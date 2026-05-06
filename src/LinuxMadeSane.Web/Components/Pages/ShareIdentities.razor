@@ -1,0 +1,1186 @@
+@page "/shares/identities"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts.Shares
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.Shares
+@inject IShareManagementService ShareService
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Users and Groups | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <UiHeroPanel Title="Users and Groups" Compact="true" />
+
+    @if (viewModel is null)
+    {
+        <section class="surface-card">
+            <p class="meta-text">Loading machine users and groups...</p>
+        </section>
+    }
+    else
+    {
+        <TabControl ActiveValue="@activeTab"
+                    ActiveValueChanged="HandleIdentityTabChangedAsync"
+                    Class="page-tab-control identity-tab-control"
+                    PanelClass="page-tab-panel identity-tab-panel">
+            <ChildContent>
+                <TabPage Value="@UsersTabValue" Title="Users">
+                    <Header>
+                        <div class="identity-tab-header">
+                            <span>Users</span>
+                            <span class="identity-tab-count">@GetHumanUsers().Count</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="identity-tab-content">
+                            <div class="identity-toolbar surface-card">
+                                <div>
+                                    <p class="eyebrow">Users</p>
+                                    <h2>Working user accounts</h2>
+                                </div>
+                                <label class="service-search compact-search identity-search">
+                                    <span>Search users</span>
+                                    <input @bind="identityFilter" @bind:event="oninput" placeholder="Search username, full name, or home path" />
+                                </label>
+                                <UiCommandButton Label="Add user" Glyph="UiIconGlyph.Plus" OnClick="CreateNewUserAsync" />
+                            </div>
+
+                            <section class="surface-card identity-table-card">
+                                @if (GetVisibleUsers().Count == 0)
+                                {
+                                    <div class="empty-state">
+                                        <p>No users match that filter.</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <table class="identity-accounts-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Username</th>
+                                                <th>Full name</th>
+                                                <th>ID</th>
+                                                <th>Group</th>
+                                                <th>Access</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var user in GetVisibleUsers())
+                                            {
+                                                <tr class="@(IsUserSelected(user.Id) ? "selected" : null)">
+                                                    <td><button class="identity-link-button" type="button" @onclick="@(() => EditUserAsync(user.Id))">@user.UserName</button></td>
+                                                    <td>@GetUserFullName(user)</td>
+                                                    <td>@FormatUserId(user)</td>
+                                                    <td>@RenderGroupChips(GetUserGroups(user))</td>
+                                                    <td><span class="status-pill @(user.IsEnabled ? "success" : "warning")">@FormatLoginState(user)</span></td>
+                                                    <td class="actions-cell">
+                                                        <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.Action" OnClick="@(() => EditUserAsync(user.Id))" />
+                                                        <UiCommandButton Label="Credentials" Glyph="UiIconGlyph.Connection" Variant="UiButtonVariant.Action" OnClick="@(() => BeginLocalCredentialsAsync(user))" />
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </section>
+
+                            @if (userEditorVisible)
+                            {
+                                <section class="surface-card identity-editor-card">
+                                    <div class="table-header">
+                                        <h2>@(selectedUserId.HasValue ? userEditor.UserName : "Create user")</h2>
+                                        <span>@(selectedUserId.HasValue ? "Machine account" : "Basic setup")</span>
+                                    </div>
+
+                                    <EditForm Model="@userEditor" OnValidSubmit="SaveUserAsync" class="stack-form">
+                                        <DataAnnotationsValidator />
+
+                                        <div class="field-row">
+                                            <label>
+                                                <span>Username</span>
+                                                <InputText @bind-Value="userEditor.UserName" disabled="@selectedUserId.HasValue" />
+                                                <ValidationMessage For="@(() => userEditor.UserName)" />
+                                            </label>
+                                            <label>
+                                                <span>Display name</span>
+                                                <InputText @bind-Value="userEditor.DisplayName" placeholder="@userEditor.UserName" />
+                                            </label>
+                                        </div>
+
+                                        <UiCheckboxField @bind-Value="userEditor.IsEnabled" Label="Enabled" Compact="true" />
+
+                                        <UiIdentityTokenPicker Title="Group memberships"
+                                                               Helper="Click working groups to add or remove them. Selected groups stay visible as pills."
+                                                               SearchPlaceholder="Search working groups"
+                                                               EmptySelectionText="No extra groups selected"
+                                                               EmptyResultsText="No groups match that search."
+                                                               Glyph="UiIconGlyph.Group"
+                                                               Items="@GetMembershipGroupPickerItems()"
+                                                               SelectedValues="@GetSelectedSupplementaryGroups()"
+                                                               OnToggle="ToggleSupplementaryGroupAsync"
+                                                               OnRemove="RemoveSupplementaryGroupAsync" />
+
+                                        <details class="identity-advanced">
+                                            <summary>Advanced Linux details</summary>
+                                            <div class="field-row advanced-fields">
+                                                <label>
+                                                    <span>Primary group</span>
+                                                    <InputText @bind-Value="userEditor.PrimaryGroup" placeholder="@GetDefaultPrimaryGroup()" />
+                                                </label>
+                                                <label>
+                                                    <span>Home directory</span>
+                                                    <InputText @bind-Value="userEditor.HomeDirectory" placeholder="@GetDefaultHomeDirectory()" />
+                                                </label>
+                                            </div>
+                                            <div class="field-row advanced-fields">
+                                                <label>
+                                                    <span>Login shell</span>
+                                                    <InputText @bind-Value="userEditor.LoginShell" placeholder="@GetDefaultShell()" />
+                                                </label>
+                                                <label>
+                                                    <span>Manual groups</span>
+                                                    <InputText @bind-Value="userEditor.SupplementaryGroupsCsv" />
+                                                </label>
+                                            </div>
+                                        </details>
+
+                                        @if (!string.IsNullOrWhiteSpace(userStatusMessage))
+                                        {
+                                            <p class="callout @userStatusTone">@userStatusMessage</p>
+                                        }
+
+                                        <div class="toolbar-row">
+                                            <UiCommandButton Label="Save user" Glyph="UiIconGlyph.Connect" Type="submit" />
+                                            <UiCommandButton Label="Add another" Glyph="UiIconGlyph.Plus" Variant="UiButtonVariant.Ghost" OnClick="CreateNewUserAsync" />
+                                            @if (selectedUserId.HasValue)
+                                            {
+                                                <UiCommandButton Label="Remove user" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" OnClick="DeleteUserAsync" />
+                                            }
+                                        </div>
+                                    </EditForm>
+                                </section>
+                            }
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@GroupsTabValue" Title="Groups">
+                    <Header>
+                        <div class="identity-tab-header">
+                            <span>Groups</span>
+                            <span class="identity-tab-count">@GetWorkingGroups().Count</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="identity-tab-content">
+                            <div class="identity-toolbar surface-card">
+                                <div>
+                                    <p class="eyebrow">Groups</p>
+                                    <h2>Working groups</h2>
+                                </div>
+                                <label class="service-search compact-search identity-search">
+                                    <span>Search groups</span>
+                                    <input @bind="identityFilter" @bind:event="oninput" placeholder="Search group names or members" />
+                                </label>
+                                <UiCommandButton Label="Add group" Glyph="UiIconGlyph.Plus" OnClick="CreateNewGroupAsync" />
+                            </div>
+
+                            <section class="surface-card identity-table-card">
+                                @if (GetVisibleGroups().Count == 0)
+                                {
+                                    <div class="empty-state">
+                                        <p>No groups match that filter.</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <table class="identity-accounts-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Group</th>
+                                                <th>ID</th>
+                                                <th>Members</th>
+                                                <th>Type</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var group in GetVisibleGroups())
+                                            {
+                                                <tr class="@(IsGroupSelected(group.Id) ? "selected" : null)">
+                                                    <td><button class="identity-link-button" type="button" @onclick="@(() => EditGroupAsync(group.Id))">@group.GroupName</button></td>
+                                                    <td>@FormatGroupId(group)</td>
+                                                    <td>@RenderGroupChips(group.Members)</td>
+                                                    <td><span class="status-pill @(IsWorkingGroup(group) ? "success" : "neutral")">@(IsWorkingGroup(group) ? "Working" : "System")</span></td>
+                                                    <td class="actions-cell">
+                                                        <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.Action" OnClick="@(() => EditGroupAsync(group.Id))" />
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </section>
+
+                            @if (groupEditorVisible)
+                            {
+                                <section class="surface-card identity-editor-card">
+                                    <div class="table-header">
+                                        <h2>@(selectedGroupId.HasValue ? groupEditor.GroupName : "Create group")</h2>
+                                        <span>@(selectedGroupId.HasValue ? "Machine group" : "Basic setup")</span>
+                                    </div>
+
+                                    <EditForm Model="@groupEditor" OnValidSubmit="SaveGroupAsync" class="stack-form">
+                                        <DataAnnotationsValidator />
+
+                                        <label>
+                                            <span>Group name</span>
+                                            <InputText @bind-Value="groupEditor.GroupName" disabled="@selectedGroupId.HasValue" />
+                                            <ValidationMessage For="@(() => groupEditor.GroupName)" />
+                                        </label>
+
+                                        <UiIdentityTokenPicker Title="Members"
+                                                               Helper="Click people to add or remove them. Selected members stay visible as pills."
+                                                               SearchPlaceholder="Search user accounts"
+                                                               EmptySelectionText="No members selected"
+                                                               EmptyResultsText="No users match that search."
+                                                               Glyph="UiIconGlyph.User"
+                                                               Items="@GetGroupMemberPickerItems()"
+                                                               SelectedValues="@GetSelectedGroupMembers()"
+                                                               OnToggle="ToggleGroupMemberAsync"
+                                                               OnRemove="RemoveGroupMemberAsync" />
+
+                                        <details class="identity-advanced">
+                                            <summary>Advanced group details</summary>
+                                            <div class="field-row advanced-fields">
+                                                <label>
+                                                    <span>Description</span>
+                                                    <InputTextArea @bind-Value="groupEditor.Description" />
+                                                </label>
+                                                <label>
+                                                    <span>Manual members</span>
+                                                    <InputTextArea @bind-Value="groupEditor.MembersCsv" />
+                                                </label>
+                                            </div>
+                                        </details>
+
+                                        @if (!string.IsNullOrWhiteSpace(groupStatusMessage))
+                                        {
+                                            <p class="callout @groupStatusTone">@groupStatusMessage</p>
+                                        }
+
+                                        <div class="toolbar-row">
+                                            <UiCommandButton Label="Save group" Glyph="UiIconGlyph.Connect" Type="submit" />
+                                            <UiCommandButton Label="Add another" Glyph="UiIconGlyph.Plus" Variant="UiButtonVariant.Ghost" OnClick="CreateNewGroupAsync" />
+                                            @if (selectedGroupId.HasValue)
+                                            {
+                                                <UiCommandButton Label="Remove group" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" OnClick="DeleteGroupAsync" />
+                                            }
+                                        </div>
+                                    </EditForm>
+                                </section>
+                            }
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@LocalUsersTabValue" Title="Local Users">
+                    <Header>
+                        <div class="identity-tab-header">
+                            <span>Local Users</span>
+                            <span class="identity-tab-count">@GetLocalUsers().Count</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="identity-tab-content">
+                            <div class="identity-toolbar surface-card">
+                                <div>
+                                    <p class="eyebrow">Local machine</p>
+                                    <h2>All existing local users</h2>
+                                </div>
+                                <label class="service-search compact-search identity-search">
+                                    <span>Search local users</span>
+                                    <input @bind="localUserFilter" @bind:event="oninput" placeholder="Search name, group, home, or shell" />
+                                </label>
+                                <UiCommandButton Label="Create new account" Glyph="UiIconGlyph.Plus" OnClick="CreateNewUserAsync" />
+                            </div>
+
+                            <section class="surface-card identity-table-card">
+                                @if (GetVisibleLocalUsers().Count == 0)
+                                {
+                                    <div class="empty-state">
+                                        <p>No local users match that filter.</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <table class="identity-accounts-table local-users-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Username</th>
+                                                <th>Full name</th>
+                                                <th>ID</th>
+                                                <th>Login</th>
+                                                <th>Group</th>
+                                                <th>SSH access</th>
+                                                <th>Password</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var user in GetVisibleLocalUsers())
+                                            {
+                                                <tr>
+                                                    <td>
+                                                        <button class="identity-link-button" type="button" @onclick="@(() => EditUserAsync(user.Id))">@user.UserName</button>
+                                                        @if (user.UserName.Equals(Environment.UserName, StringComparison.OrdinalIgnoreCase))
+                                                        {
+                                                            <span class="status-pill success identity-current-user">Current</span>
+                                                        }
+                                                    </td>
+                                                    <td>@GetUserFullName(user)</td>
+                                                    <td>@FormatUserId(user)</td>
+                                                    <td>@FormatLoginState(user)</td>
+                                                    <td>@RenderGroupChips(GetUserGroups(user))</td>
+                                                    <td>
+                                                        <strong>@GetSshAccessLabel(user)</strong>
+                                                        <div class="meta-text">@(HasImportedKeys(user) ? "Key or certificate material imported" : "No key material imported")</div>
+                                                    </td>
+                                                    <td>@FormatTimestamp(GetPasswordChangedAtUtc(user), "Not changed yet")</td>
+                                                    <td class="actions-cell">
+                                                        <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.Action" OnClick="@(() => EditUserAsync(user.Id))" />
+                                                        <UiCommandButton Label="Credentials" Glyph="UiIconGlyph.Connection" Variant="UiButtonVariant.Action" OnClick="@(() => BeginLocalCredentialsAsync(user))" />
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </section>
+                        </div>
+                    </ChildContent>
+                </TabPage>
+            </ChildContent>
+        </TabControl>
+    }
+</div>
+
+<UiModal IsOpen="@isLocalCredentialsOpen"
+         Title="Credentials"
+         Subtitle="@localUserAccessEditor.UserName"
+         Class="remote-access-modal local-credentials-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseLocalCredentialsAsync">
+    <ChildContent>
+        @if (localCredentialsMessageTone == "error" && !string.IsNullOrWhiteSpace(localCredentialsMessage))
+        {
+            <p class="callout error">@localCredentialsMessage</p>
+        }
+
+        <EditForm id="local-user-credentials-form" Model="@localUserAccessEditor" OnValidSubmit="SaveLocalUserAccessAsync" class="stack-form remote-access-modal-form">
+            <DataAnnotationsValidator />
+
+            <div class="surface-subcard local-credentials-section">
+                <div class="local-credentials-section-header">
+                    <div>
+                        <h3>Password</h3>
+                        <p class="meta-text">Linux Made Sane only changes the password when you click <strong>Change password</strong>.</p>
+                    </div>
+                    <span class="status-pill neutral">@FormatTimestamp(GetPasswordChangedAtUtcForSelectedUser(), "Not changed yet")</span>
+                </div>
+
+                <div class="local-password-field">
+                    <label for="local-user-password-display">
+                        <span>@GetLocalPasswordLabel()</span>
+                        <span class="meta-text">@GetLocalPasswordHelperText()</span>
+                    </label>
+
+                    <div class="local-password-action-row">
+                        <div class="local-password-input-shell">
+                            <input id="local-user-password-display"
+                                   class="ui-control-input remote-access-password-input local-password-input"
+                                   type="text"
+                                   autocomplete="new-password"
+                                   value="@GetVisibleLocalPasswordValue()"
+                                   placeholder="@GetLocalPasswordPlaceholder()"
+                                   readonly />
+                            @if (HasVisibleLocalPassword())
+                            {
+                                <button class="local-password-copy-button"
+                                        type="button"
+                                        @onclick="CopyPendingLocalPasswordAsync">
+                                    <UiGlyphIcon Glyph="UiIconGlyph.Copy" />
+                                    <span>Copy</span>
+                                </button>
+                            }
+                        </div>
+
+                        <UiCommandButton Label="@(isResettingLocalPassword ? "Changing..." : "Change password")"
+                                         Glyph="UiIconGlyph.Save"
+                                         Variant="UiButtonVariant.PrimaryMuted"
+                                         Disabled="@isResettingLocalPassword"
+                                         OnClick="ResetLocalUserPasswordAsync" />
+                    </div>
+                </div>
+
+            </div>
+
+            <div class="surface-subcard local-credentials-section">
+                <div class="local-credentials-section-header">
+                    <div>
+                        <h3>SSH login</h3>
+                        <p class="meta-text">Set password, password + certificate / key, or certificate / key only for this local user.</p>
+                    </div>
+                </div>
+
+                <div class="field-row local-ssh-row">
+                    <UiComboboxField TValue="RemoteAccessSshAuthenticationMode"
+                                   @bind-Value="localUserAccessEditor.SshAuthenticationMode"
+                                   Label="SSH login mode"
+                                   Helper="@BuildSshModeHelperText(localUserAccessEditor.SshAuthenticationMode)">
+                        @foreach (var mode in Enum.GetValues<RemoteAccessSshAuthenticationMode>())
+                        {
+                            <option value="@mode">@GetSshModeLabel(mode)</option>
+                        }
+                    </UiComboboxField>
+
+                    <UiFileDropzone Label="Import public keys or certificate files"
+                                    Helper="Append one or more OpenSSH public keys, `-cert.pub` files, or `cert-authority` entries."
+                                    PrimaryText="Drag &amp; drop your file here"
+                                    SecondaryText="or click to choose OpenSSH public keys or certificate entries"
+                                    Accept=".pub,.txt"
+                                    Multiple="true"
+                                    Class="local-credentials-dropzone"
+                                    OnChange="HandleLocalUserKeyImportAsync" />
+                </div>
+
+                <UiTextAreaField @bind-Value="localUserAccessEditor.AuthorizedKeyEntries"
+                                 Label="Public keys / certificate entries"
+                                 Helper="@BuildAuthorizedKeyHelperText(localUserAccessEditor.SshAuthenticationMode)"
+                                 Rows="5"
+                                 InputClass="local-ssh-key-textarea" />
+            </div>
+        </EditForm>
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="CloseLocalCredentialsAsync" />
+        <UiCommandButton Label="@(isSavingLocalUserAccess ? "Saving..." : "Save SSH access")"
+                         Glyph="UiIconGlyph.Save"
+                         Variant="UiButtonVariant.PrimaryMuted"
+                         Type="submit"
+                         Disabled="@isSavingLocalUserAccess"
+                         form="local-user-credentials-form" />
+    </Footer>
+</UiModal>
+
+@code {
+    private static readonly HashSet<string> CommonWorkingGroups = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "sudo",
+        "adm",
+        "docker",
+        "sambashare",
+        "www-data",
+        "libvirt"
+    };
+
+    private UsersGroupsManagerViewModel? viewModel;
+    private UserEditor userEditor = new();
+    private GroupEditor groupEditor = new();
+    private LocalUserAccessEditor localUserAccessEditor = new();
+    private LocalUserPasswordResetViewModel? localPasswordResetModel;
+    private Guid? selectedUserId;
+    private Guid? selectedGroupId;
+    private Guid? selectedLocalAccessUserId;
+    private bool userEditorVisible;
+    private bool groupEditorVisible;
+    private bool isLocalCredentialsOpen;
+    private bool isSavingLocalUserAccess;
+    private bool isResettingLocalPassword;
+    private string userStatusMessage = string.Empty;
+    private string groupStatusMessage = string.Empty;
+    private string userStatusTone = "info";
+    private string groupStatusTone = "info";
+    private string localCredentialsMessage = string.Empty;
+    private string localCredentialsMessageTone = "info";
+    private string revealedLocalPassword = string.Empty;
+    private string activeTab = UsersTabValue;
+    private string identityFilter = string.Empty;
+    private string localUserFilter = string.Empty;
+    private const string UsersTabValue = "users";
+    private const string GroupsTabValue = "groups";
+    private const string LocalUsersTabValue = "local-users";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        viewModel = await ShareService.GetUsersGroupsManagerAsync();
+        userStatusMessage = string.Empty;
+        groupStatusMessage = string.Empty;
+        userStatusTone = "info";
+        groupStatusTone = "info";
+
+        if (selectedUserId.HasValue)
+        {
+            var selectedUser = viewModel.Users.FirstOrDefault(user => user.Id == selectedUserId.Value);
+            if (selectedUser is null)
+            {
+                selectedUserId = null;
+                userEditorVisible = false;
+            }
+        }
+
+        if (selectedGroupId.HasValue)
+        {
+            var selectedGroup = viewModel.Groups.FirstOrDefault(group => group.Id == selectedGroupId.Value);
+            if (selectedGroup is null)
+            {
+                selectedGroupId = null;
+                groupEditorVisible = false;
+            }
+        }
+    }
+
+    private async Task CreateNewUserAsync()
+    {
+        userEditor = await ShareService.GetUserEditorAsync(null);
+        selectedUserId = null;
+        userEditorVisible = true;
+        activeTab = UsersTabValue;
+        SetUserStatus("Ready to create a new machine user.");
+    }
+
+    private async Task EditUserAsync(Guid id)
+    {
+        userEditor = await ShareService.GetUserEditorAsync(id);
+        selectedUserId = id;
+        userEditorVisible = true;
+        activeTab = UsersTabValue;
+        SetUserStatus($"Loaded {userEditor.UserName} from the machine.");
+    }
+
+    private async Task SaveUserAsync()
+    {
+        try
+        {
+            var id = await ShareService.SaveUserAsync(userEditor);
+            selectedUserId = id;
+            await LoadAsync();
+            userEditor = await ShareService.GetUserEditorAsync(id);
+            userEditorVisible = true;
+            activeTab = UsersTabValue;
+            SetUserStatus($"Saved {userEditor.UserName} on the machine.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetUserStatus(exception.Message, "error");
+        }
+    }
+
+    private async Task DeleteUserAsync()
+    {
+        if (!selectedUserId.HasValue)
+        {
+            return;
+        }
+
+        try
+        {
+            await ShareService.DeleteUserAsync(selectedUserId.Value);
+            selectedUserId = null;
+            userEditorVisible = false;
+            userEditor = await ShareService.GetUserEditorAsync(null);
+            await LoadAsync();
+            activeTab = UsersTabValue;
+            SetUserStatus("User removed from the machine.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetUserStatus(exception.Message, "error");
+        }
+    }
+
+    private async Task BeginLocalCredentialsAsync(LinuxShareUser user)
+    {
+        localUserAccessEditor = await ShareService.GetLocalUserAccessEditorAsync(user.Id);
+        selectedLocalAccessUserId = user.Id;
+        localPasswordResetModel = await ShareService.BuildLocalUserPasswordResetAsync(user.Id);
+        revealedLocalPassword = string.Empty;
+        isLocalCredentialsOpen = true;
+        localCredentialsMessage = string.Empty;
+        localCredentialsMessageTone = "info";
+    }
+
+    private Task CloseLocalCredentialsAsync()
+    {
+        isLocalCredentialsOpen = false;
+        isSavingLocalUserAccess = false;
+        isResettingLocalPassword = false;
+        selectedLocalAccessUserId = null;
+        localUserAccessEditor = new();
+        localPasswordResetModel = null;
+        revealedLocalPassword = string.Empty;
+        localCredentialsMessage = string.Empty;
+        localCredentialsMessageTone = "info";
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleLocalUserKeyImportAsync(InputFileChangeEventArgs args)
+    {
+        try
+        {
+            localUserAccessEditor.AuthorizedKeyEntries = await AppendImportedAuthorizedKeysAsync(localUserAccessEditor.AuthorizedKeyEntries, args);
+            localCredentialsMessage = string.Empty;
+            localCredentialsMessageTone = "info";
+        }
+        catch (Exception exception)
+        {
+            localCredentialsMessage = exception.Message;
+            localCredentialsMessageTone = "error";
+        }
+    }
+
+    private async Task SaveLocalUserAccessAsync()
+    {
+        if (!selectedLocalAccessUserId.HasValue)
+        {
+            return;
+        }
+
+        isSavingLocalUserAccess = true;
+        localCredentialsMessage = string.Empty;
+
+        try
+        {
+            await ShareService.SaveLocalUserAccessAsync(selectedLocalAccessUserId.Value, localUserAccessEditor);
+            await LoadAsync();
+            localCredentialsMessage = string.Empty;
+            localCredentialsMessageTone = "info";
+        }
+        catch (Exception exception)
+        {
+            localCredentialsMessage = exception.Message;
+            localCredentialsMessageTone = "error";
+        }
+        finally
+        {
+            isSavingLocalUserAccess = false;
+        }
+    }
+
+    private async Task CopyPendingLocalPasswordAsync()
+    {
+        if (string.IsNullOrWhiteSpace(revealedLocalPassword))
+        {
+            localCredentialsMessage = "Change the password first, then copy the generated password.";
+            localCredentialsMessageTone = "error";
+            return;
+        }
+
+        try
+        {
+            var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", revealedLocalPassword);
+            localCredentialsMessage = copied
+                ? string.Empty
+                : "Clipboard copy was blocked by the browser. Copy it manually.";
+            localCredentialsMessageTone = copied ? "info" : "error";
+        }
+        catch (Exception exception)
+        {
+            localCredentialsMessage = exception.Message;
+            localCredentialsMessageTone = "error";
+        }
+    }
+
+    private async Task ResetLocalUserPasswordAsync()
+    {
+        if (localPasswordResetModel is null)
+        {
+            return;
+        }
+
+        isResettingLocalPassword = true;
+        localCredentialsMessage = string.Empty;
+
+        try
+        {
+            var passwordReset = await ShareService.BuildLocalUserPasswordResetAsync(localPasswordResetModel.UserId);
+            await ShareService.ResetLocalUserPasswordAsync(passwordReset.UserId, passwordReset.SuggestedPassword);
+            await LoadAsync();
+            localPasswordResetModel = passwordReset;
+            revealedLocalPassword = passwordReset.SuggestedPassword;
+            localCredentialsMessage = string.Empty;
+            localCredentialsMessageTone = "info";
+        }
+        catch (Exception exception)
+        {
+            localCredentialsMessage = exception.Message;
+            localCredentialsMessageTone = "error";
+        }
+        finally
+        {
+            isResettingLocalPassword = false;
+        }
+    }
+
+    private async Task CreateNewGroupAsync()
+    {
+        groupEditor = await ShareService.GetGroupEditorAsync(null);
+        selectedGroupId = null;
+        groupEditorVisible = true;
+        activeTab = GroupsTabValue;
+        SetGroupStatus("Ready to create a new machine group.");
+    }
+
+    private async Task EditGroupAsync(Guid id)
+    {
+        groupEditor = await ShareService.GetGroupEditorAsync(id);
+        selectedGroupId = id;
+        groupEditorVisible = true;
+        activeTab = GroupsTabValue;
+        SetGroupStatus($"Loaded {groupEditor.GroupName} from the machine.");
+    }
+
+    private async Task SaveGroupAsync()
+    {
+        try
+        {
+            var id = await ShareService.SaveGroupAsync(groupEditor);
+            selectedGroupId = id;
+            await LoadAsync();
+            groupEditor = await ShareService.GetGroupEditorAsync(id);
+            groupEditorVisible = true;
+            activeTab = GroupsTabValue;
+            SetGroupStatus($"Saved {groupEditor.GroupName} on the machine.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetGroupStatus(exception.Message, "error");
+        }
+    }
+
+    private async Task DeleteGroupAsync()
+    {
+        if (!selectedGroupId.HasValue)
+        {
+            return;
+        }
+
+        try
+        {
+            await ShareService.DeleteGroupAsync(selectedGroupId.Value);
+            selectedGroupId = null;
+            groupEditorVisible = false;
+            groupEditor = await ShareService.GetGroupEditorAsync(null);
+            await LoadAsync();
+            activeTab = GroupsTabValue;
+            SetGroupStatus("Group removed from the machine.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetGroupStatus(exception.Message, "error");
+        }
+    }
+
+    private Task HandleIdentityTabChangedAsync(string? value)
+    {
+        activeTab = string.IsNullOrWhiteSpace(value) ? UsersTabValue : value;
+        return Task.CompletedTask;
+    }
+
+    private IReadOnlyList<LinuxShareUser> GetVisibleUsers()
+    {
+        if (viewModel is null)
+        {
+            return [];
+        }
+
+        return viewModel.Users
+            .Where(user => IsHumanUser(user) || IsUserSelected(user.Id))
+            .Where(user =>
+                string.IsNullOrWhiteSpace(identityFilter) ||
+                user.DisplayName.Contains(identityFilter, StringComparison.OrdinalIgnoreCase) ||
+                user.UserName.Contains(identityFilter, StringComparison.OrdinalIgnoreCase) ||
+                user.HomeDirectory.Contains(identityFilter, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(user => IsHumanUser(user) ? 0 : 1)
+            .ThenBy(user => user.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private IReadOnlyList<LinuxShareGroup> GetVisibleGroups()
+    {
+        if (viewModel is null)
+        {
+            return [];
+        }
+
+        return viewModel.Groups
+            .Where(group => IsWorkingGroup(group) || IsGroupSelected(group.Id))
+            .Where(group =>
+                string.IsNullOrWhiteSpace(identityFilter) ||
+                group.GroupName.Contains(identityFilter, StringComparison.OrdinalIgnoreCase) ||
+                group.Members.Any(member => member.Contains(identityFilter, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(group => IsWorkingGroup(group) ? 0 : 1)
+            .ThenBy(group => group.GroupName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private IReadOnlyList<LinuxShareUser> GetHumanUsers()
+    {
+        if (viewModel is null)
+        {
+            return [];
+        }
+
+        return viewModel.Users
+            .Where(IsHumanUser)
+            .OrderBy(user => user.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private IReadOnlyList<LinuxShareUser> GetSystemUsers()
+    {
+        if (viewModel is null)
+        {
+            return [];
+        }
+
+        return viewModel.Users
+            .Where(user => !IsHumanUser(user))
+            .OrderBy(user => user.UserName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private IReadOnlyList<LinuxShareGroup> GetWorkingGroups()
+    {
+        if (viewModel is null)
+        {
+            return [];
+        }
+
+        return viewModel.Groups
+            .Where(IsWorkingGroup)
+            .OrderBy(group => group.GroupName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private IReadOnlyList<LinuxShareGroup> GetSystemGroups()
+    {
+        if (viewModel is null)
+        {
+            return [];
+        }
+
+        return viewModel.Groups
+            .Where(group => !IsWorkingGroup(group))
+            .OrderBy(group => group.GroupName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private IReadOnlyList<LinuxShareUser> GetLocalUsers()
+    {
+        if (viewModel is null)
+        {
+            return [];
+        }
+
+        return viewModel.Users
+            .OrderBy(user => user.Uid < 0 ? int.MaxValue : user.Uid)
+            .ThenBy(user => user.UserName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private IReadOnlyList<LinuxShareUser> GetVisibleLocalUsers()
+    {
+        return GetLocalUsers()
+            .Where(user =>
+                string.IsNullOrWhiteSpace(localUserFilter) ||
+                UserMatchesFilter(user, localUserFilter))
+            .ToArray();
+    }
+
+    private IReadOnlyList<LinuxShareGroup> GetPickableGroups()
+    {
+        if (viewModel is null)
+        {
+            return [];
+        }
+
+        return viewModel.Groups
+            .Where(group => IsWorkingGroup(group) || IsSupplementaryGroupSelected(group.GroupName))
+            .OrderBy(group => group.GroupName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private IReadOnlyList<UiIdentityTokenPickerItem> GetMembershipGroupPickerItems() =>
+        GetPickableGroups()
+            .Select(group => new UiIdentityTokenPickerItem(
+                group.GroupName,
+                group.GroupName,
+                FormatList(group.Members),
+                $"{group.GroupName} {string.Join(' ', group.Members)}"))
+            .ToArray();
+
+    private IReadOnlyList<UiIdentityTokenPickerItem> GetGroupMemberPickerItems() =>
+        GetHumanUsers()
+            .Select(user => new UiIdentityTokenPickerItem(
+                user.UserName,
+                user.DisplayName,
+                user.UserName,
+                $"{user.DisplayName} {user.UserName} {user.HomeDirectory}"))
+            .ToArray();
+
+    private IReadOnlyList<string> GetSelectedSupplementaryGroups() =>
+        ParseCsv(userEditor.SupplementaryGroupsCsv);
+
+    private Task ToggleSupplementaryGroupAsync(string groupName)
+    {
+        var selectedGroups = GetSelectedSupplementaryGroups().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!selectedGroups.Add(groupName))
+        {
+            selectedGroups.Remove(groupName);
+        }
+
+        userEditor.SupplementaryGroupsCsv = string.Join(", ", selectedGroups.OrderBy(group => group, StringComparer.OrdinalIgnoreCase));
+        return Task.CompletedTask;
+    }
+
+    private Task RemoveSupplementaryGroupAsync(string groupName)
+    {
+        var selectedGroups = GetSelectedSupplementaryGroups().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        selectedGroups.Remove(groupName);
+        userEditor.SupplementaryGroupsCsv = string.Join(", ", selectedGroups.OrderBy(group => group, StringComparer.OrdinalIgnoreCase));
+        return Task.CompletedTask;
+    }
+
+    private bool IsSupplementaryGroupSelected(string groupName) =>
+        GetSelectedSupplementaryGroups().Contains(groupName, StringComparer.OrdinalIgnoreCase);
+
+    private IReadOnlyList<string> GetSelectedGroupMembers() =>
+        ParseCsv(groupEditor.MembersCsv);
+
+    private Task ToggleGroupMemberAsync(string userName)
+    {
+        var members = GetSelectedGroupMembers().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!members.Add(userName))
+        {
+            members.Remove(userName);
+        }
+
+        groupEditor.MembersCsv = string.Join(", ", members.OrderBy(member => member, StringComparer.OrdinalIgnoreCase));
+        return Task.CompletedTask;
+    }
+
+    private Task RemoveGroupMemberAsync(string userName)
+    {
+        var members = GetSelectedGroupMembers().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        members.Remove(userName);
+        groupEditor.MembersCsv = string.Join(", ", members.OrderBy(member => member, StringComparer.OrdinalIgnoreCase));
+        return Task.CompletedTask;
+    }
+
+    private bool IsGroupMemberSelected(string userName) =>
+        GetSelectedGroupMembers().Contains(userName, StringComparer.OrdinalIgnoreCase);
+
+    private bool IsUserSelected(Guid userId) =>
+        selectedUserId.HasValue && selectedUserId.Value == userId;
+
+    private bool IsGroupSelected(Guid groupId) =>
+        selectedGroupId.HasValue && selectedGroupId.Value == groupId;
+
+    private bool IsWorkingGroup(LinuxShareGroup group)
+    {
+        var humanUsers = GetHumanUsers();
+        return group.Members.Any(member => humanUsers.Any(user => user.UserName.Equals(member, StringComparison.OrdinalIgnoreCase))) ||
+               humanUsers.Any(user => user.PrimaryGroup.Equals(group.GroupName, StringComparison.OrdinalIgnoreCase) ||
+                                      user.SupplementaryGroups.Contains(group.GroupName, StringComparer.OrdinalIgnoreCase)) ||
+               CommonWorkingGroups.Contains(group.GroupName);
+    }
+
+    private static bool IsHumanUser(LinuxShareUser user) =>
+        user.HomeDirectory.StartsWith("/home/", StringComparison.OrdinalIgnoreCase) &&
+        !IsNonInteractiveShell(user.LoginShell);
+
+    private static bool IsNonInteractiveShell(string shell) =>
+        shell.EndsWith("/nologin", StringComparison.OrdinalIgnoreCase) ||
+        shell.EndsWith("/false", StringComparison.OrdinalIgnoreCase);
+
+    private static IReadOnlyList<string> ParseCsv(string value) =>
+        value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string FormatList(IReadOnlyList<string> values) =>
+        values.Count == 0 ? "No explicit members" : string.Join(", ", values);
+
+    private static IReadOnlyList<string> GetUserGroups(LinuxShareUser user) =>
+        new[] { user.PrimaryGroup }
+            .Concat(user.SupplementaryGroups)
+            .Where(static group => !string.IsNullOrWhiteSpace(group))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private static string GetUserFullName(LinuxShareUser user) =>
+        string.IsNullOrWhiteSpace(user.DisplayName) || user.DisplayName.Equals(user.UserName, StringComparison.OrdinalIgnoreCase)
+            ? "-"
+            : user.DisplayName;
+
+    private static string FormatUserId(LinuxShareUser user) =>
+        user.Uid < 0 ? "-" : user.Uid.ToString();
+
+    private static string FormatGroupId(LinuxShareGroup group) =>
+        group.Gid < 0 ? "-" : group.Gid.ToString();
+
+    private static string FormatLoginState(LinuxShareUser user) =>
+        user.IsEnabled ? "Login enabled" : "No login shell";
+
+    private LocalUserAccessViewModel? GetUserAccess(LinuxShareUser user) =>
+        viewModel?.UserAccessPolicies.FirstOrDefault(item =>
+            item.UserName.Equals(user.UserName, StringComparison.OrdinalIgnoreCase));
+
+    private string GetSshAccessLabel(LinuxShareUser user)
+    {
+        var policy = GetUserAccess(user);
+        return policy?.SshAuthenticationMode is null
+            ? "System default"
+            : GetSshModeLabel(policy.SshAuthenticationMode.Value);
+    }
+
+    private bool HasImportedKeys(LinuxShareUser user) =>
+        GetUserAccess(user)?.HasAuthorizedKeys == true;
+
+    private DateTimeOffset? GetPasswordChangedAtUtc(LinuxShareUser user) =>
+        GetUserAccess(user)?.PasswordChangedAtUtc;
+
+    private DateTimeOffset? GetPasswordChangedAtUtcForSelectedUser() =>
+        localPasswordResetModel is null
+            ? null
+            : GetUserAccessByName(localPasswordResetModel.UserName)?.PasswordChangedAtUtc;
+
+
+    private LocalUserAccessViewModel? GetUserAccessByName(string userName) =>
+        viewModel?.UserAccessPolicies.FirstOrDefault(item =>
+            item.UserName.Equals(userName, StringComparison.OrdinalIgnoreCase));
+
+    private static bool UserMatchesFilter(LinuxShareUser user, string filter) =>
+        user.DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+        user.UserName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+        user.PrimaryGroup.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+        user.SupplementaryGroups.Any(group => group.Contains(filter, StringComparison.OrdinalIgnoreCase)) ||
+        user.HomeDirectory.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+        user.LoginShell.Contains(filter, StringComparison.OrdinalIgnoreCase);
+
+    private RenderFragment RenderGroupChips(IReadOnlyList<string> values) => @<div class="identity-group-chip-row">
+        @if (values.Count == 0)
+        {
+            <span class="identity-group-chip muted">No groups</span>
+        }
+        else
+        {
+            @foreach (var value in values.Take(5))
+            {
+                <span class="identity-group-chip">@value</span>
+            }
+
+            @if (values.Count > 5)
+            {
+                <span class="identity-group-chip muted">+@(values.Count - 5)</span>
+            }
+        }
+    </div>;
+
+    private void SetUserStatus(string message, string tone = "info")
+    {
+        userStatusMessage = message;
+        userStatusTone = tone;
+    }
+
+    private void SetGroupStatus(string message, string tone = "info")
+    {
+        groupStatusMessage = message;
+        groupStatusTone = tone;
+    }
+
+    private static string GetSshModeLabel(RemoteAccessSshAuthenticationMode mode) => mode switch
+    {
+        RemoteAccessSshAuthenticationMode.Password => "Password",
+        RemoteAccessSshAuthenticationMode.PasswordAndKey => "Password + certificate / key",
+        RemoteAccessSshAuthenticationMode.KeyOnly => "Certificate / key only",
+        _ => mode.ToString()
+    };
+
+    private static string BuildSshModeHelperText(RemoteAccessSshAuthenticationMode mode) => mode switch
+    {
+        RemoteAccessSshAuthenticationMode.Password => "SSH accepts a password only for this user.",
+        RemoteAccessSshAuthenticationMode.PasswordAndKey => "SSH requires both a password and imported public-key or certificate-authority material.",
+        RemoteAccessSshAuthenticationMode.KeyOnly => "SSH rejects passwords and only accepts imported public-key or certificate-authority material.",
+        _ => string.Empty
+    };
+
+    private static string BuildAuthorizedKeyHelperText(RemoteAccessSshAuthenticationMode mode) => mode switch
+    {
+        RemoteAccessSshAuthenticationMode.Password => "Optional. Paste OpenSSH public keys or cert-authority entries if you want this user ready for certificate / key login later.",
+        RemoteAccessSshAuthenticationMode.PasswordAndKey => "Required. Paste one or more OpenSSH public keys or cert-authority entries for the certificate / key step.",
+        RemoteAccessSshAuthenticationMode.KeyOnly => "Required. Paste one or more OpenSSH public keys or cert-authority entries because passwords will be rejected.",
+        _ => string.Empty
+    };
+
+    private static string FormatTimestamp(DateTimeOffset? value, string fallback) =>
+        value?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? fallback;
+
+    private bool HasVisibleLocalPassword() =>
+        !string.IsNullOrWhiteSpace(revealedLocalPassword);
+
+    private string GetLocalPasswordLabel() =>
+        HasVisibleLocalPassword() ? "New password" : "Password";
+
+    private string GetLocalPasswordHelperText() =>
+        HasVisibleLocalPassword()
+            ? "Copy this now if you need it. Linux Made Sane will not show the existing password before it is changed."
+            : "Current password stays hidden. Click Change password to rotate it immediately and reveal the new password so you can copy it.";
+
+    private string GetLocalPasswordPlaceholder() =>
+        HasVisibleLocalPassword() ? string.Empty : "Current password hidden";
+
+    private string GetVisibleLocalPasswordValue() =>
+        HasVisibleLocalPassword() ? revealedLocalPassword : string.Empty;
+
+    private static async Task<string> AppendImportedAuthorizedKeysAsync(string existingEntries, InputFileChangeEventArgs args)
+    {
+        const long maxImportBytes = 128 * 1024;
+        var importedBlocks = new List<string>();
+
+        foreach (var file in args.GetMultipleFiles())
+        {
+            await using var stream = file.OpenReadStream(maxImportBytes);
+            using var reader = new StreamReader(stream);
+            var content = await reader.ReadToEndAsync();
+            if (!string.IsNullOrWhiteSpace(content))
+            {
+                importedBlocks.Add(content);
+            }
+        }
+
+        if (importedBlocks.Count == 0)
+        {
+            return existingEntries;
+        }
+
+        return string.Join(
+            Environment.NewLine,
+            $"{existingEntries}{Environment.NewLine}{string.Join(Environment.NewLine, importedBlocks)}"
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
+    private string GetDefaultPrimaryGroup() =>
+        string.IsNullOrWhiteSpace(userEditor.UserName) ? "username" : userEditor.UserName.Trim().ToLowerInvariant();
+
+    private string GetDefaultHomeDirectory() =>
+        $"/home/{GetDefaultPrimaryGroup()}";
+
+    private static string GetDefaultShell() => "/bin/bash";
+
+}

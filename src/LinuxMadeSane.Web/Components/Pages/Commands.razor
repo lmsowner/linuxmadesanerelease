@@ -1,0 +1,1145 @@
+@page "/commands"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
+@inject IManagedHostService HostService
+@inject IRunbookService RunbookService
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Runbooks | Linux Made Sane</PageTitle>
+
+@* Guardrail: runbook library/editing/execution goes through IRunbookService.
+   HostService is for machine metadata and connectivity only; do not move runbook
+   mutations back onto host lifecycle services or duplicate execution logic here. *@
+<div class="page-shell">
+    <UiHeroPanel Title="Runbooks"
+                 Compact="true">
+        <Actions>
+            <UiCommandButton Label="Add runbook"
+                             Glyph="UiIconGlyph.Plus"
+                             Disabled="@(IsMutating || OrderedHosts.Count == 0)"
+                             OnClick="OpenCreateDialogAsync" />
+            <UiCommandButton Label="Assign host to runbooks"
+                             Glyph="UiIconGlyph.Connection"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@(IsMutating || OrderedHosts.Count == 0 || RunnableCommands.Count == 0)"
+                             OnClick="OpenBulkHostAssignmentAsync" />
+            <UiCommandButton Label="Load starter runbooks"
+                             Glyph="UiIconGlyph.Run"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@(IsMutating || OrderedHosts.Count == 0)"
+                             OnClick="LoadStarterPackAsync" />
+        </Actions>
+    </UiHeroPanel>
+
+    <UiPanel>
+        <div class="runbook-library-toolbar">
+            <div class="table-header">
+                <h2>Runbook library</h2>
+                <span>@commands.Count item(s)</span>
+            </div>
+
+            <UiFilterInput Value="@filterText"
+                           ValueChanged="SetFilterAsync"
+                           Placeholder="Filter runbooks"
+                           AriaLabel="Filter runbooks"
+                           Class="runbook-library-filter" />
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(statusMessage))
+        {
+            <p class="callout @statusTone">@statusMessage</p>
+        }
+
+        @if (OrderedHosts.Count == 0)
+        {
+            <div class="empty-state runbook-empty-state">
+                <p>No machines are registered yet.</p>
+                <p class="meta-text">Add a machine first so LMS knows where a runbook belongs.</p>
+            </div>
+        }
+        else if (commands.Count == 0)
+        {
+            <div class="empty-state runbook-empty-state">
+                <p>No runbooks yet.</p>
+                <p class="meta-text">Add one from scratch or load the starter pack for the first machine.</p>
+            </div>
+        }
+        else if (FilteredCommands.Count == 0)
+        {
+            <div class="empty-state runbook-empty-state">
+                <p>No runbooks match that filter.</p>
+                <p class="meta-text">Try another search term or clear the filter.</p>
+            </div>
+        }
+        else
+        {
+            <div class="runbook-list">
+                @foreach (var command in FilteredCommands)
+                {
+                    <article class="runbook-row @(IsExpanded(command.Id) ? "expanded" : string.Empty)">
+                        <div class="runbook-row-head">
+                            <div class="runbook-row-copy">
+                                <div class="runbook-row-title-line">
+                                    <strong>@command.Name</strong>
+                                    @if (!string.IsNullOrWhiteSpace(command.Description))
+                                    {
+                                        <span class="runbook-row-summary">@command.Description</span>
+                                    }
+                                    <span class="runbook-row-host">@GetRunbookAvailabilitySummary(command)</span>
+                                </div>
+                            </div>
+
+                            <div class="runbook-row-side">
+                                <span class="runbook-row-access @(command.IsTemplate ? "runbook-row-access-template" : command.RequiresSudo ? "runbook-row-access-sudo" : "runbook-row-access-user")">
+                                    @(command.IsTemplate ? "template" : command.RequiresSudo ? "sudo" : "user")
+                                </span>
+
+                                <div class="runbook-row-actions">
+                                    @if (!command.IsTemplate)
+                                    {
+                                        @if (CanShowRunbookProgressButton(command))
+                                        {
+                                            <UiCommandButton Label="Progress"
+                                                             Glyph="UiIconGlyph.Info"
+                                                             Variant="UiButtonVariant.ActionSubtle"
+                                                             OnClick="OpenRunbookExecutionAsync" />
+                                        }
+                                        else
+                                        {
+                                            <UiCommandButton Label="Run"
+                                                             Glyph="UiIconGlyph.Run"
+                                                             Variant="UiButtonVariant.ActionSubtle"
+                                                             Disabled="@(IsMutating || isRunningRunbook)"
+                                                             OnClick="@(() => RunRunbookAsync(command))" />
+                                        }
+                                    }
+                                    <UiCommandButton Label="@(IsExpanded(command.Id) ? "Hide script" : "Show script")"
+                                                     Glyph="UiIconGlyph.Info"
+                                                     Variant="UiButtonVariant.Ghost"
+                                                     OnClick="@(() => ToggleExpandedAsync(command.Id))" />
+                                    @if (command.IsTemplate)
+                                    {
+                                        <UiCommandButton Label="Create runbook"
+                                                         Glyph="UiIconGlyph.Plus"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         OnClick="@(() => OpenCreateFromTemplateDialogAsync(command))" />
+                                    }
+                                    <UiCommandButton Label="Edit"
+                                                     Glyph="UiIconGlyph.Edit"
+                                                     Variant="UiButtonVariant.Ghost"
+                                                     OnClick="@(() => OpenEditDialogAsync(command))" />
+                                    <UiCommandButton Label="Duplicate"
+                                                     Glyph="UiIconGlyph.Copy"
+                                                     Variant="UiButtonVariant.Ghost"
+                                                     OnClick="@(() => OpenDuplicateDialogAsync(command))" />
+                                    <UiCommandButton Label="Delete"
+                                                     Glyph="UiIconGlyph.Delete"
+                                                     Variant="UiButtonVariant.Danger"
+                                                     OnClick="@(() => DeleteRunbookAsync(command))" />
+                                </div>
+                            </div>
+                        </div>
+
+                        @if (IsExpanded(command.Id))
+                        {
+                            <div class="runbook-row-body">
+                                @if (!command.IsTemplate)
+                                {
+                                    <section class="runbook-row-host-assignment">
+                                        <div class="runbook-row-section-header">
+                                            <div class="stack-tight">
+                                                <strong>Available on</strong>
+                                                <span class="meta-text">@GetRunbookAvailabilitySummary(command)</span>
+                                            </div>
+                                        </div>
+
+                                        <div class="runbook-row-host-grid">
+                                            @foreach (var host in OrderedHosts)
+                                            {
+                                                var isAssigned = command.HostIds.Contains(host.Id);
+                                                <div class="runbook-row-host-chip @(isAssigned ? "selected" : string.Empty)"
+                                                     @key="@($"{command.Id}-{host.Id}")"
+                                                     @onclick="@(() => SetRunbookHostAvailabilityAsync(command, host.Id, !isAssigned))">
+                                                    <UiCompactCheckbox Label="@($"Assign {command.Name} to {host.Name}")"
+                                                                       Value="@isAssigned"
+                                                                       Disabled="@(IsMutating || (isAssigned && command.HostIds.Count == 1))"
+                                                                       ValueChanged="@((bool value) => SetRunbookHostAvailabilityAsync(command, host.Id, value))" />
+                                                    <span class="runbook-row-host-chip-copy">@host.Name</span>
+                                                </div>
+                                            }
+                                        </div>
+                                    </section>
+                                }
+
+                                <div class="runbook-row-meta">
+                                    <span><strong>Type:</strong> @GetRunbookTypeLabel(command)</span>
+                                    <span><strong>Scope:</strong> @GetRunbookAvailabilitySummary(command)</span>
+                                    <span><strong>Terminal:</strong> @(command.IsTemplate ? "Templates must be instantiated first" : command.IsQuickAccess ? "Shown in terminal menu" : "Not a terminal favourite")</span>
+                                    @if (command.HasParameters)
+                                    {
+                                        <span><strong>Parameters:</strong> @command.ParameterDefinitions!.Count</span>
+                                    }
+                                    @if (!command.IsTemplate && command.TemplateSourceId.HasValue)
+                                    {
+                                        <span><strong>Origin:</strong> Built from template</span>
+                                    }
+                                </div>
+                                <pre class="runbook-row-code"><code>@command.CommandText</code></pre>
+                            </div>
+                        }
+                    </article>
+                }
+            </div>
+        }
+    </UiPanel>
+</div>
+
+<RunbookEditorDialog IsOpen="@isEditorOpen"
+                     Editor="@editor"
+                     Hosts="@OrderedHosts"
+                     StatusMessage="@editorStatusMessage"
+                     StatusTone="@editorStatusTone"
+                     IsBusy="@IsMutating"
+                     OnClose="CloseEditorAsync"
+                     OnSave="SaveRunbookAsync"
+                     OnDelete="DeleteActiveRunbookAsync" />
+
+<UiModal IsOpen="@isBulkHostAssignmentOpen"
+         Title="Assign host to runbooks"
+         Subtitle="Pick one machine and tick the runbooks it should have."
+         Class="runbook-bulk-assignment-modal"
+         CloseOnBackdrop="true"
+         OnClose="CloseBulkHostAssignmentAsync">
+    <ChildContent>
+        <div class="runbook-bulk-assignment-shell">
+            @if (!string.IsNullOrWhiteSpace(bulkAssignmentStatusMessage))
+            {
+                <p class="callout @bulkAssignmentStatusTone">@bulkAssignmentStatusMessage</p>
+            }
+
+            <div class="runbook-bulk-assignment-toolbar">
+                <UiComboboxField TValue="Guid"
+                                 Value="@bulkAssignmentHostId"
+                                 ValueChanged="SetBulkHostIdAsync"
+                                 ValueExpression="@(() => bulkAssignmentHostId)"
+                                 Label="Machine"
+                                 Compact="true"
+                                 Class="runbook-bulk-assignment-host">
+                    @foreach (var host in OrderedHosts)
+                    {
+                        <option value="@host.Id">@host.Name</option>
+                    }
+                </UiComboboxField>
+
+                <UiFilterInput Value="@bulkAssignmentFilterText"
+                               ValueChanged="SetBulkFilterTextAsync"
+                               Placeholder="Filter runbooks"
+                               AriaLabel="Filter runbooks"
+                               Class="runbook-bulk-assignment-filter" />
+            </div>
+
+            @if (FilteredBulkAssignmentRunbooks.Count == 0)
+            {
+                <div class="empty-state compact-empty-state">
+                    <p>No matching runbooks.</p>
+                </div>
+            }
+            else
+            {
+                <div class="runbook-bulk-assignment-list">
+                    @foreach (var runbook in FilteredBulkAssignmentRunbooks)
+                    {
+                        var isSelected = bulkAssignmentRunbookIds.Contains(runbook.Id);
+                        <div class="runbook-bulk-assignment-item @(isSelected ? "selected" : string.Empty)"
+                             @key="@($"bulk-{runbook.Id}")"
+                             @onclick="@(() => SetBulkRunbookSelectedAsync(runbook.Id, !isSelected))">
+                            <UiCompactCheckbox Label="@($"Assign {runbook.Name} to the selected machine")"
+                                               Value="@isSelected"
+                                               Disabled="@IsMutating"
+                                               ValueChanged="@((bool value) => SetBulkRunbookSelectedAsync(runbook.Id, value))" />
+                            <div class="runbook-bulk-assignment-copy">
+                                <strong>@runbook.Name</strong>
+                                @if (!string.IsNullOrWhiteSpace(runbook.Description))
+                                {
+                                    <span class="meta-text">@runbook.Description</span>
+                                }
+                            </div>
+                            <span class="runbook-bulk-assignment-meta">@GetRunbookAvailabilitySummary(runbook)</span>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    </ChildContent>
+
+    <Footer>
+        <div class="runbook-bulk-assignment-footer">
+            <UiCommandButton Label="Close"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@IsMutating"
+                             OnClick="CloseBulkHostAssignmentAsync" />
+            <UiCommandButton Label="@(IsMutating ? "Saving..." : "Save assignments")"
+                             Glyph="UiIconGlyph.Save"
+                             Disabled="@IsMutating"
+                             OnClick="SaveBulkHostAssignmentsAsync" />
+        </div>
+    </Footer>
+</UiModal>
+
+<UiModal IsOpen="@isRunbookExecutionOpen"
+         Title="@GetRunbookExecutionTitle()"
+         Subtitle="@GetRunbookExecutionSubtitle()"
+         Class="runbook-execution-modal"
+         CloseOnBackdrop="true"
+         OnClose="CloseRunbookExecutionAsync">
+    <ChildContent>
+        <div class="runbook-execution-shell">
+            @if (isRunningRunbook)
+            {
+                <div class="runbook-execution-running-shell" role="status" aria-live="polite" aria-busy="true">
+                    <span class="runbook-execution-spinner" aria-hidden="true"></span>
+                    <div class="runbook-execution-running-copy">
+                        <strong>Runbook started.</strong>
+                        <span>@GetRunbookExecutionRunningMessage()</span>
+                        <span class="meta-text">LMS is waiting for each target machine to finish. Slower SSH hosts can take a while.</span>
+                    </div>
+                </div>
+
+                @if (runbookExecutionTargetNames.Count > 0)
+                {
+                    <div class="runbook-execution-targets">
+                        @foreach (var targetName in runbookExecutionTargetNames)
+                        {
+                            <span class="runbook-execution-target">@targetName</span>
+                        }
+                    </div>
+                }
+
+                @if (runbookExecutionProgressHosts.Count > 0)
+                {
+                    <div class="runbook-execution-results">
+                        @foreach (var hostProgress in GetOrderedRunbookExecutionProgressHosts())
+                        {
+                            <article class="runbook-execution-host-card">
+                                <div class="runbook-execution-host-head">
+                                    <div class="runbook-execution-host-copy">
+                                        <strong>@hostProgress.HostName</strong>
+                                        <span class="meta-text">@hostProgress.Summary</span>
+                                    </div>
+
+                                    <div class="runbook-execution-host-meta">
+                                        <span class="runbook-execution-host-status @GetRunbookExecutionProgressStatusClass(hostProgress)">
+                                            @GetRunbookExecutionProgressStatusLabel(hostProgress)
+                                        </span>
+                                        @if (hostProgress.ExitCode.HasValue)
+                                        {
+                                            <span class="meta-text">exit @hostProgress.ExitCode.Value</span>
+                                        }
+                                    </div>
+                                </div>
+
+                                @if (!string.IsNullOrWhiteSpace(hostProgress.StandardOutput))
+                                {
+                                    <div class="runbook-execution-output-block">
+                                        <span class="runbook-execution-output-label">stdout</span>
+                                        <pre class="runbook-execution-output"><code>@hostProgress.StandardOutput</code></pre>
+                                    </div>
+                                }
+
+                                @if (!string.IsNullOrWhiteSpace(hostProgress.StandardError))
+                                {
+                                    <div class="runbook-execution-output-block">
+                                        <span class="runbook-execution-output-label">stderr</span>
+                                        <pre class="runbook-execution-output error"><code>@hostProgress.StandardError</code></pre>
+                                    </div>
+                                }
+                            </article>
+                        }
+                    </div>
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(runbookExecutionError))
+            {
+                <p class="callout error">@runbookExecutionError</p>
+            }
+            else if (runbookExecutionResult is not null)
+            {
+                <div class="runbook-execution-summary @(runbookExecutionResult.AllSucceeded ? "success" : "warning")">
+                    <strong>@(runbookExecutionResult.AllSucceeded ? "Runbook completed." : "Runbook completed with issues.")</strong>
+                    <span>@runbookExecutionResult.SucceededCount succeeded · @runbookExecutionResult.FailedCount failed</span>
+                </div>
+
+                <div class="runbook-execution-results">
+                    @foreach (var hostResult in runbookExecutionResult.HostResults)
+                    {
+                        <article class="runbook-execution-host-card">
+                            <div class="runbook-execution-host-head">
+                                <div class="runbook-execution-host-copy">
+                                    <strong>@hostResult.HostName</strong>
+                                    <span class="meta-text">@hostResult.Summary</span>
+                                </div>
+
+                                <div class="runbook-execution-host-meta">
+                                    <span class="runbook-execution-host-status @(hostResult.Success ? "success" : "error")">
+                                        @(hostResult.Success ? "success" : "failed")
+                                    </span>
+                                    <span class="meta-text">exit @hostResult.ExitCode</span>
+                                </div>
+                            </div>
+
+                            @if (!string.IsNullOrWhiteSpace(hostResult.StandardOutput))
+                            {
+                                <div class="runbook-execution-output-block">
+                                    <span class="runbook-execution-output-label">stdout</span>
+                                    <pre class="runbook-execution-output"><code>@hostResult.StandardOutput</code></pre>
+                                </div>
+                            }
+
+                            @if (!string.IsNullOrWhiteSpace(hostResult.StandardError))
+                            {
+                                <div class="runbook-execution-output-block">
+                                    <span class="runbook-execution-output-label">stderr</span>
+                                    <pre class="runbook-execution-output error"><code>@hostResult.StandardError</code></pre>
+                                </div>
+                            }
+                        </article>
+                    }
+                </div>
+            }
+        </div>
+    </ChildContent>
+
+    <Footer>
+        <div class="runbook-execution-footer">
+            <UiCommandButton Label="Close"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isRunningRunbook"
+                             OnClick="CloseRunbookExecutionAsync" />
+        </div>
+    </Footer>
+</UiModal>
+
+@code {
+    private IReadOnlyList<CommandLibraryItem> commands = [];
+    private IReadOnlyList<ManagedHost> hosts = [];
+    private readonly HashSet<Guid> expandedRunbookIds = [];
+    private RunbookEditor editor = new();
+    private string filterText = string.Empty;
+    private string statusMessage = string.Empty;
+    private string statusTone = "info";
+    private string editorStatusMessage = string.Empty;
+    private string editorStatusTone = "info";
+    private bool isEditorOpen;
+    private bool isBulkHostAssignmentOpen;
+    private bool isMutating;
+    private bool isRunbookExecutionOpen;
+    private bool isRunningRunbook;
+    private Guid bulkAssignmentHostId;
+    private string bulkAssignmentFilterText = string.Empty;
+    private string bulkAssignmentStatusMessage = string.Empty;
+    private string bulkAssignmentStatusTone = "info";
+    private readonly HashSet<Guid> bulkAssignmentRunbookIds = [];
+    private Guid? runbookExecutionRunbookId;
+    private string runbookExecutionName = string.Empty;
+    private string runbookExecutionScopeSummary = string.Empty;
+    private int runbookExecutionHostCount;
+    private IReadOnlyList<string> runbookExecutionTargetNames = [];
+    private readonly Dictionary<Guid, RunbookExecutionProgressHostState> runbookExecutionProgressHosts = [];
+    private string runbookExecutionError = string.Empty;
+    private RunbookExecutionResultViewModel? runbookExecutionResult;
+
+    private bool IsMutating => isMutating;
+
+    private IReadOnlyList<ManagedHost> OrderedHosts =>
+        hosts
+            .OrderBy(ManagedHostCapabilities.GetSortRank)
+            .ThenBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private IReadOnlyList<CommandLibraryItem> FilteredCommands =>
+        commands
+            .Where(MatchesFilter)
+            .OrderBy(command => command.IsTemplate ? 0 : 1)
+            .ThenBy(command => command.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private IReadOnlyList<CommandLibraryItem> RunnableCommands =>
+        commands
+            .Where(command => !command.IsTemplate)
+            .OrderBy(command => command.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private IReadOnlyList<CommandLibraryItem> FilteredBulkAssignmentRunbooks =>
+        RunnableCommands
+            .Where(command =>
+                string.IsNullOrWhiteSpace(bulkAssignmentFilterText) ||
+                command.Name.Contains(bulkAssignmentFilterText, StringComparison.OrdinalIgnoreCase) ||
+                command.Description.Contains(bulkAssignmentFilterText, StringComparison.OrdinalIgnoreCase) ||
+                command.CommandText.Contains(bulkAssignmentFilterText, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        var hostsTask = HostService.ListHostsAsync();
+        var commandsTask = RunbookService.ListCommandsAsync();
+        await Task.WhenAll(hostsTask, commandsTask);
+
+        hosts = hostsTask.Result;
+        commands = commandsTask.Result;
+        if (!OrderedHosts.Any(host => host.Id == bulkAssignmentHostId))
+        {
+            bulkAssignmentHostId = OrderedHosts.FirstOrDefault()?.Id ?? Guid.Empty;
+        }
+    }
+
+    private Task SetFilterAsync(string? value)
+    {
+        filterText = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenCreateDialogAsync()
+    {
+        editor = new RunbookEditor
+        {
+            HostId = OrderedHosts.FirstOrDefault()?.Id ?? Guid.Empty,
+            SelectedHostIds = OrderedHosts.FirstOrDefault() is { } host ? [host.Id] : [],
+            CommandText = DefaultRunbookScript
+        };
+        editorStatusMessage = string.Empty;
+        editorStatusTone = "info";
+        isEditorOpen = true;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenEditDialogAsync(CommandLibraryItem command)
+    {
+        editor = MapEditor(command, duplicate: false);
+        editorStatusMessage = string.Empty;
+        editorStatusTone = "info";
+        isEditorOpen = true;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenDuplicateDialogAsync(CommandLibraryItem command)
+    {
+        editor = MapEditor(command, duplicate: true);
+        editorStatusMessage = string.Empty;
+        editorStatusTone = "info";
+        isEditorOpen = true;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenCreateFromTemplateDialogAsync(CommandLibraryItem command)
+    {
+        editor = CreateTemplateInstanceEditor(command);
+        editorStatusMessage = string.Empty;
+        editorStatusTone = "info";
+        isEditorOpen = true;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenBulkHostAssignmentAsync()
+    {
+        bulkAssignmentStatusMessage = string.Empty;
+        bulkAssignmentStatusTone = "info";
+        bulkAssignmentFilterText = string.Empty;
+        bulkAssignmentHostId = OrderedHosts.FirstOrDefault()?.Id ?? Guid.Empty;
+        RefreshBulkHostSelection();
+        isBulkHostAssignmentOpen = true;
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveRunbookAsync()
+    {
+        isMutating = true;
+        editorStatusMessage = string.Empty;
+        editorStatusTone = "info";
+
+        try
+        {
+            var wasEdit = editor.Id.HasValue;
+            var savedId = await RunbookService.SaveRunbookAsync(editor);
+            await LoadAsync();
+
+            expandedRunbookIds.Add(savedId);
+            statusMessage = editor.IsTemplate
+                ? wasEdit
+                    ? $"Updated template `{editor.Name}`."
+                    : $"Saved template `{editor.Name}`."
+                : wasEdit
+                    ? $"Updated `{editor.Name}`."
+                    : $"Saved `{editor.Name}`.";
+            statusTone = "success";
+            isEditorOpen = false;
+        }
+        catch (Exception exception)
+        {
+            editorStatusMessage = exception.Message;
+            editorStatusTone = "error";
+        }
+        finally
+        {
+            isMutating = false;
+        }
+    }
+
+    private async Task SaveBulkHostAssignmentsAsync()
+    {
+        if (bulkAssignmentHostId == Guid.Empty)
+        {
+            bulkAssignmentStatusMessage = "Pick a machine first.";
+            bulkAssignmentStatusTone = "warning";
+            return;
+        }
+
+        isMutating = true;
+        bulkAssignmentStatusMessage = string.Empty;
+        bulkAssignmentStatusTone = "info";
+
+        try
+        {
+            await RunbookService.SetHostRunbookAssignmentsAsync(bulkAssignmentHostId, [..bulkAssignmentRunbookIds]);
+            var hostName = OrderedHosts.FirstOrDefault(host => host.Id == bulkAssignmentHostId)?.Name ?? "Selected machine";
+            await LoadAsync();
+            RefreshBulkHostSelection();
+            isBulkHostAssignmentOpen = false;
+            statusMessage = $"Updated runbook availability for `{hostName}`.";
+            statusTone = "success";
+        }
+        catch (Exception exception)
+        {
+            bulkAssignmentStatusMessage = exception.Message;
+            bulkAssignmentStatusTone = "error";
+        }
+        finally
+        {
+            isMutating = false;
+        }
+    }
+
+    private async Task SetRunbookHostAvailabilityAsync(CommandLibraryItem command, Guid hostId, bool isAssigned)
+    {
+        var updatedHostIds = isAssigned
+            ? command.HostIds.Concat([hostId]).Distinct().ToArray()
+            : command.HostIds.Where(existingHostId => existingHostId != hostId).ToArray();
+        if (updatedHostIds.Length == 0)
+        {
+            return;
+        }
+
+        isMutating = true;
+        statusMessage = string.Empty;
+
+        try
+        {
+            await RunbookService.SetRunbookHostsAsync(command.Id, updatedHostIds);
+            await LoadAsync();
+            expandedRunbookIds.Add(command.Id);
+            statusMessage = $"Updated `{command.Name}` host availability.";
+            statusTone = "success";
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusTone = "error";
+        }
+        finally
+        {
+            isMutating = false;
+        }
+    }
+
+    private async Task DeleteActiveRunbookAsync()
+    {
+        if (!editor.Id.HasValue)
+        {
+            return;
+        }
+
+        if (!await ConfirmDeleteAsync(editor.Name))
+        {
+            return;
+        }
+
+        isMutating = true;
+        editorStatusMessage = string.Empty;
+
+        try
+        {
+            await RunbookService.DeleteRunbookAsync(editor.Id.Value);
+            expandedRunbookIds.Remove(editor.Id.Value);
+            await LoadAsync();
+            isEditorOpen = false;
+            statusMessage = $"Deleted `{editor.Name}`.";
+            statusTone = "success";
+        }
+        catch (Exception exception)
+        {
+            editorStatusMessage = exception.Message;
+            editorStatusTone = "error";
+        }
+        finally
+        {
+            isMutating = false;
+        }
+    }
+
+    private async Task DeleteRunbookAsync(CommandLibraryItem command)
+    {
+        if (!await ConfirmDeleteAsync(command.Name))
+        {
+            return;
+        }
+
+        isMutating = true;
+        statusMessage = string.Empty;
+
+        try
+        {
+            await RunbookService.DeleteRunbookAsync(command.Id);
+            expandedRunbookIds.Remove(command.Id);
+            await LoadAsync();
+            statusMessage = $"Deleted `{command.Name}`.";
+            statusTone = "success";
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusTone = "error";
+        }
+        finally
+        {
+            isMutating = false;
+        }
+    }
+
+    private async Task LoadStarterPackAsync()
+    {
+        isMutating = true;
+        statusMessage = string.Empty;
+
+        try
+        {
+            var result = await RunbookService.ImportStarterRunbooksAsync();
+            await LoadAsync();
+            statusMessage = result.ImportedCount > 0
+                ? $"Imported {result.ImportedCount} starter runbook(s) into `{result.HostName}`. {result.ExistingCount} already existed."
+                : $"Starter pack already exists for `{result.HostName}`. Nothing new was added.";
+            statusTone = "success";
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusTone = "error";
+        }
+        finally
+        {
+            isMutating = false;
+        }
+    }
+
+    private async Task RunRunbookAsync(CommandLibraryItem command)
+    {
+        isRunningRunbook = true;
+        isRunbookExecutionOpen = true;
+        runbookExecutionRunbookId = command.Id;
+        runbookExecutionName = command.Name;
+        runbookExecutionHostCount = command.HostIds.Count;
+        runbookExecutionTargetNames = ResolveRunbookExecutionTargetNames(command);
+        runbookExecutionProgressHosts.Clear();
+        runbookExecutionScopeSummary = GetRunbookAvailabilitySummary(command);
+        runbookExecutionError = string.Empty;
+        runbookExecutionResult = null;
+        statusMessage = $"Started `{command.Name}`. Waiting for machine results...";
+        statusTone = "info";
+
+        await InvokeAsync(StateHasChanged);
+        await Task.Delay(75);
+
+        try
+        {
+            var executionProgress = new Progress<RunbookExecutionProgressUpdate>(update =>
+                _ = InvokeAsync(() => ApplyRunbookExecutionProgress(update)));
+            runbookExecutionResult = await RunbookService.RunRunbookAsync(command.Id, executionProgress);
+            statusMessage = runbookExecutionResult.AllSucceeded
+                ? $"Ran `{command.Name}` successfully."
+                : $"Ran `{command.Name}` with failures on {runbookExecutionResult.FailedCount} machine(s).";
+            statusTone = runbookExecutionResult.AllSucceeded ? "success" : "warning";
+        }
+        catch (Exception exception)
+        {
+            runbookExecutionError = exception.Message;
+            statusMessage = $"Runbook `{command.Name}` failed to start or complete.";
+            statusTone = "error";
+        }
+        finally
+        {
+            isRunningRunbook = false;
+        }
+    }
+
+    private Task CloseEditorAsync()
+    {
+        isEditorOpen = false;
+        editorStatusMessage = string.Empty;
+        editorStatusTone = "info";
+        return Task.CompletedTask;
+    }
+
+    private Task CloseBulkHostAssignmentAsync()
+    {
+        isBulkHostAssignmentOpen = false;
+        bulkAssignmentStatusMessage = string.Empty;
+        bulkAssignmentStatusTone = "info";
+        return Task.CompletedTask;
+    }
+
+    private Task SetBulkHostIdAsync(Guid hostId)
+    {
+        bulkAssignmentHostId = hostId;
+        RefreshBulkHostSelection();
+        return Task.CompletedTask;
+    }
+
+    private Task SetBulkFilterTextAsync(string? value)
+    {
+        bulkAssignmentFilterText = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetBulkRunbookSelectedAsync(Guid runbookId, bool value)
+    {
+        if (value)
+        {
+            bulkAssignmentRunbookIds.Add(runbookId);
+        }
+        else
+        {
+            bulkAssignmentRunbookIds.Remove(runbookId);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task OpenRunbookExecutionAsync()
+    {
+        if (HasRetainedRunbookExecutionState())
+        {
+            isRunbookExecutionOpen = true;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task CloseRunbookExecutionAsync()
+    {
+        if (isRunningRunbook)
+        {
+            isRunbookExecutionOpen = false;
+            statusMessage = $"Runbook `{runbookExecutionName}` is still running. Use Progress to reopen live output.";
+            statusTone = "info";
+            return Task.CompletedTask;
+        }
+
+        isRunbookExecutionOpen = false;
+        runbookExecutionRunbookId = null;
+        runbookExecutionName = string.Empty;
+        runbookExecutionScopeSummary = string.Empty;
+        runbookExecutionHostCount = 0;
+        runbookExecutionTargetNames = [];
+        runbookExecutionProgressHosts.Clear();
+        runbookExecutionError = string.Empty;
+        runbookExecutionResult = null;
+        return Task.CompletedTask;
+    }
+
+    private Task ToggleExpandedAsync(Guid runbookId)
+    {
+        if (!expandedRunbookIds.Add(runbookId))
+        {
+            expandedRunbookIds.Remove(runbookId);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private bool IsExpanded(Guid runbookId) =>
+        expandedRunbookIds.Contains(runbookId);
+
+    private bool MatchesFilter(CommandLibraryItem command)
+    {
+        if (string.IsNullOrWhiteSpace(filterText))
+        {
+            return true;
+        }
+
+        return command.Name.Contains(filterText, StringComparison.OrdinalIgnoreCase)
+               || command.Description.Contains(filterText, StringComparison.OrdinalIgnoreCase)
+               || command.HostName.Contains(filterText, StringComparison.OrdinalIgnoreCase)
+               || command.HostNames.Any(hostName => hostName.Contains(filterText, StringComparison.OrdinalIgnoreCase))
+               || command.CommandText.Contains(filterText, StringComparison.OrdinalIgnoreCase)
+               || (command.IsTemplate ? "template" : command.RequiresSudo ? "sudo" : "user").Contains(filterText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void RefreshBulkHostSelection()
+    {
+        bulkAssignmentRunbookIds.Clear();
+        if (bulkAssignmentHostId == Guid.Empty)
+        {
+            return;
+        }
+
+        foreach (var runbookId in RunnableCommands
+                     .Where(command => command.HostIds.Contains(bulkAssignmentHostId))
+                     .Select(command => command.Id))
+        {
+            bulkAssignmentRunbookIds.Add(runbookId);
+        }
+    }
+
+    private Task<bool> ConfirmDeleteAsync(string name) =>
+        JSRuntime.InvokeAsync<bool>("confirm", $"Delete runbook '{name}'?").AsTask();
+
+    private static RunbookEditor MapEditor(CommandLibraryItem command, bool duplicate) =>
+        new()
+        {
+            Id = duplicate ? null : command.Id,
+            HostId = command.HostId,
+            Name = duplicate ? BuildDuplicateName(command.Name) : command.Name,
+            Description = command.Description,
+            CommandText = command.CommandText,
+            RequiresSudo = command.RequiresSudo,
+            IsQuickAccess = command.IsQuickAccess,
+            IsTemplate = command.IsTemplate,
+            TemplateSourceId = command.TemplateSourceId,
+            LinkGroupId = duplicate ? null : command.LinkGroupId,
+            DistributionMode = command.HostIds.Count > 1
+                ? RunbookDistributionMode.LinkAcrossMachines
+                : RunbookDistributionMode.SingleMachine,
+            SelectedHostIds = [..command.HostIds],
+            Parameters = command.ParameterDefinitions?.Select(definition => new RunbookParameterEditor
+            {
+                Name = definition.Name,
+                Label = definition.Label,
+                Kind = definition.Kind,
+                Placeholder = definition.Placeholder,
+                HelpText = definition.HelpText,
+                IsRequired = definition.IsRequired,
+                Value = command.ParameterValueSnapshot?.TryGetValue(definition.Name, out var value) == true ? value : string.Empty
+            }).ToList() ?? []
+        };
+
+    private RunbookEditor CreateTemplateInstanceEditor(CommandLibraryItem template)
+    {
+        var primaryHostId = OrderedHosts.FirstOrDefault()?.Id ?? template.HostIds.FirstOrDefault();
+        return new RunbookEditor
+        {
+            HostId = primaryHostId,
+            SelectedHostIds = primaryHostId == Guid.Empty ? [] : [primaryHostId],
+            Name = $"{template.Name} runbook",
+            Description = template.Description,
+            CommandText = template.CommandText,
+            RequiresSudo = template.RequiresSudo,
+            TemplateSourceId = template.Id,
+            TemplateSourceName = template.Name,
+            Parameters = template.ParameterDefinitions?.Select(definition => new RunbookParameterEditor
+            {
+                Name = definition.Name,
+                Label = definition.Label,
+                Kind = definition.Kind,
+                Placeholder = definition.Placeholder,
+                HelpText = definition.HelpText,
+                IsRequired = definition.IsRequired
+            }).ToList() ?? []
+        };
+    }
+
+    private static string BuildDuplicateName(string name) =>
+        string.IsNullOrWhiteSpace(name)
+            ? "Runbook copy"
+            : $"{name.Trim()} copy";
+
+    private static string GetRunbookTypeLabel(CommandLibraryItem command) =>
+        command.IsTemplate
+            ? "Bash template"
+            : "Bash script";
+
+    private static string GetRunbookAvailabilitySummary(CommandLibraryItem command)
+    {
+        if (command.IsTemplate)
+        {
+            return command.HasParameters
+                ? $"{command.ParameterDefinitions!.Count} parameter template"
+                : "Template";
+        }
+
+        return command.HostIds.Count switch
+        {
+            0 => "No machines",
+            1 => command.HostName,
+            _ => $"{command.HostIds.Count} machines"
+        };
+    }
+
+    private const string DefaultRunbookScript = "#!/usr/bin/env bash\nset -euo pipefail\n";
+
+    private string GetRunbookExecutionTitle() =>
+        string.IsNullOrWhiteSpace(runbookExecutionName)
+            ? "Runbook execution"
+            : $"Run {runbookExecutionName}";
+
+    private string GetRunbookExecutionSubtitle()
+    {
+        if (isRunningRunbook)
+        {
+            return "LMS is dispatching the selected runbook now.";
+        }
+
+        if (runbookExecutionResult is null)
+        {
+            return "Review the execution result per machine.";
+        }
+
+        return $"{runbookExecutionResult.HostResults.Count} machine(s) processed.";
+    }
+
+    private string GetRunbookExecutionRunningMessage()
+    {
+        if (runbookExecutionHostCount <= 0)
+        {
+            return "LMS is starting the selected runbook.";
+        }
+
+        var machineLabel = runbookExecutionHostCount == 1 ? "machine" : "machines";
+        return $"{runbookExecutionHostCount} {machineLabel} targeted · {runbookExecutionScopeSummary}";
+    }
+
+    private bool CanShowRunbookProgressButton(CommandLibraryItem command) =>
+        !command.IsTemplate &&
+        !isRunbookExecutionOpen &&
+        runbookExecutionRunbookId == command.Id &&
+        HasRetainedRunbookExecutionState();
+
+    private bool HasRetainedRunbookExecutionState() =>
+        isRunningRunbook ||
+        runbookExecutionResult is not null ||
+        !string.IsNullOrWhiteSpace(runbookExecutionError) ||
+        runbookExecutionProgressHosts.Count > 0;
+
+    private IReadOnlyList<RunbookExecutionProgressHostState> GetOrderedRunbookExecutionProgressHosts() =>
+        runbookExecutionProgressHosts.Values
+            .OrderBy(host => host.HostName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private string GetRunbookExecutionProgressStatusClass(RunbookExecutionProgressHostState hostProgress) =>
+        hostProgress.Kind switch
+        {
+            RunbookExecutionProgressKind.Completed => "success",
+            RunbookExecutionProgressKind.Failed => "error",
+            RunbookExecutionProgressKind.Started => "running",
+            _ => "queued"
+        };
+
+    private static string GetRunbookExecutionProgressStatusLabel(RunbookExecutionProgressHostState hostProgress) =>
+        hostProgress.Kind switch
+        {
+            RunbookExecutionProgressKind.Completed => "success",
+            RunbookExecutionProgressKind.Failed => "failed",
+            RunbookExecutionProgressKind.Started => "running",
+            _ => "queued"
+        };
+
+    private Task ApplyRunbookExecutionProgress(RunbookExecutionProgressUpdate update)
+    {
+        if (!runbookExecutionProgressHosts.TryGetValue(update.HostId, out var state))
+        {
+            state = new RunbookExecutionProgressHostState
+            {
+                HostId = update.HostId,
+                HostName = update.HostName
+            };
+            runbookExecutionProgressHosts[update.HostId] = state;
+        }
+
+        state.HostName = string.IsNullOrWhiteSpace(update.HostName) ? state.HostName : update.HostName;
+        state.Kind = update.Kind;
+        state.UpdatedAtUtc = update.OccurredAtUtc;
+
+        if (!string.IsNullOrWhiteSpace(update.Message))
+        {
+            state.Summary = update.Message;
+        }
+
+        if (update.ExitCode.HasValue)
+        {
+            state.ExitCode = update.ExitCode;
+        }
+
+        if (update.Kind == RunbookExecutionProgressKind.StandardOutput)
+        {
+            state.StandardOutput = update.IsCompleteSnapshot
+                ? update.Content
+                : $"{state.StandardOutput}{update.Content}";
+        }
+        else if (update.Kind == RunbookExecutionProgressKind.StandardError)
+        {
+            state.StandardError = update.IsCompleteSnapshot
+                ? update.Content
+                : $"{state.StandardError}{update.Content}";
+        }
+
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    private IReadOnlyList<string> ResolveRunbookExecutionTargetNames(CommandLibraryItem command)
+    {
+        var orderedNames = command.HostIds
+            .Select(hostId => hosts.FirstOrDefault(host => host.Id == hostId)?.Name)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (orderedNames.Length > 0)
+        {
+            return orderedNames;
+        }
+
+        return string.IsNullOrWhiteSpace(command.HostName)
+            ? []
+            : [command.HostName];
+    }
+
+    private sealed class RunbookExecutionProgressHostState
+    {
+        public Guid HostId { get; set; }
+
+        public string HostName { get; set; } = string.Empty;
+
+        public RunbookExecutionProgressKind Kind { get; set; } = RunbookExecutionProgressKind.Queued;
+
+        public string Summary { get; set; } = "Queued for execution.";
+
+        public string StandardOutput { get; set; } = string.Empty;
+
+        public string StandardError { get; set; } = string.Empty;
+
+        public int? ExitCode { get; set; }
+
+        public DateTimeOffset UpdatedAtUtc { get; set; }
+    }
+}

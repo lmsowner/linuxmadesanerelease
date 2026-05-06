@@ -1,0 +1,1691 @@
+@using System.Security.Claims
+@using System.Threading
+@using LinuxMadeSane.Core.Models.Cloudflare
+@using LinuxMadeSane.Application.Contracts.Cloudflare
+@using LinuxMadeSane.Application.Interfaces
+@using Microsoft.AspNetCore.Components.Authorization
+@inject IExposedServiceManager ExposedServiceManager
+@implements IDisposable
+
+@if (ShowBlockingLoad)
+{
+    <section class="surface-card cloudflare-loading-card">
+        <div class="cloudflare-loading-header">
+            <div>
+                <strong>@initialLoadStep</strong>
+                <p class="meta-text">@initialLoadDetail</p>
+            </div>
+        </div>
+        <div class="cloudflare-loading-progress" role="progressbar" aria-label="Cloudflare load progress" aria-valuetext="@initialLoadStep">
+            <div class="cloudflare-loading-progress-fill"></div>
+        </div>
+        <div class="cloudflare-loading-steps">
+            <span class="cloudflare-loading-step @GetInitialLoadStepClass(LoadingSettingsPhase)">Local settings</span>
+            <span class="cloudflare-loading-step @GetInitialLoadStepClass(LoadingTokenPhase)">Token validation</span>
+            <span class="cloudflare-loading-step @GetInitialLoadStepClass(LoadingTunnelPhase)">Connector context</span>
+        </div>
+    </section>
+}
+else
+{
+    <div class="cloudflare-expose-shell">
+        <section class="surface-card">
+            <TabControl ActiveValue="@activeCloudflareTab"
+                        ActiveValueChanged="HandleCloudflareTabChangedAsync"
+                        Class="cloudflare-page-tab-control"
+                        PanelClass="cloudflare-page-tab-panel">
+                <HeaderActions>
+                    <UiCommandButton Label="@(IsRefreshBusy ? "Refreshing..." : "Refresh")"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@IsRefreshBusy"
+                                     OnClick="RefreshWorkspaceAsync" />
+                </HeaderActions>
+                <ChildContent>
+                    <TabPage Value="@SetupTabValue" Title="Setup">
+                        <div class="cloudflare-tab-section">
+                        <div class="cloudflare-token-actions cloudflare-token-actions-standalone">
+                            <UiCommandButton Label="Setup guide"
+                                             Glyph="UiIconGlyph.Info"
+                                             Variant="UiButtonVariant.Ghost"
+                                             OnClick="OnOpenSetupGuide" />
+                        </div>
+
+                        @if (ShowSetupSummary)
+                        {
+                            <section class="surface-subcard cloudflare-setup-summary">
+                                <div class="cloudflare-setup-summary-item">
+                                    <span class="meta-text">Connector</span>
+                                    <strong>@ConnectorSummary</strong>
+                                </div>
+                                <div class="cloudflare-setup-summary-item">
+                                    <span class="meta-text">Token</span>
+                                    <strong>@TokenSummary</strong>
+                                </div>
+                                @if (!string.IsNullOrWhiteSpace(SelectedAccountName))
+                                {
+                                    <div class="cloudflare-setup-summary-item">
+                                        <span class="meta-text">Account</span>
+                                        <strong>@SelectedAccountName</strong>
+                                    </div>
+                                }
+                                <div class="cloudflare-setup-summary-item">
+                                    <span class="meta-text">Apps on connector</span>
+                                    <strong>@ConnectedApplicationCount</strong>
+                                </div>
+                            </section>
+                        }
+
+                        @if (!HostHasInstalledConnector)
+                        {
+                            <section class="surface-subcard cloudflare-mode-note">
+                                <strong>Install cloudflared</strong>
+                                <span>This LMS host does not have a working cloudflared service yet. Linux Made Sane can install or attach it when you apply the first application.</span>
+                                <UiCheckboxField Value="@editor.RunConnectorInstallOnHost"
+                                                 ValueChanged="HandleRunConnectorInstallOnHostChangedAsync"
+                                                 ValueExpression="@(() => editor.RunConnectorInstallOnHost)"
+                                                 Label="Install or attach cloudflared automatically"
+                                                 Helper="@ConnectorInstallHelper" />
+                            </section>
+                        }
+
+                        @if (HasValidatedSavedToken)
+                        {
+                            <div class="cloudflare-token-actions cloudflare-token-actions-standalone">
+                                <UiCommandButton Label="Forget saved token"
+                                                 Glyph="UiIconGlyph.Delete"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 OnClick="ForgetSavedTokenAsync" />
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="cloudflare-token-row">
+                                <UiTextField @bind-Value="editor.ApiTokenInput"
+                                             Label="Cloudflare API token"
+                                             Type="password"
+                                             Autocomplete="off"
+                                             Helper="The token is only kept in memory unless you explicitly save it."
+                                             Placeholder="Paste a scoped Bearer API token" />
+                                <div class="cloudflare-token-actions">
+                                    <UiCommandButton Label="@(isValidating ? "Validating..." : "Validate token")"
+                                                     Glyph="UiIconGlyph.Connect"
+                                                     Disabled="@isValidating"
+                                                     OnClick="@(() => ValidateTokenAsync())" />
+                                    @if (hasSavedToken)
+                                    {
+                                        <UiCommandButton Label="Forget saved token"
+                                                         Glyph="UiIconGlyph.Delete"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         OnClick="ForgetSavedTokenAsync" />
+                                    }
+                                </div>
+                            </div>
+
+                            <UiCheckboxField @bind-Value="editor.SaveApiToken"
+                                             Label="Save this token securely for this host"
+                                             Helper="Uses the existing encrypted secret store." />
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(statusMessage) && activeCloudflareTab == SetupTabValue)
+                        {
+                            <p class="callout @(statusIsError ? "error" : "success")">@statusMessage</p>
+                        }
+                        </div>
+                    </TabPage>
+
+                    <TabPage Value="@ApplicationsTabValue" Title="@($"Applications ({ServiceEntries.Count})")">
+                        <div class="cloudflare-tab-section">
+                        <section class="surface-subcard">
+                            <div class="table-header">
+                                <div>
+                                    <h3>Applications</h3>
+                                    <p class="meta-text">Configured public hostnames for this local LMS instance.</p>
+                                </div>
+                                <div class="cloudflare-saved-actions">
+                                    <UiCommandButton Label="Add application"
+                                                     Glyph="UiIconGlyph.Plus"
+                                                     Disabled="@(!CanManageApplications)"
+                                                     OnClick="BeginAddApplication" />
+                                </div>
+                            </div>
+
+                            @if (workspace?.SyncWarnings.Count > 0)
+                            {
+                                <div class="cloudflare-warning-list">
+                                    @foreach (var warning in workspace.SyncWarnings)
+                                    {
+                                        <p class="callout warning">@warning</p>
+                                    }
+                                </div>
+                            }
+
+                            @if (ServiceEntries.Count == 0)
+                            {
+                                <p class="meta-text">No Cloudflare applications are configured yet.</p>
+                            }
+                            else
+                            {
+                                <div class="cloudflare-saved-list">
+                                    @foreach (var serviceEntry in ServiceEntries)
+                                    {
+                                        var service = serviceEntry.Config;
+                                        <div class="cloudflare-saved-row">
+                                            <div>
+                                                <strong>@service.ServiceName</strong>
+                                                <div class="meta-text cloudflare-saved-mapping">@service.Hostname -> @service.LocalServiceUrl</div>
+                                            </div>
+                                            <div class="cloudflare-saved-actions">
+                                                <span class="status-pill neutral">@FormatAccessMode(service.AccessMode)</span>
+                                                <span class="status-pill @(serviceEntry.IsOutOfSync ? "warning" : "success")">@GetSyncLabel(serviceEntry)</span>
+                                                @if (CanManageApplications)
+                                                {
+                                                    <UiCommandButton Label="Edit"
+                                                                     Glyph="UiIconGlyph.Edit"
+                                                                     Variant="UiButtonVariant.Action"
+                                                                     OnClick="@(() => BeginEditApplicationAsync(serviceEntry))" />
+                                                }
+                                                <UiCommandButton Label="@(removingServiceId == service.Id ? "Removing..." : "Remove")"
+                                                                 Glyph="UiIconGlyph.Delete"
+                                                                 Variant="UiButtonVariant.Danger"
+                                                                 Disabled="@(removingServiceId == service.Id)"
+                                         OnClick="@(() => RemoveServiceAsync(serviceEntry))" />
+                                            </div>
+                                        </div>
+                                    }
+                                </div>
+                            }
+                        </section>
+
+                        @if (!CanManageApplications)
+                        {
+                            <section class="surface-subcard cloudflare-mode-note">
+                                <strong>Setup required</strong>
+                                <span>Validate or save a Cloudflare API token in Setup before adding or editing applications.</span>
+                            </section>
+                        }
+                        else if (isApplicationEditorOpen)
+                        {
+                            <section class="surface-subcard cloudflare-application-editor-card">
+                                <div class="table-header">
+                                    <div>
+                                        <h3>@ApplicationEditorHeading</h3>
+                                        <p class="meta-text">@ApplicationEditorSummary</p>
+                                    </div>
+                                    <div class="cloudflare-saved-actions">
+                                        <UiCommandButton Label="Close"
+                                                         Glyph="UiIconGlyph.Clear"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         OnClick="CloseApplicationEditor" />
+                                    </div>
+                                </div>
+
+                                <EditForm EditContext="@editContext" class="stack-form cloudflare-form">
+                                    <DataAnnotationsValidator />
+
+                                    @if (validationMessages.Count > 0)
+                                    {
+                                        <div class="callout error">
+                                            <strong>Cloudflare form errors</strong>
+                                            <ul class="cloudflare-validation-list">
+                                                @foreach (var message in validationMessages)
+                                                {
+                                                    <li>@message</li>
+                                                }
+                                            </ul>
+                                        </div>
+                                    }
+
+                                    @if (validation is not null && validation.Accounts.Count > 1)
+                                    {
+                                        <div class="field-row">
+                                            <UiComboboxField TValue="string"
+                                                           Label="Cloudflare account"
+                                                           Value="@editor.AccountId"
+                                                           ValueChanged="HandleAccountChangedAsync"
+                                                           ValueExpression="@(() => editor.AccountId)"
+                                                           Helper="Choose which Zero Trust account to use.">
+                                                @foreach (var account in validation.Accounts)
+                                                {
+                                                    <option value="@account.Id">@account.Name</option>
+                                                }
+                                            </UiComboboxField>
+                                        </div>
+                                    }
+
+                                    @if (!HostHasInstalledConnector)
+                                    {
+                                        <div class="field-row">
+                                            <UiComboboxField TValue="string"
+                                                           Label="Tunnel"
+                                                           Value="@SelectedTunnelOptionValue"
+                                                           ValueChanged="HandleTunnelSelectionChangedAsync"
+                                                           ValueExpression="@(() => editor.TunnelId)"
+                                                           Helper="@TunnelSelectionFieldHelper">
+                                                <option value="@CreateNewTunnelOptionValue">Create new LMS tunnel</option>
+                                                @foreach (var tunnel in availableTunnels)
+                                                {
+                                                    <option value="@tunnel.Id">@FormatTunnelOptionLabel(tunnel)</option>
+                                                }
+                                            </UiComboboxField>
+                                        </div>
+                                    }
+
+                                    <div class="field-row cloudflare-primary-grid">
+                                        <UiTextField @bind-Value="editor.Subdomain"
+                                                     Label="Subdomain"
+                                                     Helper="@SubdomainHelperText"
+                                                     Placeholder="myapp" />
+
+                                        <UiComboboxField TValue="string"
+                                                       Label="Zone / domain"
+                                                       Value="@editor.ZoneId"
+                                                       ValueChanged="HandleZoneChangedAsync"
+                                                       ValueExpression="@(() => editor.ZoneId)"
+                                                       Helper="Pick the Cloudflare zone that will hold the public hostname.">
+                                            @if (FilteredZones.Count == 0)
+                                            {
+                                                <option value="">Validate a token first</option>
+                                            }
+                                            else
+                                            {
+                                                @foreach (var zone in FilteredZones)
+                                                {
+                                                    <option value="@zone.Id">@zone.Name</option>
+                                                }
+                                            }
+                                        </UiComboboxField>
+
+                                        <UiTextField @bind-Value="editor.LocalServiceUrl"
+                                                     Label="Local service URL"
+                                                     Helper="Absolute origin URL on the target host, for example http://localhost:8080. Do not include a path such as /app or even a trailing /."
+                                                     Placeholder="http://localhost:5080" />
+                                    </div>
+
+                                    <div class="field-row">
+                                        <UiTextField @bind-Value="editor.ServiceName"
+                                                     Label="Service name"
+                                                     Helper="Friendly label shown in Linux Made Sane and Cloudflare Access." />
+                                    </div>
+
+                                    <div class="field-row cloudflare-primary-grid">
+                                        <UiComboboxField TValue="ExposedServiceAccessMode"
+                                                       Label="Access mode"
+                                                       Value="@editor.AccessMode"
+                                                       ValueChanged="HandleAccessModeChangedAsync"
+                                                       ValueExpression="@(() => editor.AccessMode)"
+                                                       Helper="Access protection is enabled by default.">
+                                            @foreach (var option in accessModes)
+                                            {
+                                                <option value="@option.Value">@option.Label</option>
+                                            }
+                                        </UiComboboxField>
+
+                                        @if (editor.AccessMode == ExposedServiceAccessMode.EmailAllowList)
+                                        {
+                                            <UiTextField @bind-Value="editor.EmailAllowList"
+                                                         Label="Email allow list"
+                                                         Helper="Comma or newline separated email addresses." />
+                                        }
+                                        else if (editor.AccessMode == ExposedServiceAccessMode.EmailDomainAllowList)
+                                        {
+                                            <UiTextField @bind-Value="editor.EmailDomainAllowList"
+                                                         Label="Email domain allow list"
+                                                         Helper="Comma or newline separated email domains such as example.com." />
+                                        }
+                                        else if (editor.AccessMode == ExposedServiceAccessMode.OnlyMe)
+                                        {
+                                            <div class="surface-subcard cloudflare-mode-note">
+                                                <strong>Only me</strong>
+                                                <span>@(string.IsNullOrWhiteSpace(currentUserEmail) ? "This login does not expose an email claim." : currentUserEmail)</span>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <div class="surface-subcard cloudflare-mode-note">
+                                                <strong>DNS / tunnel only</strong>
+                                                <span>No Cloudflare Access app or policy will be created for this hostname.</span>
+                                            </div>
+                                        }
+                                    </div>
+
+                                    <div class="toolbar-row">
+                                        <UiCommandButton Label="@(isPreviewing ? "Building preview..." : "Dry-run preview")"
+                                                         Glyph="UiIconGlyph.Analyze"
+                                                         Disabled="@isPreviewing"
+                                                         OnClick="PreviewAsync" />
+                                        <UiCommandButton Label="@(isApplying ? "Applying..." : editor.ConfigId.HasValue ? "Update application" : "Add application")"
+                                                         Glyph="UiIconGlyph.Save"
+                                                         Variant="UiButtonVariant.Primary"
+                                                         Disabled="@isApplying"
+                                                         OnClick="ApplyAsync" />
+                                    </div>
+
+                                    @if (previewPlan is not null && previewPlan.Warnings.Count > 0)
+                                    {
+                                        <div class="cloudflare-warning-list">
+                                            @foreach (var warning in previewPlan.Warnings)
+                                            {
+                                                <p class="callout @(warning.RequiresConfirmation ? "warning" : "info")">@warning.Message</p>
+                                            }
+                                        </div>
+
+                                        @if (previewPlan.RequiresConfirmation)
+                                        {
+                                            <UiCheckboxField @bind-Value="editor.ConfirmDangerousExposure"
+                                                             Label="I understand the exposure warnings and want to continue"
+                                                             Helper="Required before applying dangerous or ambiguous targets." />
+                                        }
+                                    }
+                                </EditForm>
+                            </section>
+
+                            @if (!string.IsNullOrWhiteSpace(statusMessage) && activeCloudflareTab == ApplicationsTabValue)
+                            {
+                                <p class="callout @(statusIsError ? "error" : "success")">@statusMessage</p>
+                            }
+
+                            <div class="cloudflare-panel-stack">
+                                <section class="surface-card cloudflare-collapsible-card">
+                                    <button type="button"
+                                            class="cloudflare-panel-toggle @(previewPanelExpanded ? "expanded" : string.Empty)"
+                                            @onclick="TogglePreviewPanel">
+                                        <div class="cloudflare-panel-heading">
+                                            <h3>Preview / status</h3>
+                                            <p class="meta-text">@PreviewPanelSummary</p>
+                                        </div>
+                                        <span class="cloudflare-panel-badge">@PreviewPanelBadge</span>
+                                    </button>
+
+                                    @if (previewPanelExpanded)
+                                    {
+                                        <div class="cloudflare-panel-body">
+                                            @if (applyResult is not null)
+                                            {
+                                                <div class="cloudflare-result-block">
+                                                    <p><strong>Public URL:</strong> <a href="@applyResult.PublicUrl" target="_blank" rel="noreferrer">@applyResult.PublicUrl</a></p>
+                                                    <p><strong>Status:</strong> @applyResult.Status</p>
+                                                    @if (!string.IsNullOrWhiteSpace(applyResult.NextStep))
+                                                    {
+                                                        <p class="meta-text">@applyResult.NextStep</p>
+                                                    }
+
+                                                    @if (ShouldShowConnectorRecoveryDetails)
+                                                    {
+                                                        <div class="surface-subcard cloudflare-connector-runbook">
+                                                            <strong>Connector steps</strong>
+                                                            <span class="meta-text">Review these only if the local connector still needs attention.</span>
+                                                            @if (applyResult.ConnectorDeployment is not null)
+                                                            {
+                                                                <div class="surface-subcard cloudflare-connector-result">
+                                                                    <strong>@(applyResult.ConnectorDeployment.Succeeded ? "Connector deployment succeeded" : "Connector deployment failed")</strong>
+                                                                    <span class="meta-text">@applyResult.ConnectorDeployment.Summary</span>
+                                                                    @if (applyResult.ConnectorDeployment.ExitCode.HasValue)
+                                                                    {
+                                                                        <span class="meta-text">Exit code: @applyResult.ConnectorDeployment.ExitCode.Value</span>
+                                                                    }
+                                                                    @if (!string.IsNullOrWhiteSpace(applyResult.ConnectorDeployment.StandardOutput))
+                                                                    {
+                                                                        <div>
+                                                                            <p class="meta-text">Output</p>
+                                                                            <pre class="block-code">@applyResult.ConnectorDeployment.StandardOutput</pre>
+                                                                        </div>
+                                                                    }
+                                                                    @if (!string.IsNullOrWhiteSpace(applyResult.ConnectorDeployment.StandardError))
+                                                                    {
+                                                                        <div>
+                                                                            <p class="meta-text">Errors</p>
+                                                                            <pre class="block-code">@applyResult.ConnectorDeployment.StandardError</pre>
+                                                                        </div>
+                                                                    }
+                                                                </div>
+                                                            }
+                                                            @if (!string.IsNullOrWhiteSpace(applyResult.ConnectorInstallCommand))
+                                                            {
+                                                                <div>
+                                                                    <p class="meta-text">Install or reattach the local connector:</p>
+                                                                    <code class="block-code">@applyResult.ConnectorInstallCommand</code>
+                                                                </div>
+                                                            }
+                                                            else if (!HostHasInstalledConnector)
+                                                            {
+                                                                <p class="callout warning">Linux Made Sane could not fetch the tunnel token automatically. Open this tunnel in the Cloudflare dashboard, choose the host operating system, and copy the <code>cloudflared service install ...</code> command from there.</p>
+                                                            }
+
+                                                            @if (!string.IsNullOrWhiteSpace(applyResult.ConnectorStatusCommand))
+                                                            {
+                                                                <div>
+                                                                    <p class="meta-text">Check the local connector service:</p>
+                                                                    <code class="block-code">@applyResult.ConnectorStatusCommand</code>
+                                                                </div>
+                                                            }
+                                                            @if (!string.IsNullOrWhiteSpace(applyResult.ConnectorLogsCommand))
+                                                            {
+                                                                <div>
+                                                                    <p class="meta-text">Inspect local connector logs:</p>
+                                                                    <code class="block-code">@applyResult.ConnectorLogsCommand</code>
+                                                                </div>
+                                                            }
+                                                        </div>
+                                                    }
+                                                </div>
+                                            }
+                                            else if (previewPlan is not null)
+                                            {
+                                                <div class="cloudflare-result-block">
+                                                    <p><strong>Public URL:</strong> @previewPlan.PublicUrl</p>
+                                                    <p><strong>Tunnel:</strong> @previewPlan.TunnelName</p>
+                                                    <div class="cloudflare-plan-list">
+                                                        @foreach (var step in previewPlan.Steps)
+                                                        {
+                                                            <div class="cloudflare-plan-row">
+                                                                <strong>@step.Action</strong>
+                                                                <span>@step.Summary</span>
+                                                            </div>
+                                                        }
+                                                    </div>
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <p class="meta-text">Use dry-run preview before applying Cloudflare changes.</p>
+                                            }
+                                        </div>
+                                    }
+                                </section>
+                            </div>
+                        }
+                        else if (!string.IsNullOrWhiteSpace(statusMessage) && activeCloudflareTab == ApplicationsTabValue)
+                        {
+                            <p class="callout @(statusIsError ? "error" : "success")">@statusMessage</p>
+                        }
+                        </div>
+                    </TabPage>
+                </ChildContent>
+            </TabControl>
+        </section>
+
+    </div>
+}
+
+@code {
+    [Parameter]
+    public EventCallback OnOpenSetupGuide { get; set; }
+
+    [Parameter]
+    public Guid HostId { get; set; }
+
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private readonly CloudflareExposeServiceEditor editor = new();
+    private readonly (ExposedServiceAccessMode Value, string Label)[] accessModes =
+    [
+        (ExposedServiceAccessMode.OnlyMe, "Only me"),
+        (ExposedServiceAccessMode.EmailAllowList, "Email allow list"),
+        (ExposedServiceAccessMode.EmailDomainAllowList, "Email domain allow list"),
+        (ExposedServiceAccessMode.NoAccessProtection, "No Access protection")
+    ];
+
+    private EditContext editContext = default!;
+    private CloudflareExposeServiceWorkspaceViewModel? workspace;
+    private CloudflareValidationResult? validation;
+    private List<CloudflareTunnel> availableTunnels = [];
+    private ExposedServiceDryRunPlan? previewPlan;
+    private ExposedServiceApplyResult? applyResult;
+    private bool isLoaded;
+    private bool isRefreshingWorkspace;
+    private bool isBackgroundRefreshing;
+    private bool isValidating;
+    private bool isPreviewing;
+    private bool isApplying;
+    private Guid? removingServiceId;
+    private bool hasSavedToken;
+    private string? currentUserEmail;
+    private string statusMessage = string.Empty;
+    private bool statusIsError;
+    private bool connectorInstallPreferenceTouched;
+    private List<string> validationMessages = [];
+    private bool previewPanelExpanded = true;
+    private CancellationTokenSource? statusMessageCts;
+    private bool isDisposed;
+    private bool isApplicationEditorOpen;
+    private string activeCloudflareTab = SetupTabValue;
+    private bool hasInitializedActiveTab;
+    private string initialLoadPhase = LoadingSettingsPhase;
+    private string initialLoadStep = "Opening Cloudflare integration";
+    private string initialLoadDetail = "Loading this LMS host configuration.";
+    private const string CreateNewTunnelOptionValue = "__create_new_tunnel__";
+    private const string SetupTabValue = "setup";
+    private const string ApplicationsTabValue = "applications";
+    private const string LoadingSettingsPhase = "settings";
+    private const string LoadingTokenPhase = "token";
+    private const string LoadingTunnelPhase = "tunnel";
+    private const string LoadingReadyPhase = "ready";
+    private const string CloudflareUserTokenUrl = "https://dash.cloudflare.com/profile/api-tokens";
+    private const string CloudflareAccountTokenDocsUrl = "https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/";
+    private const string CloudflareCreateTokenDocsUrl = "https://developers.cloudflare.com/fundamentals/api/get-started/create-token/";
+    private const string CloudflareTokenPermissionsUrl = "https://developers.cloudflare.com/fundamentals/api/reference/permissions/";
+    private const string CloudflareTunnelApiDocsUrl = "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel-api/";
+    private const string CloudflareTunnelDashboardDocsUrl = "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/";
+    private const string CloudflareTunnelTokenDocsUrl = "https://developers.cloudflare.com/tunnel/advanced/tunnel-tokens/";
+    private const string CloudflareTunnelTroubleshootingUrl = "https://developers.cloudflare.com/cloudflare-one/troubleshooting/tunnel/";
+
+    private bool ShowBlockingLoad => !isLoaded || isRefreshingWorkspace;
+
+    private bool IsRefreshBusy =>
+        isRefreshingWorkspace ||
+        isBackgroundRefreshing ||
+        isValidating ||
+        isPreviewing ||
+        isApplying;
+
+    private IReadOnlyList<CloudflareZone> FilteredZones =>
+        validation?.Zones
+            .Where(zone => string.IsNullOrWhiteSpace(editor.AccountId) || zone.AccountId == editor.AccountId)
+            .OrderBy(zone => zone.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray()
+        ?? [];
+
+    private bool RequiresAccessPermission => editor.AccessMode != ExposedServiceAccessMode.NoAccessProtection;
+
+    private string AccessPermissionGuidance =>
+        RequiresAccessPermission
+            ? "The selected access mode creates a Cloudflare Access application and policy, so Access: Apps and Policies -> Edit is required."
+            : "No Access protection is selected, so Linux Made Sane will only manage the tunnel and DNS record. Add Access: Apps and Policies -> Edit later if you switch to a protected mode.";
+
+    private string SelectedTunnelOptionValue =>
+        !editor.CreateNewTunnel && !string.IsNullOrWhiteSpace(editor.TunnelId)
+            ? editor.TunnelId
+            : HostHasInstalledConnector
+                ? availableTunnels.FirstOrDefault()?.Id ?? string.Empty
+                : CreateNewTunnelOptionValue;
+
+    private CloudflaredConnectorStatus? HostConnectorStatus =>
+        workspace?.HostConnectorStatus;
+
+    private bool HostHasInstalledConnector =>
+        HostConnectorStatus?.IsInstalled == true;
+
+    private CloudflareTunnel? SelectedTunnel =>
+        string.IsNullOrWhiteSpace(editor.TunnelId)
+            ? null
+            : availableTunnels.FirstOrDefault(item => item.Id == editor.TunnelId);
+
+    private bool SelectedTunnelIsLmsManaged =>
+        SelectedTunnel?.IsManagedByLinuxMadeSane == true;
+
+    private bool SelectedTunnelMatchesInstalledConnector =>
+        HostConnectorStatus is { IsInstalled: true, TunnelId: not null } connectorStatus &&
+        SelectedTunnel is not null &&
+        connectorStatus.TunnelId.Equals(SelectedTunnel.Id, StringComparison.OrdinalIgnoreCase);
+
+    private string AccountSelectionStatus =>
+        validation is null
+            ? string.Empty
+            : validation.Accounts.Count switch
+            {
+                > 1 => "Choose account if needed",
+                1 => "Account auto-selected",
+                _ => "Account inferred from zone"
+            };
+
+    private string SubdomainHelperText
+    {
+        get
+        {
+            var zone = FilteredZones.FirstOrDefault(item => item.Id == editor.ZoneId);
+            return zone is null
+                ? "Relative hostname inside the selected zone."
+                : $"Relative hostname inside {zone.Name}, for example app or tools.admin.";
+        }
+    }
+
+    private string TunnelSelectionFieldHelper =>
+        validation is null
+            ? "Validate a token and choose a zone first so Linux Made Sane can load reusable tunnels."
+            : HostHasInstalledConnector
+                ? string.Empty
+            : availableTunnels.Count == 0
+            ? "No existing tunnels were loaded for this account, so LMS will create a new one unless you change the account or zone."
+            : "Pick an existing tunnel to keep multiple services on one connector, or create a new tunnel if you need isolation.";
+
+    private IReadOnlyList<CloudflareExposedServiceListItemViewModel> ServiceEntries =>
+        workspace?.ServiceEntries
+            .OrderBy(item => item.Config.ServiceName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.Config.Hostname, StringComparer.OrdinalIgnoreCase)
+            .ToArray()
+        ?? [];
+
+    private bool CanManageApplications =>
+        validation is not null;
+
+    private string ApplicationEditorHeading =>
+        editor.ConfigId.HasValue
+            ? "Edit application"
+            : "Add application";
+
+    private string ApplicationEditorSummary =>
+        editor.ConfigId.HasValue
+            ? "Update the current hostname, origin, tunnel, and access policy."
+            : "Add a new Cloudflare application for a local service on this LMS instance.";
+
+    private string ConnectorInstallHelper =>
+        HostHasInstalledConnector
+            ? "cloudflared is already installed on this managed host, so LMS will reuse the existing service instead of running another install."
+        : editor.CreateNewTunnel
+            ? "Recommended for a new tunnel. LMS will run the cloudflared install command over SSH on this managed host after apply."
+            : SelectedTunnelIsLmsManaged
+                ? "Recommended for an LMS-managed tunnel. Leave this enabled to repair or reattach cloudflared on this managed host after apply."
+                : "Enable this if this managed host should attach or reattach its cloudflared service to the selected tunnel after apply.";
+
+    private bool HasValidatedSavedToken =>
+        hasSavedToken &&
+        validation is not null &&
+        string.IsNullOrWhiteSpace(editor.ApiTokenInput);
+
+    private bool ShowSetupSummary =>
+        HostConnectorStatus is not null ||
+        validation is not null ||
+        hasSavedToken;
+
+    private string ConnectorSummary =>
+        HostConnectorStatus switch
+        {
+            { IsInstalled: true, IsRunning: true } => "Installed and running",
+            { IsInstalled: true } => "Installed but not running",
+            _ => "Not installed"
+        };
+
+    private string TokenSummary =>
+        validation is not null
+            ? hasSavedToken || validation.HasSavedToken
+                ? "Saved token ready"
+                : "Validated for this session"
+            : isBackgroundRefreshing
+                ? "Refreshing saved token..."
+                : hasSavedToken
+                    ? "Saved token present"
+                    : "Not validated";
+
+    private string SelectedAccountName =>
+        validation?.Accounts.FirstOrDefault(account => account.Id == editor.AccountId)?.Name
+        ?? validation?.Accounts.FirstOrDefault()?.Name
+        ?? workspace?.SavedSettings?.AccountName
+        ?? string.Empty;
+
+    private int ConnectedApplicationCount =>
+        string.IsNullOrWhiteSpace(ActiveConnectorTunnelId)
+            ? 0
+            : ServiceEntries.Count(item =>
+                item.Config.TunnelId.Equals(ActiveConnectorTunnelId, StringComparison.OrdinalIgnoreCase));
+
+    private string? ActiveConnectorTunnelId =>
+        HostConnectorStatus?.TunnelId;
+
+    private string PreviewPanelBadge =>
+        applyResult is not null ? "Applied" : previewPlan is not null ? "Preview ready" : "Waiting";
+
+    private string PreviewPanelSummary =>
+        applyResult is not null
+            ? "Review the public URL, Cloudflare-side result, and connector runbook."
+            : previewPlan is not null
+                ? "Dry-run output is ready before you apply."
+                : "Nothing has been previewed or applied yet.";
+
+    private bool ShouldShowConnectorRecoveryDetails =>
+        applyResult is not null &&
+        (
+            applyResult.ConnectorDeployment is { Succeeded: false } ||
+            (!HostHasInstalledConnector && !string.IsNullOrWhiteSpace(applyResult.ConnectorInstallCommand)) ||
+            (!HostHasInstalledConnector && applyResult.ConnectorDeployment is null)
+        );
+
+    protected override async Task OnParametersSetAsync()
+    {
+        ResetInitialLoadProgress();
+        await SetInitialLoadProgressAsync(
+            LoadingSettingsPhase,
+            "Opening Cloudflare integration",
+            "Loading the local connector, saved settings, and existing applications for this LMS host.");
+        ResetEditContext();
+        currentUserEmail = await ResolveCurrentUserEmailAsync();
+        await LoadWorkspaceAsync(validateSavedToken: false);
+        await SetInitialLoadProgressAsync(
+            LoadingReadyPhase,
+            "Cloudflare ready",
+            "The Cloudflare integration is ready.");
+        isLoaded = true;
+
+        if (hasSavedToken)
+        {
+            QueueBackgroundValidation();
+        }
+    }
+
+    private async Task LoadWorkspaceAsync(bool preserveUiState = false, bool validateSavedToken = true)
+    {
+        if (ShowBlockingLoad)
+        {
+            await SetInitialLoadProgressAsync(
+                LoadingSettingsPhase,
+                "Loading saved Cloudflare settings",
+                "Checking saved token state, local connector details, and configured applications.");
+        }
+
+        workspace = await ExposedServiceManager.GetWorkspaceAsync(HostId);
+        hasSavedToken = !string.IsNullOrWhiteSpace(workspace.SavedSettings?.ApiTokenSecretReference);
+
+        if (!hasInitializedActiveTab)
+        {
+            activeCloudflareTab = hasSavedToken && HostHasInstalledConnector ? ApplicationsTabValue : SetupTabValue;
+            hasInitializedActiveTab = true;
+        }
+
+        editor.ServiceName = string.IsNullOrWhiteSpace(editor.ServiceName)
+            ? workspace.HostName
+            : editor.ServiceName;
+        editor.AccountId = string.IsNullOrWhiteSpace(editor.AccountId)
+            ? workspace.SavedSettings?.AccountId ?? string.Empty
+            : editor.AccountId;
+        editor.ZoneId = string.IsNullOrWhiteSpace(editor.ZoneId)
+            ? workspace.SavedSettings?.ZoneId ?? string.Empty
+            : editor.ZoneId;
+
+        if (hasSavedToken)
+        {
+            if (validateSavedToken)
+            {
+                if (ShowBlockingLoad)
+                {
+                    await SetInitialLoadProgressAsync(
+                    LoadingTokenPhase,
+                    "Validating saved token",
+                    "Checking the saved Cloudflare token and loading the available account context.");
+                }
+
+                await ValidateTokenAsync(preserveUiState, suppressStatus: !ShowBlockingLoad);
+            }
+            else
+            {
+                validation = null;
+                availableTunnels = [];
+            }
+        }
+        else
+        {
+            validation = null;
+            availableTunnels = [];
+
+            if (ShowBlockingLoad)
+            {
+                await SetInitialLoadProgressAsync(
+                    LoadingSettingsPhase,
+                    "Ready for Cloudflare setup",
+                    "No saved token was found. Add a token in Setup to continue.");
+            }
+        }
+    }
+
+    private void QueueBackgroundValidation()
+    {
+        if (isDisposed || !hasSavedToken || isBackgroundRefreshing || isRefreshingWorkspace)
+        {
+            return;
+        }
+
+        _ = RunBackgroundValidationAsync();
+    }
+
+    private async Task RunBackgroundValidationAsync()
+    {
+        if (isDisposed || !hasSavedToken || isBackgroundRefreshing || isRefreshingWorkspace)
+        {
+            return;
+        }
+
+        isBackgroundRefreshing = true;
+
+        if (!isDisposed)
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+
+        try
+        {
+            await ValidateTokenAsync(preserveUiState: true, suppressStatus: true);
+        }
+        finally
+        {
+            isBackgroundRefreshing = false;
+
+            if (!isDisposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private async Task RefreshWorkspaceAsync()
+    {
+        if (isRefreshingWorkspace || isBackgroundRefreshing)
+        {
+            return;
+        }
+
+        isRefreshingWorkspace = true;
+        ClearStatus();
+        ResetInitialLoadProgress();
+        await SetInitialLoadProgressAsync(
+            LoadingSettingsPhase,
+            "Refreshing Cloudflare integration",
+            "Reloading saved settings, token state, and connector context for this LMS host.");
+
+        try
+        {
+            await LoadWorkspaceAsync(preserveUiState: true);
+            await SetInitialLoadProgressAsync(
+                LoadingReadyPhase,
+                "Cloudflare ready",
+                "The Cloudflare integration is ready.");
+
+            if (string.IsNullOrWhiteSpace(statusMessage))
+            {
+                SetStatus("Cloudflare workspace refreshed.", isError: false, autoHide: true);
+            }
+        }
+        finally
+        {
+            isRefreshingWorkspace = false;
+        }
+    }
+
+    private Task HandleCloudflareTabChangedAsync(string? value)
+    {
+        activeCloudflareTab = value switch
+        {
+            ApplicationsTabValue => ApplicationsTabValue,
+            SetupTabValue => SetupTabValue,
+            _ => SetupTabValue
+        };
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ValidateTokenAsync(bool preserveUiState = false, bool suppressStatus = false)
+    {
+        if (!preserveUiState)
+        {
+            ClearStatus();
+            previewPlan = null;
+            applyResult = null;
+        }
+
+        isValidating = true;
+        if (!suppressStatus)
+        {
+            SetStatus("Validating Cloudflare token...", isError: false);
+        }
+
+        try
+        {
+            if (ShowBlockingLoad)
+            {
+                await SetInitialLoadProgressAsync(
+                    LoadingTokenPhase,
+                    "Validating saved token",
+                    "Cloudflare is checking the saved token and returning accounts and domains.");
+            }
+
+            validation = await ExposedServiceManager.ValidateTokenAsync(HostId, editor.ApiTokenInput);
+            hasSavedToken = validation.HasSavedToken;
+
+            if (string.IsNullOrWhiteSpace(editor.AccountId))
+            {
+                editor.AccountId = workspace?.SavedSettings?.AccountId
+                    ?? validation.Accounts.FirstOrDefault()?.Id
+                    ?? validation.Zones.FirstOrDefault()?.AccountId
+                    ?? string.Empty;
+            }
+
+            if (string.IsNullOrWhiteSpace(editor.ZoneId))
+            {
+                editor.ZoneId = workspace?.SavedSettings?.ZoneId
+                    ?? FilteredZones.FirstOrDefault()?.Id
+                    ?? string.Empty;
+            }
+
+            NormalizeSelectedAccountAndZone();
+
+            if (ShowBlockingLoad)
+            {
+                await SetInitialLoadProgressAsync(
+                    LoadingTunnelPhase,
+                    "Loading tunnel context",
+                    "Checking reusable tunnels and matching them to the local cloudflared connector.");
+            }
+
+            await LoadAvailableTunnelsAsync();
+
+            if (!preserveUiState)
+            {
+                activeCloudflareTab = ApplicationsTabValue;
+                if (!suppressStatus)
+                {
+                    SetStatus("Cloudflare token validated.", isError: false, autoHide: true);
+                }
+            }
+
+            if (ShowBlockingLoad)
+            {
+                await SetInitialLoadProgressAsync(
+                    LoadingTunnelPhase,
+                    "Preparing Cloudflare workspace",
+                    "Finalising validated settings and local connector choices.");
+            }
+        }
+        catch (Exception exception)
+        {
+            availableTunnels = [];
+            if (suppressStatus)
+            {
+                statusMessage = BuildStatusMessage(exception, isTokenValidation: true);
+                statusIsError = true;
+            }
+            else
+            {
+                SetStatus(BuildStatusMessage(exception, isTokenValidation: true), isError: true);
+            }
+
+            if (ShowBlockingLoad)
+            {
+                await SetInitialLoadProgressAsync(
+                    LoadingTokenPhase,
+                    "Cloudflare setup needs attention",
+                    "The saved token could not be validated. Open Setup to fix the token or connector.");
+            }
+        }
+        finally
+        {
+            isValidating = false;
+        }
+    }
+
+    private async Task HandleAccountChangedAsync(string value)
+    {
+        editor.AccountId = value;
+        previewPlan = null;
+        applyResult = null;
+
+        if (!FilteredZones.Any(zone => zone.Id == editor.ZoneId))
+        {
+            editor.ZoneId = FilteredZones.FirstOrDefault()?.Id ?? string.Empty;
+        }
+
+        await LoadAvailableTunnelsAsync();
+    }
+
+    private async Task HandleZoneChangedAsync(string value)
+    {
+        editor.ZoneId = value;
+        previewPlan = null;
+        applyResult = null;
+        AlignAccountToSelectedZone();
+        NormalizeSelectedAccountAndZone();
+        await LoadAvailableTunnelsAsync();
+    }
+
+    private Task HandleTunnelSelectionChangedAsync(string value)
+    {
+        editor.CreateNewTunnel = value == CreateNewTunnelOptionValue;
+        editor.TunnelId = editor.CreateNewTunnel ? string.Empty : value;
+        ApplySuggestedConnectorInstallDefault();
+        previewPlan = null;
+        applyResult = null;
+        return Task.CompletedTask;
+    }
+
+    private Task HandleRunConnectorInstallOnHostChangedAsync(bool value)
+    {
+        connectorInstallPreferenceTouched = true;
+        editor.RunConnectorInstallOnHost = value;
+        previewPlan = null;
+        applyResult = null;
+        return Task.CompletedTask;
+    }
+
+    private Task HandleAccessModeChangedAsync(ExposedServiceAccessMode mode)
+    {
+        editor.AccessMode = mode;
+        editor.ConfirmDangerousExposure = false;
+        previewPlan = null;
+        applyResult = null;
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAvailableTunnelsAsync()
+    {
+        availableTunnels = [];
+
+        if (validation is null || string.IsNullOrWhiteSpace(editor.ZoneId))
+        {
+            editor.TunnelId = string.Empty;
+            editor.CreateNewTunnel = !HostHasInstalledConnector;
+            ApplySuggestedConnectorInstallDefault();
+            return;
+        }
+
+        try
+        {
+            availableTunnels = (await ExposedServiceManager.ListTunnelsAsync(
+                    HostId,
+                    editor.ZoneId,
+                    editor.AccountId,
+                    editor.ApiTokenInput))
+                .ToList();
+            NormalizeSelectedTunnel();
+        }
+        catch (Exception exception)
+        {
+            editor.TunnelId = string.Empty;
+            editor.CreateNewTunnel = !HostHasInstalledConnector;
+            ApplySuggestedConnectorInstallDefault();
+            statusMessage = BuildStatusMessage(exception);
+            statusIsError = true;
+        }
+    }
+
+    private async Task PreviewAsync()
+    {
+        ClearStatus();
+
+        if (!CanSubmitCloudflareForm())
+        {
+            SetStatus(
+                validationMessages.Count == 1
+                    ? validationMessages[0]
+                    : "Fix the listed fields before previewing the Cloudflare plan.",
+                isError: true);
+            return;
+        }
+
+        if (!editContext.Validate())
+        {
+            CaptureValidationMessages();
+            SetStatus("Fix the listed fields before previewing the Cloudflare plan.", isError: true);
+            return;
+        }
+
+        isPreviewing = true;
+        previewPlan = null;
+        applyResult = null;
+
+        try
+        {
+            previewPlan = await ExposedServiceManager.PreviewAsync(HostId, editor, currentUserEmail);
+            previewPanelExpanded = true;
+            SetStatus("Dry-run preview generated.", isError: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, isError: true);
+        }
+        finally
+        {
+            isPreviewing = false;
+        }
+    }
+
+    private async Task ApplyAsync()
+    {
+        ClearStatus();
+
+        if (!CanSubmitCloudflareForm())
+        {
+            SetStatus(
+                validationMessages.Count == 1
+                    ? validationMessages[0]
+                    : "Fix the listed fields before applying Cloudflare changes.",
+                isError: true);
+            return;
+        }
+
+        if (!editContext.Validate())
+        {
+            CaptureValidationMessages();
+            SetStatus("Fix the listed fields before applying Cloudflare changes.", isError: true);
+            return;
+        }
+
+        isApplying = true;
+        applyResult = null;
+
+        try
+        {
+            applyResult = await ExposedServiceManager.ApplyAsync(HostId, editor, currentUserEmail);
+            previewPanelExpanded = true;
+            previewPlan = null;
+            await LoadWorkspaceAsync(preserveUiState: true);
+            BindEditorToSavedService();
+            SetStatus(
+                applyResult.Status,
+                isError: applyResult.ConnectorDeployment is { Succeeded: false });
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, isError: true);
+        }
+        finally
+        {
+            isApplying = false;
+        }
+    }
+
+    private async Task RemoveServiceAsync(CloudflareExposedServiceListItemViewModel serviceEntry)
+    {
+        ClearStatus();
+        removingServiceId = serviceEntry.Config.Id;
+
+        try
+        {
+            await ExposedServiceManager.RemoveServiceAsync(
+                HostId,
+                serviceEntry.Config,
+                serviceEntry.ExistsInLmsStore,
+                editor.ApiTokenInput);
+            await LoadWorkspaceAsync(preserveUiState: true);
+
+            if (editor.ConfigId == serviceEntry.Config.Id)
+            {
+                CloseApplicationEditor();
+            }
+
+            SetStatus(
+                serviceEntry.ExistsInLmsStore
+                    ? "Saved exposed service removed from Cloudflare and Linux Made Sane."
+                    : "Cloudflare-only exposed service removed.",
+                isError: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, isError: true);
+        }
+        finally
+        {
+            removingServiceId = null;
+        }
+    }
+
+    private async Task ForgetSavedTokenAsync()
+    {
+        ClearStatus();
+
+        try
+        {
+            await ExposedServiceManager.ForgetSavedTokenAsync(HostId);
+            editor.ApiTokenInput = string.Empty;
+            validation = null;
+            availableTunnels = [];
+            hasSavedToken = false;
+            SetStatus("Saved Cloudflare token removed.", isError: false);
+            await LoadWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, isError: true);
+        }
+    }
+
+    private async Task BeginAddApplication()
+    {
+        if (!CanManageApplications)
+        {
+            activeCloudflareTab = SetupTabValue;
+            SetStatus("Validate a Cloudflare token in Setup before adding applications.", isError: true);
+            return;
+        }
+
+        activeCloudflareTab = ApplicationsTabValue;
+        isApplicationEditorOpen = true;
+        previewPanelExpanded = true;
+        previewPlan = null;
+        applyResult = null;
+        validationMessages = [];
+        PopulateEditorForNewApplication();
+        ResetEditContext();
+        await LoadAvailableTunnelsAsync();
+    }
+
+    private async Task BeginEditApplicationAsync(CloudflareExposedServiceListItemViewModel serviceEntry)
+    {
+        if (!CanManageApplications)
+        {
+            activeCloudflareTab = SetupTabValue;
+            SetStatus("Validate a Cloudflare token in Setup before editing applications.", isError: true);
+            return;
+        }
+
+        activeCloudflareTab = ApplicationsTabValue;
+        isApplicationEditorOpen = true;
+        previewPanelExpanded = true;
+        previewPlan = null;
+        applyResult = null;
+        validationMessages = [];
+        PopulateEditorForExistingApplication(serviceEntry.Config);
+        ResetEditContext();
+        await LoadAvailableTunnelsAsync();
+    }
+
+    private void CloseApplicationEditor()
+    {
+        isApplicationEditorOpen = false;
+        previewPlan = null;
+        applyResult = null;
+        validationMessages = [];
+        editor.ConfigId = null;
+    }
+
+    private void TogglePreviewPanel()
+    {
+        previewPanelExpanded = !previewPanelExpanded;
+    }
+
+    private void NormalizeSelectedAccountAndZone()
+    {
+        if (validation is null)
+        {
+            return;
+        }
+
+        if (!validation.Accounts.Any(item => item.Id == editor.AccountId))
+        {
+            var selectedZone = validation.Zones.FirstOrDefault(item => item.Id == editor.ZoneId);
+            var selectedZoneAccountExists = selectedZone is not null &&
+                !string.IsNullOrWhiteSpace(selectedZone.AccountId) &&
+                validation.Accounts.Any(item => item.Id == selectedZone.AccountId);
+
+            editor.AccountId = selectedZoneAccountExists
+                ? selectedZone!.AccountId
+                : validation.Accounts.FirstOrDefault()?.Id ?? string.Empty;
+        }
+
+        if (!FilteredZones.Any(item => item.Id == editor.ZoneId))
+        {
+            editor.ZoneId = FilteredZones.FirstOrDefault()?.Id
+                ?? validation.Zones.FirstOrDefault()?.Id
+                ?? string.Empty;
+        }
+    }
+
+    private void NormalizeSelectedTunnel()
+    {
+        if (HostHasInstalledConnector &&
+            !string.IsNullOrWhiteSpace(HostConnectorStatus?.TunnelId) &&
+            availableTunnels.Any(item => item.Id == HostConnectorStatus.TunnelId))
+        {
+            editor.TunnelId = HostConnectorStatus.TunnelId!;
+            editor.CreateNewTunnel = false;
+            ApplySuggestedConnectorInstallDefault();
+            return;
+        }
+
+        if (!editor.CreateNewTunnel &&
+            !string.IsNullOrWhiteSpace(editor.TunnelId) &&
+            availableTunnels.Any(item => item.Id == editor.TunnelId))
+        {
+            ApplySuggestedConnectorInstallDefault();
+            return;
+        }
+
+        var preferredTunnelId = workspace?.ServiceEntries
+            .OrderByDescending(item => item.Config.UpdatedAtUtc)
+            .Select(item => item.Config.TunnelId)
+            .FirstOrDefault(tunnelId => availableTunnels.Any(tunnel => tunnel.Id == tunnelId));
+
+        if (!string.IsNullOrWhiteSpace(preferredTunnelId))
+        {
+            editor.TunnelId = preferredTunnelId;
+            editor.CreateNewTunnel = false;
+            ApplySuggestedConnectorInstallDefault();
+            return;
+        }
+
+        var preferredManagedTunnel = availableTunnels.FirstOrDefault(item => item.IsManagedByLinuxMadeSane);
+        if (preferredManagedTunnel is not null)
+        {
+            editor.TunnelId = preferredManagedTunnel.Id;
+            editor.CreateNewTunnel = false;
+            ApplySuggestedConnectorInstallDefault();
+            return;
+        }
+
+        editor.TunnelId = string.Empty;
+        editor.CreateNewTunnel = !HostHasInstalledConnector;
+        ApplySuggestedConnectorInstallDefault();
+    }
+
+    private void PopulateEditorForNewApplication()
+    {
+        var accountId = !string.IsNullOrWhiteSpace(editor.AccountId)
+            ? editor.AccountId
+            : workspace?.SavedSettings?.AccountId
+                ?? validation?.Accounts.FirstOrDefault()?.Id
+                ?? string.Empty;
+        var zoneId = !string.IsNullOrWhiteSpace(editor.ZoneId)
+            ? editor.ZoneId
+            : workspace?.SavedSettings?.ZoneId
+                ?? FilteredZones.FirstOrDefault()?.Id
+                ?? validation?.Zones.FirstOrDefault()?.Id
+                ?? string.Empty;
+
+        editor.ConfigId = null;
+        editor.AccountId = accountId;
+        editor.ZoneId = zoneId;
+        editor.ServiceName = workspace?.HostName ?? string.Empty;
+        editor.Subdomain = string.Empty;
+        editor.LocalServiceUrl = "http://localhost:8080";
+        editor.TunnelId = string.Empty;
+        editor.CreateNewTunnel = !HostHasInstalledConnector;
+        editor.AccessMode = ExposedServiceAccessMode.OnlyMe;
+        editor.EmailAllowList = string.Empty;
+        editor.EmailDomainAllowList = string.Empty;
+        editor.ConfirmDangerousExposure = false;
+        connectorInstallPreferenceTouched = false;
+        ApplySuggestedConnectorInstallDefault();
+    }
+
+    private void PopulateEditorForExistingApplication(ExposedServiceConfig config)
+    {
+        editor.ConfigId = config.Id;
+        editor.AccountId = config.AccountId;
+        editor.ZoneId = config.ZoneId;
+        editor.ServiceName = config.ServiceName;
+        editor.Subdomain = ExtractRelativeHostname(config.Hostname, config.ZoneName);
+        editor.LocalServiceUrl = config.LocalServiceUrl;
+        editor.TunnelId = config.TunnelId;
+        editor.CreateNewTunnel = false;
+        editor.AccessMode = config.AccessMode;
+        editor.EmailAllowList = string.Join(Environment.NewLine, config.AllowedEmails);
+        editor.EmailDomainAllowList = string.Join(Environment.NewLine, config.AllowedEmailDomains);
+        editor.ConfirmDangerousExposure = false;
+        connectorInstallPreferenceTouched = false;
+        ApplySuggestedConnectorInstallDefault();
+    }
+
+    private static string ExtractRelativeHostname(string hostname, string zoneName)
+    {
+        if (!string.IsNullOrWhiteSpace(hostname) &&
+            !string.IsNullOrWhiteSpace(zoneName) &&
+            hostname.EndsWith($".{zoneName}", StringComparison.OrdinalIgnoreCase))
+        {
+            return hostname[..^(zoneName.Length + 1)];
+        }
+
+        return hostname;
+    }
+
+    private void BindEditorToSavedService()
+    {
+        if (workspace is null)
+        {
+            return;
+        }
+
+        if (editor.ConfigId.HasValue &&
+            workspace.ServiceEntries.Any(item => item.Config.Id == editor.ConfigId.Value))
+        {
+            return;
+        }
+
+        var zone = FilteredZones.FirstOrDefault(item => item.Id == editor.ZoneId);
+        if (zone is null || string.IsNullOrWhiteSpace(editor.Subdomain))
+        {
+            return;
+        }
+
+        var hostname = $"{editor.Subdomain.Trim()}.{zone.Name}".Trim();
+        var matchingEntry = workspace.ServiceEntries.FirstOrDefault(item =>
+            item.Config.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase));
+
+        if (matchingEntry is null)
+        {
+            return;
+        }
+
+        editor.ConfigId = matchingEntry.Config.Id;
+    }
+
+    private void AlignAccountToSelectedZone()
+    {
+        if (validation is null)
+        {
+            return;
+        }
+
+        var selectedZone = validation.Zones.FirstOrDefault(item => item.Id == editor.ZoneId);
+        if (selectedZone is null || string.IsNullOrWhiteSpace(selectedZone.AccountId))
+        {
+            return;
+        }
+
+        if (validation.Accounts.Any(item => item.Id == selectedZone.AccountId))
+        {
+            editor.AccountId = selectedZone.AccountId;
+        }
+    }
+
+    private static string GetSyncLabel(CloudflareExposedServiceListItemViewModel item) =>
+        item switch
+        {
+            { ExistsInLmsStore: true, ExistsInCloudflare: true, IsOutOfSync: false } => "Good",
+            _ => "Check"
+        };
+
+    private void ApplySuggestedConnectorInstallDefault()
+    {
+        if (connectorInstallPreferenceTouched)
+        {
+            return;
+        }
+
+        editor.RunConnectorInstallOnHost = !HostHasInstalledConnector &&
+            (editor.CreateNewTunnel || SelectedTunnelIsLmsManaged);
+    }
+
+    private static string FormatTunnelOptionLabel(CloudflareTunnel tunnel)
+    {
+        var managedLabel = tunnel.IsManagedByLinuxMadeSane ? "LMS managed" : "existing";
+        var statusLabel = string.IsNullOrWhiteSpace(tunnel.Status) ? "unknown" : tunnel.Status;
+        return $"{tunnel.Name} ({managedLabel}, {statusLabel})";
+    }
+
+    private static string FormatAccessMode(ExposedServiceAccessMode mode) =>
+        mode switch
+        {
+            ExposedServiceAccessMode.OnlyMe => "Only me",
+            ExposedServiceAccessMode.EmailAllowList => "Email list",
+            ExposedServiceAccessMode.EmailDomainAllowList => "Email domains",
+            _ => "DNS / tunnel only"
+        };
+
+    private async Task<string?> ResolveCurrentUserEmailAsync()
+    {
+        var authenticationState = AuthenticationStateTask is null
+            ? null
+            : await AuthenticationStateTask;
+
+        return authenticationState?.User.FindFirstValue(ClaimTypes.Email);
+    }
+
+    private void ClearStatus()
+    {
+        CancelStatusTimer();
+        statusMessage = string.Empty;
+        statusIsError = false;
+        validationMessages = [];
+    }
+
+    private void ResetInitialLoadProgress()
+    {
+        initialLoadPhase = LoadingSettingsPhase;
+        initialLoadStep = "Opening Cloudflare integration";
+        initialLoadDetail = "Loading this LMS host configuration.";
+    }
+
+    private void SetInitialLoadProgress(string phase, string step, string detail)
+    {
+        initialLoadPhase = phase;
+        initialLoadStep = step;
+        initialLoadDetail = detail;
+    }
+
+    private async Task SetInitialLoadProgressAsync(string phase, string step, string detail)
+    {
+        SetInitialLoadProgress(phase, step, detail);
+
+        if (!ShowBlockingLoad)
+        {
+            return;
+        }
+
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
+    }
+
+    private string GetInitialLoadStepClass(string stepPhase)
+    {
+        var current = GetInitialLoadStepOrder(initialLoadPhase);
+        var target = GetInitialLoadStepOrder(stepPhase);
+
+        if (current > target)
+        {
+            return "complete";
+        }
+
+        return current == target ? "current" : string.Empty;
+    }
+
+    private static int GetInitialLoadStepOrder(string phase) =>
+        phase switch
+        {
+            LoadingSettingsPhase => 0,
+            LoadingTokenPhase => 1,
+            LoadingTunnelPhase => 2,
+            LoadingReadyPhase => 3,
+            _ => 0
+        };
+
+    private void ResetEditContext()
+    {
+        editContext = new EditContext(editor);
+    }
+
+    private void SetStatus(string message, bool isError, bool autoHide = false)
+    {
+        CancelStatusTimer();
+        statusMessage = message;
+        statusIsError = isError;
+
+        if (!autoHide || isError || string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        statusMessageCts = new CancellationTokenSource();
+        _ = AutoHideStatusAsync(statusMessageCts.Token);
+    }
+
+    private async Task AutoHideStatusAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested || isDisposed)
+            {
+                return;
+            }
+
+            await InvokeAsync(() =>
+            {
+                if (cancellationToken.IsCancellationRequested || isDisposed)
+                {
+                    return;
+                }
+
+                statusMessage = string.Empty;
+                statusIsError = false;
+                StateHasChanged();
+            });
+        }
+        catch (TaskCanceledException)
+        {
+        }
+    }
+
+    private void CancelStatusTimer()
+    {
+        if (statusMessageCts is null)
+        {
+            return;
+        }
+
+        statusMessageCts.Cancel();
+        statusMessageCts.Dispose();
+        statusMessageCts = null;
+    }
+
+    private bool CanSubmitCloudflareForm()
+    {
+        if (validation is null)
+        {
+            validationMessages =
+            [
+                "Validate a Cloudflare API token first so Linux Made Sane can load the available zones."
+            ];
+            return false;
+        }
+
+        if (validation.Zones.Count == 0)
+        {
+            validationMessages =
+            [
+                "The validated token did not return any Cloudflare zones. Check the token's Zone Resources scope."
+            ];
+            return false;
+        }
+
+        return true;
+    }
+
+    private void CaptureValidationMessages()
+    {
+        validationMessages = editContext.GetValidationMessages()
+            .Where(message => !string.IsNullOrWhiteSpace(message))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private string BuildStatusMessage(Exception exception, bool isTokenValidation = false)
+    {
+        if (exception is CloudflareApiException apiException &&
+            (apiException.StatusCode == 401 || apiException.StatusCode == 403))
+        {
+            var requiredPermissions = RequiresAccessPermission
+                ? "Required permissions: Account -> Cloudflare Tunnel -> Edit, Account -> Access: Apps and Policies -> Edit, and Zone -> DNS -> Edit."
+                : "Required permissions: Account -> Cloudflare Tunnel -> Edit and Zone -> DNS -> Edit.";
+
+            return isTokenValidation
+                ? $"Cloudflare rejected the token. Make sure you copied the full token, scoped it to the correct account and zone, and granted the expected permissions. {requiredPermissions}"
+                : $"Cloudflare rejected the token or its permissions for this request. {requiredPermissions}";
+        }
+
+        return exception.Message;
+    }
+
+    public void Dispose()
+    {
+        isDisposed = true;
+        CancelStatusTimer();
+    }
+}

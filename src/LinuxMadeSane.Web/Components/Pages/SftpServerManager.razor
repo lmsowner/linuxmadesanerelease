@@ -1,0 +1,2070 @@
+@page "/sftp-server"
+@rendermode InteractiveServer
+@using System.ComponentModel.DataAnnotations
+@using LinuxMadeSane.Application.Contracts.Sftp
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.SftpServer
+@using Microsoft.AspNetCore.Components.Forms
+@inject ISftpServerManagerService SftpService
+@inject IJSRuntime JSRuntime
+
+<PageTitle>SFTP Server | Linux Made Sane</PageTitle>
+
+<div class="page-shell sftp-manager-page">
+    <UiHeroPanel Title="SFTP Server"
+                 Compact="true">
+        <Actions>
+            <UiCommandButton Label="Refresh"
+                             Glyph="UiIconGlyph.Refresh"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@IsBusy"
+                             OnClick="LoadAsync" />
+        </Actions>
+    </UiHeroPanel>
+
+    @if (!isLoaded || workspace is null || hostSettingsEditor is null || hostSettingsEditContext is null)
+    {
+        <section class="surface-card sftp-loading-card">
+            <p class="meta-text">Loading SFTP server manager...</p>
+        </section>
+    }
+    else
+    {
+        @if (!string.IsNullOrWhiteSpace(statusMessage))
+        {
+            <p class="callout @statusTone">@statusMessage</p>
+        }
+
+        <TabControl ActiveValue="@activeTab"
+                    ActiveValueChanged="HandleTabChangedAsync"
+                    Class="page-tab-control sftp-tab-control"
+                    PanelClass="page-tab-panel sftp-tab-panel">
+                <ChildContent>
+                    <TabPage Value="@OverviewTabValue" Title="Overview">
+                        <ChildContent>
+                            <div class="sftp-tab-content">
+                                <div class="sftp-summary-grid">
+                                    <article class="sftp-summary-card">
+                                        <span class="sftp-summary-label">OpenSSH</span>
+                                        <strong>@(workspace.Overview.IsOpenSshInstalled ? "Installed" : "Missing")</strong>
+                                        <span class="meta-text">@(string.IsNullOrWhiteSpace(workspace.Overview.OpenSshVersion) ? "No sshd binary detected yet." : workspace.Overview.OpenSshVersion)</span>
+                                        <UiPill Tone="@(workspace.Overview.IsOpenSshInstalled ? UiPillTone.Success : UiPillTone.Failure)">
+                                            @(workspace.Overview.IsOpenSshInstalled ? "Ready" : "Missing")
+                                        </UiPill>
+                                    </article>
+
+                                    <article class="sftp-summary-card">
+                                        <span class="sftp-summary-label">SSH service</span>
+                                        <strong>@workspace.Overview.SshServiceName</strong>
+                                        <span class="meta-text">@(workspace.Overview.IsSshServiceActive ? "Active and reloadable." : "Service is not active.")</span>
+                                        <UiPill Tone="@(workspace.Overview.IsSshServiceActive ? UiPillTone.Success : UiPillTone.Warning)">
+                                            @(workspace.Overview.IsSshServiceActive ? "Active" : "Attention")
+                                        </UiPill>
+                                    </article>
+
+                                    <article class="sftp-summary-card">
+                                        <span class="sftp-summary-label">LMS SFTP mode</span>
+                                        <strong>@(workspace.Overview.Settings.IsManagedModeEnabled ? "Enabled" : "Not applied")</strong>
+                                        <span class="meta-text">@GetManagedModeDetail()</span>
+                                        <UiPill Tone="@(workspace.Overview.Settings.IsManagedModeEnabled ? UiPillTone.Success : UiPillTone.Warning)">
+                                            @(workspace.Overview.Settings.IsManagedModeEnabled ? "Managed" : "Setup needed")
+                                        </UiPill>
+                                    </article>
+
+                                    <article class="sftp-summary-card">
+                                        <span class="sftp-summary-label">Managed users</span>
+                                        <strong>@workspace.Users.Count</strong>
+                                        <span class="meta-text">@GetManagedUserDetail()</span>
+                                        <UiPill Tone="@(workspace.Users.Count > 0 ? UiPillTone.Neutral : UiPillTone.Warning)">
+                                            @(workspace.Users.Count > 0 ? "Provisioned" : "No users")
+                                        </UiPill>
+                                    </article>
+
+                                    <article class="sftp-summary-card">
+                                        <span class="sftp-summary-label">LMS SFTP config</span>
+                                        <strong>@(workspace.Overview.IsManagedConfigPresent ? "Present" : "Missing")</strong>
+                                        <span class="meta-text">@workspace.Overview.EffectiveManagedConfigPath</span>
+                                        <UiPill Tone="@(workspace.Overview.IsManagedConfigPresent ? UiPillTone.Success : UiPillTone.Warning)">
+                                            @(workspace.Overview.IsManagedConfigPresent ? "Detected" : "Not written")
+                                        </UiPill>
+                                    </article>
+
+                                    <article class="sftp-summary-card">
+                                        <span class="sftp-summary-label">Base folder</span>
+                                        <strong>@(workspace.Overview.IsBasePathPresent ? "Present" : "Missing")</strong>
+                                        <span class="meta-text">@workspace.Overview.Settings.BasePath</span>
+                                        <UiPill Tone="@(workspace.Overview.IsBasePathPresent ? UiPillTone.Success : UiPillTone.Warning)">
+                                            @(workspace.Overview.IsBasePathPresent ? "Ready" : "Needs create")
+                                        </UiPill>
+                                    </article>
+                                </div>
+
+                                <div class="sftp-overview-grid">
+                                    <section class="surface-subcard sftp-overview-card">
+                                        <div class="table-header">
+                                            <div>
+                                                <p class="eyebrow">Inspection</p>
+                                                <h2>Current SSH/SFTP state</h2>
+                                            </div>
+                                            <UiPill Tone="@(workspace.Overview.IsConfigurationValid ? UiPillTone.Success : UiPillTone.Failure)">
+                                                @(workspace.Overview.IsConfigurationValid ? "Validated" : "Validation failed")
+                                            </UiPill>
+                                        </div>
+
+                                        <div class="sftp-fact-grid">
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Main sshd config</span>
+                                                <strong class="sftp-break">@workspace.Overview.MainConfigPath</strong>
+                                                <span class="meta-text">The primary sshd configuration file Linux Made Sane validates and protects with backups before applying managed changes.</span>
+                                            </article>
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Managed config path</span>
+                                                <strong class="sftp-break">@workspace.Overview.EffectiveManagedConfigPath</strong>
+                                                <span class="meta-text">@(workspace.Overview.SupportsDropInConfiguration ? "Drop-in path available." : "Main sshd_config fallback in use.")</span>
+                                            </article>
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Base SFTP root</span>
+                                                <strong class="sftp-break">@workspace.Overview.Settings.BasePath</strong>
+                                                <span class="meta-text">Each user is chrooted under this root with a separate writable <code>/files</code> folder.</span>
+                                            </article>
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Drop-in support</span>
+                                                <strong>@(workspace.Overview.SupportsDropInConfiguration ? "Available" : "Not available")</strong>
+                                                <span class="meta-text">@(workspace.Overview.SupportsDropInConfiguration ? "LMS can isolate its SFTP rules in sshd_config.d." : "LMS must manage a marked block inside the main sshd_config file.")</span>
+                                            </article>
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Authorized keys</span>
+                                                <strong class="sftp-break">@SftpServerDefaults.ManagedAuthorizedKeysDirectory</strong>
+                                                <span class="meta-text">LMS stores managed per-user authorized_keys files outside the writable chroots.</span>
+                                            </article>
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Managed groups</span>
+                                                <strong>@(workspace.Overview.MissingGroups.Count == 0 ? "Ready" : $"{workspace.Overview.MissingGroups.Count} missing")</strong>
+                                                <span class="meta-text">@(workspace.Overview.MissingGroups.Count == 0 ? "All LMS SFTP groups are present." : string.Join(", ", workspace.Overview.MissingGroups))</span>
+                                            </article>
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Validation result</span>
+                                                <strong>@workspace.Overview.ValidationSummary</strong>
+                                                <span class="meta-text">LMS always validates with <code>sshd -t</code> before reloading SSH.</span>
+                                            </article>
+                                        </div>
+                                    </section>
+
+                                    <section class="surface-subcard sftp-overview-card">
+                                        <div class="table-header">
+                                            <div>
+                                                <p class="eyebrow">Readiness</p>
+                                                <h2>What still needs attention</h2>
+                                            </div>
+                                            <span>@GetOpenIssuesCount() item(s)</span>
+                                        </div>
+
+                                        @if (GetOpenIssuesCount() == 0)
+                                        {
+                                            <div class="empty-state compact-empty-state">
+                                                <p>No immediate SFTP readiness issues were detected.</p>
+                                                <p class="meta-text">You can still review the setup wizard before applying managed sshd rules.</p>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <div class="sftp-warning-list">
+                                                @foreach (var warning in workspace.Overview.Warnings)
+                                                {
+                                                    <div class="sftp-warning-item">@warning</div>
+                                                }
+                                                @foreach (var group in workspace.Overview.MissingGroups)
+                                                {
+                                                    <div class="sftp-warning-item">Managed Linux group <code>@group</code> does not exist yet.</div>
+                                                }
+                                            </div>
+                                        }
+                                    </section>
+                                </div>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="@SetupTabValue" Title="Setup Wizard">
+                        <ChildContent>
+                            <div class="sftp-tab-content">
+                                <section class="surface-subcard sftp-setup-card">
+                                    <div class="table-header">
+                                        <div>
+                                            <p class="eyebrow">Setup Wizard</p>
+                                            <h2>Configure this LMS host as a dedicated SFTP server</h2>
+                                            <p class="meta-text">Preview the exact Linux actions and generated sshd configuration first. LMS will not apply anything until the approval switch is set.</p>
+                                        </div>
+                                    </div>
+
+                                    <EditForm EditContext="@hostSettingsEditContext" class="sftp-setup-form">
+                                        <DataAnnotationsValidator />
+                                        <ValidationSummary />
+
+                                        <div class="sftp-form-grid">
+                                            <UiTextField Value="@hostSettingsEditor.BasePath"
+                                                         ValueChanged="SetHostBasePathAsync"
+                                                         ValueExpression="@(() => hostSettingsEditor.BasePath)"
+                                                         Label="Base SFTP path"
+                                                         Helper="Each user gets {base path}/{username} as a root-owned chroot plus a writable /files folder inside it."
+                                                         Placeholder="/srv/lms-sftp"
+                                                         Compact="true"
+                                                         Class="sftp-form-field-wide" />
+
+                                            <UiComboboxField TValue="SftpAuthenticationMode"
+                                                             Value="@hostSettingsEditor.DefaultAuthenticationMode"
+                                                             ValueChanged="SetDefaultAuthenticationModeAsync"
+                                                             ValueExpression="@(() => hostSettingsEditor.DefaultAuthenticationMode)"
+                                                             Label="Default auth policy"
+                                                             Helper="New SFTP users start with this auth mode."
+                                                             Compact="true">
+                                                @foreach (var mode in AuthenticationModes)
+                                                {
+                                                    <option value="@mode">@GetAuthModeLabel(mode)</option>
+                                                }
+                                            </UiComboboxField>
+
+                                            <UiCheckboxField Value="@hostSettingsEditor.PreferDropInConfiguration"
+                                                             ValueChanged="SetPreferDropInConfigurationAsync"
+                                                             ValueExpression="@(() => hostSettingsEditor.PreferDropInConfiguration)"
+                                                             Label="Prefer sshd drop-in"
+                                                             Helper="Use /etc/ssh/sshd_config.d/90-lms-sftp.conf when the local OpenSSH build supports include files."
+                                                             Compact="true" />
+                                        </div>
+                                    </EditForm>
+
+                                    <div class="sftp-approval-row">
+                                        <label class="sftp-approval-toggle" title="Require explicit approval before mutating SSH or Linux accounts.">
+                                            <UiCompactCheckbox Label="Approve host change"
+                                                               Value="@hostPlanApproved"
+                                                               ValueChanged="SetHostPlanApprovedAsync" />
+                                            <span>I approve the SFTP host changes shown in the plan below.</span>
+                                        </label>
+
+                                        <div class="sftp-inline-actions">
+                                            <UiCommandButton Label="Preview plan"
+                                                             Glyph="UiIconGlyph.Analyze"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@IsBusy"
+                                                             OnClick="PreviewHostPlanAsync" />
+                                            <UiCommandButton Label="Apply configuration"
+                                                             Glyph="UiIconGlyph.Save"
+                                                             Disabled="@(!hostPlanApproved || IsBusy)"
+                                                             OnClick="ApplyHostPlanAsync" />
+                                        </div>
+                                    </div>
+
+                                    @if (!string.IsNullOrWhiteSpace(hostStatusMessage))
+                                    {
+                                        <p class="callout @hostStatusTone">@hostStatusMessage</p>
+                                    }
+
+                                    @if (hostPlan is not null)
+                                    {
+                                        @RenderPlan(hostPlan, "Host action plan", "The generated sshd configuration and Linux actions Linux Made Sane will apply to this machine.")
+                                    }
+                                </section>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="@UsersTabValue" Title="Users">
+                        <ChildContent>
+                            <div class="sftp-tab-content">
+                                <section class="surface-subcard sftp-users-card">
+                                    <div class="table-header sftp-users-header">
+                                        <div>
+                                            <p class="eyebrow">Users</p>
+                                            <h2>Managed SFTP accounts</h2>
+                                        </div>
+                                        <span>@FilteredUsers.Count of @workspace.Users.Count user(s)</span>
+                                    </div>
+
+                                    <div class="sftp-users-toolbar">
+                                        <UiFilterInput Value="@userFilter"
+                                                       ValueChanged="SetUserFilterAsync"
+                                                       Placeholder="Filter SFTP users"
+                                                       AriaLabel="Filter SFTP users"
+                                                       Class="sftp-users-filter" />
+
+                                        <UiCommandButton Label="Add user"
+                                                         Glyph="UiIconGlyph.Plus"
+                                                         Disabled="@IsBusy"
+                                                         OnClick="OpenCreateUserModalAsync" />
+                                    </div>
+
+                                    @if (FilteredUsers.Count == 0)
+                                    {
+                                        <div class="empty-state compact-empty-state">
+                                            <p>No SFTP users match that filter.</p>
+                                            <p class="meta-text">Add a user or clear the filter.</p>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="sftp-user-list">
+                                            @foreach (var user in FilteredUsers)
+                                            {
+                                                <article class="sftp-user-row @(IsSelectedUser(user.UserName) ? "selected" : string.Empty)">
+                                                    <div class="sftp-user-grid"
+                                                         role="button"
+                                                         tabindex="0"
+                                                         title="Inspect SFTP user details"
+                                                         @onclick="@(() => SelectUserAsync(user.UserName))"
+                                                         @onkeydown="@(args => HandleUserRowKeyDownAsync(args, user.UserName))">
+                                                        <div class="sftp-user-cell sftp-user-cell-name">
+                                                            <strong>@user.UserName</strong>
+                                                            <span class="meta-text">@user.Folder.ChrootPath</span>
+                                                        </div>
+
+                                                        <div class="sftp-user-cell">
+                                                            <UiPill Tone="@GetAuthModeTone(user.AuthenticationMode)">@GetAuthModeLabel(user.AuthenticationMode)</UiPill>
+                                                        </div>
+
+                                                        <div class="sftp-user-cell sftp-user-cell-path">
+                                                            <span class="sftp-break">@user.Folder.WritablePath</span>
+                                                        </div>
+
+                                                        <div class="sftp-user-cell">
+                                                            <span>@user.PublicKeys.Count key(s)</span>
+                                                        </div>
+
+                                                        <div class="sftp-user-cell">
+                                                            <UiPill Tone="@(user.IsEnabled ? UiPillTone.Success : UiPillTone.Warning)">
+                                                                @(user.IsEnabled ? "Enabled" : "Disabled")
+                                                            </UiPill>
+                                                        </div>
+
+                                                        <div class="sftp-user-cell">
+                                                            <span>@FormatTimestamp(user.UpdatedAtUtc)</span>
+                                                        </div>
+
+                                                        <div class="sftp-user-actions" @onclick:stopPropagation="true">
+                                                            <UiIconButton Label="Open user details"
+                                                                          Glyph="UiIconGlyph.Info"
+                                                                          Variant="UiButtonVariant.ActionSubtle"
+                                                                          Disabled="@IsBusy"
+                                                                          OnClick="@(() => OpenUserDetailsAsync(user.UserName))" />
+                                                            <UiIconButton Label="Edit SFTP user"
+                                                                          Glyph="UiIconGlyph.Edit"
+                                                                          Variant="UiButtonVariant.ActionSubtle"
+                                                                          Disabled="@IsBusy"
+                                                                          OnClick="@(() => OpenEditUserModalAsync(user.UserName))" />
+                                                            <UiIconButton Label="Reset password"
+                                                                          Glyph="UiIconGlyph.Connection"
+                                                                          Variant="UiButtonVariant.ActionSubtle"
+                                                                          Disabled="@(IsBusy || user.AuthenticationMode == SftpAuthenticationMode.PublicKeyOnly)"
+                                                                          OnClick="@(() => OpenPasswordResetModalAsync(user.UserName))" />
+                                                            <UiIconButton Label="Disable user"
+                                                                          Glyph="UiIconGlyph.Stop"
+                                                                          Variant="UiButtonVariant.ActionSubtle"
+                                                                          Disabled="@(IsBusy || !user.IsEnabled)"
+                                                                          OnClick="@(() => OpenUserActionModalAsync(UserActionKind.Disable, user.UserName))" />
+                                                            <UiIconButton Label="Delete user"
+                                                                          Glyph="UiIconGlyph.Delete"
+                                                                          Variant="UiButtonVariant.Danger"
+                                                                          Disabled="@IsBusy"
+                                                                          OnClick="@(() => OpenUserActionModalAsync(UserActionKind.Delete, user.UserName))" />
+                                                        </div>
+                                                    </div>
+                                                </article>
+                                            }
+                                        </div>
+                                    }
+                                </section>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="@UserDetailsTabValue" Title="User Details">
+                        <ChildContent>
+                            <div class="sftp-tab-content">
+                                @if (selectedUserDetails is null)
+                                {
+                                    <section class="surface-subcard">
+                                        <div class="empty-state compact-empty-state">
+                                            <p>Select an SFTP user first.</p>
+                                            <p class="meta-text">The detail view shows the chroot layout, auth mode, key inventory, and audit history for one LMS-managed SFTP account.</p>
+                                        </div>
+                                    </section>
+                                }
+                                else
+                                {
+                                    <section class="surface-subcard sftp-user-detail-card">
+                                        <div class="table-header">
+                                            <div>
+                                                <p class="eyebrow">User Details</p>
+                                                <h2>@selectedUserDetails.User.UserName</h2>
+                                                <p class="meta-text">Shell access stays disabled with <code>@selectedUserDetails.User.LoginShell</code>. LMS only manages chrooted internal-sftp access for this account.</p>
+                                            </div>
+
+                                            <div class="sftp-inline-actions">
+                                                <UiCommandButton Label="Edit"
+                                                                 Glyph="UiIconGlyph.Edit"
+                                                                 Variant="UiButtonVariant.Ghost"
+                                                                 Disabled="@IsBusy"
+                                                                 OnClick="@(() => OpenEditUserModalAsync(selectedUserDetails.User.UserName))" />
+                                                <UiCommandButton Label="Reset password"
+                                                                 Glyph="UiIconGlyph.Connection"
+                                                                 Variant="UiButtonVariant.Ghost"
+                                                                 Disabled="@(IsBusy || selectedUserDetails.User.AuthenticationMode == SftpAuthenticationMode.PublicKeyOnly)"
+                                                                 OnClick="@(() => OpenPasswordResetModalAsync(selectedUserDetails.User.UserName))" />
+                                            </div>
+                                        </div>
+
+                                        <div class="sftp-fact-grid">
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Authentication</span>
+                                                <strong>@GetAuthModeLabel(selectedUserDetails.User.AuthenticationMode)</strong>
+                                                <span class="meta-text">@(selectedUserDetails.User.HasPassword ? "Password present when the auth mode requires it." : "No Linux password retained for this user.")</span>
+                                            </article>
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">State</span>
+                                                <strong>@(selectedUserDetails.User.IsEnabled ? "Enabled" : "Disabled")</strong>
+                                                <span class="meta-text">Password changed @FormatNullableTimestamp(selectedUserDetails.User.PasswordChangedAtUtc, "Never through LMS")</span>
+                                            </article>
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Chroot path</span>
+                                                <strong class="sftp-break">@selectedUserDetails.User.Folder.ChrootPath</strong>
+                                                <span class="meta-text">@(selectedUserDetails.User.Folder.ChrootOwner + ":" + selectedUserDetails.User.Folder.ChrootGroup + " " + selectedUserDetails.User.Folder.ChrootMode)</span>
+                                            </article>
+                                            <article class="sftp-fact-card">
+                                                <span class="eyebrow">Writable folder</span>
+                                                <strong class="sftp-break">@selectedUserDetails.User.Folder.WritablePath</strong>
+                                                <span class="meta-text">@(selectedUserDetails.User.Folder.WritableOwner + ":" + selectedUserDetails.User.Folder.WritableGroup + " " + selectedUserDetails.User.Folder.WritableMode)</span>
+                                            </article>
+                                        </div>
+
+                                        <div class="sftp-user-detail-grid">
+                                            <section class="surface-subcard sftp-user-subcard">
+                                                <div class="table-header">
+                                                    <h3>Public keys</h3>
+                                                    <span>@selectedUserDetails.User.PublicKeys.Count key(s)</span>
+                                                </div>
+
+                                                @if (selectedUserDetails.User.PublicKeys.Count == 0)
+                                                {
+                                                    <div class="empty-state compact-empty-state">
+                                                        <p>No managed public keys.</p>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    <div class="sftp-key-list">
+                                                        @foreach (var key in selectedUserDetails.User.PublicKeys)
+                                                        {
+                                                            <article class="sftp-key-item">
+                                                                <div class="sftp-key-item-header">
+                                                                    <strong>@(string.IsNullOrWhiteSpace(key.Label) ? "SSH key" : key.Label)</strong>
+                                                                    <span class="meta-text">@key.KeyType</span>
+                                                                </div>
+                                                                <code class="block-code sftp-key-fingerprint">@key.Fingerprint</code>
+                                                                <code class="block-code sftp-key-preview">@AbbreviateKey(key.PublicKeyText)</code>
+                                                            </article>
+                                                        }
+                                                    </div>
+                                                }
+                                            </section>
+
+                                            <section class="surface-subcard sftp-user-subcard">
+                                                <div class="table-header">
+                                                    <h3>Audit history</h3>
+                                                    <span>@selectedUserDetails.AuditEntries.Count item(s)</span>
+                                                </div>
+
+                                                @if (selectedUserDetails.AuditEntries.Count == 0)
+                                                {
+                                                    <div class="empty-state compact-empty-state">
+                                                        <p>No user audit entries yet.</p>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    <div class="sftp-audit-list">
+                                                        @foreach (var entry in selectedUserDetails.AuditEntries)
+                                                        {
+                                                            <article class="sftp-audit-row">
+                                                                <div class="sftp-audit-row-header">
+                                                                    <strong>@entry.EventType</strong>
+                                                                    <UiPill Tone="@(entry.Success ? UiPillTone.Success : UiPillTone.Failure)">
+                                                                        @(entry.Success ? "Success" : "Failed")
+                                                                    </UiPill>
+                                                                </div>
+                                                                <span class="meta-text">@FormatTimestamp(entry.CreatedAtUtc)</span>
+                                                                <p>@entry.Summary</p>
+                                                                @if (!string.IsNullOrWhiteSpace(entry.Details))
+                                                                {
+                                                                    <details>
+                                                                        <summary>Details</summary>
+                                                                        <pre class="sftp-plan-code"><code>@entry.Details</code></pre>
+                                                                    </details>
+                                                                }
+                                                            </article>
+                                                        }
+                                                    </div>
+                                                }
+                                            </section>
+                                        </div>
+                                    </section>
+                                }
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="@AuditTabValue" Title="Audit / History">
+                        <ChildContent>
+                            <div class="sftp-tab-content">
+                                <div class="sftp-overview-grid">
+                                    <section class="surface-subcard sftp-overview-card">
+                                        <div class="table-header">
+                                            <div>
+                                                <p class="eyebrow">Audit</p>
+                                                <h2>Configuration and user changes</h2>
+                                            </div>
+                                            <span>@workspace.AuditEntries.Count entry(s)</span>
+                                        </div>
+
+                                        @if (workspace.AuditEntries.Count == 0)
+                                        {
+                                            <div class="empty-state compact-empty-state">
+                                                <p>No SFTP audit history yet.</p>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <div class="sftp-audit-list">
+                                                @foreach (var entry in workspace.AuditEntries)
+                                                {
+                                                    <article class="sftp-audit-row">
+                                                        <div class="sftp-audit-row-header">
+                                                            <div>
+                                                                <strong>@entry.EventType</strong>
+                                                                <span class="meta-text">@(entry.TargetType): @entry.TargetKey</span>
+                                                            </div>
+                                                            <UiPill Tone="@(entry.Success ? UiPillTone.Success : UiPillTone.Failure)">
+                                                                @(entry.Success ? "Success" : "Failed")
+                                                            </UiPill>
+                                                        </div>
+                                                        <span class="meta-text">@FormatTimestamp(entry.CreatedAtUtc)</span>
+                                                        <p>@entry.Summary</p>
+                                                        @if (!string.IsNullOrWhiteSpace(entry.Details))
+                                                        {
+                                                            <details>
+                                                                <summary>Details</summary>
+                                                                <pre class="sftp-plan-code"><code>@entry.Details</code></pre>
+                                                            </details>
+                                                        }
+                                                    </article>
+                                                }
+                                            </div>
+                                        }
+                                    </section>
+
+                                    <section class="surface-subcard sftp-overview-card">
+                                        <div class="table-header">
+                                            <div>
+                                                <p class="eyebrow">Backups</p>
+                                                <h2>Rollback snapshots</h2>
+                                            </div>
+                                            <span>@workspace.BackupSnapshots.Count snapshot(s)</span>
+                                        </div>
+
+                                        @if (workspace.BackupSnapshots.Count == 0)
+                                        {
+                                            <div class="empty-state compact-empty-state">
+                                                <p>No rollback snapshots yet.</p>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <div class="sftp-backup-list">
+                                                @foreach (var snapshot in workspace.BackupSnapshots)
+                                                {
+                                                    <article class="sftp-backup-row">
+                                                        <div class="sftp-audit-row-header">
+                                                            <div>
+                                                                <strong>@snapshot.Summary</strong>
+                                                                <span class="meta-text">@FormatTimestamp(snapshot.CreatedAtUtc)</span>
+                                                            </div>
+                                                            <UiPill Tone="@(snapshot.RollbackAvailable ? UiPillTone.Success : UiPillTone.Warning)">
+                                                                @(snapshot.RollbackAvailable ? "Rollback available" : "Reference only")
+                                                            </UiPill>
+                                                        </div>
+                                                        <span class="meta-text">@snapshot.Files.Count file(s) · @snapshot.StorageDirectory</span>
+                                                        <details>
+                                                            <summary>Snapshot files</summary>
+                                                            <div class="sftp-backup-files">
+                                                                @foreach (var file in snapshot.Files)
+                                                                {
+                                                                    <div class="sftp-backup-file">
+                                                                        <strong>@file.SourcePath</strong>
+                                                                        <span class="meta-text">@(file.ExistedBeforeSnapshot ? file.BackupPath : "File did not exist before the snapshot.")</span>
+                                                                    </div>
+                                                                }
+                                                            </div>
+                                                        </details>
+                                                    </article>
+                                                }
+                                            </div>
+                                        }
+                                    </section>
+                                </div>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+                </ChildContent>
+        </TabControl>
+    }
+</div>
+
+@if (showUserEditorModal && userEditor is not null && userEditContext is not null)
+{
+    <UiModal IsOpen="true"
+             Title="@(userEditor.IsNewUser ? "Add SFTP user" : $"Edit {userEditor.UserName}")"
+             Subtitle="Preview the Linux account, chroot, key, and password changes before Linux Made Sane applies anything."
+             Class="sftp-modal sftp-user-modal"
+             CloseOnBackdrop="false"
+             OnClose="CloseUserEditorModalAsync">
+        <ChildContent>
+            <EditForm EditContext="@userEditContext" class="sftp-modal-form">
+                <DataAnnotationsValidator />
+                <ValidationSummary />
+
+                <div class="sftp-form-grid">
+                    <UiTextField Value="@userEditor.UserName"
+                                 ValueChanged="SetUserNameAsync"
+                                 ValueExpression="@(() => userEditor.UserName)"
+                                 Label="Username"
+                                 Placeholder="alice"
+                                 Disabled="@(!userEditor.IsNewUser)"
+                                 Compact="true" />
+
+                    <UiComboboxField TValue="SftpAuthenticationMode"
+                                     Value="@userEditor.AuthenticationMode"
+                                     ValueChanged="SetUserAuthenticationModeAsync"
+                                     ValueExpression="@(() => userEditor.AuthenticationMode)"
+                                     Label="Authentication"
+                                     Helper="@GetAuthModeHelperText(userEditor.AuthenticationMode)"
+                                     Compact="true">
+                        @foreach (var mode in AuthenticationModes)
+                        {
+                            <option value="@mode">@GetAuthModeLabel(mode)</option>
+                        }
+                    </UiComboboxField>
+
+                    <UiSwitchField Label="Enabled"
+                                   Title="Allow new SFTP logins for this account"
+                                   Value="@userEditor.IsEnabled"
+                                   ValueChanged="SetUserEnabledAsync"
+                                   Compact="true"
+                                   Class="sftp-inline-switch" />
+                </div>
+
+                @if (ShouldShowUserPasswordField())
+                {
+                    <section class="surface-subcard sftp-modal-subcard">
+                        <div class="sftp-section-header">
+                            <div>
+                                <strong>@(userEditor.IsNewUser ? "Initial password" : "New password")</strong>
+                                <span class="helper-text">Required because the selected auth mode accepts a password. Linux Made Sane never stores the plaintext password.</span>
+                            </div>
+                            <div class="sftp-inline-actions">
+                                <UiIconButton Label="Generate password"
+                                              Glyph="UiIconGlyph.Refresh"
+                                              Variant="UiButtonVariant.ActionSubtle"
+                                              Disabled="@IsBusy"
+                                              OnClick="GenerateUserPasswordAsync" />
+                                <UiIconButton Label="Copy password"
+                                              Glyph="UiIconGlyph.Copy"
+                                              Variant="UiButtonVariant.ActionSubtle"
+                                              Disabled="@(IsBusy || string.IsNullOrWhiteSpace(userEditorPassword))"
+                                              OnClick="CopyUserPasswordAsync" />
+                            </div>
+                        </div>
+
+                        <UiTextField Value="@userEditorPassword"
+                                     ValueChanged="SetUserPasswordAsync"
+                                     ValueExpression="@(() => userEditorPassword)"
+                                     Label="Password"
+                                     Helper="This value is only held in memory long enough to apply the change."
+                                     Type="text"
+                                     Compact="true" />
+                    </section>
+                }
+
+                <section class="surface-subcard sftp-modal-subcard">
+                    <div class="sftp-section-header">
+                        <div>
+                            <strong>Public keys</strong>
+                            <span class="helper-text">@GetPublicKeyHelperText(userEditor.AuthenticationMode)</span>
+                        </div>
+                        <UiCommandButton Label="Add key"
+                                         Glyph="UiIconGlyph.Plus"
+                                         Variant="UiButtonVariant.Ghost"
+                                         Disabled="@IsBusy"
+                                         OnClick="AddPublicKeyRowAsync" />
+                    </div>
+
+                    @if (userEditor.PublicKeys.Count == 0)
+                    {
+                        <div class="empty-state compact-empty-state sftp-key-empty">
+                            <p>No public keys entered yet.</p>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="sftp-editor-key-list">
+                            @for (var index = 0; index < userEditor.PublicKeys.Count; index++)
+                            {
+                                var keyIndex = index;
+                                var keyEditor = userEditor.PublicKeys[keyIndex];
+                                <article class="surface-subcard sftp-editor-key-card" @key="keyEditor.Id">
+                                    <div class="sftp-editor-key-header">
+                                        <label class="sftp-inline-field">
+                                            <span>Label</span>
+                                            <input class="ui-control-input"
+                                                   type="text"
+                                                   value="@keyEditor.Label"
+                                                   @oninput="args => HandlePublicKeyLabelInput(keyIndex, args.Value?.ToString())" />
+                                        </label>
+                                        <UiIconButton Label="Remove public key"
+                                                      Glyph="UiIconGlyph.Delete"
+                                                      Variant="UiButtonVariant.Danger"
+                                                      Disabled="@IsBusy"
+                                                      OnClick="@(() => RemovePublicKeyRowAsync(keyIndex))" />
+                                    </div>
+
+                                    <label class="sftp-inline-field">
+                                        <span>SSH public key</span>
+                                        <textarea class="ui-control-input ui-control-textarea"
+                                                  rows="3"
+                                                  @oninput="args => HandlePublicKeyTextInput(keyIndex, args.Value?.ToString())">@keyEditor.PublicKeyText</textarea>
+                                    </label>
+                                </article>
+                            }
+                        </div>
+                    }
+
+                    <UiFileDropzone Label="Import keys"
+                                    Helper="Drop .pub files or other text files containing OpenSSH or SSH2 public keys."
+                                    PrimaryText="Drop public key files or click here"
+                                    SecondaryText="Linux Made Sane supports OpenSSH one-line keys and SSH2/RFC4716 public key blocks."
+                                    Compact="true"
+                                    Multiple="true"
+                                    OnChange="ImportPublicKeysAsync" />
+                </section>
+            </EditForm>
+
+            @if (!string.IsNullOrWhiteSpace(userModalMessage))
+            {
+                <p class="callout @userModalTone">@userModalMessage</p>
+            }
+
+            @if (userPlan is not null)
+            {
+                @RenderPlan(userPlan, "User action plan", "Linux Made Sane will keep the shell locked, update the SFTP auth groups, and maintain the chroot layout exactly as shown here.")
+            }
+        </ChildContent>
+        <Footer>
+            <label class="sftp-approval-toggle" title="Require explicit approval before mutating Linux users or passwords.">
+                <UiCompactCheckbox Label="Approve user change"
+                                   Value="@userPlanApproved"
+                                   ValueChanged="SetUserPlanApprovedAsync" />
+                <span>I approve the SFTP user changes shown in this plan.</span>
+            </label>
+
+            <div class="sftp-inline-actions">
+                <UiCommandButton Label="Cancel"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@IsBusy"
+                                 OnClick="CloseUserEditorModalAsync" />
+                <UiCommandButton Label="Preview plan"
+                                 Glyph="UiIconGlyph.Analyze"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@IsBusy"
+                                 OnClick="PreviewUserPlanAsync" />
+                <UiCommandButton Label="Apply user"
+                                 Glyph="UiIconGlyph.Save"
+                                 Disabled="@(!userPlanApproved || IsBusy)"
+                                 OnClick="ApplyUserAsync" />
+            </div>
+        </Footer>
+    </UiModal>
+}
+
+@if (showPasswordResetModal && passwordResetEditor is not null && passwordResetEditContext is not null)
+{
+    <UiModal IsOpen="true"
+             Title="Reset SFTP password"
+             Subtitle="Preview the password reset action first. Linux Made Sane never stores the plaintext password."
+             Class="sftp-modal sftp-password-modal"
+             CloseOnBackdrop="false"
+             OnClose="ClosePasswordResetModalAsync">
+        <ChildContent>
+            <EditForm EditContext="@passwordResetEditContext" class="sftp-modal-form">
+                <DataAnnotationsValidator />
+                <ValidationSummary />
+
+                <div class="sftp-password-summary">
+                    <strong>@passwordResetEditor.UserName</strong>
+                    <UiPill Tone="@GetAuthModeTone(passwordResetEditor.AuthenticationMode)">@GetAuthModeLabel(passwordResetEditor.AuthenticationMode)</UiPill>
+                </div>
+
+                <section class="surface-subcard sftp-modal-subcard">
+                    <div class="sftp-section-header">
+                        <div>
+                            <strong>New password</strong>
+                            <span class="helper-text">Generate, copy, and then apply the password in one flow.</span>
+                        </div>
+                        <div class="sftp-inline-actions">
+                            <UiIconButton Label="Generate password"
+                                          Glyph="UiIconGlyph.Refresh"
+                                          Variant="UiButtonVariant.ActionSubtle"
+                                          Disabled="@IsBusy"
+                                          OnClick="GenerateResetPasswordAsync" />
+                            <UiIconButton Label="Copy password"
+                                          Glyph="UiIconGlyph.Copy"
+                                          Variant="UiButtonVariant.ActionSubtle"
+                                          Disabled="@(IsBusy || string.IsNullOrWhiteSpace(passwordResetEditor.NewPassword))"
+                                          OnClick="CopyResetPasswordAsync" />
+                        </div>
+                    </div>
+
+                    <UiTextField Value="@passwordResetEditor.NewPassword"
+                                 ValueChanged="SetResetPasswordAsync"
+                                 ValueExpression="@(() => passwordResetEditor.NewPassword)"
+                                 Label="Password"
+                                 Type="text"
+                                 Compact="true" />
+                </section>
+            </EditForm>
+
+            @if (!string.IsNullOrWhiteSpace(passwordResetMessage))
+            {
+                <p class="callout @passwordResetTone">@passwordResetMessage</p>
+            }
+
+            @if (passwordResetPlan is not null)
+            {
+                @RenderPlan(passwordResetPlan, "Password reset plan", "Only the password change command will run. SSH config and other user settings stay untouched.")
+            }
+        </ChildContent>
+        <Footer>
+            <label class="sftp-approval-toggle">
+                <UiCompactCheckbox Label="Approve password reset"
+                                   Value="@passwordResetApproved"
+                                   ValueChanged="SetPasswordResetApprovedAsync" />
+                <span>I approve this password reset.</span>
+            </label>
+
+            <div class="sftp-inline-actions">
+                <UiCommandButton Label="Cancel"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@IsBusy"
+                                 OnClick="ClosePasswordResetModalAsync" />
+                <UiCommandButton Label="Preview plan"
+                                 Glyph="UiIconGlyph.Analyze"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@IsBusy"
+                                 OnClick="PreviewPasswordResetPlanAsync" />
+                <UiCommandButton Label="Apply reset"
+                                 Glyph="UiIconGlyph.Save"
+                                 Disabled="@(!passwordResetApproved || IsBusy)"
+                                 OnClick="ApplyPasswordResetAsync" />
+            </div>
+        </Footer>
+    </UiModal>
+}
+
+@if (showUserActionModal && userActionPlan is not null)
+{
+    <UiModal IsOpen="true"
+             Title="@GetUserActionTitle()"
+             Subtitle="@GetUserActionSubtitle()"
+             Class="sftp-modal sftp-action-modal"
+             CloseOnBackdrop="false"
+             OnClose="CloseUserActionModalAsync">
+        <ChildContent>
+            @if (!string.IsNullOrWhiteSpace(userActionMessage))
+            {
+                <p class="callout @userActionTone">@userActionMessage</p>
+            }
+
+            @RenderPlan(userActionPlan, "Pending action", "Linux Made Sane will only execute the explicit actions shown here.")
+        </ChildContent>
+        <Footer>
+            <label class="sftp-approval-toggle">
+                <UiCompactCheckbox Label="Approve action"
+                                   Value="@userActionApproved"
+                                   ValueChanged="SetUserActionApprovedAsync" />
+                <span>I approve this @GetUserActionVerb().ToLowerInvariant() action.</span>
+            </label>
+
+            <div class="sftp-inline-actions">
+                <UiCommandButton Label="Cancel"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@IsBusy"
+                                 OnClick="CloseUserActionModalAsync" />
+                <UiCommandButton Label="@GetUserActionVerb()"
+                                 Glyph="@(pendingUserAction == UserActionKind.Delete ? UiIconGlyph.Delete : UiIconGlyph.Stop)"
+                                 Variant="@(pendingUserAction == UserActionKind.Delete ? UiButtonVariant.Danger : UiButtonVariant.Primary)"
+                                 Disabled="@(!userActionApproved || IsBusy)"
+                                 OnClick="ApplyPendingUserActionAsync" />
+            </div>
+        </Footer>
+    </UiModal>
+}
+
+@code {
+    private const string OverviewTabValue = "overview";
+    private const string SetupTabValue = "setup";
+    private const string UsersTabValue = "users";
+    private const string UserDetailsTabValue = "details";
+    private const string AuditTabValue = "audit";
+
+    private static readonly IReadOnlyList<SftpAuthenticationMode> AuthenticationModes =
+    [
+        SftpAuthenticationMode.PasswordOnly,
+        SftpAuthenticationMode.PublicKeyOnly,
+        SftpAuthenticationMode.PasswordAndPublicKey
+    ];
+
+    private string activeTab = OverviewTabValue;
+    private bool isLoaded;
+    private bool isLoading;
+    private bool isHostBusy;
+    private bool isUserBusy;
+    private bool isPasswordResetBusy;
+    private bool isUserActionBusy;
+
+    private string statusMessage = string.Empty;
+    private string statusTone = "info";
+    private string hostStatusMessage = string.Empty;
+    private string hostStatusTone = "info";
+    private string userModalMessage = string.Empty;
+    private string userModalTone = "info";
+    private string passwordResetMessage = string.Empty;
+    private string passwordResetTone = "info";
+    private string userActionMessage = string.Empty;
+    private string userActionTone = "info";
+    private string userFilter = string.Empty;
+    private string? selectedUserName;
+    private string userEditorPassword = string.Empty;
+
+    private SftpServerWorkspaceViewModel? workspace;
+    private SftpHostSettingsEditor? hostSettingsEditor;
+    private EditContext? hostSettingsEditContext;
+    private SftpConfigurationPlan? hostPlan;
+    private bool hostPlanApproved;
+
+    private bool showUserEditorModal;
+    private SftpManagedUserEditor? userEditor;
+    private EditContext? userEditContext;
+    private SftpConfigurationPlan? userPlan;
+    private bool userPlanApproved;
+
+    private bool showPasswordResetModal;
+    private SftpPasswordResetEditor? passwordResetEditor;
+    private EditContext? passwordResetEditContext;
+    private SftpConfigurationPlan? passwordResetPlan;
+    private bool passwordResetApproved;
+
+    private bool showUserActionModal;
+    private UserActionKind? pendingUserAction;
+    private string pendingUserActionUserName = string.Empty;
+    private SftpConfigurationPlan? userActionPlan;
+    private bool userActionApproved;
+
+    private SftpUserDetailsViewModel? selectedUserDetails;
+
+    private bool IsBusy =>
+        isLoading || isHostBusy || isUserBusy || isPasswordResetBusy || isUserActionBusy;
+
+    private IReadOnlyList<SftpManagedUser> FilteredUsers =>
+        workspace?.Users
+            .Where(MatchesUserFilter)
+            .ToArray() ?? [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        isLoading = true;
+        try
+        {
+            var workspaceTask = SftpService.GetWorkspaceAsync();
+            var settingsTask = SftpService.GetHostSettingsEditorAsync();
+            await Task.WhenAll(workspaceTask, settingsTask);
+
+            workspace = workspaceTask.Result;
+            hostSettingsEditor = settingsTask.Result;
+            hostSettingsEditContext = new EditContext(hostSettingsEditor);
+
+            if (string.IsNullOrWhiteSpace(selectedUserName))
+            {
+                selectedUserName = workspace.Users.FirstOrDefault()?.UserName;
+            }
+            else if (workspace.Users.All(user => !user.UserName.Equals(selectedUserName, StringComparison.OrdinalIgnoreCase)))
+            {
+                selectedUserName = workspace.Users.FirstOrDefault()?.UserName;
+            }
+
+            selectedUserDetails = string.IsNullOrWhiteSpace(selectedUserName)
+                ? null
+                : await SftpService.GetUserDetailsAsync(selectedUserName, CancellationToken.None);
+
+            await RefreshHostPlanAsync(resetApproval: true, announceReadyState: true);
+
+            isLoaded = true;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private Task HandleTabChangedAsync(string value)
+    {
+        activeTab = value;
+        return Task.CompletedTask;
+    }
+
+    private string GetManagedModeDetail() =>
+        workspace?.Overview.Settings.IsManagedModeEnabled == true
+            ? $"Managed config last applied {FormatNullableTimestamp(workspace.Overview.Settings.LastAppliedAtUtc, "recently")}."
+            : "The setup wizard has not applied managed sshd rules yet.";
+
+    private string GetManagedUserDetail()
+    {
+        if (workspace is null || workspace.Users.Count == 0)
+        {
+            return "No LMS-managed SFTP users yet.";
+        }
+
+        var enabledCount = workspace.Users.Count(user => user.IsEnabled);
+        return $"{enabledCount} enabled, {workspace.Users.Count - enabledCount} disabled.";
+    }
+
+    private int GetOpenIssuesCount() =>
+        (workspace?.Overview.Warnings.Count ?? 0) + (workspace?.Overview.MissingGroups.Count ?? 0);
+
+    private bool MatchesUserFilter(SftpManagedUser user)
+    {
+        if (string.IsNullOrWhiteSpace(userFilter))
+        {
+            return true;
+        }
+
+        var filter = userFilter.Trim();
+        return user.UserName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+               user.Folder.ChrootPath.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+               user.Folder.WritablePath.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+               GetAuthModeLabel(user.AuthenticationMode).Contains(filter, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private Task SetUserFilterAsync(string? value)
+    {
+        userFilter = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private bool IsSelectedUser(string userName) =>
+        string.Equals(selectedUserName, userName, StringComparison.OrdinalIgnoreCase);
+
+    private async Task HandleUserRowKeyDownAsync(KeyboardEventArgs args, string userName)
+    {
+        if (args.Key is "Enter" or " ")
+        {
+            await SelectUserAsync(userName);
+        }
+    }
+
+    private async Task SelectUserAsync(string userName)
+    {
+        selectedUserName = userName;
+        selectedUserDetails = await SftpService.GetUserDetailsAsync(userName);
+    }
+
+    private async Task OpenUserDetailsAsync(string userName)
+    {
+        await SelectUserAsync(userName);
+        activeTab = UserDetailsTabValue;
+    }
+
+    private Task SetHostBasePathAsync(string? value)
+    {
+        if (hostSettingsEditor is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        hostSettingsEditor.BasePath = value ?? string.Empty;
+        return RefreshHostPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private Task SetDefaultAuthenticationModeAsync(SftpAuthenticationMode mode)
+    {
+        if (hostSettingsEditor is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        hostSettingsEditor.DefaultAuthenticationMode = mode;
+        return RefreshHostPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private Task SetPreferDropInConfigurationAsync(bool value)
+    {
+        if (hostSettingsEditor is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        hostSettingsEditor.PreferDropInConfiguration = value;
+        return RefreshHostPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private Task SetHostPlanApprovedAsync(bool value)
+    {
+        hostPlanApproved = value;
+        return Task.CompletedTask;
+    }
+
+    private async Task PreviewHostPlanAsync()
+    {
+        await RefreshHostPlanAsync(resetApproval: true, announceReadyState: true);
+    }
+
+    private async Task RefreshHostPlanAsync(bool resetApproval, bool announceReadyState)
+    {
+        if (hostSettingsEditor is null || hostSettingsEditContext is null)
+        {
+            return;
+        }
+
+        if (!hostSettingsEditContext.Validate())
+        {
+            hostPlan = null;
+            if (resetApproval)
+            {
+                hostPlanApproved = false;
+            }
+            hostStatusMessage = "Fix the setup fields before previewing the SFTP host plan.";
+            hostStatusTone = "error";
+            return;
+        }
+
+        isHostBusy = true;
+        try
+        {
+            hostPlan = await SftpService.PreviewHostConfigurationAsync(hostSettingsEditor);
+            if (resetApproval)
+            {
+                hostPlanApproved = false;
+            }
+
+            if (announceReadyState)
+            {
+                hostStatusMessage = "Review the generated sshd changes, Linux commands, and warnings before you approve the host update.";
+                hostStatusTone = hostPlan.Validation.IsValid ? "info" : "error";
+            }
+        }
+        catch (Exception exception)
+        {
+            hostPlan = null;
+            if (resetApproval)
+            {
+                hostPlanApproved = false;
+            }
+            hostStatusMessage = exception.Message;
+            hostStatusTone = "error";
+        }
+        finally
+        {
+            isHostBusy = false;
+        }
+    }
+
+    private async Task ApplyHostPlanAsync()
+    {
+        if (hostSettingsEditor is null || hostSettingsEditContext is null)
+        {
+            return;
+        }
+
+        if (!hostSettingsEditContext.Validate())
+        {
+            hostStatusMessage = "Fix the setup fields before applying the SFTP host configuration.";
+            hostStatusTone = "error";
+            return;
+        }
+
+        if (hostPlan is null)
+        {
+            await RefreshHostPlanAsync(resetApproval: false, announceReadyState: true);
+            if (hostPlan is null)
+            {
+                return;
+            }
+        }
+
+        isHostBusy = true;
+        try
+        {
+            var result = await SftpService.ApplyHostConfigurationAsync(hostSettingsEditor, approved: true);
+            hostStatusMessage = result.Summary;
+            hostStatusTone = result.Success ? "success" : "error";
+            statusMessage = result.Summary;
+            statusTone = result.Success ? "success" : "error";
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            hostStatusMessage = exception.Message;
+            hostStatusTone = "error";
+        }
+        finally
+        {
+            isHostBusy = false;
+        }
+    }
+
+    private async Task OpenCreateUserModalAsync()
+    {
+        userEditor = await SftpService.GetUserEditorAsync(null);
+        EnsureUserEditorReady();
+        userEditContext = new EditContext(userEditor);
+        userEditorPassword = RequiresPassword(userEditor.AuthenticationMode) ? GenerateSuggestedPassword() : string.Empty;
+        userPlan = null;
+        userPlanApproved = false;
+        userModalMessage = string.Empty;
+        userModalTone = "info";
+        showUserEditorModal = true;
+        await RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private async Task OpenEditUserModalAsync(string userName)
+    {
+        userEditor = await SftpService.GetUserEditorAsync(userName);
+        EnsureUserEditorReady();
+        userEditContext = new EditContext(userEditor);
+        userEditorPassword = string.Empty;
+        userPlan = null;
+        userPlanApproved = false;
+        userModalMessage = string.Empty;
+        userModalTone = "info";
+        showUserEditorModal = true;
+        await RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private void EnsureUserEditorReady()
+    {
+        if (userEditor is null)
+        {
+            return;
+        }
+
+        if (userEditor.PublicKeys.Count == 0 &&
+            userEditor.AuthenticationMode != SftpAuthenticationMode.PasswordOnly)
+        {
+            userEditor.PublicKeys.Add(new SftpPublicKeyEditor());
+        }
+    }
+
+    private Task CloseUserEditorModalAsync()
+    {
+        showUserEditorModal = false;
+        userEditor = null;
+        userEditContext = null;
+        userEditorPassword = string.Empty;
+        userPlan = null;
+        userPlanApproved = false;
+        userModalMessage = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetUserNameAsync(string? value)
+    {
+        if (userEditor is not null)
+        {
+            userEditor.UserName = value ?? string.Empty;
+        }
+
+        return RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private Task SetUserAuthenticationModeAsync(SftpAuthenticationMode mode)
+    {
+        if (userEditor is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        userEditor.AuthenticationMode = mode;
+        if (mode != SftpAuthenticationMode.PasswordOnly && userEditor.PublicKeys.Count == 0)
+        {
+            userEditor.PublicKeys.Add(new SftpPublicKeyEditor());
+        }
+
+        if (!RequiresPassword(mode))
+        {
+            userEditorPassword = string.Empty;
+        }
+        else if (string.IsNullOrWhiteSpace(userEditorPassword) && ShouldShowUserPasswordField())
+        {
+            userEditorPassword = GenerateSuggestedPassword();
+        }
+
+        return RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private Task SetUserEnabledAsync(bool value)
+    {
+        if (userEditor is not null)
+        {
+            userEditor.IsEnabled = value;
+        }
+
+        return RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private bool ShouldShowUserPasswordField()
+    {
+        if (userEditor is null || !RequiresPassword(userEditor.AuthenticationMode))
+        {
+            return false;
+        }
+
+        return userEditor.IsNewUser || !userEditor.HasExistingPassword || userEditor.AuthenticationMode != SftpAuthenticationMode.PasswordOnly && !userEditor.HasExistingPassword;
+    }
+
+    private Task SetUserPasswordAsync(string? value)
+    {
+        userEditorPassword = value ?? string.Empty;
+        return RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private Task GenerateUserPasswordAsync()
+    {
+        userEditorPassword = GenerateSuggestedPassword();
+        return RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private async Task CopyUserPasswordAsync()
+    {
+        if (string.IsNullOrWhiteSpace(userEditorPassword))
+        {
+            userModalMessage = "Generate or enter a password first, then copy it.";
+            userModalTone = "warning";
+            return;
+        }
+
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", userEditorPassword);
+        userModalMessage = copied ? "Password copied." : "Linux Made Sane could not copy the password.";
+        userModalTone = copied ? "success" : "error";
+    }
+
+    private Task AddPublicKeyRowAsync()
+    {
+        userEditor?.PublicKeys.Add(new SftpPublicKeyEditor());
+        return RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private Task RemovePublicKeyRowAsync(int index)
+    {
+        if (userEditor is null || index < 0 || index >= userEditor.PublicKeys.Count)
+        {
+            return Task.CompletedTask;
+        }
+
+        userEditor.PublicKeys.RemoveAt(index);
+        return RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private void HandlePublicKeyLabelInput(int index, string? value)
+    {
+        if (userEditor is null || index < 0 || index >= userEditor.PublicKeys.Count)
+        {
+            return;
+        }
+
+        userEditor.PublicKeys[index].Label = value ?? string.Empty;
+    }
+
+    private void HandlePublicKeyTextInput(int index, string? value)
+    {
+        if (userEditor is null || index < 0 || index >= userEditor.PublicKeys.Count)
+        {
+            return;
+        }
+
+        userEditor.PublicKeys[index].PublicKeyText = value ?? string.Empty;
+        userPlanApproved = false;
+    }
+
+    private async Task ImportPublicKeysAsync(InputFileChangeEventArgs args)
+    {
+        if (userEditor is null)
+        {
+            return;
+        }
+
+        const long maxImportBytes = 128 * 1024;
+        foreach (var file in args.GetMultipleFiles())
+        {
+            await using var stream = file.OpenReadStream(maxImportBytes);
+            using var reader = new StreamReader(stream);
+            var content = await reader.ReadToEndAsync();
+
+            foreach (var importedKey in ExtractImportedPublicKeys(content))
+            {
+                if (userEditor.PublicKeys.Any(existing => existing.PublicKeyText.Equals(importedKey, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                userEditor.PublicKeys.Add(new SftpPublicKeyEditor
+                {
+                    Label = BuildImportedKeyLabel(importedKey),
+                    PublicKeyText = importedKey
+                });
+            }
+        }
+
+        await RefreshUserPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private async Task PreviewUserPlanAsync()
+    {
+        await RefreshUserPlanAsync(resetApproval: true, announceReadyState: true);
+    }
+
+    private async Task RefreshUserPlanAsync(bool resetApproval, bool announceReadyState)
+    {
+        if (userEditor is null || userEditContext is null)
+        {
+            return;
+        }
+
+        if (!userEditContext.Validate())
+        {
+            userPlan = null;
+            if (resetApproval)
+            {
+                userPlanApproved = false;
+            }
+
+            if (announceReadyState)
+            {
+                userModalMessage = "Fix the SFTP user fields before previewing the plan.";
+                userModalTone = "error";
+            }
+            return;
+        }
+
+        isUserBusy = true;
+        try
+        {
+            userPlan = await SftpService.PreviewUserAsync(userEditor, userEditorPassword);
+            if (resetApproval)
+            {
+                userPlanApproved = false;
+            }
+
+            if (announceReadyState)
+            {
+                userModalMessage = "Review the Linux account, chroot, and auth changes before you approve this user update.";
+                userModalTone = userPlan.Validation.IsValid ? "info" : "error";
+            }
+        }
+        catch (Exception exception)
+        {
+            userPlan = null;
+            if (resetApproval)
+            {
+                userPlanApproved = false;
+            }
+            userModalMessage = exception.Message;
+            userModalTone = "error";
+        }
+        finally
+        {
+            isUserBusy = false;
+        }
+    }
+
+    private Task SetUserPlanApprovedAsync(bool value)
+    {
+        userPlanApproved = value;
+        return Task.CompletedTask;
+    }
+
+    private async Task ApplyUserAsync()
+    {
+        if (userEditor is null || userEditContext is null)
+        {
+            return;
+        }
+
+        if (!userEditContext.Validate())
+        {
+            userModalMessage = "Fix the SFTP user fields before applying the user.";
+            userModalTone = "error";
+            return;
+        }
+
+        if (userPlan is null)
+        {
+            await RefreshUserPlanAsync(resetApproval: false, announceReadyState: true);
+            if (userPlan is null)
+            {
+                return;
+            }
+        }
+
+        isUserBusy = true;
+        try
+        {
+            var result = await SftpService.SaveUserAsync(userEditor, userEditorPassword, approved: true);
+            userModalMessage = result.Summary;
+            userModalTone = result.Success ? "success" : "error";
+            statusMessage = result.Summary;
+            statusTone = result.Success ? "success" : "error";
+            if (result.Success)
+            {
+                selectedUserName = userEditor.UserName.Trim().ToLowerInvariant();
+                await CloseUserEditorModalAsync();
+                await LoadAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            userModalMessage = exception.Message;
+            userModalTone = "error";
+        }
+        finally
+        {
+            isUserBusy = false;
+        }
+    }
+
+    private async Task OpenPasswordResetModalAsync(string userName)
+    {
+        passwordResetEditor = await SftpService.GetPasswordResetEditorAsync(userName);
+        passwordResetEditContext = new EditContext(passwordResetEditor);
+        passwordResetPlan = null;
+        passwordResetApproved = false;
+        passwordResetMessage = string.Empty;
+        passwordResetTone = "info";
+        showPasswordResetModal = true;
+        await RefreshPasswordResetPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private Task ClosePasswordResetModalAsync()
+    {
+        showPasswordResetModal = false;
+        passwordResetEditor = null;
+        passwordResetEditContext = null;
+        passwordResetPlan = null;
+        passwordResetApproved = false;
+        passwordResetMessage = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetResetPasswordAsync(string? value)
+    {
+        if (passwordResetEditor is not null)
+        {
+            passwordResetEditor.NewPassword = value ?? string.Empty;
+        }
+
+        return RefreshPasswordResetPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private Task GenerateResetPasswordAsync()
+    {
+        if (passwordResetEditor is not null)
+        {
+            passwordResetEditor.NewPassword = GenerateSuggestedPassword();
+        }
+
+        return RefreshPasswordResetPlanAsync(resetApproval: true, announceReadyState: false);
+    }
+
+    private async Task CopyResetPasswordAsync()
+    {
+        if (passwordResetEditor is null || string.IsNullOrWhiteSpace(passwordResetEditor.NewPassword))
+        {
+            passwordResetMessage = "Generate or enter a password first, then copy it.";
+            passwordResetTone = "warning";
+            return;
+        }
+
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", passwordResetEditor.NewPassword);
+        passwordResetMessage = copied ? "Password copied." : "Linux Made Sane could not copy the password.";
+        passwordResetTone = copied ? "success" : "error";
+    }
+
+    private async Task PreviewPasswordResetPlanAsync()
+    {
+        await RefreshPasswordResetPlanAsync(resetApproval: true, announceReadyState: true);
+    }
+
+    private async Task RefreshPasswordResetPlanAsync(bool resetApproval, bool announceReadyState)
+    {
+        if (passwordResetEditor is null || passwordResetEditContext is null)
+        {
+            return;
+        }
+
+        if (!passwordResetEditContext.Validate())
+        {
+            passwordResetPlan = null;
+            if (resetApproval)
+            {
+                passwordResetApproved = false;
+            }
+
+            if (announceReadyState)
+            {
+                passwordResetMessage = "Fix the password field before previewing the reset.";
+                passwordResetTone = "error";
+            }
+            return;
+        }
+
+        isPasswordResetBusy = true;
+        try
+        {
+            passwordResetPlan = await SftpService.PreviewPasswordResetAsync(passwordResetEditor);
+            if (resetApproval)
+            {
+                passwordResetApproved = false;
+            }
+
+            if (announceReadyState)
+            {
+                passwordResetMessage = "Review the reset command, then approve the password change.";
+                passwordResetTone = passwordResetPlan.Validation.IsValid ? "info" : "error";
+            }
+        }
+        catch (Exception exception)
+        {
+            passwordResetPlan = null;
+            if (resetApproval)
+            {
+                passwordResetApproved = false;
+            }
+            passwordResetMessage = exception.Message;
+            passwordResetTone = "error";
+        }
+        finally
+        {
+            isPasswordResetBusy = false;
+        }
+    }
+
+    private Task SetPasswordResetApprovedAsync(bool value)
+    {
+        passwordResetApproved = value;
+        return Task.CompletedTask;
+    }
+
+    private async Task ApplyPasswordResetAsync()
+    {
+        if (passwordResetEditor is null || passwordResetEditContext is null)
+        {
+            return;
+        }
+
+        if (!passwordResetEditContext.Validate())
+        {
+            passwordResetMessage = "Fix the password field before applying the reset.";
+            passwordResetTone = "error";
+            return;
+        }
+
+        if (passwordResetPlan is null)
+        {
+            await RefreshPasswordResetPlanAsync(resetApproval: false, announceReadyState: true);
+            if (passwordResetPlan is null)
+            {
+                return;
+            }
+        }
+
+        isPasswordResetBusy = true;
+        try
+        {
+            var result = await SftpService.ResetPasswordAsync(passwordResetEditor, approved: true);
+            passwordResetMessage = result.Summary;
+            passwordResetTone = result.Success ? "success" : "error";
+            statusMessage = result.Summary;
+            statusTone = result.Success ? "success" : "error";
+            if (result.Success)
+            {
+                await ClosePasswordResetModalAsync();
+                await LoadAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            passwordResetMessage = exception.Message;
+            passwordResetTone = "error";
+        }
+        finally
+        {
+            isPasswordResetBusy = false;
+        }
+    }
+
+    private async Task OpenUserActionModalAsync(UserActionKind actionKind, string userName)
+    {
+        pendingUserAction = actionKind;
+        pendingUserActionUserName = userName;
+        userActionPlan = actionKind switch
+        {
+            UserActionKind.Disable => await SftpService.PreviewDisableUserAsync(userName),
+            UserActionKind.Delete => await SftpService.PreviewDeleteUserAsync(userName),
+            _ => null
+        };
+        userActionApproved = false;
+        userActionMessage = string.Empty;
+        userActionTone = "info";
+        showUserActionModal = userActionPlan is not null;
+    }
+
+    private Task CloseUserActionModalAsync()
+    {
+        showUserActionModal = false;
+        pendingUserAction = null;
+        pendingUserActionUserName = string.Empty;
+        userActionPlan = null;
+        userActionApproved = false;
+        userActionMessage = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetUserActionApprovedAsync(bool value)
+    {
+        userActionApproved = value;
+        return Task.CompletedTask;
+    }
+
+    private async Task ApplyPendingUserActionAsync()
+    {
+        if (pendingUserAction is null)
+        {
+            return;
+        }
+
+        isUserActionBusy = true;
+        try
+        {
+            if (pendingUserAction.Value is not UserActionKind.Disable and not UserActionKind.Delete)
+            {
+                userActionMessage = "That SFTP action is no longer available.";
+                userActionTone = "error";
+                return;
+            }
+
+            var result = pendingUserAction.Value == UserActionKind.Disable
+                ? await SftpService.DisableUserAsync(pendingUserActionUserName, approved: true)
+                : await SftpService.DeleteUserAsync(pendingUserActionUserName, approved: true);
+
+            userActionMessage = result.Summary;
+            userActionTone = result.Success ? "success" : "error";
+            statusMessage = result.Summary;
+            statusTone = result.Success ? "success" : "error";
+
+            if (result.Success)
+            {
+                if (pendingUserAction == UserActionKind.Delete &&
+                    string.Equals(selectedUserName, pendingUserActionUserName, StringComparison.OrdinalIgnoreCase))
+                {
+                    selectedUserName = null;
+                }
+
+                await CloseUserActionModalAsync();
+                await LoadAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            userActionMessage = exception.Message;
+            userActionTone = "error";
+        }
+        finally
+        {
+            isUserActionBusy = false;
+        }
+    }
+
+    private string GetUserActionTitle() =>
+        pendingUserAction switch
+        {
+            UserActionKind.Disable => $"Disable {pendingUserActionUserName}",
+            UserActionKind.Delete => $"Delete {pendingUserActionUserName}",
+            _ => "Pending SFTP action"
+        };
+
+    private string GetUserActionSubtitle() =>
+        pendingUserAction switch
+        {
+            UserActionKind.Disable => "Disable the Linux account immediately while keeping the LMS audit trail and chroot layout visible.",
+            UserActionKind.Delete => "Delete the Linux account, managed chroot, and LMS-tracked authorized_keys file.",
+            _ => string.Empty
+        };
+
+    private string GetUserActionVerb() =>
+        pendingUserAction switch
+        {
+            UserActionKind.Disable => "Disable user",
+            UserActionKind.Delete => "Delete user",
+            _ => "Apply"
+        };
+
+    private RenderFragment RenderPlan(SftpConfigurationPlan plan, string heading, string helpText) => @<section class="surface-subcard sftp-plan-card">
+        <div class="table-header">
+            <div>
+                <p class="eyebrow">Preview</p>
+                <h3>@heading</h3>
+                <p class="meta-text">@helpText</p>
+            </div>
+            <UiPill Tone="@(plan.Validation.IsValid ? UiPillTone.Success : UiPillTone.Failure)">
+                @(plan.Validation.IsValid ? "Validated" : "Invalid")
+            </UiPill>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(plan.BackupSummary))
+        {
+            <div class="sftp-plan-summary">@plan.BackupSummary</div>
+        }
+
+        @if (plan.Warnings.Count > 0)
+        {
+            <div class="sftp-warning-list">
+                @foreach (var warning in plan.Warnings)
+                {
+                    <div class="sftp-warning-item">@warning</div>
+                }
+            </div>
+        }
+
+        <div class="sftp-plan-validation">
+            <strong>@plan.Validation.Summary</strong>
+            @if (plan.Validation.Errors.Count > 0)
+            {
+                <ul>
+                    @foreach (var error in plan.Validation.Errors)
+                    {
+                        <li>@error</li>
+                    }
+                </ul>
+            }
+        </div>
+
+        <div class="sftp-plan-action-list">
+            @foreach (var action in plan.Actions.OrderBy(item => item.Order))
+            {
+                <article class="sftp-plan-action">
+                    <div class="sftp-plan-action-header">
+                        <strong>@action.Order. @action.Title</strong>
+                        <UiPill Tone="@(action.MutatesSystem ? UiPillTone.Warning : UiPillTone.Neutral)">
+                            @(action.MutatesSystem ? "Mutates system" : "Read / validate")
+                        </UiPill>
+                    </div>
+                    <p>@action.Summary</p>
+                    <pre class="sftp-plan-code"><code>@action.CommandText</code></pre>
+                    @if (!string.IsNullOrWhiteSpace(action.TargetPath))
+                    {
+                        <span class="meta-text">Target: @action.TargetPath</span>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(action.ProposedContent))
+                    {
+                        <details class="sftp-plan-content">
+                            <summary>Preview generated content</summary>
+                            <pre class="sftp-plan-code"><code>@action.ProposedContent</code></pre>
+                        </details>
+                    }
+                </article>
+            }
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(plan.ProposedSshdConfig))
+        {
+            <details class="sftp-plan-content">
+                <summary>Full generated sshd configuration</summary>
+                <pre class="sftp-plan-code"><code>@plan.ProposedSshdConfig</code></pre>
+            </details>
+        }
+    </section>;
+
+    private static string GetAuthModeLabel(SftpAuthenticationMode mode) => mode switch
+    {
+        SftpAuthenticationMode.PasswordOnly => "Password only",
+        SftpAuthenticationMode.PublicKeyOnly => "Public key only",
+        SftpAuthenticationMode.PasswordAndPublicKey => "Password and public key",
+        _ => mode.ToString()
+    };
+
+    private static string GetAuthModeHelperText(SftpAuthenticationMode mode) => mode switch
+    {
+        SftpAuthenticationMode.PasswordOnly => "SSH accepts only a password for this user. No public key is required.",
+        SftpAuthenticationMode.PublicKeyOnly => "Passwords are disabled. At least one managed OpenSSH or SSH2 public key is required.",
+        SftpAuthenticationMode.PasswordAndPublicKey => "SSH requires both a valid OpenSSH or SSH2 public key and the Linux password.",
+        _ => string.Empty
+    };
+
+    private static string GetPublicKeyHelperText(SftpAuthenticationMode mode) => mode switch
+    {
+        SftpAuthenticationMode.PasswordOnly => "Optional. Keep managed OpenSSH or SSH2 public keys ready if you plan to switch this user to a key-based mode later.",
+        SftpAuthenticationMode.PublicKeyOnly => "Required. SSH login is locked to imported OpenSSH or SSH2 public keys only.",
+        SftpAuthenticationMode.PasswordAndPublicKey => "Required. SSH login needs both a public key and the password.",
+        _ => string.Empty
+    };
+
+    private static UiPillTone GetAuthModeTone(SftpAuthenticationMode mode) => mode switch
+    {
+        SftpAuthenticationMode.PasswordOnly => UiPillTone.Warning,
+        SftpAuthenticationMode.PublicKeyOnly => UiPillTone.Success,
+        SftpAuthenticationMode.PasswordAndPublicKey => UiPillTone.Neutral,
+        _ => UiPillTone.Neutral
+    };
+
+    private static bool RequiresPassword(SftpAuthenticationMode mode) =>
+        mode is SftpAuthenticationMode.PasswordOnly or SftpAuthenticationMode.PasswordAndPublicKey;
+
+    private static string FormatTimestamp(DateTimeOffset value) =>
+        value.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+
+    private static string FormatNullableTimestamp(DateTimeOffset? value, string fallback) =>
+        value?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? fallback;
+
+    private static string AbbreviateKey(string key)
+    {
+        var normalized = key.Trim();
+        if (normalized.Length <= 120)
+        {
+            return normalized;
+        }
+
+        return $"{normalized[..56]} ... {normalized[^40..]}";
+    }
+
+    private static string BuildImportedKeyLabel(string publicKeyText)
+    {
+        if (publicKeyText.Contains("BEGIN SSH2 PUBLIC KEY", StringComparison.Ordinal))
+        {
+            var commentLine = publicKeyText
+                .Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace('\r', '\n')
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault(line => line.StartsWith("Comment:", StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(commentLine))
+            {
+                var comment = commentLine["Comment:".Length..].Trim().Trim('"');
+                if (!string.IsNullOrWhiteSpace(comment))
+                {
+                    return comment;
+                }
+            }
+        }
+
+        var parts = publicKeyText.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length >= 3 && !string.IsNullOrWhiteSpace(parts[2])
+            ? parts[2]
+            : "Imported key";
+    }
+
+    private static IReadOnlyList<string> ExtractImportedPublicKeys(string content)
+    {
+        var normalized = (content ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
+
+        var keys = new List<string>();
+        var lines = normalized.Split('\n');
+        var currentSsh2 = new List<string>();
+        var insideSsh2 = false;
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.Trim();
+            if (insideSsh2)
+            {
+                currentSsh2.Add(line);
+                if (string.Equals(line, "---- END SSH2 PUBLIC KEY ----", StringComparison.Ordinal))
+                {
+                    keys.Add(string.Join(Environment.NewLine, currentSsh2));
+                    currentSsh2.Clear();
+                    insideSsh2 = false;
+                }
+
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            if (string.Equals(line, "---- BEGIN SSH2 PUBLIC KEY ----", StringComparison.Ordinal))
+            {
+                insideSsh2 = true;
+                currentSsh2.Add(line);
+                continue;
+            }
+
+            keys.Add(line);
+        }
+
+        if (insideSsh2 && currentSsh2.Count > 0)
+        {
+            keys.Add(string.Join(Environment.NewLine, currentSsh2));
+        }
+
+        return keys;
+    }
+
+    private static string GenerateSuggestedPassword()
+    {
+        const string upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+        const string lower = "abcdefghijkmnopqrstuvwxyz";
+        const string digits = "23456789";
+        const string symbols = "!@#$%^*-_=+?";
+        var all = upper + lower + digits + symbols;
+        Span<char> password = stackalloc char[20];
+
+        password[0] = upper[Random.Shared.Next(upper.Length)];
+        password[1] = lower[Random.Shared.Next(lower.Length)];
+        password[2] = digits[Random.Shared.Next(digits.Length)];
+        password[3] = symbols[Random.Shared.Next(symbols.Length)];
+
+        for (var index = 4; index < password.Length; index++)
+        {
+            password[index] = all[Random.Shared.Next(all.Length)];
+        }
+
+        for (var index = password.Length - 1; index > 0; index--)
+        {
+            var swapIndex = Random.Shared.Next(index + 1);
+            (password[index], password[swapIndex]) = (password[swapIndex], password[index]);
+        }
+
+        return new string(password);
+    }
+
+    private enum UserActionKind
+    {
+        Disable,
+        Delete
+    }
+}

@@ -1,0 +1,498 @@
+@implements IAsyncDisposable
+@inject IJSRuntime JSRuntime
+
+<div class="@ResolvedClass" @attributes="AdditionalAttributes">
+    <div class="host-file-address-bar" title="@Title">
+        <span class="host-file-address-icon" aria-hidden="true">
+            <UiGlyphIcon Glyph="@Glyph" />
+        </span>
+        @if (!string.IsNullOrWhiteSpace(PrefixText))
+        {
+            <span class="host-file-address-prefix"
+                  title="@ResolvedPrefixTitle">
+                @PrefixText
+            </span>
+        }
+        <div class="host-file-address-input-shell">
+            @if (ShouldShowInlineSuggestion)
+            {
+                <div class="host-file-address-input-ghost" aria-hidden="true">
+                    <span class="host-file-address-input-ghost-prefix">@ResolvedValue</span>
+                    <span class="host-file-address-input-ghost-suffix">@InlineSuggestionSuffix</span>
+                </div>
+            }
+
+            <input class="@ResolvedInputClass"
+                   @ref="inputElement"
+                   type="text"
+                   value="@ResolvedValue"
+                   placeholder="@Placeholder"
+                   autocomplete="off"
+                   spellcheck="false"
+                   disabled="@Disabled"
+                   aria-label="@ResolvedAriaLabel"
+                   aria-autocomplete="both"
+                   role="combobox"
+                   aria-expanded="@ShouldShowSuggestionPanel"
+                   @onfocus="OpenSuggestions"
+                   @onblur="CloseSuggestionsAfterBlurAsync"
+                   @oninput="HandleInputAsync"
+                   @onchange="HandleChangeAsync"
+                   @onkeydown="HandleKeyDownAsync" />
+        </div>
+    </div>
+
+    @if (ShouldShowSuggestionPanel)
+    {
+        <div class="host-file-path-suggestions" role="listbox" @ref="suggestionPanelElement">
+            @if (VisibleSuggestions.Count == 0)
+            {
+                <div class="host-file-path-suggestion-state">
+                    @(IsLoadingSuggestions ? "Loading folders..." : "No folders found.")
+                </div>
+            }
+            else
+            {
+                @for (var suggestionIndex = 0; suggestionIndex < VisibleSuggestions.Count; suggestionIndex++)
+                {
+                    var suggestion = VisibleSuggestions[suggestionIndex];
+                    <button class="host-file-path-suggestion @(suggestionIndex == activeSuggestionIndex ? "active" : null)"
+                            type="button"
+                            role="option"
+                            aria-selected="@(suggestionIndex == activeSuggestionIndex)"
+                            title="@suggestion"
+                            @key="suggestion"
+                            @onmousedown:preventDefault="true"
+                            @onclick="@(() => SelectSuggestionAsync(suggestion))">
+                        <span class="host-file-path-suggestion-icon" aria-hidden="true">
+                            <UiGlyphIcon Glyph="UiIconGlyph.FolderClosed" />
+                        </span>
+                        <span class="host-file-path-suggestion-main">@GetPathLabel(suggestion)</span>
+                        <span class="host-file-path-suggestion-context">@GetParentDirectory(suggestion)</span>
+                    </button>
+                }
+            }
+
+            @if (HasMoreSuggestions)
+            {
+                <div class="host-file-path-suggestion-more">
+                    Showing @VisibleSuggestions.Count of @SuggestionTotalCount. Scroll for more.
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private const int SuggestionBatchSize = 50;
+
+    private bool suggestionsOpen;
+    private bool keepEmptySuggestionPanelVisible;
+    private bool suppressNextCommit;
+    private bool moveCaretToEndOnRender;
+    private DateTimeOffset suppressBlurCloseUntilUtc;
+    private int activeSuggestionIndex = -1;
+    private int visibleSuggestionCount = SuggestionBatchSize;
+    private ElementReference inputElement;
+    private ElementReference suggestionPanelElement;
+    private DotNetObjectReference<UiPathCombobox>? suggestionInteropReference;
+
+    [Parameter] public string? Value { get; set; }
+    [Parameter] public EventCallback<string?> ValueChanged { get; set; }
+    [Parameter] public EventCallback<string?> CommitRequested { get; set; }
+    [Parameter] public EventCallback<string> SuggestionSelected { get; set; }
+    [Parameter] public IReadOnlyList<string> Suggestions { get; set; } = [];
+    [Parameter] public string? Placeholder { get; set; }
+    [Parameter] public string? AriaLabel { get; set; }
+    [Parameter] public string? Title { get; set; }
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public string? InputClass { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public string? EscapeValue { get; set; }
+    [Parameter] public UiIconGlyph Glyph { get; set; } = UiIconGlyph.FolderOpen;
+    [Parameter] public string? PrefixText { get; set; }
+    [Parameter] public string? PrefixTitle { get; set; }
+    [Parameter] public bool IsLoadingSuggestions { get; set; }
+    [Parameter] public bool KeepSuggestionsOpenOnSelect { get; set; } = true;
+    [Parameter] public bool AppendTrailingSlashOnSelect { get; set; } = true;
+    [Parameter(CaptureUnmatchedValues = true)] public IReadOnlyDictionary<string, object>? AdditionalAttributes { get; set; }
+
+    private string ResolvedValue => Value ?? string.Empty;
+    private string ResolvedAriaLabel => string.IsNullOrWhiteSpace(AriaLabel)
+        ? "Path"
+        : AriaLabel.Trim();
+    private string ResolvedClass => string.IsNullOrWhiteSpace(Class)
+        ? "host-file-address-combobox"
+        : $"host-file-address-combobox {Class}";
+    private string ResolvedInputClass => string.IsNullOrWhiteSpace(InputClass)
+        ? "host-file-address-input"
+        : $"host-file-address-input {InputClass}";
+    private string? ResolvedPrefixTitle => string.IsNullOrWhiteSpace(PrefixTitle) ? PrefixText : PrefixTitle.Trim();
+    private IReadOnlyList<string> FilteredSuggestions =>
+        Suggestions
+            .Where(path => !string.IsNullOrWhiteSpace(path) &&
+                           !string.Equals(path, ResolvedValue, StringComparison.Ordinal))
+            .ToArray();
+    private IReadOnlyList<string> VisibleSuggestions => FilteredSuggestions.Take(visibleSuggestionCount).ToArray();
+    private int SuggestionTotalCount => FilteredSuggestions.Count;
+    private bool HasMoreSuggestions => SuggestionTotalCount > visibleSuggestionCount;
+    private bool ShouldShowSuggestions => SuggestionTotalCount > 0;
+    private bool ShouldShowSuggestionPanel =>
+        suggestionsOpen &&
+        (ShouldShowSuggestions || IsLoadingSuggestions || keepEmptySuggestionPanelVisible) &&
+        !Disabled;
+    private string? ActiveSuggestion =>
+        VisibleSuggestions.Count == 0 || activeSuggestionIndex < 0
+            ? null
+            : VisibleSuggestions[NormalizeSuggestionIndex(activeSuggestionIndex)];
+    private string? InlineSuggestionCandidate =>
+        VisibleSuggestions.Count == 0
+            ? null
+            : activeSuggestionIndex < 0
+                ? VisibleSuggestions[0]
+                : VisibleSuggestions[NormalizeSuggestionIndex(activeSuggestionIndex)];
+    private bool ShouldShowInlineSuggestion => ShouldShowSuggestionPanel && ShouldShowSuggestions && !string.IsNullOrEmpty(InlineSuggestionSuffix);
+    private string InlineSuggestionSuffix => GetInlineSuggestionSuffix(ResolvedValue, InlineSuggestionCandidate);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        suggestionInteropReference ??= DotNetObjectReference.Create(this);
+
+        await JSRuntime.InvokeVoidAsync(
+            "lmsFileBrowser.watchSuggestionKeys",
+            inputElement,
+            suggestionInteropReference);
+
+        if (moveCaretToEndOnRender)
+        {
+            moveCaretToEndOnRender = false;
+            await JSRuntime.InvokeVoidAsync(
+                "lmsFileBrowser.focusPathInputAtEnd",
+                inputElement);
+        }
+
+        if (!ShouldShowSuggestionPanel)
+        {
+            return;
+        }
+
+        if (VisibleSuggestions.Count > 0 && activeSuggestionIndex >= 0)
+        {
+            activeSuggestionIndex = NormalizeSuggestionIndex(activeSuggestionIndex);
+
+            await JSRuntime.InvokeVoidAsync(
+                "lmsFileBrowser.scrollActiveSuggestionIntoView",
+                suggestionPanelElement);
+        }
+
+        if (VisibleSuggestions.Count > 0 && HasMoreSuggestions)
+        {
+            await JSRuntime.InvokeVoidAsync(
+                "lmsFileBrowser.watchSuggestionScroll",
+                suggestionPanelElement,
+                suggestionInteropReference);
+        }
+    }
+
+    private void OpenSuggestions()
+    {
+        suggestionsOpen = true;
+    }
+
+    private async Task CloseSuggestionsAfterBlurAsync()
+    {
+        await Task.Delay(120);
+
+        if (DateTimeOffset.UtcNow < suppressBlurCloseUntilUtc)
+        {
+            return;
+        }
+
+        suggestionsOpen = false;
+        keepEmptySuggestionPanelVisible = false;
+        ResetSuggestionWindow();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task HandleInputAsync(ChangeEventArgs args)
+    {
+        suggestionsOpen = true;
+        keepEmptySuggestionPanelVisible = true;
+        ResetSuggestionWindow();
+        await ValueChanged.InvokeAsync(args.Value?.ToString() ?? string.Empty);
+    }
+
+    private async Task HandleChangeAsync(ChangeEventArgs args)
+    {
+        if (suppressNextCommit)
+        {
+            suppressNextCommit = false;
+            return;
+        }
+
+        if (CommitRequested.HasDelegate)
+        {
+            await CommitRequested.InvokeAsync(args.Value?.ToString() ?? string.Empty);
+        }
+    }
+
+    private async Task HandleKeyDownAsync(KeyboardEventArgs args)
+    {
+        if (args.Key is "ArrowDown" or "ArrowUp" or "Tab")
+        {
+            await OnPathSuggestionKeyDown(args.Key);
+            return;
+        }
+
+        if (string.Equals(args.Key, "Enter", StringComparison.OrdinalIgnoreCase))
+        {
+            if (ShouldShowSuggestionPanel && VisibleSuggestions.Count > 0)
+            {
+                await SelectActiveSuggestionAsync();
+            }
+            else if (CommitRequested.HasDelegate)
+            {
+                await CommitRequested.InvokeAsync(ResolvedValue);
+            }
+
+            return;
+        }
+
+        if (string.Equals(args.Key, "Escape", StringComparison.OrdinalIgnoreCase))
+        {
+            suggestionsOpen = false;
+            keepEmptySuggestionPanelVisible = false;
+            ResetSuggestionWindow();
+            if (EscapeValue is not null)
+            {
+                suppressNextCommit = true;
+                await ValueChanged.InvokeAsync(EscapeValue);
+            }
+        }
+    }
+
+    private async Task SelectSuggestionAsync(string suggestion)
+    {
+        await ApplySuggestionAsync(
+            suggestion,
+            keepSuggestionsOpen: KeepSuggestionsOpenOnSelect,
+            invokeSuggestionSelected: true);
+    }
+
+    private async Task AutocompleteSuggestionAsync(string suggestion)
+    {
+        await ApplySuggestionAsync(
+            suggestion,
+            keepSuggestionsOpen: true,
+            invokeSuggestionSelected: false);
+    }
+
+    private async Task ApplySuggestionAsync(
+        string suggestion,
+        bool keepSuggestionsOpen,
+        bool invokeSuggestionSelected)
+    {
+        var selectedValue = AppendTrailingSlashOnSelect
+            ? EnsureTrailingSlash(suggestion)
+            : suggestion;
+
+        suppressNextCommit = true;
+        suggestionsOpen = keepSuggestionsOpen;
+        keepEmptySuggestionPanelVisible = keepSuggestionsOpen;
+        suppressBlurCloseUntilUtc = keepSuggestionsOpen
+            ? DateTimeOffset.UtcNow.AddMilliseconds(350)
+            : DateTimeOffset.MinValue;
+        moveCaretToEndOnRender = true;
+        ResetSuggestionWindow();
+        await ValueChanged.InvokeAsync(selectedValue);
+        await InvokeAsync(StateHasChanged);
+
+        if (invokeSuggestionSelected && SuggestionSelected.HasDelegate)
+        {
+            await SuggestionSelected.InvokeAsync(selectedValue);
+        }
+    }
+
+    [JSInvokable]
+    public async Task OnPathSuggestionKeyDown(string key)
+    {
+        if (key is "ArrowDown")
+        {
+            suggestionsOpen = true;
+            MoveActiveSuggestion(1);
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        if (key is "ArrowUp")
+        {
+            suggestionsOpen = true;
+            MoveActiveSuggestion(-1);
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        if (key is "Enter")
+        {
+            await SelectActiveSuggestionAsync();
+            return;
+        }
+
+        if (key is "Tab")
+        {
+            await AutocompleteActiveSuggestionAsync();
+        }
+    }
+
+    [JSInvokable]
+    public async Task OnPathSuggestionListBottomReached()
+    {
+        if (!ShouldShowSuggestionPanel || !HasMoreSuggestions)
+        {
+            return;
+        }
+
+        visibleSuggestionCount = Math.Min(visibleSuggestionCount + SuggestionBatchSize, SuggestionTotalCount);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void ResetSuggestionWindow()
+    {
+        visibleSuggestionCount = SuggestionBatchSize;
+        activeSuggestionIndex = -1;
+    }
+
+    private void MoveActiveSuggestion(int delta)
+    {
+        var visibleSuggestions = VisibleSuggestions;
+        if (visibleSuggestions.Count == 0)
+        {
+            activeSuggestionIndex = -1;
+            return;
+        }
+
+        if (activeSuggestionIndex < 0)
+        {
+            activeSuggestionIndex = delta >= 0 ? 0 : visibleSuggestions.Count - 1;
+            return;
+        }
+
+        var nextIndex = activeSuggestionIndex + delta;
+        if (nextIndex >= visibleSuggestions.Count && HasMoreSuggestions)
+        {
+            visibleSuggestionCount = Math.Min(visibleSuggestionCount + SuggestionBatchSize, SuggestionTotalCount);
+            visibleSuggestions = VisibleSuggestions;
+        }
+
+        activeSuggestionIndex = Math.Clamp(nextIndex, 0, Math.Max(0, visibleSuggestions.Count - 1));
+    }
+
+    private async Task SelectActiveSuggestionAsync()
+    {
+        var visibleSuggestions = VisibleSuggestions;
+        if (!ShouldShowSuggestionPanel || visibleSuggestions.Count == 0)
+        {
+            if (CommitRequested.HasDelegate)
+            {
+                await CommitRequested.InvokeAsync(ResolvedValue);
+            }
+
+            return;
+        }
+
+        await SelectSuggestionAsync(visibleSuggestions[NormalizeSuggestionIndex(activeSuggestionIndex)]);
+    }
+
+    private async Task AutocompleteActiveSuggestionAsync()
+    {
+        var visibleSuggestions = VisibleSuggestions;
+        if (!ShouldShowSuggestionPanel || visibleSuggestions.Count == 0)
+        {
+            return;
+        }
+
+        await AutocompleteSuggestionAsync(visibleSuggestions[NormalizeSuggestionIndex(activeSuggestionIndex)]);
+    }
+
+    private int NormalizeSuggestionIndex(int index)
+    {
+        var visibleCount = VisibleSuggestions.Count;
+        return visibleCount == 0 ? 0 : Math.Clamp(index, 0, visibleCount - 1);
+    }
+
+    private static string GetPathLabel(string path)
+    {
+        var normalizedPath = NormalizePath(path);
+        if (normalizedPath == "/")
+        {
+            return "/";
+        }
+
+        var separator = normalizedPath.LastIndexOf('/');
+        return separator >= 0 ? normalizedPath[(separator + 1)..] : normalizedPath;
+    }
+
+    private static string GetParentDirectory(string path)
+    {
+        var normalizedPath = NormalizePath(path);
+        if (normalizedPath == "/")
+        {
+            return "/";
+        }
+
+        var separator = normalizedPath.LastIndexOf('/');
+        if (separator <= 0)
+        {
+            return "/";
+        }
+
+        return normalizedPath[..separator];
+    }
+
+    private static string NormalizePath(string path)
+    {
+        var normalized = (path ?? string.Empty).Trim().Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return "/";
+        }
+
+        if (!normalized.StartsWith("/", StringComparison.Ordinal))
+        {
+            normalized = "/" + normalized.TrimStart('/');
+        }
+
+        while (normalized.Contains("//", StringComparison.Ordinal))
+        {
+            normalized = normalized.Replace("//", "/", StringComparison.Ordinal);
+        }
+
+        return normalized.Length > 1 ? normalized.TrimEnd('/') : normalized;
+    }
+
+    private static string GetInlineSuggestionSuffix(string input, string? suggestion)
+    {
+        if (string.IsNullOrEmpty(input) ||
+            string.IsNullOrEmpty(suggestion) ||
+            suggestion.Length <= input.Length ||
+            !suggestion.StartsWith(input, StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        return suggestion[input.Length..];
+    }
+
+    private static string EnsureTrailingSlash(string path)
+    {
+        var normalizedPath = NormalizePath(path);
+        return normalizedPath == "/" ? normalizedPath : normalizedPath + "/";
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        suggestionInteropReference?.Dispose();
+        suggestionInteropReference = null;
+        return ValueTask.CompletedTask;
+    }
+}

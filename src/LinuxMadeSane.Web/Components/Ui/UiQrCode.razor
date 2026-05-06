@@ -1,0 +1,43 @@
+@using Microsoft.AspNetCore.Components
+@using QRCoder
+
+@if (!string.IsNullOrWhiteSpace(SvgMarkup))
+{
+    <div class="@CssClass" title="@Title">
+        <div class="ui-qr-code-frame" aria-label="@AriaLabel">
+            @((MarkupString)SvgMarkup)
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(Caption))
+        {
+            <p class="ui-qr-code-caption">@Caption</p>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public string Payload { get; set; } = string.Empty;
+    [Parameter] public string? Caption { get; set; }
+    [Parameter] public string? Title { get; set; }
+    [Parameter] public string AriaLabel { get; set; } = "QR code";
+    [Parameter] public string? Class { get; set; }
+
+    private string? SvgMarkup { get; set; }
+
+    private string CssClass => string.Join(" ", new[] { "ui-qr-code", Class }
+        .Where(static value => !string.IsNullOrWhiteSpace(value)));
+
+    protected override void OnParametersSet()
+    {
+        if (string.IsNullOrWhiteSpace(Payload))
+        {
+            SvgMarkup = null;
+            return;
+        }
+
+        using var generator = new QRCodeGenerator();
+        using var data = generator.CreateQrCode(Payload.Trim(), QRCodeGenerator.ECCLevel.Q);
+        var qrCode = new SvgQRCode(data);
+        SvgMarkup = qrCode.GetGraphic(12);
+    }
+}

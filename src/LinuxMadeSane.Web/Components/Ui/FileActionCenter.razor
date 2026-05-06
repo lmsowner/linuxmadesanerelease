@@ -1,0 +1,476 @@
+@implements IDisposable
+@using LinuxMadeSane.Web.Services
+@inject FileActionQueueService FileActionQueueService
+@inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
+@inject IJSRuntime JSRuntime
+
+@if (PopupMode)
+{
+    <div class="page-shell file-action-center-window">
+        @RenderPanel()
+    </div>
+}
+else if (jobs.Count > 0)
+{
+    <section class="file-action-center-dock @(isExpanded ? "file-action-center-expanded" : "file-action-center-collapsed")">
+        @RenderPanel()
+    </section>
+}
+
+@code {
+    [Parameter] public bool PopupMode { get; set; }
+    [Parameter] public string? WorkspaceId { get; set; }
+
+    private string workspaceId = string.Empty;
+    private IReadOnlyList<FileActionJobSnapshot> jobs = [];
+    private bool isExpanded = true;
+    private bool hasObservedPopupJobs;
+    private CancellationTokenSource? popupAutoCloseCts;
+
+    private int ActiveJobCount => jobs.Count(job => !job.IsTerminal);
+    private int AttentionJobCount => jobs.Count(job => job.RequiresAttention);
+    private int CompletedJobCount => jobs.Count(job => job.IsTerminal);
+    private bool HasDismissibleJobs => jobs.Any(job => job.IsTerminal);
+
+    protected override void OnInitialized()
+    {
+        workspaceId = ResolveWorkspaceId();
+        jobs = FileActionQueueService.GetJobs(workspaceId);
+        hasObservedPopupJobs = PopupMode && jobs.Count > 0;
+        isExpanded = PopupMode || jobs.Count > 0;
+        FileActionQueueService.Changed += HandleFileActionChanged;
+        SchedulePopupAutoCloseIfIdle();
+    }
+
+    public void Dispose()
+    {
+        FileActionQueueService.Changed -= HandleFileActionChanged;
+        popupAutoCloseCts?.Cancel();
+        popupAutoCloseCts?.Dispose();
+        popupAutoCloseCts = null;
+    }
+
+    private RenderFragment RenderPanel() => @<div class="file-action-center-shell">
+        <header class="file-action-center-header">
+            <button class="file-action-center-summary"
+                    type="button"
+                    @onclick="ToggleExpandedAsync"
+                    disabled="@PopupMode"
+                    aria-expanded="@isExpanded">
+                <span class="file-action-center-title">File actions</span>
+                <span class="file-action-center-meta">
+                    <UiPill Tone="@(AttentionJobCount > 0 ? UiPillTone.Warning : ActiveJobCount > 0 ? UiPillTone.Success : UiPillTone.Neutral)">
+                        @(AttentionJobCount > 0 ? $"{AttentionJobCount} need attention" : ActiveJobCount > 0 ? $"{ActiveJobCount} active" : $"{CompletedJobCount} completed")
+                    </UiPill>
+                </span>
+            </button>
+
+            <div class="row-action-cluster file-action-center-actions">
+                @if (!PopupMode)
+                {
+                <UiIconButton Label="Pop out"
+                              Title="Open file actions in a separate window"
+                              Glyph="UiIconGlyph.PopOut"
+                              Variant="UiButtonVariant.Toolbar"
+                              Href="@BuildPopupUrl()"
+                              Target="@BuildPopupTarget()"
+                              Rel="noopener"
+                              OnClientPointerDown="@BuildPopupPrepareScript()"
+                              OnClientClick="@BuildPopupOpenScript()" />
+                }
+                @if (HasDismissibleJobs)
+                {
+                    <UiIconButton Label="Clear completed"
+                                  Title="Remove completed and cancelled file actions"
+                                  Glyph="UiIconGlyph.Clear"
+                                  Variant="UiButtonVariant.Toolbar"
+                                  OnClick="ClearCompletedAsync" />
+                }
+            </div>
+        </header>
+
+        @if (isExpanded || PopupMode)
+        {
+            <div class="file-action-center-body">
+                @if (jobs.Count == 0)
+                {
+                    <div class="empty-state">
+                        <h3>No file actions</h3>
+                        <p>Copy, move, and delete actions from the file browser will appear here.</p>
+                    </div>
+                }
+                else
+                {
+                    <div class="compact-list file-action-job-list">
+                        @foreach (var job in jobs)
+                        {
+                            <details class="surface-subcard file-action-job" open="@ShouldOpenJob(job)">
+                                <summary class="file-action-job-summary">
+                                    <div class="file-action-job-heading">
+                                        <div class="file-action-job-title-row">
+                                            <strong>@GetJobTitle(job)</strong>
+                                            <UiPill Tone="@GetJobTone(job.Status)">@GetJobStatusLabel(job.Status)</UiPill>
+                                        </div>
+                                        <div class="meta-text file-action-job-meta">
+                                            <span>@job.HostName</span>
+                                            <span>@($"{job.CompletedItemCount}/{job.TotalItemCount} done")</span>
+                                            @if (!string.IsNullOrWhiteSpace(job.ActiveItemName))
+                                            {
+                                                <span>@job.ActiveItemName</span>
+                                            }
+                                        </div>
+                                    </div>
+                                </summary>
+
+                                <div class="file-action-job-body">
+                                    <div class="file-action-progress-shell">
+                                        <div class="file-action-progress-bar" style="@($"width:{job.ProgressPercent:0.#}%;")"></div>
+                                    </div>
+
+                                    @if (job.UsesByteProgress)
+                                    {
+                                        <div class="meta-text file-action-job-progress-copy">
+                                            <span>@($"{FormatBytes(job.BytesTransferred)} / {FormatBytes(job.TotalBytes ?? 0)}")</span>
+                                            @if (!string.IsNullOrWhiteSpace(job.TransferPhase))
+                                            {
+                                                <span>@job.TransferPhase</span>
+                                            }
+                                        </div>
+                                    }
+
+                                    <p class="meta-text file-action-job-status-copy">@job.StatusMessage</p>
+                                    @if (!string.IsNullOrWhiteSpace(job.CurrentDetail))
+                                    {
+                                        <p class="meta-text file-action-job-current-detail">Current: @job.CurrentDetail</p>
+                                    }
+
+                                    @if (job.RequiresAttention && !string.IsNullOrWhiteSpace(job.FailedItemName))
+                                    {
+                                        <p class="callout warning file-action-job-callout">
+                                            @job.FailedItemName failed. Retry it, ignore it and continue, or cancel the whole action.
+                                        </p>
+                                    }
+
+                                    <div class="file-action-job-item-list">
+                                        @foreach (var item in job.Items)
+                                        {
+                                            <div class="file-action-job-item">
+                                                <div class="file-action-job-item-copy">
+                                                    <strong>@item.DisplayName</strong>
+                                                    <span class="meta-text file-action-job-item-path">
+                                                        @GetItemPathText(job, item)
+                                                    </span>
+                                                </div>
+                                                <div class="file-action-job-item-state">
+                                                    <UiPill Tone="@GetItemTone(item.Status)">@GetItemStatusLabel(item.Status)</UiPill>
+                                                </div>
+                                            </div>
+
+                                            @if (!string.IsNullOrWhiteSpace(item.Message) && item.Status is FileActionItemStatus.Failed or FileActionItemStatus.Ignored)
+                                            {
+                                                <p class="meta-text file-action-job-item-message">@item.Message</p>
+                                            }
+                                        }
+                                    </div>
+
+                                    <div class="row-action-cluster file-action-job-actions">
+                                        @if (job.RequiresAttention)
+                                        {
+                                            <UiCommandButton Label="Retry"
+                                                             Glyph="UiIconGlyph.Refresh"
+                                                             Variant="UiButtonVariant.Action"
+                                                             OnClick="@(() => RetryJobAsync(job.Id))" />
+                                            <UiCommandButton Label="Ignore and continue"
+                                                             Glyph="UiIconGlyph.Run"
+                                                             Variant="UiButtonVariant.Action"
+                                                             OnClick="@(() => IgnoreAndContinueAsync(job.Id))" />
+                                            <UiCommandButton Label="Cancel"
+                                                             Glyph="UiIconGlyph.Clear"
+                                                             Variant="UiButtonVariant.Danger"
+                                                             OnClick="@(() => CancelJobAsync(job.Id))" />
+                                        }
+                                        else if (!job.IsTerminal)
+                                        {
+                                            @if (job.CanStartBrowserDownload)
+                                            {
+                                                <UiCommandButton Label="Download"
+                                                                 Glyph="UiIconGlyph.Download"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 OnClick="@(() => StartBrowserDownloadAsync(job))" />
+                                            }
+                                            <UiCommandButton Label="Cancel"
+                                                             Glyph="UiIconGlyph.Clear"
+                                                             Variant="UiButtonVariant.Danger"
+                                                             OnClick="@(() => CancelJobAsync(job.Id))" />
+                                        }
+                                        else
+                                        {
+                                            <UiCommandButton Label="Dismiss"
+                                                             Glyph="UiIconGlyph.Clear"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             OnClick="@(() => DismissJobAsync(job.Id))" />
+                                        }
+                                    </div>
+                                </div>
+                            </details>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    </div>;
+
+    private Task ToggleExpandedAsync()
+    {
+        if (!PopupMode)
+        {
+            isExpanded = !isExpanded;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task OpenPopupAsync()
+    {
+        var opened = await JSRuntime.InvokeAsync<bool>(
+            "lmsTerminalWindow.openPopup",
+            $"/file-actions-window?workspaceId={Uri.EscapeDataString(workspaceId)}",
+            $"lms-file-actions-{workspaceId}",
+            860,
+            620);
+
+        if (!opened)
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private string BuildPopupUrl() =>
+        $"/file-actions-window?workspaceId={Uri.EscapeDataString(workspaceId)}";
+
+    private string BuildPopupTarget() =>
+        $"lms-file-actions-{workspaceId}";
+
+    private static string BuildPopupPrepareScript(int width = 860, int height = 620) =>
+        $"return window.lmsTerminalWindow.preparePopup(this.target, {width}, {height});";
+
+    private static string BuildPopupOpenScript(int width = 860, int height = 620) =>
+        $"window.lmsTerminalWindow.openPopup(this.href, this.target, {width}, {height}); return false;";
+
+    private Task RetryJobAsync(Guid jobId) =>
+        FileActionQueueService.RetryAsync(workspaceId, jobId);
+
+    private string ResolveWorkspaceId() =>
+        string.IsNullOrWhiteSpace(WorkspaceId)
+            ? TerminalWorkspaceAccessor.GetWorkspaceId()
+            : WorkspaceId.Trim();
+
+    private Task IgnoreAndContinueAsync(Guid jobId) =>
+        FileActionQueueService.IgnoreAndContinueAsync(workspaceId, jobId);
+
+    private Task CancelJobAsync(Guid jobId) =>
+        FileActionQueueService.CancelAsync(workspaceId, jobId);
+
+    private async Task StartBrowserDownloadAsync(FileActionJobSnapshot job)
+    {
+        var launchRequest = FileActionQueueService.TryBeginBrowserDownload(workspaceId, job.Id);
+        if (launchRequest is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync(
+                "lmsFileBrowser.startManagedDownload",
+                new
+                {
+                    contentUrl = $"/internal/file-actions/downloads/{Uri.EscapeDataString(launchRequest.DownloadToken)}/content",
+                    progressUrl = $"/internal/file-actions/downloads/{Uri.EscapeDataString(launchRequest.DownloadToken)}/progress",
+                    completeUrl = $"/internal/file-actions/downloads/{Uri.EscapeDataString(launchRequest.DownloadToken)}/complete",
+                    cancelUrl = $"/internal/file-actions/downloads/{Uri.EscapeDataString(launchRequest.DownloadToken)}/cancel",
+                    fileName = launchRequest.FileName,
+                    contentType = launchRequest.ContentType,
+                    totalBytes = launchRequest.TotalBytes
+                });
+        }
+        catch
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private Task DismissJobAsync(Guid jobId) =>
+        FileActionQueueService.DismissAsync(workspaceId, jobId);
+
+    private Task ClearCompletedAsync() =>
+        FileActionQueueService.ClearCompletedAsync(workspaceId);
+
+    private void HandleFileActionChanged(FileActionQueueChangedEvent changeEvent)
+    {
+        if (!string.Equals(changeEvent.WorkspaceId, workspaceId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _ = InvokeAsync(() =>
+        {
+            jobs = FileActionQueueService.GetJobs(workspaceId);
+            if (PopupMode && jobs.Count > 0)
+            {
+                hasObservedPopupJobs = true;
+            }
+
+            if (!PopupMode && changeEvent.Status == FileActionJobStatus.Queued)
+            {
+                _ = OpenPopupAsync();
+            }
+
+            if (PopupMode || jobs.Any(job => !job.IsTerminal || job.RequiresAttention))
+            {
+                isExpanded = true;
+            }
+
+            SchedulePopupAutoCloseIfIdle();
+            StateHasChanged();
+        });
+    }
+
+    private void SchedulePopupAutoCloseIfIdle()
+    {
+        popupAutoCloseCts?.Cancel();
+        popupAutoCloseCts?.Dispose();
+        popupAutoCloseCts = null;
+
+        if (!PopupMode ||
+            !hasObservedPopupJobs ||
+            jobs.Count == 0 ||
+            jobs.Any(job => !IsPopupAutoCloseStatus(job.Status)))
+        {
+            return;
+        }
+
+        popupAutoCloseCts = new CancellationTokenSource();
+        _ = ClosePopupAfterIdleAsync(popupAutoCloseCts.Token);
+    }
+
+    private async Task ClosePopupAfterIdleAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+            await JSRuntime.InvokeVoidAsync("lmsTerminalWindow.closeSelf");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (JSException)
+        {
+        }
+    }
+
+    private static bool IsPopupAutoCloseStatus(FileActionJobStatus status) => status is
+        FileActionJobStatus.Succeeded or
+        FileActionJobStatus.CompletedWithIssues or
+        FileActionJobStatus.Cancelled;
+
+    private static bool ShouldOpenJob(FileActionJobSnapshot job) =>
+        job.RequiresAttention || !job.IsTerminal;
+
+    private static string GetJobTitle(FileActionJobSnapshot job)
+    {
+        var targetName = job.TotalItemCount == 1 ? job.Items[0].DisplayName : null;
+        return job.Kind switch
+        {
+            FileActionKind.Copy => targetName is null ? $"Copy {DescribeItemCount(job.TotalItemCount)}" : $"Copy {targetName}",
+            FileActionKind.Move => targetName is null ? $"Move {DescribeItemCount(job.TotalItemCount)}" : $"Move {targetName}",
+            FileActionKind.Delete => targetName is null ? $"Delete {DescribeItemCount(job.TotalItemCount)}" : $"Delete {targetName}",
+            FileActionKind.CreateFolder => targetName is null ? $"Create {DescribeItemCount(job.TotalItemCount)}" : $"Create {targetName}",
+            FileActionKind.Zip => targetName is null ? $"Zip {DescribeItemCount(job.TotalItemCount)}" : $"Zip {targetName}",
+            FileActionKind.Extract => targetName is null ? $"Extract {DescribeItemCount(job.TotalItemCount)}" : $"Extract {targetName}",
+            FileActionKind.Upload => targetName is null ? $"Upload {DescribeItemCount(job.TotalItemCount)}" : $"Upload {targetName}",
+            FileActionKind.Download => targetName is null ? $"Download {DescribeItemCount(job.TotalItemCount)}" : $"Download {targetName}",
+            _ => "File action"
+        };
+    }
+
+    private static string DescribeItemCount(int count) => count == 1 ? "1 item" : $"{count} items";
+
+    private static string GetItemPathText(FileActionJobSnapshot job, FileActionJobItemSnapshot item) => job.Kind switch
+    {
+        FileActionKind.Delete => item.SourcePath,
+        FileActionKind.Upload => string.IsNullOrWhiteSpace(item.DestinationPath)
+            ? item.DisplayName
+            : $"{item.DisplayName} -> {item.DestinationPath}",
+        FileActionKind.Download => item.SourcePath,
+        _ when string.IsNullOrWhiteSpace(item.DestinationPath) => item.SourcePath,
+        _ => $"{item.SourcePath} -> {item.DestinationPath}"
+    };
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes <= 0)
+        {
+            return "0 B";
+        }
+
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var size = (double)bytes;
+        var unitIndex = 0;
+        while (size >= 1024d && unitIndex < units.Length - 1)
+        {
+            size /= 1024d;
+            unitIndex++;
+        }
+
+        var format = unitIndex == 0 || size >= 10d ? "0" : "0.0";
+        return $"{size.ToString(format, System.Globalization.CultureInfo.InvariantCulture)} {units[unitIndex]}";
+    }
+
+    private static UiPillTone GetJobTone(FileActionJobStatus status) => status switch
+    {
+        FileActionJobStatus.Succeeded => UiPillTone.Success,
+        FileActionJobStatus.Running => UiPillTone.Success,
+        FileActionJobStatus.CompletedWithIssues => UiPillTone.Warning,
+        FileActionJobStatus.NeedsAttention => UiPillTone.Warning,
+        FileActionJobStatus.Cancelled => UiPillTone.Neutral,
+        FileActionJobStatus.Failed => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+
+    private static string GetJobStatusLabel(FileActionJobStatus status) => status switch
+    {
+        FileActionJobStatus.Queued => "Queued",
+        FileActionJobStatus.Running => "Running",
+        FileActionJobStatus.NeedsAttention => "Needs attention",
+        FileActionJobStatus.Succeeded => "Done",
+        FileActionJobStatus.CompletedWithIssues => "Done with issues",
+        FileActionJobStatus.Cancelled => "Cancelled",
+        FileActionJobStatus.Failed => "Failed",
+        _ => "Closed"
+    };
+
+    private static UiPillTone GetItemTone(FileActionItemStatus status) => status switch
+    {
+        FileActionItemStatus.Succeeded => UiPillTone.Success,
+        FileActionItemStatus.Running => UiPillTone.Success,
+        FileActionItemStatus.Ignored => UiPillTone.Warning,
+        FileActionItemStatus.Failed => UiPillTone.Failure,
+        FileActionItemStatus.Cancelled => UiPillTone.Neutral,
+        _ => UiPillTone.Neutral
+    };
+
+    private static string GetItemStatusLabel(FileActionItemStatus status) => status switch
+    {
+        FileActionItemStatus.Pending => "Pending",
+        FileActionItemStatus.Running => "Running",
+        FileActionItemStatus.Succeeded => "Done",
+        FileActionItemStatus.Ignored => "Ignored",
+        FileActionItemStatus.Failed => "Failed",
+        FileActionItemStatus.Cancelled => "Cancelled",
+        _ => "Pending"
+    };
+}

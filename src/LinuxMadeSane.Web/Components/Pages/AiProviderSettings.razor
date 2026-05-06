@@ -1,0 +1,160 @@
+@page "/ai/providers"
+@using LinuxMadeSane.Application.Interfaces
+@inject IAiProviderSettingsService ProviderSettingsService
+
+@if (!Embedded)
+{
+    <PageTitle>AI Providers | Linux Made Sane</PageTitle>
+}
+
+<div class="page-shell ai-chat-shell">
+    <section class="surface-card compact-toolbar provider-page-toolbar">
+        <div class="page-toolbar">
+            <div class="stack-tight">
+                <p class="eyebrow">LinuxMadeSane.AI</p>
+                <h1 class="compact-page-title">Configured providers</h1>
+                <p class="meta-text">Click a provider record to edit it or fix what is missing.</p>
+            </div>
+
+            <div class="toolbar-cluster">
+                @if (!Embedded)
+                {
+                    <UiCommandButton Label="Local AI Engine" Glyph="UiIconGlyph.Ai" Variant="UiButtonVariant.Ghost" Href="/ai/engine" />
+                }
+                <UiCommandButton Label="Add provider" Glyph="UiIconGlyph.Plus" Href="/ai/providers/new" />
+            </div>
+        </div>
+
+        @if (pageModel is not null)
+        {
+            <div class="summary-pill-row">
+                <UiPill Tone="UiPillTone.Neutral">@($"{ConfiguredProviderCount} configured")</UiPill>
+                <UiPill Tone="@(EnabledProviderCount > 0 ? UiPillTone.Success : UiPillTone.Warning)">
+                    @(EnabledProviderCount > 0 ? $"{EnabledProviderCount} enabled" : "No enabled provider")
+                </UiPill>
+                <UiPill Tone="@(MissingApiKeyCount == 0 ? UiPillTone.Success : UiPillTone.Warning)">
+                    @(MissingApiKeyCount == 0 ? "Provider credentials ready" : $"{MissingApiKeyCount} key missing")
+                </UiPill>
+                <UiPill Tone="@(DefaultProvider is not null ? UiPillTone.Success : UiPillTone.Warning)">
+                    @(DefaultProvider is not null ? $"Default: {DefaultProvider.DisplayName}" : "No default provider")
+                </UiPill>
+            </div>
+        }
+    </section>
+
+    @if (!string.IsNullOrWhiteSpace(loadError))
+    {
+        <UiPanel>
+            <div class="callout error">@loadError</div>
+        </UiPanel>
+    }
+    else if (pageModel is null)
+    {
+        <UiPanel>
+            <p class="meta-text">Loading provider records...</p>
+        </UiPanel>
+    }
+    else
+    {
+        <UiPanel>
+            <div class="table-header">
+                <h2>Configured providers</h2>
+                <span>@ConfiguredProviderCount item(s)</span>
+            </div>
+
+            @if (ConfiguredProviderCount == 0)
+            {
+                <div class="empty-state">
+                    No provider configured yet.
+                </div>
+            }
+            else
+            {
+                <div class="compact-list provider-record-list">
+                    @foreach (var provider in OrderedProviders)
+                    {
+                        <a class="compact-row compact-row-block provider-record-row" href="@($"/ai/providers/{provider.ProviderKey}")">
+                            <div class="compact-row-main">
+                                <div class="provider-record-heading">
+                                    <strong>@provider.DisplayName</strong>
+                                    @if (provider.IsDefault)
+                                    {
+                                        <UiPill Tone="UiPillTone.Neutral">Default</UiPill>
+                                    }
+                                </div>
+                                <div class="provider-record-meta">
+                                    <span class="compact-row-summary">@provider.DefaultModelId</span>
+                                </div>
+                            </div>
+
+                            <div class="compact-row-side">
+                                <div class="toolbar-cluster compact-token-row provider-record-pills">
+                                    <UiPill Tone="@(provider.IsEnabled ? UiPillTone.Success : UiPillTone.Warning)">
+                                        @(provider.IsEnabled ? "Enabled" : "Disabled")
+                                    </UiPill>
+                                    @if (provider.RequiresApiKey)
+                                    {
+                                        <UiPill Tone="@(provider.HasApiKeyConfigured ? UiPillTone.Success : UiPillTone.Warning)">
+                                            @(provider.HasApiKeyConfigured ? "API key set" : "API key missing")
+                                        </UiPill>
+                                    }
+                                    else
+                                    {
+                                        <UiPill Tone="UiPillTone.Neutral">Managed locally</UiPill>
+                                    }
+                                    @if (!IsRuntimeImplemented(provider.ProviderType))
+                                    {
+                                        <UiPill Tone="UiPillTone.Warning">Unavailable</UiPill>
+                                    }
+                                </div>
+                                <span class="meta-text provider-record-action">Open provider</span>
+                            </div>
+                        </a>
+                    }
+                </div>
+            }
+        </UiPanel>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public bool Embedded { get; set; }
+
+    private AiProviderSettingsPageViewModel? pageModel;
+    private string loadError = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        loadError = string.Empty;
+
+        try
+        {
+            pageModel = await ProviderSettingsService.GetPageAsync();
+        }
+        catch (Exception exception)
+        {
+            loadError = exception.Message;
+        }
+    }
+
+    private bool IsRuntimeImplemented(AiProviderType providerType) =>
+        pageModel?.SupportedProviders.FirstOrDefault(provider => provider.ProviderType == providerType)?.IsRuntimeImplemented != false;
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> OrderedProviders =>
+        pageModel?.Providers
+            .OrderByDescending(provider => provider.IsDefault)
+            .ThenByDescending(provider => provider.IsEnabled)
+            .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray()
+        ?? [];
+
+    private int ConfiguredProviderCount => pageModel?.Providers.Count ?? 0;
+
+    private int EnabledProviderCount => pageModel?.Providers.Count(provider => provider.IsEnabled) ?? 0;
+
+    private int MissingApiKeyCount => pageModel?.Providers.Count(provider => provider.RequiresApiKey && !provider.HasApiKeyConfigured) ?? 0;
+
+    private AiConfiguredProviderViewModel? DefaultProvider =>
+        pageModel?.Providers.FirstOrDefault(provider => provider.IsDefault);
+}

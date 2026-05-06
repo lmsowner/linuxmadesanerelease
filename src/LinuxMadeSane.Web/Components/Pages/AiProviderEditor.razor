@@ -1,0 +1,383 @@
+@page "/ai/providers/new"
+@page "/ai/providers/{ProviderKey}"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.Ai
+@inject IAiProviderSettingsService ProviderSettingsService
+@inject NavigationManager NavigationManager
+
+<PageTitle>@(IsEditMode ? "Edit AI Provider" : "New AI Provider") | Linux Made Sane</PageTitle>
+
+<div class="page-shell ai-chat-shell">
+        <section class="hero-panel compact">
+            <div>
+                <p class="eyebrow">LinuxMadeSane.AI</p>
+                <h1>@(IsEditMode ? "Edit provider" : "Add provider")</h1>
+                <p class="hero-copy">@GetHeroCopy()</p>
+            </div>
+            <div class="hero-actions">
+                <UiCommandButton Label="Back to providers" Glyph="UiIconGlyph.FolderOpen" Href="/ai/providers" Variant="UiButtonVariant.Ghost" />
+            </div>
+        </section>
+
+    @if (!isLoaded)
+    {
+        <section class="surface-card">
+            <p class="meta-text">Loading provider editor...</p>
+        </section>
+    }
+    else if (!string.IsNullOrWhiteSpace(loadError))
+    {
+        <section class="surface-card">
+            <div class="callout error">@loadError</div>
+        </section>
+    }
+    else if (IsEditMode && (providerContext is null || !providerContext.ProviderExists))
+    {
+        <section class="surface-card">
+            <div class="empty-state">
+                That provider record could not be found.
+            </div>
+        </section>
+    }
+    else if (providerContext is not null)
+    {
+        <div class="dashboard-columns">
+            <section class="surface-card">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Provider settings</p>
+                        <h2>@(IsEditMode ? "Update record" : "Create record")</h2>
+                    </div>
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(saveError))
+                {
+                    <div class="callout warning">@saveError</div>
+                }
+
+                @if (!string.IsNullOrWhiteSpace(providerTestMessage))
+                {
+                    <div class="callout @providerTestTone">@providerTestMessage</div>
+                }
+
+                @if (!SelectedProviderTypeDefinition.IsRuntimeImplemented)
+                {
+                    <div class="callout warning">
+                        @SelectedProviderTypeDefinition.RuntimeNotes
+                    </div>
+                }
+
+                <EditForm Model="@providerContext.Editor" OnValidSubmit="SaveAsync" class="stack-form">
+                    <DataAnnotationsValidator />
+                    <ValidationSummary />
+
+                    <div class="field-row">
+                        <UiComboboxField TValue="AiProviderType"
+                                       @bind-Value="providerContext.Editor.ProviderType"
+                                       @bind-Value:after="OnProviderTypeChanged"
+                                       Label="Provider type">
+                            @foreach (var provider in providerContext.SupportedProviders.OrderBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase))
+                            {
+                                <option value="@provider.ProviderType">@provider.DisplayName</option>
+                            }
+                        </UiComboboxField>
+
+                        <UiTextField @bind-Value="providerContext.Editor.DisplayName"
+                                     Label="Display name" />
+                    </div>
+
+                    <div class="field-row">
+                        <UiComboboxField TValue="string"
+                                       @bind-Value="providerContext.Editor.DefaultModelId"
+                                       Label="Default model"
+                                       Helper="@(CurrentModelOptions.Count > 0 ? "Used for new chats that pick this provider." : null)">
+                            @foreach (var model in CurrentModelOptions)
+                            {
+                                <option value="@model.ModelId">@model.DisplayName</option>
+                            }
+                        </UiComboboxField>
+                    </div>
+
+                    <details class="identity-advanced" open>
+                        <summary>Capability flags</summary>
+                        <div class="advanced-fields">
+                            <div class="field-row">
+                                <UiCheckboxField @bind-Value="providerContext.Editor.IsEnabled"
+                                                 Label="Enabled" />
+
+                                <UiCheckboxField @bind-Value="providerContext.Editor.IsDefault"
+                                                 Label="Default provider" />
+                            </div>
+
+                            <div class="field-row">
+                                <UiCheckboxField @bind-Value="providerContext.Editor.StreamingEnabled"
+                                                 Label="Streaming enabled" />
+
+                                <UiCheckboxField @bind-Value="providerContext.Editor.ToolUseEnabled"
+                                                 Label="Tool use enabled" />
+                            </div>
+                        </div>
+                    </details>
+
+                    @if (providerContext.Editor.RequiresApiKey)
+                    {
+                        <details class="identity-advanced" open>
+                            <summary>Protected API key</summary>
+                            <div class="advanced-fields">
+                                <UiTextField @bind-Value="providerContext.Editor.ApiKeyInput"
+                                             Label="@(providerContext.Editor.HasApiKeyConfigured ? "Replacement API key" : "API key")"
+                                             Type="password"
+                                             Autocomplete="new-password" />
+
+                                <p class="helper-text">
+                                    @(providerContext.Editor.HasApiKeyConfigured
+                                        ? "A key is already stored. Enter a new one to replace it, or clear it."
+                                        : "No key stored yet.")
+                                </p>
+
+                                @if (providerContext.Editor.HasApiKeyConfigured)
+                                {
+                                    <UiCheckboxField @bind-Value="providerContext.Editor.ClearStoredApiKey"
+                                                     Label="Clear stored API key" />
+                                }
+                            </div>
+                        </details>
+                    }
+                    else
+                    {
+                        <details class="identity-advanced" open>
+                            <summary>Provider runtime</summary>
+                            <div class="advanced-fields">
+                                <p class="helper-text">This provider is managed by Linux Made Sane and does not require a directly stored API key.</p>
+                            </div>
+                        </details>
+                    }
+
+                    <div class="hero-actions">
+                        <UiCommandButton Label="@(isTestingProvider ? "Testing..." : "Test provider")"
+                                         Glyph="UiIconGlyph.Search"
+                                         Variant="UiButtonVariant.ActionSubtle"
+                                         Disabled="@(isSaving || isTestingProvider)"
+                                         OnClick="HandleTestProviderAsync" />
+                        <UiCommandButton Label="@(isSaving ? "Saving..." : IsEditMode ? "Save provider" : "Create provider")"
+                                         Glyph="UiIconGlyph.Connect"
+                                         Type="submit"
+                                         Disabled="@(isSaving || isTestingProvider)" />
+                        <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Href="/ai/providers" Variant="UiButtonVariant.Secondary" />
+                    </div>
+                </EditForm>
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Existing provider records</h2>
+                    <span>@providerContext.ExistingProviders.Count item(s)</span>
+                </div>
+
+                @if (providerContext.ExistingProviders.Count == 0)
+                {
+                    <div class="empty-state">
+                        This will be the first provider record.
+                    </div>
+                }
+                else
+                {
+                    <div class="stack-list">
+                        @foreach (var provider in providerContext.ExistingProviders)
+                        {
+                            <a class="list-row" href="@($"/ai/providers/{provider.ProviderKey}")">
+                                <div class="stack-tight">
+                                    <strong>@provider.DisplayName</strong>
+                                    <span class="meta-text">@provider.ProviderType | @provider.DefaultModelId</span>
+                                </div>
+                                <div class="row-action-cluster">
+                                    @if (provider.IsDefault)
+                                    {
+                                        <span class="status-pill neutral">Default</span>
+                                    }
+                                    <span class="status-pill @((provider.RequiresApiKey ? provider.HasApiKeyConfigured : true) ? "success" : "warning")">
+                                        @(provider.RequiresApiKey
+                                            ? provider.HasApiKeyConfigured ? "API key set" : "API key missing"
+                                            : "Managed locally")
+                                    </span>
+                                    <span class="status-pill @(provider.StreamingEnabled ? "success" : "neutral")">
+                                        @(provider.StreamingEnabled ? "Streaming" : "No streaming")
+                                    </span>
+                                </div>
+                            </a>
+                        }
+                    </div>
+                }
+            </section>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public string? ProviderKey { get; set; }
+
+    private AiProviderSettingsEditorContextViewModel? providerContext;
+    private bool isLoaded;
+    private bool isSaving;
+    private bool isTestingProvider;
+    private string loadError = string.Empty;
+    private string saveError = string.Empty;
+    private string? providerTestMessage;
+    private string providerTestTone = "success";
+    private AiProviderType? lastProviderType;
+    private bool IsEditMode => !string.IsNullOrWhiteSpace(ProviderKey);
+    private AiProviderDefinition SelectedProviderTypeDefinition =>
+        providerContext?.SupportedProviders.FirstOrDefault(provider => provider.ProviderType == providerContext.Editor.ProviderType)
+        ?? new AiProviderDefinition("unknown", AiProviderType.Unknown, "Unknown", "Unknown provider type.", false, false);
+    private IReadOnlyList<AiProviderModelOption> CurrentModelOptions =>
+        providerContext?.AvailableModelOptions
+            .Where(model => model.ProviderType == providerContext.Editor.ProviderType)
+            .OrderByDescending(model => model.IsRecommendedDefault)
+            .ThenBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray()
+        ?? [];
+
+    protected override async Task OnParametersSetAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        isLoaded = false;
+        loadError = string.Empty;
+        saveError = string.Empty;
+        ClearProviderTestMessage();
+
+        try
+        {
+            providerContext = await ProviderSettingsService.GetEditorAsync(ProviderKey);
+            lastProviderType = providerContext.Editor.ProviderType;
+            providerContext.Editor.RequiresApiKey = SelectedProviderTypeDefinition.RequiresApiKey;
+        }
+        catch (Exception exception)
+        {
+            providerContext = null;
+            loadError = exception.Message;
+        }
+        finally
+        {
+            isLoaded = true;
+        }
+    }
+
+    private Task OnProviderTypeChanged()
+    {
+        if (providerContext is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        ClearProviderTestMessage();
+
+        var previousDefinition = lastProviderType.HasValue
+            ? providerContext.SupportedProviders.FirstOrDefault(provider => provider.ProviderType == lastProviderType.Value)
+            : null;
+        var selectedDefinition = SelectedProviderTypeDefinition;
+
+        if (string.IsNullOrWhiteSpace(providerContext.Editor.DisplayName) ||
+            (!string.IsNullOrWhiteSpace(previousDefinition?.DisplayName) &&
+             providerContext.Editor.DisplayName.Equals(previousDefinition.DisplayName, StringComparison.OrdinalIgnoreCase)))
+        {
+            providerContext.Editor.DisplayName = selectedDefinition.DisplayName;
+        }
+
+        var selectedModel = CurrentModelOptions.FirstOrDefault(model =>
+            model.ModelId.Equals(providerContext.Editor.DefaultModelId, StringComparison.OrdinalIgnoreCase));
+
+        if (selectedModel is null)
+        {
+            providerContext.Editor.DefaultModelId = CurrentModelOptions.FirstOrDefault()?.ModelId ?? string.Empty;
+        }
+
+        lastProviderType = providerContext.Editor.ProviderType;
+        providerContext.Editor.RequiresApiKey = selectedDefinition.RequiresApiKey;
+
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (providerContext is null)
+        {
+            return;
+        }
+
+        isSaving = true;
+        saveError = string.Empty;
+        ClearProviderTestMessage();
+
+        try
+        {
+            var providerKey = await ProviderSettingsService.SaveAsync(providerContext.Editor);
+            var targetPath = $"/ai/providers/{providerKey}";
+            var currentPath = "/" + NavigationManager.ToBaseRelativePath(NavigationManager.Uri).Trim('/');
+
+            if (string.Equals(currentPath, targetPath, StringComparison.OrdinalIgnoreCase))
+            {
+                providerContext = await ProviderSettingsService.GetEditorAsync(providerKey);
+            }
+            else
+            {
+                NavigationManager.NavigateTo(targetPath);
+            }
+        }
+        catch (Exception exception)
+        {
+            saveError = exception.Message;
+        }
+        finally
+        {
+            isSaving = false;
+        }
+    }
+
+    private async Task HandleTestProviderAsync()
+    {
+        if (providerContext is null)
+        {
+            return;
+        }
+
+        isTestingProvider = true;
+        saveError = string.Empty;
+        providerTestTone = "warning";
+        providerTestMessage = "Testing provider...";
+
+        try
+        {
+            var result = await ProviderSettingsService.TestAsync(providerContext.Editor);
+            providerTestTone = result.Succeeded ? "success" : "warning";
+            providerTestMessage = string.IsNullOrWhiteSpace(result.Detail)
+                ? result.Summary
+                : $"{result.Summary} {result.Detail}";
+        }
+        catch (Exception exception)
+        {
+            providerTestTone = "error";
+            providerTestMessage = exception.Message;
+        }
+        finally
+        {
+            isTestingProvider = false;
+        }
+    }
+
+    private void ClearProviderTestMessage()
+    {
+        providerTestMessage = null;
+        providerTestTone = "success";
+    }
+
+    private string GetHeroCopy() =>
+        providerContext?.Editor.RequiresApiKey == false
+            ? "Required: provider type, display name, and default model. Linux Made Sane manages the runtime connection."
+            : "Required: provider type, display name, default model, and API key.";
+}

@@ -1,0 +1,153 @@
+<div class="nav-shell @(IsCollapsed ? "nav-shell-collapsed" : null)">
+    <div class="nav-shell-top">
+        <div class="brand-lockup">
+            <button class="brand-link"
+                    type="button"
+                    title="About Linux Made Sane"
+                    aria-label="About Linux Made Sane"
+                    data-about-open>
+                <span class="brand-mark">
+                    <img class="brand-logo" src="/images/lms-logo.png" alt="" />
+                </span>
+            </button>
+        </div>
+
+        <UiIconButton Label="@ToggleLabel"
+                      Title="@ToggleLabel"
+                      Glyph="@(IsCollapsed || IsFlyout ? UiIconGlyph.SidebarExpand : UiIconGlyph.SidebarCollapse)"
+                      Variant="UiButtonVariant.Toolbar"
+                      Class="sidebar-toggle-button"
+                      OnClick="@OnToggleCollapse"
+                      data-sidebar-toggle="@SidebarToggleAction" />
+    </div>
+
+    @if (IsCollapsed)
+    {
+        <div class="sidebar-section sidebar-section-compact">
+            @foreach (var navSection in Sections)
+            {
+                <div class="nav-icon-group" title="@navSection.Title">
+                    @foreach (var item in navSection.Items)
+                    {
+                        <UiNavButton Href="@item.Href"
+                                     Label="@item.Label"
+                                     Match="@item.Match"
+                                     Preview="@item.Preview"
+                                     IconName="@item.Icon"
+                                     Compact="true" />
+                    }
+                </div>
+            }
+        </div>
+    }
+    else
+    {
+        <div class="sidebar-section">
+            @foreach (var navSection in Sections)
+            {
+                <details class="nav-accordion" open="@navSection.IsOpen">
+                    <summary class="nav-accordion-trigger">
+                        <span class="nav-trigger-shell">
+                            <span class="nav-trigger-title">@navSection.Title</span>
+                        </span>
+                        <span class="nav-trigger-expander" aria-hidden="true"></span>
+                    </summary>
+
+                    <div class="nav-accordion-body">
+                        @foreach (var item in navSection.Items)
+                        {
+                            <UiNavButton Href="@item.Href"
+                                         Label="@item.Label"
+                                         Match="@item.Match"
+                                         Preview="@item.Preview"
+                                         IconName="@item.Icon" />
+                        }
+                    </div>
+                </details>
+            }
+        </div>
+    }
+
+    <div class="sidebar-footer">
+        @if (IsAuthenticated)
+        {
+            <div class="sidebar-account">
+                @if (!IsCollapsed)
+                {
+                    <span class="sidebar-account-chip">@AuthenticatedEmail</span>
+                }
+
+                <form method="post" action="/auth/logout" class="sidebar-logout-form">
+                    @if (IsCollapsed)
+                    {
+                        <UiIconButton Label="Sign out"
+                                      Title="Sign out"
+                                      Glyph="UiIconGlyph.SignOut"
+                                      Variant="UiButtonVariant.Toolbar"
+                                      Type="submit" />
+                    }
+                    else
+                    {
+                        <UiCommandButton Label="Sign out"
+                                         Glyph="UiIconGlyph.SignOut"
+                                         Type="submit"
+                                         Variant="UiButtonVariant.Toolbar" />
+                    }
+                </form>
+            </div>
+        }
+
+    </div>
+</div>
+
+@code {
+    [Parameter] public bool IsCollapsed { get; set; }
+    [Parameter] public bool IsFlyout { get; set; }
+    [Parameter] public bool IsAuthenticated { get; set; }
+    [Parameter] public string AuthenticatedEmail { get; set; } = string.Empty;
+    [Parameter] public EventCallback OnToggleCollapse { get; set; }
+
+    private string ToggleLabel => IsCollapsed || IsFlyout ? "Pin sidebar open" : "Collapse sidebar";
+    private string SidebarToggleAction => IsCollapsed || IsFlyout ? "expand" : "collapse";
+
+    private static readonly IReadOnlyList<NavSection> Sections =
+    [
+        new(
+            "This LMS Host",
+            true,
+            [
+                new("/", "Overview", UiIconName.Overview, NavLinkMatch.All),
+                new("/hosts", "Hosts", UiIconName.Hosts),
+                new("/integrations", "Integrations", UiIconName.Integrations),
+                new("/scheduling", "Scheduling", UiIconName.Scheduling),
+                new("/commands", "Runbooks", UiIconName.Runbooks),
+                new("/ai", "AI Services", UiIconName.AiOverview),
+                new("/rdp-optimizer", "Desktop Manager", UiIconName.RdpOptimizer),
+                new("/settings", "Security", UiIconName.Security)
+            ]),
+        new(
+            "LMS Identity",
+            true,
+            [
+                new("/shares/identities", "Users and Groups", UiIconName.UsersGroups),
+                new("/sftp-server", "SFTP Server", UiIconName.SftpServer),
+                new("/shares", "Network Shares", UiIconName.Shares),
+                new("/services", "Services", UiIconName.Services)
+            ]),
+        new(
+            "Platform",
+            false,
+            [
+                new("/modules", "Roadmap", UiIconName.LaterSection, Preview: true)
+            ])
+    ];
+
+    private sealed record NavSection(string Title, bool IsOpen, IReadOnlyList<NavItem> Items);
+
+    private sealed record NavItem(
+        string Href,
+        string Label,
+        UiIconName Icon,
+        NavLinkMatch Match = NavLinkMatch.Prefix,
+        bool Preview = false);
+}

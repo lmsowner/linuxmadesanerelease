@@ -1,0 +1,634 @@
+@implements IAsyncDisposable
+@using System.Text.RegularExpressions
+@using LinuxMadeSane.Application.Contracts.Ai
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@using LinuxMadeSane.Web.Services
+@inject IAiThreadService ThreadService
+@inject ITerminalAiAssistantService TerminalAiAssistantService
+@inject IJSRuntime JSRuntime
+
+<section class="surface-card terminal-ai-panel">
+    @if (!string.IsNullOrWhiteSpace(panelInfo))
+    {
+        <div class="callout warning">@panelInfo</div>
+    }
+    @if (!string.IsNullOrWhiteSpace(panelError))
+    {
+        <div class="callout error">@panelError</div>
+    }
+
+    <section class="terminal-ai-section terminal-ai-provider-section">
+        @if (isProviderContextLoading)
+        {
+            <p class="meta-text">Loading AI providers...</p>
+        }
+        else if (AvailableAiProviders.Count == 0)
+        {
+            <p class="meta-text">No enabled runnable AI provider is configured.</p>
+        }
+        else
+        {
+            <AiProviderSwitcher Providers="@AvailableAiProviders"
+                                Models="@(aiProviderContext?.Models ?? [])"
+                                ProviderKey="@selectedProviderKey"
+                                ProviderKeyChanged="HandleProviderSelectionChangedAsync"
+                                ModelId="@selectedModelId"
+                                ModelIdChanged="HandleModelSelectionChangedAsync"
+                                Disabled="@isBusy"
+                                ProviderLabel="AI provider"
+                                ModelLabel="Model"
+                                Class="terminal-ai-provider-switcher" />
+        }
+    </section>
+
+    <section class="terminal-ai-section terminal-ai-activity-section">
+        @if (RecentEntries.Count == 0)
+        {
+            <div class="empty-state compact-empty-state">
+                <p>No AI activity yet.</p>
+                <p class="meta-text">Ask AI below or review the live terminal state.</p>
+            </div>
+        }
+        else
+        {
+            <div class="terminal-ai-activity-list" @ref="activityListElement">
+                @foreach (var entry in RecentEntries)
+                {
+                    <article class="@(entry.Role == AiChatMessageRole.Assistant ? "terminal-ai-tool-card" : "terminal-ai-message-card")">
+                        <div class="terminal-ai-message-header">
+                            <UiPill Tone="@GetMessageTone(entry.Role)">@GetRoleLabel(entry.Role)</UiPill>
+                            <span class="meta-text">@entry.CreatedAtUtc.ToLocalTime().ToString("HH:mm:ss")</span>
+                        </div>
+                        <p class="terminal-ai-message-content">@entry.Content</p>
+
+                        @if (!string.IsNullOrWhiteSpace(entry.SuggestedCommand))
+                        {
+                            <pre class="command-preview-block command-display-block terminal-ai-command-preview">@entry.SuggestedCommand</pre>
+                            <div class="toolbar-row">
+                                <UiCommandButton Label="Run then review" Glyph="UiIconGlyph.Analyze" OnClick="@(() => RunAndAnalyzeCommandAsync(entry.SuggestedCommand))" />
+                                <UiCommandButton Label="Run commands" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.Toolbar" OnClick="@(() => RunCommandAsync(entry.SuggestedCommand))" />
+                            </div>
+                        }
+                    </article>
+                }
+            </div>
+        }
+    </section>
+
+    <section class="terminal-ai-section terminal-ai-composer">
+        <label class="terminal-ai-prompt-field">
+            <span>Prompt</span>
+            <textarea class="ui-control-input ui-control-textarea"
+                      @ref="promptInputElement"
+                      @bind="promptText"
+                      @bind:event="oninput"
+                      placeholder="Ask about the current terminal session. Enter sends, Shift+Enter adds a new line."></textarea>
+        </label>
+
+        <div class="terminal-ai-composer-actions">
+            <div class="toolbar-row">
+                <UiCommandButton Label="@(isBusy ? "Working..." : "Ask AI")"
+                                 Title="Use the prompt box for a normal question or request."
+                                 Glyph="UiIconGlyph.Send"
+                                 OnClick="SendCustomPromptAsync"
+                                 Disabled="@(isBusy || string.IsNullOrWhiteSpace(promptText))" />
+                @if (ShouldShowExplainAction)
+                {
+                    <UiCommandButton Label="What does this mean"
+                                     Title="Explain the current terminal error state without auto-running commands."
+                                     Glyph="UiIconGlyph.Analyze"
+                                     Variant="UiButtonVariant.Toolbar"
+                                     OnClick="SendAnalyzePromptAsync"
+                                     Disabled="@isBusy" />
+                }
+                <UiCommandButton Label="Deep Fix"
+                                 Title="Auto-run up to four focused diagnostic steps and stop when the likely cause is found."
+                                 Glyph="UiIconGlyph.Analyze"
+                                 Variant="UiButtonVariant.Toolbar"
+                                 OnClick="RunInvestigationAsync"
+                                 Disabled="@isBusy" />
+                <UiCommandButton Label="Clear context" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="ClearContext" Disabled="@(isBusy || Tab.AiConversation.Entries.Count == 0)" />
+            </div>
+
+            <div class="terminal-ai-option-row">
+                <UiCheckboxField @bind-Value="includeTerminalContext"
+                                 Label="Use terminal output"
+                                 Compact="true"
+                                 Class="terminal-ai-option" />
+
+                <UiCheckboxField @bind-Value="Tab.SafeInvestigationOnly"
+                                 Label="Safe investigation only"
+                                 Compact="true"
+                                 Class="terminal-ai-option" />
+
+                <UiCheckboxField @bind-Value="Tab.AllowInternetResearch"
+                                 Label="Allow web research"
+                                 Compact="true"
+                                 Class="terminal-ai-option" />
+            </div>
+        </div>
+    </section>
+</section>
+
+@code {
+    [Parameter, EditorRequired]
+    public TerminalTabState Tab { get; set; } = default!;
+
+    [Parameter]
+    public EventCallback<string> RunCommand { get; set; }
+
+    private string promptText = string.Empty;
+    private string panelInfo = string.Empty;
+    private string panelError = string.Empty;
+    private bool includeTerminalContext = true;
+    private bool isSendingPrompt;
+    private bool isRunningAndAnalyzing;
+    private bool isInvestigating;
+    private bool isProviderContextLoading;
+    private int renderedEntryCount = -1;
+    private ElementReference activityListElement;
+    private ElementReference promptInputElement;
+    private AiChatThreadEditorContextViewModel? aiProviderContext;
+    private DotNetObjectReference<TerminalAiPanel>? promptInteropReference;
+    private const int MaxInvestigationSteps = 4;
+    private string selectedProviderKey = string.Empty;
+    private string selectedModelId = string.Empty;
+    private static readonly Regex terminalErrorPattern = new(
+        @"(?im)\b(error|failed|failure|exception|traceback|permission denied|command not found|no such file|cannot|timed out|not found|segmentation fault|fatal)\b",
+        RegexOptions.Compiled);
+
+    private bool isBusy => isSendingPrompt || isRunningAndAnalyzing || isInvestigating;
+    private bool ShouldShowExplainAction => HasTerminalErrorContext();
+
+    private IReadOnlyList<TerminalAiConversationEntry> RecentEntries =>
+        Tab.AiConversation.Entries
+            .TakeLast(10)
+            .ToArray();
+
+    public Task AnalyzeSessionAsync() =>
+        SendPromptAsync(TerminalAiPromptMode.Analyze, string.Empty);
+
+    public async Task AnalyzeSelectionAsync(string selectionText)
+    {
+        var selected = selectionText.Trim();
+        if (string.IsNullOrWhiteSpace(selected))
+        {
+            panelError = "Select terminal output first.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        var requestText = $"""
+Review this selected content from the current terminal session.
+Explain what it indicates, then suggest the safest next step or command if useful.
+
+Selected terminal content:
+```text
+{selected}
+```
+""";
+
+        await SendPromptAsync(TerminalAiPromptMode.Custom, requestText);
+    }
+
+    public async Task RunAndAnalyzeCommandAsync(string commandText)
+    {
+        if (!RunCommand.HasDelegate)
+        {
+            return;
+        }
+
+        isRunningAndAnalyzing = true;
+        panelInfo = string.Empty;
+        panelError = string.Empty;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var initialOutputLength = Tab.Snapshot?.Output.Length ?? 0;
+            var initialActivity = Tab.Snapshot?.LastActivityUtc;
+
+            await RunCommand.InvokeAsync(commandText);
+            await WaitForTerminalUpdateAsync(initialOutputLength, initialActivity);
+            await AnalyzeSessionAsync();
+        }
+        catch (Exception exception)
+        {
+            panelError = exception.Message;
+        }
+        finally
+        {
+            isRunningAndAnalyzing = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    public async Task RunInvestigationAsync()
+    {
+        if (!RunCommand.HasDelegate)
+        {
+            return;
+        }
+
+        isInvestigating = true;
+        panelInfo = string.Empty;
+        panelError = string.Empty;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var originalRequest = promptText.Trim();
+            var seenCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            for (var step = 0; step < MaxInvestigationSteps; step++)
+            {
+                var result = await ExecutePromptCoreAsync(
+                    TerminalAiPromptMode.Investigate,
+                    step == 0 ? originalRequest : string.Empty);
+
+                if (step == 0)
+                {
+                    promptText = string.Empty;
+                }
+
+                if (string.IsNullOrWhiteSpace(result.AssistantEntry.SuggestedCommand))
+                {
+                    AddSystemEntry($"Investigation complete after {step + 1} step(s).");
+                    return;
+                }
+
+                var normalizedCommand = result.AssistantEntry.SuggestedCommand.Trim();
+                if (!seenCommands.Add(normalizedCommand))
+                {
+                    AddSystemEntry("Investigation stopped because the same diagnostic command was suggested again.");
+                    return;
+                }
+
+                if (Tab.SafeInvestigationOnly &&
+                    !TerminalAiCommandGuard.TryValidateForInvestigation(normalizedCommand, out var reason))
+                {
+                    AddSystemEntry($"Investigation stopped because the next command was not safe to auto-run: {reason}. Use Run commands if you want to execute it manually.");
+                    return;
+                }
+
+                var initialOutputLength = Tab.Snapshot?.Output.Length ?? 0;
+                var initialActivity = Tab.Snapshot?.LastActivityUtc;
+                await RunCommand.InvokeAsync(normalizedCommand);
+                await WaitForTerminalUpdateAsync(initialOutputLength, initialActivity);
+            }
+
+            AddSystemEntry($"Investigation stopped after {MaxInvestigationSteps} diagnostic step(s).");
+        }
+        catch (Exception exception)
+        {
+            panelError = exception.Message;
+        }
+        finally
+        {
+            isInvestigating = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task SendAnalyzePromptAsync() =>
+        await AnalyzeSessionAsync();
+
+    private async Task SendCustomPromptAsync()
+    {
+        var requestText = promptText.Trim();
+        if (string.IsNullOrWhiteSpace(requestText))
+        {
+            panelError = "Enter a request first.";
+            return;
+        }
+
+        await SendPromptAsync(TerminalAiPromptMode.Custom, requestText);
+    }
+
+    private async Task SendPromptAsync(TerminalAiPromptMode mode, string requestText)
+    {
+        isSendingPrompt = true;
+        panelInfo = string.Empty;
+        panelError = string.Empty;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            await ExecutePromptCoreAsync(mode, requestText);
+            promptText = string.Empty;
+        }
+        catch (Exception exception)
+        {
+            panelError = exception.Message;
+        }
+        finally
+        {
+            isSendingPrompt = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            promptInteropReference ??= DotNetObjectReference.Create(this);
+
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("lmsTerminal.registerAiPromptShortcut", promptInputElement, promptInteropReference);
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+        }
+
+        var currentEntryCount = RecentEntries.Count;
+        if (currentEntryCount == renderedEntryCount)
+        {
+            return;
+        }
+
+        renderedEntryCount = currentEntryCount;
+
+        if (currentEntryCount == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.scrollElementToBottom", activityListElement);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    [JSInvokable]
+    public async Task SubmitPromptFromKeyboardAsync()
+    {
+        if (isBusy || string.IsNullOrWhiteSpace(promptText))
+        {
+            return;
+        }
+
+        await SendCustomPromptAsync();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        await EnsureProviderContextAsync();
+        SyncTerminalProviderSelection();
+    }
+
+    private async Task WaitForTerminalUpdateAsync(int initialOutputLength, DateTimeOffset? initialActivity)
+    {
+        for (var attempt = 0; attempt < 12; attempt++)
+        {
+            await Task.Delay(250);
+
+            var currentOutputLength = Tab.Snapshot?.Output.Length ?? 0;
+            var currentActivity = Tab.Snapshot?.LastActivityUtc;
+            if (currentOutputLength != initialOutputLength || currentActivity != initialActivity)
+            {
+                return;
+            }
+        }
+    }
+
+    private async Task<TerminalAiTurnResult> ExecutePromptCoreAsync(TerminalAiPromptMode mode, string requestText)
+    {
+        await EnsureProviderContextAsync();
+        SyncTerminalProviderSelection();
+
+        var result = await TerminalAiAssistantService.ExecutePromptAsync(
+            Tab.AiConversation,
+            new TerminalAiPromptRequest
+            {
+                Mode = mode,
+                HostId = Tab.HostId,
+                HostName = Tab.HostName,
+                HostAddress = Tab.HostAddress,
+                HostEnvironment = Tab.HostEnvironment,
+                WorkingDirectory = Tab.WorkingDirectory,
+                TerminalOutput = includeTerminalContext ? Tab.Snapshot?.Output ?? string.Empty : string.Empty,
+                Request = requestText,
+                AllowInternetResearch = Tab.AllowInternetResearch
+            });
+
+        panelInfo = result.Sanitization.Applied
+            ? result.Sanitization.Message
+            : string.Empty;
+
+        ApplyTerminalProviderSelection(result.ProviderKey, result.ModelId);
+        Tab.AiConversation.ProviderConversationReference = result.ProviderConversationReference;
+        Tab.AiConversation.ProviderResponseId = result.ProviderResponseId;
+        Tab.AiConversation.Entries.Add(result.UserEntry);
+        Tab.AiConversation.Entries.Add(result.AssistantEntry);
+        await InvokeAsync(StateHasChanged);
+        return result;
+    }
+
+    private async Task EnsureProviderContextAsync()
+    {
+        if (aiProviderContext is not null || isProviderContextLoading)
+        {
+            return;
+        }
+
+        isProviderContextLoading = true;
+
+        try
+        {
+            aiProviderContext = await ThreadService.GetEditorAsync();
+            SyncTerminalProviderSelection();
+        }
+        catch (Exception exception)
+        {
+            panelError = exception.Message;
+        }
+        finally
+        {
+            isProviderContextLoading = false;
+        }
+    }
+
+    private void SyncTerminalProviderSelection()
+    {
+        if (aiProviderContext is null)
+        {
+            return;
+        }
+
+        var requestedProviderKey = string.IsNullOrWhiteSpace(selectedProviderKey)
+            ? Tab.AiConversation.ProviderKey
+            : selectedProviderKey;
+        var requestedModelId = string.IsNullOrWhiteSpace(selectedModelId)
+            ? Tab.AiConversation.ModelId
+            : selectedModelId;
+        var providers = BuildAvailableAiProviders(requestedProviderKey);
+        var selection = AiProviderSelectionResolver.Resolve(
+            requestedProviderKey,
+            requestedModelId,
+            aiProviderContext.Editor.ProviderKey,
+            aiProviderContext.Editor.ModelId,
+            providers,
+            aiProviderContext.Models);
+
+        selectedProviderKey = selection.ProviderKey;
+        selectedModelId = selection.ModelId;
+        Tab.AiConversation.ProviderKey = selection.ProviderKey;
+        Tab.AiConversation.ModelId = selection.ModelId;
+        Tab.AiConversation.ProviderLabel = selection.ProviderLabel;
+    }
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> AvailableAiProviders =>
+        BuildAvailableAiProviders(selectedProviderKey);
+
+    private Task HandleProviderSelectionChangedAsync(string providerKey)
+    {
+        var previousProviderKey = Tab.AiConversation.ProviderKey;
+        var previousModelId = Tab.AiConversation.ModelId;
+        ApplyTerminalProviderSelection(providerKey, string.Empty);
+        if (!string.Equals(previousProviderKey, Tab.AiConversation.ProviderKey, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(previousModelId, Tab.AiConversation.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            ResetTerminalProviderState();
+        }
+
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private Task HandleModelSelectionChangedAsync(string modelId)
+    {
+        var previousModelId = Tab.AiConversation.ModelId;
+        ApplyTerminalProviderSelection(selectedProviderKey, modelId);
+        if (!string.Equals(previousModelId, Tab.AiConversation.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            ResetTerminalProviderState();
+        }
+
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> BuildAvailableAiProviders(string selectedProviderKey)
+    {
+        if (aiProviderContext is null)
+        {
+            return [];
+        }
+
+        return aiProviderContext.ConfiguredProviders
+            .Where(provider =>
+                (provider.IsEnabled &&
+                 aiProviderContext.SupportedProviders.FirstOrDefault(definition => definition.ProviderType == provider.ProviderType)?.IsRuntimeImplemented != false) ||
+                provider.ProviderKey.Equals(selectedProviderKey, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(provider => provider.IsDefault)
+            .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private void ResetTerminalProviderState()
+    {
+        Tab.AiConversation.ProviderConversationReference = string.Empty;
+        Tab.AiConversation.ProviderResponseId = string.Empty;
+    }
+
+    private void ApplyTerminalProviderSelection(string? providerKey, string? modelId)
+    {
+        if (aiProviderContext is null)
+        {
+            selectedProviderKey = providerKey?.Trim() ?? string.Empty;
+            selectedModelId = modelId?.Trim() ?? string.Empty;
+            Tab.AiConversation.ProviderKey = selectedProviderKey;
+            Tab.AiConversation.ModelId = selectedModelId;
+            return;
+        }
+
+        var selection = AiProviderSelectionResolver.Resolve(
+            providerKey,
+            modelId,
+            aiProviderContext.Editor.ProviderKey,
+            aiProviderContext.Editor.ModelId,
+            BuildAvailableAiProviders(providerKey?.Trim() ?? string.Empty),
+            aiProviderContext.Models);
+
+        selectedProviderKey = selection.ProviderKey;
+        selectedModelId = selection.ModelId;
+        Tab.AiConversation.ProviderKey = selection.ProviderKey;
+        Tab.AiConversation.ModelId = selection.ModelId;
+        Tab.AiConversation.ProviderLabel = selection.ProviderLabel;
+    }
+
+    private void ClearContext()
+    {
+        Tab.AiConversation.ProviderConversationReference = string.Empty;
+        Tab.AiConversation.ProviderResponseId = string.Empty;
+        Tab.AiConversation.Entries.Clear();
+        panelError = string.Empty;
+        renderedEntryCount = 0;
+    }
+
+    private void AddSystemEntry(string content)
+    {
+        Tab.AiConversation.Entries.Add(new TerminalAiConversationEntry(
+            AiChatMessageRole.System,
+            content,
+            DateTimeOffset.UtcNow));
+    }
+
+    private bool HasTerminalErrorContext()
+    {
+        if (!string.IsNullOrWhiteSpace(Tab.ErrorMessage))
+        {
+            return true;
+        }
+
+        if (Tab.Snapshot?.Status == LinuxMadeSane.Core.Enums.TerminalSessionStatus.Faulted)
+        {
+            return true;
+        }
+
+        var output = Tab.Snapshot?.Output;
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return false;
+        }
+
+        var tailLength = Math.Min(output.Length, 1600);
+        return terminalErrorPattern.IsMatch(output[^tailLength..]);
+    }
+
+    private async Task RunCommandAsync(string commandText)
+    {
+        if (RunCommand.HasDelegate)
+        {
+            await RunCommand.InvokeAsync(commandText);
+        }
+    }
+
+    private static UiPillTone GetMessageTone(AiChatMessageRole role) =>
+        role switch
+        {
+            AiChatMessageRole.Assistant => UiPillTone.Success,
+            AiChatMessageRole.System => UiPillTone.Warning,
+            _ => UiPillTone.Neutral
+        };
+
+    private static string GetRoleLabel(AiChatMessageRole role) =>
+        role switch
+        {
+            AiChatMessageRole.Assistant => "AI",
+            AiChatMessageRole.User => "Request",
+            _ => role.ToString()
+        };
+
+    public ValueTask DisposeAsync()
+    {
+        promptInteropReference?.Dispose();
+        promptInteropReference = null;
+        return ValueTask.CompletedTask;
+    }
+}

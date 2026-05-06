@@ -1,0 +1,28 @@
+using LinuxMadeSane.Core.Enums;
+
+namespace LinuxMadeSane.Application.Contracts.RdpOptimizer;
+
+public sealed class RdpOptimizationRequestEditor
+{
+    public RdpOptimizationProfile Profile { get; set; } = RdpOptimizationProfile.Default;
+
+    public bool InstallXrdpIfMissing { get; set; } = true;
+
+    public bool InstallXfceIfMissing { get; set; } = true;
+
+    public bool DisableGnomeServicesOnly { get; set; }
+
+    public bool DisableGnomeAutostarts { get; set; } = true;
+
+    public bool CreateSnapshotBeforeChanges { get; set; } = true;
+
+    public bool DryRun { get; set; }
+
+    public bool InspectOnly { get; set; }
+
+    public bool RestoreRemovedPackages { get; set; } = true;
+
+    public Guid? SnapshotIdToRestore { get; set; }
+
+    public HashSet<string> SelectedGnomePackagesToRemove { get; set; } = [];
+}

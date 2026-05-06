@@ -1,0 +1,105 @@
+@using Microsoft.AspNetCore.Components.Forms
+
+<UiField Label="@Label"
+         Helper="@Helper"
+         Compact="@Compact"
+         Inline="@Inline"
+         Class="@ShellClass">
+    <ChildContent>
+        <div class="@DropzoneClass"
+             @ondragenter="HandleDragEnter"
+             @ondragover:preventDefault="true"
+             @ondragover="HandleDragOver"
+             @ondragleave="HandleDragLeave"
+             @ondrop:preventDefault="true"
+             @ondrop="HandleDrop">
+            <InputFile id="@inputId"
+                       class="ui-file-dropzone-input"
+                       style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;z-index:2;"
+                       OnChange="HandleChangeAsync"
+                       accept="@Accept"
+                       multiple="@Multiple" />
+
+            <label class="ui-file-dropzone-surface" for="@inputId">
+                <span class="ui-file-dropzone-icon">
+                    <UiGlyphIcon Glyph="@Glyph" />
+                </span>
+                <span class="ui-file-dropzone-copy">
+                    <strong>@PrimaryText</strong>
+                    @if (!string.IsNullOrWhiteSpace(SecondaryText))
+                    {
+                        <span>@SecondaryText</span>
+                    }
+                </span>
+            </label>
+
+            @if (selectedFileNames.Count > 0)
+            {
+                <div class="ui-file-dropzone-selection">
+                    <span class="status-pill success">@selectedFileNames.Count file(s) ready</span>
+                    <span class="meta-text">@SelectionSummary</span>
+                </div>
+            }
+        </div>
+    </ChildContent>
+</UiField>
+
+@code {
+    private readonly string inputId = $"ui-file-dropzone-{Guid.NewGuid():N}";
+    private IReadOnlyList<string> selectedFileNames = [];
+    private bool isDragging;
+
+    [Parameter] public string? Label { get; set; }
+    [Parameter] public string? Helper { get; set; }
+    [Parameter] public string PrimaryText { get; set; } = "Drop files or click here";
+    [Parameter] public string SecondaryText { get; set; } = string.Empty;
+    [Parameter] public string? Accept { get; set; }
+    [Parameter] public bool Multiple { get; set; } = true;
+    [Parameter] public int MaxFileCount { get; set; } = 10;
+    [Parameter] public bool Compact { get; set; }
+    [Parameter] public bool Inline { get; set; }
+    [Parameter] public UiIconGlyph Glyph { get; set; } = UiIconGlyph.Upload;
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public EventCallback<InputFileChangeEventArgs> OnChange { get; set; }
+
+    private string DropzoneClass => string.Join(" ", new[]
+    {
+        "ui-file-dropzone",
+        isDragging ? "drag-active" : string.Empty
+    }.Where(static value => !string.IsNullOrWhiteSpace(value)));
+
+    private string ShellClass => string.IsNullOrWhiteSpace(Class)
+        ? "ui-file-dropzone-shell"
+        : $"ui-file-dropzone-shell {Class}";
+
+    private string SelectionSummary =>
+        string.Join(", ", selectedFileNames.Take(3)) +
+        (selectedFileNames.Count > 3 ? $" +{selectedFileNames.Count - 3} more" : string.Empty);
+
+    private async Task HandleChangeAsync(InputFileChangeEventArgs args)
+    {
+        isDragging = false;
+        selectedFileNames = args.GetMultipleFiles(MaxFileCount).Select(file => file.Name).ToArray();
+        await OnChange.InvokeAsync(args);
+    }
+
+    private void HandleDragEnter()
+    {
+        isDragging = true;
+    }
+
+    private void HandleDragOver(DragEventArgs _)
+    {
+        isDragging = true;
+    }
+
+    private void HandleDragLeave()
+    {
+        isDragging = false;
+    }
+
+    private void HandleDrop()
+    {
+        isDragging = false;
+    }
+}

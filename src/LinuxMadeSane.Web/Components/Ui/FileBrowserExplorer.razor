@@ -1,0 +1,905 @@
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Web.Services
+@implements IDisposable
+@inject IJSRuntime JSRuntime
+
+<section class="surface-card file-browser-shell">
+    @if (HeaderContent is not null)
+    {
+        <div class="file-browser-header-slot">
+            @HeaderContent
+        </div>
+    }
+
+    @if (!CanBrowse && !IsBusy)
+    {
+        <div class="empty-state toolbar-row-spaced">
+            <h3>@NotConnectedTitle</h3>
+            <p>@NotConnectedMessage</p>
+        </div>
+    }
+    else if (!CanBrowse)
+    {
+        <div class="surface-subcard file-browser-loading-surface">
+            <div class="file-browser-busy-card" role="status" aria-live="polite" aria-busy="true">
+                <span class="file-browser-busy-spinner" aria-hidden="true"></span>
+                <strong>@BusyHeading</strong>
+                <span>@BusyDescription</span>
+            </div>
+        </div>
+    }
+    else
+    {
+        <div class="file-browser-workspace-shell">
+            <div class="file-browser-workspace @GetWorkspaceClass()">
+                <aside class="surface-subcard file-browser-sidebar @(SidebarCollapsed ? "collapsed" : null)">
+                    <div class="table-header file-browser-sidebar-header">
+                        @if (SidebarCollapsed)
+                        {
+                            <span class="file-browser-sidebar-collapsed-copy" title="Directories">
+                                <span class="file-browser-item-icon file-browser-item-icon-folder" aria-hidden="true">@RenderFolderIcon(false)</span>
+                            </span>
+                        }
+                        else
+                        {
+                            <div class="stack-tight file-browser-sidebar-copy">
+                                <h3>Directories</h3>
+                                <span>@CountVisibleDirectories(DirectoryNodes) shown</span>
+                            </div>
+                        }
+
+                        <UiIconButton Label="@(SidebarCollapsed ? "Expand directories" : "Collapse directories")"
+                                      Title="@(SidebarCollapsed ? "Expand directories" : "Collapse directories")"
+                                      Glyph="@(SidebarCollapsed ? UiIconGlyph.SidebarExpand : UiIconGlyph.SidebarCollapse)"
+                                      Variant="UiButtonVariant.Toolbar"
+                                      Class="file-browser-sidebar-toggle"
+                                      Disabled="@IsBusy"
+                                      OnClick="ToggleSidebarCollapsedAsync" />
+                    </div>
+
+                    @if (!SidebarCollapsed)
+                    {
+                        <div class="file-browser-tree">
+                            @if (DirectoryNodes.Count == 0)
+                            {
+                                <div class="empty-state">
+                                    <p>No directory tree is available yet.</p>
+                                </div>
+                            }
+                            else
+                            {
+                                @foreach (var node in DirectoryNodes)
+                                {
+                                    @RenderDirectoryNode(node)
+                                }
+                            }
+                        </div>
+                    }
+                </aside>
+
+                <div class="file-browser-main">
+                    <div class="file-browser-detail-layout @GetDetailLayoutClass()"
+                         style="@GetDetailLayoutStyle()"
+                         @ref="detailLayoutElement">
+                        @if (!IsDetailPanelFocused)
+                        {
+                            <div class="surface-subcard stack-list file-browser-content-panel">
+                                <div class="file-browser-toolbar">
+                                    <div class="toolbar-row file-browser-primary-actions">
+                                        <CompactUIButton Label="Refresh"
+                                                         Glyph="UiIconGlyph.Refresh"
+                                                         Disabled="@(!CanBrowse || IsBusy)"
+                                                         OnClick="RefreshAsync" />
+                                        @ToolbarContent
+                                    </div>
+                                    <div class="file-browser-column-toggles-row">
+                                        <div class="file-browser-column-toggles" aria-label="Visible file columns">
+                                            <UiSwitchField @bind-Value="showOwnerColumn" Label="Owner" Title="Show owner column" Compact="true" />
+                                            <UiSwitchField @bind-Value="showGroupColumn" Label="Group" Title="Show group column" Compact="true" />
+                                            <UiSwitchField @bind-Value="showPermissionsColumn" Label="Permissions" Title="Show permissions column" Compact="true" />
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="table-shell file-browser-table-shell"
+                                     @oncontextmenu="RequestCurrentDirectoryContextMenuAsync"
+                                     @oncontextmenu:preventDefault="true">
+                                    <table>
+                                        <thead>
+                                            <tr>
+                                                <th class="file-browser-select-column" title="Select all visible items">
+                                                    <div class="file-browser-select-header">
+                                                        <UiCompactCheckbox Label="Select all"
+                                                                           Title="Select all visible items"
+                                                                           Value="@AllItemsSelected"
+                                                                           ValueChanged="ToggleSelectAllAsync"
+                                                                           Disabled="@(VisibleItems.Count == 0 || IsBusy)" />
+                                                    </div>
+                                                </th>
+                                                <th class="file-browser-name-column">
+                                                    <div class="file-browser-name-header">
+                                                        <span>Name</span>
+                                                        <UiFilterInput Value="@itemFilter"
+                                                                       ValueChanged="OnItemFilterChangedAsync"
+                                                                       Placeholder="Filter"
+                                                                       Title="Filter files and folders in this folder"
+                                                                       AriaLabel="Filter files and folders in this folder"
+                                                                       Disabled="@(!CanBrowse || IsBusy)" />
+                                                    </div>
+                                                </th>
+                                                @if (showOwnerColumn)
+                                                {
+                                                    <th>Owner</th>
+                                                }
+                                                @if (showGroupColumn)
+                                                {
+                                                    <th>Group</th>
+                                                }
+                                                @if (showPermissionsColumn)
+                                                {
+                                                    <th>Permissions</th>
+                                                }
+                                                <th class="file-browser-size-column">Size</th>
+                                                <th class="file-browser-modified-column">Modified</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @if (CanNavigateUp)
+                                            {
+                                                <tr class="interactive-row file-browser-parent-row"
+                                                    @onclick="GoUpAsync"
+                                                    @oncontextmenu="RequestParentDirectoryContextMenuAsync"
+                                                    @oncontextmenu:preventDefault="true"
+                                                    @oncontextmenu:stopPropagation="true">
+                                                    <td class="file-browser-select-cell"></td>
+                                                    <td>
+                                                        <span class="entry-name">
+                                                            <span class="file-browser-item-icon file-browser-item-icon-folder" aria-hidden="true">@RenderFolderIcon(false)</span>
+                                                            ..
+                                                        </span>
+                                                    </td>
+                                                    @if (showOwnerColumn)
+                                                    {
+                                                        <td>-</td>
+                                                    }
+                                                    @if (showGroupColumn)
+                                                    {
+                                                        <td>-</td>
+                                                    }
+                                                    @if (showPermissionsColumn)
+                                                    {
+                                                        <td>-</td>
+                                                    }
+                                                    <td class="file-browser-size-column">-</td>
+                                                    <td class="file-browser-modified-column">-</td>
+                                                </tr>
+                                            }
+
+                                            @if (VisibleItems.Count == 0)
+                                            {
+                                                <tr>
+                                                    <td class="file-browser-filter-empty-state" colspan="@CurrentTableColumnCount">
+                                                        @if (HasActiveItemFilter)
+                                                        {
+                                                            <span>No files or folders in this folder match "@itemFilter.Trim()".</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span>No files or folders are available in this folder.</span>
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            }
+
+                                            @foreach (var item in VisibleItems)
+                                            {
+                                                var isBlockedFolder = IsBlockedFolder(item);
+                                                var isSelected = IsItemSelected(item);
+
+                                                <tr class="interactive-row @(SelectedItem == item || isSelected ? "interactive-row-selected" : null) @(isBlockedFolder ? "interactive-row-blocked" : null)"
+                                                    @onclick="@(() => ActivateItemAsync(item))"
+                                                    @oncontextmenu="@((MouseEventArgs args) => RequestItemContextMenuAsync(args, item))"
+                                                    @oncontextmenu:preventDefault="true"
+                                                    @oncontextmenu:stopPropagation="true">
+                                                    <td class="file-browser-select-cell">
+                                                        <UiCompactCheckbox Label="@($"Select {item.Name}")"
+                                                                           Title="@($"Select {item.Name}")"
+                                                                           Value="@isSelected"
+                                                                           ValueChanged="@((bool selected) => ToggleItemSelectionAsync(item, selected))"
+                                                                           Disabled="@IsBusy" />
+                                                    </td>
+                                                    <td>
+                                                        <span class="entry-name">
+                                                            <span class="file-browser-item-icon @GetItemIconClass(item.ItemType)" aria-hidden="true">@RenderItemIcon(item.ItemType, isExpandedFolder: false)</span>
+                                                            @if (isBlockedFolder)
+                                                            {
+                                                                <span class="file-browser-warning-icon" aria-hidden="true" title="Not accessible">@RenderBlockedIcon()</span>
+                                                            }
+                                                            @if (item.ItemType == SftpItemType.Link)
+                                                            {
+                                                                <span class="file-browser-link-entry">
+                                                                    <span class="file-browser-link-name">@item.Name</span>
+                                                                    @if (!string.IsNullOrWhiteSpace(item.LinkTarget))
+                                                                    {
+                                                                        <span class="file-browser-link-target">-&gt; @item.LinkTarget</span>
+                                                                    }
+                                                                </span>
+                                                            }
+                                                            else
+                                                            {
+                                                                @item.Name
+                                                            }
+                                                        </span>
+                                                    </td>
+                                                    @if (showOwnerColumn)
+                                                    {
+                                                        <td>@FormatMetadataValue(item.OwnerName)</td>
+                                                    }
+                                                    @if (showGroupColumn)
+                                                    {
+                                                        <td>@FormatMetadataValue(item.GroupName)</td>
+                                                    }
+                                                    @if (showPermissionsColumn)
+                                                    {
+                                                        <td class="file-browser-permissions-cell">@FormatPermissions(item)</td>
+                                                    }
+                                                    <td class="file-browser-size-column">
+                                                        @FormatBytes(item.SizeBytes)
+                                                        @if (isBlockedFolder)
+                                                        {
+                                                            <span class="file-browser-item-note">Not accessible</span>
+                                                        }
+                                                    </td>
+                                                    <td class="file-browser-modified-column">@(item.LastModifiedUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "n/a")</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        }
+
+                        @if (ShowDetailPanel && !IsDetailPanelFocused)
+                        {
+                            <div class="ui-pane-splitter file-browser-detail-splitter @(DetailPanelDock == FileBrowserPreviewDock.Bottom ? "ui-pane-splitter-horizontal" : "ui-pane-splitter-vertical")"
+                                 role="separator"
+                                 aria-orientation="@(DetailPanelDock == FileBrowserPreviewDock.Bottom ? "horizontal" : "vertical")"
+                                 aria-label="Resize preview panel"
+                                 title="Drag to resize preview panel"
+                                 @onpointerdown="OnDetailPanelSplitterPointerDownAsync"
+                                 @onpointerdown:preventDefault="true"></div>
+                        }
+
+                        @if (ShowDetailPanel)
+                        {
+                            <div class="surface-subcard stack-list file-browser-detail-panel @(IsDetailPanelFocused ? "focused" : null)">
+                                <div class="file-browser-detail-panel-body">
+                                    @if (VisibleSelectionCount > 0 && DetailItem is null)
+                                    {
+                                        <div class="empty-state">
+                                            <h3>@(VisibleSelectionCount == 1 ? "1 item selected" : $"{VisibleSelectionCount} items selected")</h3>
+                                            <p>Use the toolbar or right-click menu for bulk actions. Preview and editing open when a single item is selected.</p>
+                                        </div>
+                                    }
+                                    else if (DetailItem is null)
+                                    {
+                                        <div class="empty-state">
+                                            <h3>No file selected</h3>
+                                            <p>Select a file to preview or edit it here, or pick a folder to inspect its details.</p>
+                                        </div>
+                                    }
+                                    else if (DetailsContent is not null)
+                                    {
+                                        var detailItem = DetailItem!;
+                                        @DetailsContent(detailItem)
+                                    }
+                                    else
+                                    {
+                                        var detailItem = DetailItem!;
+                                        <div class="stack-list">
+                                            <div class="file-browser-detail-header">
+                                                <strong>@detailItem.Name</strong>
+                                                @if (detailItem.ItemType == SftpItemType.Link && !string.IsNullOrWhiteSpace(detailItem.LinkTarget))
+                                                {
+                                                    <span class="meta-text file-browser-wrap">-&gt; @detailItem.LinkTarget</span>
+                                                }
+                                                <span class="meta-text file-browser-wrap">@detailItem.FullPath</span>
+                                            </div>
+
+                                            <div class="token-row compact-token-row">
+                                                <span class="status-pill neutral">@detailItem.ItemType</span>
+                                                <span class="status-pill neutral">@FormatPermissions(detailItem)</span>
+                                            </div>
+
+                                            <dl class="file-browser-detail-list">
+                                                <div class="file-browser-detail-row">
+                                                    <dt>Owner</dt>
+                                                    <dd>@FormatMetadataValue(detailItem.OwnerName)</dd>
+                                                </div>
+                                                <div class="file-browser-detail-row">
+                                                    <dt>Group</dt>
+                                                    <dd>@FormatMetadataValue(detailItem.GroupName)</dd>
+                                                </div>
+                                                <div class="file-browser-detail-row">
+                                                    <dt>Size</dt>
+                                                    <dd>@FormatBytes(detailItem.SizeBytes)</dd>
+                                                </div>
+                                                <div class="file-browser-detail-row">
+                                                    <dt>Modified</dt>
+                                                    <dd>@(detailItem.LastModifiedUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "n/a")</dd>
+                                                </div>
+                                            </dl>
+                                        </div>
+                                    }
+                                </div>
+
+                                @if (DetailActions is not null)
+                                {
+                                    <div class="toolbar-row toolbar-row-spaced">
+                                        @DetailActions(DetailItem)
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            @if (IsBusy)
+            {
+                <div class="file-browser-busy-overlay" role="status" aria-live="polite" aria-busy="true">
+                    <div class="file-browser-busy-card">
+                        <span class="file-browser-busy-spinner" aria-hidden="true"></span>
+                        <strong>@BusyHeading</strong>
+                        <span>@BusyDescription</span>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+</section>
+
+@code {
+    [Parameter] public string Title { get; set; } = "Files";
+    [Parameter] public string CurrentPath { get; set; } = ".";
+    [Parameter] public string? RootPath { get; set; }
+    [Parameter] public IReadOnlySet<string> BlockedDirectoryPaths { get; set; } = new HashSet<string>(StringComparer.Ordinal);
+    [Parameter] public IReadOnlyList<SftpItem> Items { get; set; } = Array.Empty<SftpItem>();
+    [Parameter] public IReadOnlyList<FileBrowserDirectoryNode> DirectoryNodes { get; set; } = Array.Empty<FileBrowserDirectoryNode>();
+    [Parameter] public IReadOnlySet<string> SelectedPaths { get; set; } = new HashSet<string>(StringComparer.Ordinal);
+    [Parameter] public SftpItem? SelectedItem { get; set; }
+    [Parameter] public bool CanBrowse { get; set; }
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter] public string BusyTitle { get; set; } = "Working";
+    [Parameter] public string BusyMessage { get; set; } = "Loading folder contents.";
+    [Parameter] public string NotConnectedTitle { get; set; } = "Browser not connected";
+    [Parameter] public string NotConnectedMessage { get; set; } = "Enter a directory path to browse.";
+    [Parameter] public bool ShowDetailPanel { get; set; } = true;
+    [Parameter] public FileBrowserPreviewDock DetailPanelDock { get; set; } = FileBrowserPreviewDock.Right;
+    [Parameter] public int DetailPanelSizePx { get; set; } = 520;
+    [Parameter] public bool SidebarCollapsed { get; set; }
+    [Parameter] public bool DetailPanelFocused { get; set; }
+    [Parameter] public EventCallback RefreshRequested { get; set; }
+    [Parameter] public EventCallback GoUpRequested { get; set; }
+    [Parameter] public EventCallback<(bool Selected, IReadOnlyList<SftpItem> Items)> SelectAllRequested { get; set; }
+    [Parameter] public EventCallback<SftpItem> ItemSelected { get; set; }
+    [Parameter] public EventCallback<(SftpItem Item, bool Selected)> ItemSelectionToggled { get; set; }
+    [Parameter] public EventCallback<string> NavigateRequested { get; set; }
+    [Parameter] public EventCallback<string> ToggleDirectoryRequested { get; set; }
+    [Parameter] public EventCallback<FileBrowserContextMenuRequest> ContextMenuRequested { get; set; }
+    [Parameter] public EventCallback<int> DetailPanelSizeChanged { get; set; }
+    [Parameter] public EventCallback<bool> SidebarCollapsedChanged { get; set; }
+    [Parameter] public EventCallback<bool> DetailPanelFocusedChanged { get; set; }
+    [Parameter] public RenderFragment? HeaderContent { get; set; }
+    [Parameter] public RenderFragment? ToolbarContent { get; set; }
+    [Parameter] public RenderFragment<SftpItem>? DetailsContent { get; set; }
+    [Parameter] public RenderFragment<SftpItem?>? DetailActions { get; set; }
+
+    private string? NormalizedRootPath => string.IsNullOrWhiteSpace(RootPath) ? null : NormalizePath(RootPath);
+    private bool CanNavigateUp => CanNavigateUpFrom(CurrentPath, NormalizedRootPath);
+    private string? ParentPath => GetParentPath(CurrentPath, NormalizedRootPath);
+    private string BusyHeading => string.IsNullOrWhiteSpace(BusyTitle) ? "Working" : BusyTitle.Trim();
+    private string BusyDescription => string.IsNullOrWhiteSpace(BusyMessage) ? "Loading folder contents." : BusyMessage.Trim();
+    private IReadOnlyList<SftpItem> VisibleItems => BuildVisibleItems();
+    private SftpItem? DetailItem => ResolveDetailItem();
+    private int VisibleSelectionCount => VisibleItems.Count(IsItemSelected);
+    private bool AllItemsSelected => VisibleItems.Count > 0 && VisibleItems.All(IsItemSelected);
+    private bool IsDetailPanelFocused => ShowDetailPanel && DetailPanelFocused;
+    private bool HasActiveItemFilter => !string.IsNullOrWhiteSpace(itemFilter);
+    private int CurrentTableColumnCount => 4 + (showOwnerColumn ? 1 : 0) + (showGroupColumn ? 1 : 0) + (showPermissionsColumn ? 1 : 0);
+    private string itemFilter = string.Empty;
+    private bool showOwnerColumn;
+    private bool showGroupColumn;
+    private bool showPermissionsColumn;
+    private ElementReference detailLayoutElement;
+    private DotNetObjectReference<FileBrowserExplorer>? detailPanelInteropReference;
+
+    private Task RefreshAsync() =>
+        RefreshRequested.HasDelegate ? RefreshRequested.InvokeAsync() : Task.CompletedTask;
+
+    private Task GoUpAsync() =>
+        GoUpRequested.HasDelegate ? GoUpRequested.InvokeAsync() : Task.CompletedTask;
+
+    private Task NavigateToPathAsync(string path) =>
+        NavigateRequested.HasDelegate ? NavigateRequested.InvokeAsync(path) : Task.CompletedTask;
+
+    private Task ToggleDirectoryAsync(string path) =>
+        ToggleDirectoryRequested.HasDelegate ? ToggleDirectoryRequested.InvokeAsync(path) : Task.CompletedTask;
+
+    private Task SelectItemAsync(SftpItem item) =>
+        ItemSelected.HasDelegate ? ItemSelected.InvokeAsync(item) : Task.CompletedTask;
+
+    private Task ToggleItemSelectionAsync(SftpItem item, bool selected)
+    {
+        if (!ItemSelectionToggled.HasDelegate)
+        {
+            return Task.CompletedTask;
+        }
+
+        return ItemSelectionToggled.InvokeAsync((item, selected));
+    }
+
+    private Task ToggleSelectAllAsync(bool selected) =>
+        SelectAllRequested.HasDelegate
+            ? SelectAllRequested.InvokeAsync((selected, VisibleItems))
+            : Task.CompletedTask;
+
+    private Task OnItemFilterChangedAsync(string? value)
+    {
+        itemFilter = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task ToggleSidebarCollapsedAsync() =>
+        SidebarCollapsedChanged.HasDelegate
+            ? SidebarCollapsedChanged.InvokeAsync(!SidebarCollapsed)
+            : Task.CompletedTask;
+
+    private Task FocusDetailPanelAsync() =>
+        DetailPanelFocusedChanged.HasDelegate
+            ? DetailPanelFocusedChanged.InvokeAsync(true)
+            : Task.CompletedTask;
+
+    private Task RestoreDetailPanelAsync() =>
+        DetailPanelFocusedChanged.HasDelegate
+            ? DetailPanelFocusedChanged.InvokeAsync(false)
+            : Task.CompletedTask;
+
+    private async Task OnDetailPanelSplitterPointerDownAsync(PointerEventArgs args)
+    {
+        if (!ShowDetailPanel || !DetailPanelSizeChanged.HasDelegate)
+        {
+            return;
+        }
+
+        detailPanelInteropReference ??= DotNetObjectReference.Create(this);
+
+        await JSRuntime.InvokeVoidAsync(
+            "lmsSplitPane.beginResize",
+            detailLayoutElement,
+            new
+            {
+                orientation = DetailPanelDock == FileBrowserPreviewDock.Bottom ? "bottom" : "right",
+                pointerX = args.ClientX,
+                pointerY = args.ClientY,
+                minSize = DetailPanelDock == FileBrowserPreviewDock.Bottom ? 180 : 220,
+                maxSize = DetailPanelDock == FileBrowserPreviewDock.Bottom ? 620 : 4096,
+                minPrimarySize = DetailPanelDock == FileBrowserPreviewDock.Bottom ? 220 : 1,
+                splitterSize = 10,
+                cssVariableName = "--file-browser-detail-size",
+                callbackMethod = nameof(OnDetailPanelSizeChangedAsync),
+                contextId = "detail"
+            },
+            detailPanelInteropReference);
+    }
+
+    [JSInvokable]
+    public Task OnDetailPanelSizeChangedAsync(string _, int size) =>
+        DetailPanelSizeChanged.HasDelegate
+            ? DetailPanelSizeChanged.InvokeAsync(size)
+            : Task.CompletedTask;
+
+    private string GetDetailLayoutClass()
+    {
+        if (!ShowDetailPanel)
+        {
+            return "detail-hidden";
+        }
+
+        if (IsDetailPanelFocused)
+        {
+            return "detail-focused";
+        }
+
+        return DetailPanelDock == FileBrowserPreviewDock.Bottom
+            ? "detail-bottom"
+            : "detail-right";
+    }
+
+    private string GetDetailLayoutStyle()
+    {
+        if (!ShowDetailPanel)
+        {
+            return string.Empty;
+        }
+
+        var clampedSize = DetailPanelDock == FileBrowserPreviewDock.Bottom
+            ? Math.Clamp(DetailPanelSizePx, 180, 620)
+            : Math.Clamp(DetailPanelSizePx, 220, 4096);
+        return $"--file-browser-detail-size:{clampedSize}px;";
+    }
+
+    private string GetWorkspaceClass()
+    {
+        if (IsDetailPanelFocused)
+        {
+            return "detail-focused";
+        }
+
+        return SidebarCollapsed ? "sidebar-collapsed" : string.Empty;
+    }
+
+    private Task ActivateItemAsync(SftpItem item) =>
+        item.ItemType == SftpItemType.Folder
+            ? IsBlockedPath(item.FullPath)
+                ? SelectItemAsync(item)
+                : NavigateToPathAsync(item.FullPath)
+            : SelectItemAsync(item);
+
+    private bool IsBlockedFolder(SftpItem item) =>
+        item.ItemType == SftpItemType.Folder && IsBlockedPath(item.FullPath);
+
+    private bool IsItemSelected(SftpItem item) =>
+        SelectedPaths.Contains(NormalizePath(item.FullPath));
+
+    private bool IsBlockedPath(string path) =>
+        BlockedDirectoryPaths.Contains(NormalizePath(path));
+
+    private Task RequestItemContextMenuAsync(MouseEventArgs args, SftpItem item) =>
+        RequestContextMenuAsync(
+            args,
+            item.FullPath,
+            item.ItemType == SftpItemType.Folder ? item.FullPath : CurrentPath,
+            item.Name,
+            item.ItemType == SftpItemType.Folder,
+            item);
+
+    private Task RequestCurrentDirectoryContextMenuAsync(MouseEventArgs args) =>
+        RequestContextMenuAsync(
+            args,
+            CurrentPath,
+            CurrentPath,
+            GetPathLabel(CurrentPath),
+            isDirectory: true,
+            item: null);
+
+    private Task RequestParentDirectoryContextMenuAsync(MouseEventArgs args)
+    {
+        if (ParentPath is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        return RequestContextMenuAsync(
+            args,
+            ParentPath,
+            ParentPath,
+            "..",
+            isDirectory: true,
+            item: null);
+    }
+
+    private Task RequestContextMenuAsync(
+        MouseEventArgs args,
+        string targetPath,
+        string actionDirectoryPath,
+        string displayName,
+        bool isDirectory,
+        SftpItem? item)
+    {
+        if (!ContextMenuRequested.HasDelegate)
+        {
+            return Task.CompletedTask;
+        }
+
+        return ContextMenuRequested.InvokeAsync(
+            new FileBrowserContextMenuRequest(
+                args.ClientX,
+                args.ClientY,
+                targetPath,
+                actionDirectoryPath,
+                displayName,
+                isDirectory,
+                item));
+    }
+
+    private static string NormalizePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return "/";
+        }
+
+        var trimmed = path.Trim();
+        if (trimmed is "/" or ".")
+        {
+            return trimmed;
+        }
+
+        var hasLeadingSlash = trimmed.StartsWith("/", StringComparison.Ordinal);
+        var parts = trimmed.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0)
+        {
+            return hasLeadingSlash ? "/" : ".";
+        }
+
+        return hasLeadingSlash
+            ? "/" + string.Join("/", parts)
+            : string.Join("/", parts);
+    }
+
+    private static string GetItemIconClass(SftpItemType type) => type switch
+    {
+        SftpItemType.Folder => "file-browser-item-icon-folder",
+        SftpItemType.File => "file-browser-item-icon-file",
+        SftpItemType.Link => "file-browser-item-icon-link",
+        _ => "file-browser-item-icon-other"
+    };
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB"];
+        double value = bytes;
+        var index = 0;
+
+        while (value >= 1024 && index < units.Length - 1)
+        {
+            value /= 1024;
+            index++;
+        }
+
+        return $"{value:0.#} {units[index]}";
+    }
+
+    private static string FormatMetadataValue(string value) =>
+        string.IsNullOrWhiteSpace(value) ? "-" : value;
+
+    private static string FormatPermissions(SftpItem item) =>
+        string.IsNullOrWhiteSpace(item.PermissionsOctal)
+            ? FormatMetadataValue(item.Permissions)
+            : $"{FormatMetadataValue(item.Permissions)} / {item.PermissionsOctal}";
+
+    private static bool CanNavigateUpFrom(string currentPath, string? rootPath)
+    {
+        if (string.IsNullOrWhiteSpace(currentPath))
+        {
+            return false;
+        }
+
+        var normalizedCurrentPath = NormalizePath(currentPath);
+        if (!string.IsNullOrWhiteSpace(rootPath))
+        {
+            return !string.Equals(normalizedCurrentPath, rootPath, StringComparison.Ordinal);
+        }
+
+        return normalizedCurrentPath is not "/" and not ".";
+    }
+
+    private static string? GetParentPath(string currentPath, string? rootPath)
+    {
+        if (!CanNavigateUpFrom(currentPath, rootPath))
+        {
+            return null;
+        }
+
+        var normalizedCurrentPath = NormalizePath(currentPath);
+        if (normalizedCurrentPath is "/" or ".")
+        {
+            return null;
+        }
+
+        var normalized = normalizedCurrentPath.TrimEnd('/');
+        var separator = normalized.LastIndexOf('/');
+        var parentPath = separator <= 0
+            ? string.IsNullOrWhiteSpace(rootPath) ? "/" : NormalizePath(rootPath)
+            : normalized[..separator];
+
+        if (!string.IsNullOrWhiteSpace(rootPath))
+        {
+            var normalizedRootPath = NormalizePath(rootPath);
+            if (!IsPathWithinRoot(parentPath, normalizedRootPath))
+            {
+                return normalizedRootPath;
+            }
+        }
+
+        return parentPath;
+    }
+
+    private static IReadOnlyList<(string Label, string Path)> BuildBreadcrumbs(string currentPath, string? rootPath)
+    {
+        var normalizedCurrentPath = NormalizePath(currentPath);
+        if (!string.IsNullOrWhiteSpace(rootPath))
+        {
+            var normalizedRootPath = NormalizePath(rootPath);
+            if (IsPathWithinRoot(normalizedCurrentPath, normalizedRootPath))
+            {
+                return BuildRootedBreadcrumbs(normalizedCurrentPath, normalizedRootPath);
+            }
+        }
+
+        return BuildDefaultBreadcrumbs(normalizedCurrentPath);
+    }
+
+    private static IReadOnlyList<(string Label, string Path)> BuildDefaultBreadcrumbs(string normalizedCurrentPath)
+    {
+        var parts = normalizedCurrentPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var crumbs = new List<(string Label, string Path)> { ("root", "/") };
+
+        var path = string.Empty;
+        foreach (var part in parts)
+        {
+            path += "/" + part;
+            crumbs.Add((part, path));
+        }
+
+        return crumbs;
+    }
+
+    private static IReadOnlyList<(string Label, string Path)> BuildRootedBreadcrumbs(string normalizedCurrentPath, string normalizedRootPath)
+    {
+        if (normalizedRootPath == "/")
+        {
+            return BuildDefaultBreadcrumbs(normalizedCurrentPath);
+        }
+
+        var crumbs = new List<(string Label, string Path)>
+        {
+            (GetRootLabel(normalizedRootPath), normalizedRootPath)
+        };
+
+        if (string.Equals(normalizedCurrentPath, normalizedRootPath, StringComparison.Ordinal))
+        {
+            return crumbs;
+        }
+
+        var currentParts = normalizedCurrentPath.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var rootParts = normalizedRootPath.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var index = rootParts.Length; index < currentParts.Length; index++)
+        {
+            var path = "/" + string.Join("/", currentParts.Take(index + 1));
+            crumbs.Add((currentParts[index], path));
+        }
+
+        return crumbs;
+    }
+
+    private static string GetRootLabel(string normalizedRootPath)
+    {
+        if (normalizedRootPath == "/")
+        {
+            return "root";
+        }
+
+        var parts = normalizedRootPath.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.LastOrDefault() ?? normalizedRootPath;
+    }
+
+    private static string GetPathLabel(string path)
+    {
+        var normalizedPath = NormalizePath(path);
+        if (normalizedPath is "/" or ".")
+        {
+            return normalizedPath;
+        }
+
+        var separator = normalizedPath.LastIndexOf('/');
+        return separator >= 0 ? normalizedPath[(separator + 1)..] : normalizedPath;
+    }
+
+    private static bool IsPathWithinRoot(string normalizedPath, string normalizedRootPath) =>
+        string.Equals(normalizedPath, normalizedRootPath, StringComparison.Ordinal) ||
+        normalizedPath.StartsWith(normalizedRootPath.TrimEnd('/') + "/", StringComparison.Ordinal);
+
+    private static int CountVisibleDirectories(IReadOnlyList<FileBrowserDirectoryNode> nodes) =>
+        nodes.Sum(node => 1 + CountVisibleDirectories(node.Children));
+
+    private IReadOnlyList<SftpItem> BuildVisibleItems()
+    {
+        var filter = itemFilter.Trim();
+        if (string.IsNullOrWhiteSpace(filter))
+        {
+            return Items;
+        }
+
+        return Items
+            .Where(item => item.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
+    private SftpItem? ResolveDetailItem()
+    {
+        if (SelectedItem is null)
+        {
+            return null;
+        }
+
+        var selectedPath = NormalizePath(SelectedItem.FullPath);
+        return VisibleItems.FirstOrDefault(item =>
+            string.Equals(NormalizePath(item.FullPath), selectedPath, StringComparison.Ordinal));
+    }
+
+    private static RenderFragment RenderItemIcon(SftpItemType type, bool isExpandedFolder) => type switch
+    {
+        SftpItemType.Folder => RenderFolderIcon(isExpandedFolder),
+        SftpItemType.File => @<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10A2.5 2.5 0 0 1 5 18V6A2.5 2.5 0 0 1 7.5 3.5Z" />
+                <path d="M14 3.5V8h4" />
+            </svg>,
+        SftpItemType.Link => @<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10 13a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5L11 7" />
+                <path d="M14 11a3.5 3.5 0 0 0-5 0L6.5 13.5a3.5 3.5 0 0 0 5 5L13 17" />
+            </svg>,
+        _ => @<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="8" />
+                <path d="M12 8v4" />
+                <path d="M12 16h.01" />
+            </svg>
+    };
+
+    private static RenderFragment RenderFolderIcon(bool isExpanded) => isExpanded
+        ? @<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3.5 9.5h6l2-2H20a1.5 1.5 0 0 1 1.5 1.5V10" />
+                <path d="M2.5 11.5h19l-1.8 6.4A2.5 2.5 0 0 1 17.3 19.5H5.6a2.5 2.5 0 0 1-2.4-3.15l-.7-4.85Z" />
+            </svg>
+        : @<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3.5 7.5h6l2 2H20a1.5 1.5 0 0 1 1.5 1.5v7A2.5 2.5 0 0 1 19 20.5H5A2.5 2.5 0 0 1 2.5 18V8.5A1 1 0 0 1 3.5 7.5Z" />
+            </svg>;
+
+    private static RenderFragment RenderBlockedIcon() => @<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="8" />
+            <path d="M8.5 15.5 15.5 8.5" />
+        </svg>;
+
+    private RenderFragment RenderDirectoryNode(FileBrowserDirectoryNode node) => @<div class="file-browser-tree-branch">
+        <div class="file-browser-tree-row @(node.IsCurrent ? "current" : node.IsAncestor ? "ancestor" : null) @(node.IsBlocked ? "blocked" : null)"
+             @oncontextmenu="@((MouseEventArgs args) => RequestContextMenuAsync(args, node.Path, node.Path, node.Name, isDirectory: true, item: null))"
+             @oncontextmenu:preventDefault="true"
+             @oncontextmenu:stopPropagation="true">
+            <button class="file-browser-tree-expander"
+                    type="button"
+                    @onclick="@(() => ToggleDirectoryAsync(node.Path))"
+                    disabled="@(!node.CanExpand || node.IsBlocked || IsBusy)"
+                    aria-label="Toggle @node.Name">
+                @(node.IsExpanded ? "-" : "+")
+            </button>
+            <button class="file-browser-tree-link"
+                    type="button"
+                    @onclick="@(() => NavigateToPathAsync(node.Path))"
+                    disabled="@IsBusy">
+                <span class="file-browser-item-icon file-browser-item-icon-folder" aria-hidden="true">@RenderItemIcon(SftpItemType.Folder, node.IsExpanded || node.IsCurrent)</span>
+                @if (node.IsBlocked)
+                {
+                    <span class="file-browser-warning-icon" aria-hidden="true" title="Not accessible">@RenderBlockedIcon()</span>
+                }
+                <span class="file-browser-wrap">@node.Name</span>
+            </button>
+        </div>
+
+        @if (node.IsExpanded && node.Children.Count > 0)
+        {
+            <div class="file-browser-tree-children">
+                @foreach (var child in node.Children)
+                {
+                    @RenderDirectoryNode(child)
+                }
+            </div>
+        }
+    </div>;
+
+    public void Dispose()
+    {
+        detailPanelInteropReference?.Dispose();
+        detailPanelInteropReference = null;
+    }
+}

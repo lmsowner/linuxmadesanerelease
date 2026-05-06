@@ -1,0 +1,95 @@
+@inject IJSRuntime JSRuntime
+
+@if (IsOpen)
+{
+    <div class="@RootClass" role="presentation" @onclick="HandleBackdropClickAsync">
+        <section class="@PanelClass"
+                 @ref="panelElement"
+                 role="dialog"
+                 aria-modal="true"
+                 aria-labelledby="@titleId"
+                 @onclick:stopPropagation="true">
+            <header class="ui-modal-header">
+                <div class="@TitleBlockClass"
+                     @ref="dragHandleElement"
+                     @onpointerdown="HandleHeaderPointerDownAsync"
+                     @onpointerdown:preventDefault="true">
+                    <h2 id="@titleId">@Title</h2>
+                    @if (!string.IsNullOrWhiteSpace(Subtitle))
+                    {
+                        <p>@Subtitle</p>
+                    }
+                </div>
+                <UiIconButton Label="Close" Glyph="UiIconGlyph.Clear" OnClick="OnClose" />
+            </header>
+
+            <div class="ui-modal-body">
+                @ChildContent
+            </div>
+
+            @if (Footer is not null)
+            {
+                <footer class="ui-modal-footer">
+                    @Footer
+                </footer>
+            }
+
+        </section>
+    </div>
+}
+
+@code {
+    private readonly string titleId = $"ui-modal-title-{Guid.NewGuid():N}";
+    private ElementReference panelElement;
+    private ElementReference dragHandleElement;
+
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
+    [Parameter] public string? Subtitle { get; set; }
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public bool Resizable { get; set; }
+    [Parameter] public bool Draggable { get; set; }
+    [Parameter] public bool CloseOnBackdrop { get; set; } = true;
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public RenderFragment? Footer { get; set; }
+
+    private string RootClass => string.IsNullOrWhiteSpace(Class)
+        ? "ui-modal-shell"
+        : $"ui-modal-shell {Class}";
+
+    private string PanelClass => Resizable
+        ? "ui-modal-panel ui-modal-panel-resizable"
+        : "ui-modal-panel";
+
+    private string TitleBlockClass => Draggable
+        ? "ui-modal-title-block ui-modal-title-block-draggable"
+        : "ui-modal-title-block";
+
+    private async Task HandleBackdropClickAsync()
+    {
+        if (CloseOnBackdrop)
+        {
+            await OnClose.InvokeAsync();
+        }
+    }
+
+    private async Task HandleHeaderPointerDownAsync(PointerEventArgs args)
+    {
+        if (!Draggable)
+        {
+            return;
+        }
+
+        await JSRuntime.InvokeVoidAsync(
+            "lmsModal.beginDrag",
+            panelElement,
+            new
+            {
+                pointerX = args.ClientX,
+                pointerY = args.ClientY,
+                margin = 12
+            });
+    }
+
+}

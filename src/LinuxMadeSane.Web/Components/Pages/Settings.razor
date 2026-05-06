@@ -1,0 +1,1185 @@
+@page "/settings"
+@rendermode InteractiveServer
+@using System.Net
+@using System.Net.NetworkInformation
+@using System.Net.Sockets
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models
+@using Microsoft.AspNetCore.Components.Forms
+@inject ISecuritySettingsService SecuritySettingsService
+@inject ITrustedNetworkAccessService TrustedNetworkAccessService
+
+<PageTitle>Security | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <UiHeroPanel Title="Security" Compact="true" />
+
+    @if (!isLoaded)
+    {
+        <section class="surface-card">
+            <p class="meta-text">Loading remote access settings...</p>
+        </section>
+    }
+    else
+    {
+        <TabControl ActiveValue="@activeTab"
+                    ActiveValueChanged="HandleTabChangedAsync"
+                    Class="page-tab-control security-tab-control"
+                    PanelClass="page-tab-panel security-tab-panel">
+            <ChildContent>
+                <TabPage Value="@TrustedNetworksTabValue" Title="Network Interfaces">
+                    <Header>
+                        <div class="security-tab-header">
+                            <span class="security-tab-title">Network Interfaces</span>
+                            <span class="security-tab-count">@networkInterfaces.Count</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="security-tab-content network-interface-content">
+                            <div class="section-heading">
+                                <div>
+                                    <p class="eyebrow">Interface access</p>
+                                    <h2>Grouped by NIC</h2>
+                                    <p class="meta-text">Each local network interface shows the access rules covering its addresses. A rule can allow direct access, require sign-in, or be disabled.</p>
+                                </div>
+                            </div>
+
+                            @if (!string.IsNullOrWhiteSpace(networkMessage))
+                            {
+                                <p class="callout @(networkMessageIsError ? "error" : "success")">@networkMessage</p>
+                            }
+
+                            <details class="surface-subcard security-network-editor" open="@IsNetworkEditorOpen">
+                                <summary>
+                                    <span>
+                                        <strong>@(networkEditor.Id.HasValue ? "Edit access rule" : "Add access rule")</strong>
+                                        <span class="meta-text">CIDR rules control direct access, username + OTP, or no access for matching networks.</span>
+                                    </span>
+                                    <span class="status-pill neutral">@(page.TrustedNetworks.Count) rules</span>
+                                </summary>
+
+                                <EditForm Model="@networkEditor" OnValidSubmit="SaveNetworkAsync" class="stack-form security-network-editor-form">
+                                    <DataAnnotationsValidator />
+
+                                    <div class="field-row">
+                                        <UiTextField @bind-Value="networkEditor.Label" Label="Label" />
+                                        <UiTextField @bind-Value="networkEditor.AddressOrCidr" Label="Address or CIDR" />
+                                    </div>
+
+                                    <UiTextField @bind-Value="networkEditor.Description" Label="Description" />
+
+                                    <div class="field-row">
+                                        <UiCheckboxField @bind-Value="networkEditor.IsEnabled" Label="Rule enabled" />
+                                        <UiCheckboxField @bind-Value="networkEditor.IsAuthenticationEnabled" Label="Authentication enabled" Helper="Require username or email plus OTP before allowing access." />
+                                    </div>
+
+                                    <div class="toolbar-row">
+                                        <UiCommandButton Label="@(isSavingNetwork ? "Saving..." : networkEditor.Id.HasValue ? "Save rule" : "Add rule")"
+                                                         Glyph="@(networkEditor.Id.HasValue ? UiIconGlyph.Connect : UiIconGlyph.Plus)"
+                                                         Type="submit"
+                                                         Disabled="@isSavingNetwork" />
+                                        @if (networkEditor.Id.HasValue)
+                                        {
+                                            <UiCommandButton Label="Cancel edit" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="CancelNetworkEditAsync" />
+                                        }
+                                    </div>
+                                </EditForm>
+                            </details>
+
+                            @if (networkInterfaces.Count == 0)
+                            {
+                                <div class="empty-state">
+                                    <h3>No network interfaces were reported</h3>
+                                    <p>The saved access rule list is still available in the additional ranges section below.</p>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="network-interface-list">
+                                    @foreach (var networkInterface in networkInterfaces)
+                                    {
+                                        var interfaceRanges = GetTrustedNetworksForInterface(networkInterface);
+
+                                        <article class="surface-subcard network-interface-card">
+                                            <div class="network-interface-header">
+                                                <div class="network-interface-heading">
+                                                    <span class="network-interface-status-dot @(networkInterface.IsUp ? "up" : "down")" aria-hidden="true"></span>
+                                                    <div>
+                                                        <h3>@networkInterface.Name</h3>
+                                                        <p>@networkInterface.Description</p>
+                                                    </div>
+                                                </div>
+
+                                                <div class="token-row compact-token-row">
+                                                    <span class="status-pill @(networkInterface.IsUp ? "success" : "neutral")">@networkInterface.Status</span>
+                                                    <span class="status-pill neutral">@networkInterface.Type</span>
+                                                    <span class="status-pill neutral">@interfaceRanges.Count rule(s)</span>
+                                                </div>
+                                            </div>
+
+                                            <div class="network-address-strip">
+                                                @foreach (var address in GetPrimaryAddresses(networkInterface))
+                                                {
+                                                    <code>@address.Display</code>
+                                                }
+                                            </div>
+
+                                            @if (interfaceRanges.Count == 0)
+                                            {
+                                                <p class="meta-text">No access rules currently match this NIC address.</p>
+                                            }
+                                            else
+                                            {
+                                                <div class="trusted-range-list">
+                                                    @foreach (var entry in interfaceRanges)
+                                                    {
+                                                        <div class="trusted-range-row @(!entry.IsEnabled ? "trusted-range-row-disabled" : string.Empty)">
+                                                            <div class="trusted-range-main">
+                                                                <strong>@entry.Label</strong>
+                                                                <code>@entry.AddressOrCidr</code>
+                                                                @if (!string.IsNullOrWhiteSpace(entry.Description))
+                                                                {
+                                                                    <span class="meta-text">@entry.Description</span>
+                                                                }
+                                                            </div>
+                                                            <div class="trusted-range-access">
+                                                                @if (entry.IsEnabled)
+                                                                {
+                                                                    <div class="trusted-range-pill-row">
+                                                                        <span class="status-pill @GetTrustedNetworkAccessPillClass(entry)">@GetTrustedNetworkAccessSummary(entry)</span>
+                                                                        <span class="status-pill success">@GetTrustedNetworkAuthPillText(entry)</span>
+                                                                    </div>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <span class="status-pill @GetTrustedNetworkAccessPillClass(entry)">@GetTrustedNetworkAccessSummary(entry)</span>
+                                                                }
+                                                                @if (!string.IsNullOrWhiteSpace(GetTrustedNetworkAccessMeta(entry)))
+                                                                {
+                                                                    <span class="meta-text">@GetTrustedNetworkAccessMeta(entry)</span>
+                                                                }
+                                                            </div>
+                                                            @if (entry.IsEnabled)
+                                                            {
+                                                                <div class="trusted-range-meta">
+                                                                    <span class="status-pill neutral">@(entry.IsBuiltIn ? "Built-in" : "Custom")</span>
+                                                                </div>
+                                                            }
+                                                            <div class="trusted-range-actions">
+                                                                @if (!entry.IsBuiltIn && entry.IsEnabled)
+                                                                {
+                                                                    <UiCommandButton Label="Edit"
+                                                                                     Glyph="UiIconGlyph.Edit"
+                                                                                     Variant="UiButtonVariant.Action"
+                                                                                     OnClick="@(() => BeginNetworkEdit(entry))"
+                                                                                     Disabled="@(!entry.IsEnabled)" />
+                                                                }
+                                                                @if (entry.IsEnabled)
+                                                                {
+                                                                    <UiCommandButton Label="@(entry.IsAuthenticationEnabled ? "Auth off" : "Auth on")"
+                                                                                     Glyph="@(entry.IsAuthenticationEnabled ? UiIconGlyph.Disconnect : UiIconGlyph.Connect)"
+                                                                                     Variant="UiButtonVariant.Action"
+                                                                                     OnClick="@(() => ToggleAuthenticationAccessAsync(entry))"
+                                                                                     Disabled="@(!entry.IsEnabled)" />
+                                                                }
+                                                                <UiCommandButton Label="@(entry.IsEnabled ? "Disable" : "Enable")"
+                                                                                 Glyph="@(entry.IsEnabled ? UiIconGlyph.Disconnect : UiIconGlyph.Connect)"
+                                                                                 Variant="UiButtonVariant.Action"
+                                                                                 OnClick="@(() => ToggleTrustedNetworkAsync(entry))" />
+                                                                @if (!entry.IsBuiltIn && entry.IsEnabled)
+                                                                {
+                                                                    <UiCommandButton Label="Delete"
+                                                                                     Glyph="UiIconGlyph.Delete"
+                                                                                     Variant="UiButtonVariant.Danger"
+                                                                                     OnClick="@(() => DeleteTrustedNetworkAsync(entry))"
+                                                                                     Disabled="@(!entry.IsEnabled)" />
+                                                                }
+                                                            </div>
+                                                        </div>
+                                                    }
+                                                </div>
+                                            }
+
+                                            <details class="network-interface-details">
+                                                <summary>
+                                                    <span>Interface details</span>
+                                                    <span class="meta-text">addresses, DNS, gateway, MAC, speed</span>
+                                                </summary>
+
+                                                <dl class="network-interface-detail-grid">
+                                                    <div>
+                                                        <dt>Interface ID</dt>
+                                                        <dd>@networkInterface.Id</dd>
+                                                    </div>
+                                                    <div>
+                                                        <dt>MAC</dt>
+                                                        <dd>@networkInterface.MacAddress</dd>
+                                                    </div>
+                                                    <div>
+                                                        <dt>Speed</dt>
+                                                        <dd>@networkInterface.Speed</dd>
+                                                    </div>
+                                                    <div>
+                                                        <dt>Addresses</dt>
+                                                        <dd>@FormatAddressList(networkInterface.Addresses)</dd>
+                                                    </div>
+                                                    <div>
+                                                        <dt>Gateways</dt>
+                                                        <dd>@FormatStringList(networkInterface.Gateways)</dd>
+                                                    </div>
+                                                    <div>
+                                                        <dt>DNS</dt>
+                                                        <dd>@FormatStringList(networkInterface.DnsServers)</dd>
+                                                    </div>
+                                                </dl>
+                                            </details>
+                                        </article>
+                                    }
+                                </div>
+                            }
+
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@RemoteAccessUsersTabValue" Title="Users">
+                    <Header>
+                        <div class="security-tab-header">
+                            <span class="security-tab-title">Users</span>
+                            <span class="security-tab-count">@(page.Users.Count)</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="security-tab-content remote-access-content">
+                            <div class="section-heading">
+                                <div>
+                                    <p class="eyebrow">Remote login</p>
+                                    <h2>Users and authenticator access</h2>
+                                    <p class="meta-text">Create remote access users with email-based sign-in and authenticator OTP.</p>
+                                </div>
+                            </div>
+
+                            @if (!string.IsNullOrWhiteSpace(userMessage))
+                            {
+                                <p class="callout @(userMessageIsError ? "error" : "success")">@userMessage</p>
+                            }
+
+                            <section class="surface-subcard remote-access-create-panel">
+                                <div class="remote-access-panel-heading">
+                                    <div>
+                                        <h3>Create remote access user</h3>
+                                        <p>Create a remote access user and issue the authenticator QR for app access.</p>
+                                    </div>
+                                    <span class="status-pill neutral">Email + OTP</span>
+                                </div>
+
+                                <EditForm Model="@userEditor" OnValidSubmit="CreateUserAsync" class="stack-form">
+                                    <DataAnnotationsValidator />
+
+                                    <UiTextField @bind-Value="userEditor.Email"
+                                                 Label="Email"
+                                                 Type="email"
+                                                 Helper="Used for Linux Made Sane sign-in and OTP verification." />
+
+                                    <div class="toolbar-row">
+                                        <UiCommandButton Label="@(isSavingUser ? "Registering..." : "Register user")"
+                                                         Glyph="UiIconGlyph.Plus"
+                                                         Type="submit"
+                                                         Disabled="@isSavingUser" />
+                                    </div>
+                                </EditForm>
+                            </section>
+
+                            @if (provisioningResult is not null)
+                            {
+                                <div class="surface-subcard otp-provisioning-panel remote-access-provisioning-panel">
+                                    <UiQrCode Payload="@provisioningResult.OtpUri"
+                                              Class="otp-provisioning-qr"
+                                              Title="Authenticator setup QR"
+                                              AriaLabel="Authenticator setup QR"
+                                              Caption="Scan this in your authenticator app" />
+
+                                    <div class="stack-list">
+                                        <ServiceMetricComponent TagName="div" Label="Provisioned email" Value="@provisioningResult.Email" />
+                                        <ServiceMetricComponent TagName="div" Label="Manual key" Value="@provisioningResult.ManualEntryKey" />
+                                        <ServiceMetricComponent TagName="div" Label="OTP URI" Value="@provisioningResult.OtpUri" />
+                                        <p class="meta-text">Scan the QR code or enter the manual key in your authenticator app. If you reset OTP, the new QR is shown here again.</p>
+                                    </div>
+                                </div>
+                            }
+
+                            @if (page.Users.Count == 0)
+                            {
+                                <div class="empty-state">
+                                    <h3>No remote access users</h3>
+                                    <p>Create at least one remote access user before enabling authenticated access on interfaces that should require sign-in.</p>
+                                </div>
+                            }
+                            else
+                            {
+                                <table class="remote-access-user-table">
+                                    <thead>
+                                        <tr>
+                                            <th>User</th>
+                                            <th>Status</th>
+                                            <th>Last login</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var user in page.Users)
+                                        {
+                                            <tr>
+                                                <td>
+                                                    <strong>@user.Email</strong>
+                                                    @if (!user.HasOtpSecret)
+                                                    {
+                                                        <div class="meta-text">Authenticator secret missing</div>
+                                                    }
+                                                </td>
+                                                <td>
+                                                    <div class="remote-access-status-stack">
+                                                        <span class="status-pill @(user.IsEnabled ? "success" : "neutral")">@(user.IsEnabled ? "Enabled" : "Disabled")</span>
+                                                        <span class="status-pill @(user.HasOtpSecret ? "neutral" : "warning")">@(user.HasOtpSecret ? "OTP ready" : "OTP missing")</span>
+                                                    </div>
+                                                </td>
+                                                <td>@FormatTimestamp(user.LastLoginAtUtc, "Never")</td>
+                                                <td class="actions-cell">
+                                                    <UiCommandButton Label="@(user.IsEnabled ? "Disable" : "Enable")"
+                                                                     Glyph="@(user.IsEnabled ? UiIconGlyph.Disconnect : UiIconGlyph.Connect)"
+                                                                     Variant="UiButtonVariant.Action"
+                                                                     OnClick="@(() => ToggleUserAsync(user))" />
+                                                    <UiCommandButton Label="Reset OTP" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Action" OnClick="@(() => ResetUserOtpAsync(user))" />
+                                                    <UiCommandButton Label="Delete" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" OnClick="@(() => DeleteUserAsync(user))" />
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+                    </ChildContent>
+                </TabPage>
+            </ChildContent>
+        </TabControl>
+    }
+</div>
+
+<UiModal IsOpen="@showNetworkRiskModal"
+         Title="@networkRiskModalTitle"
+         CloseOnBackdrop="false"
+         OnClose="CancelNetworkRiskAsync">
+    <ChildContent>
+        <div class="stack-form">
+            <p class="callout warning">@networkRiskModalMessage</p>
+            @if (!string.IsNullOrWhiteSpace(networkRiskCurrentAccessWarning))
+            {
+                <p class="callout warning">@networkRiskCurrentAccessWarning</p>
+            }
+            @if (!string.IsNullOrWhiteSpace(networkRiskRecoveryWarning))
+            {
+                <p class="callout error">@networkRiskRecoveryWarning</p>
+            }
+            @if (networkRiskRequiresTypedConfirmation)
+            {
+                <UiCheckboxField @bind-Value="networkRiskAcknowledged"
+                                 Label="I understand this can strand the current session or remove direct localhost access." />
+                <UiTextField @bind-Value="networkRiskConfirmationInput"
+                             Label="Type UNLOCK to continue"
+                             Helper="If you lose access, log into the server and run Linux Made Sane with unlock-security from the server console." />
+            }
+            <div class="toolbar-row">
+                <UiCommandButton Label="Apply risky change"
+                                 Glyph="UiIconGlyph.Connect"
+                                 OnClick="ConfirmNetworkRiskAsync"
+                                 Disabled="@(!IsNetworkRiskConfirmationSatisfied)" />
+                <UiCommandButton Label="Cancel"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 OnClick="CancelNetworkRiskAsync" />
+            </div>
+        </div>
+    </ChildContent>
+</UiModal>
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private SecuritySettingsPageViewModel page = new([], []);
+    private IReadOnlyList<LocalNetworkInterfaceView> networkInterfaces = [];
+    private TrustedNetworkAccessResult currentAccess = new("unknown", "unknown", false, null, false, false, false, false, false);
+    private TrustedNetworkEntryEditor networkEditor = new();
+    private SecurityUserEditor userEditor = new();
+    private SecurityUserProvisioningViewModel? provisioningResult;
+    private bool isLoaded;
+    private bool isSavingNetwork;
+    private bool isSavingUser;
+    private string? networkMessage;
+    private bool networkMessageIsError;
+    private string? userMessage;
+    private bool userMessageIsError;
+    private string activeTab = TrustedNetworksTabValue;
+    private bool showNetworkRiskModal;
+    private string networkRiskModalTitle = "Confirm security change";
+    private string networkRiskModalMessage = string.Empty;
+    private string networkRiskCurrentAccessWarning = string.Empty;
+    private string networkRiskRecoveryWarning = string.Empty;
+    private Func<Task>? pendingNetworkRiskAction;
+    private bool networkRiskRequiresTypedConfirmation;
+    private bool networkRiskAcknowledged;
+    private string networkRiskConfirmationInput = string.Empty;
+
+    private const string TrustedNetworksTabValue = "trusted-networks";
+    private const string RemoteAccessUsersTabValue = "remote-access-users";
+
+    private bool IsNetworkRiskConfirmationSatisfied =>
+        !networkRiskRequiresTypedConfirmation ||
+        (networkRiskAcknowledged &&
+         string.Equals(networkRiskConfirmationInput?.Trim(), "UNLOCK", StringComparison.Ordinal));
+
+    private bool IsNetworkEditorOpen =>
+        networkEditor.Id.HasValue || page.TrustedNetworks.Count == 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        isLoaded = true;
+    }
+
+    private async Task LoadAsync()
+    {
+        page = await SecuritySettingsService.GetPageAsync();
+        networkInterfaces = LoadNetworkInterfaces();
+        currentAccess = await TrustedNetworkAccessService.EvaluateAsync(
+            HttpContext?.Connection.RemoteIpAddress,
+            HttpContext?.Request.Host.Host);
+    }
+
+    private Task HandleTabChangedAsync(string? value)
+    {
+        activeTab = string.IsNullOrWhiteSpace(value) ? TrustedNetworksTabValue : value;
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveNetworkAsync()
+    {
+        if (TryBuildRiskWarning(
+                networkEditor.Id,
+                networkEditor.Label,
+                networkEditor.AddressOrCidr,
+                networkEditor.IsEnabled,
+                networkEditor.IsAuthenticationEnabled,
+                out var warningTitle,
+                out var warningMessage,
+                out var currentAccessWarning,
+                out var recoveryWarning,
+                out var requiresTypedConfirmation))
+        {
+            ShowNetworkRiskModal(
+                warningTitle,
+                warningMessage,
+                currentAccessWarning,
+                recoveryWarning,
+                requiresTypedConfirmation,
+                SaveNetworkCoreAsync);
+            return;
+        }
+
+        await SaveNetworkCoreAsync();
+    }
+
+    private async Task SaveNetworkCoreAsync()
+    {
+        isSavingNetwork = true;
+        networkMessage = null;
+
+        try
+        {
+            await SecuritySettingsService.SaveTrustedNetworkAsync(networkEditor);
+            networkMessage = networkEditor.Id.HasValue ? "Access rule updated." : "Access rule added.";
+            networkMessageIsError = false;
+            networkEditor = new TrustedNetworkEntryEditor();
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            networkMessage = exception.Message;
+            networkMessageIsError = true;
+        }
+        finally
+        {
+            isSavingNetwork = false;
+        }
+    }
+
+    private Task CancelNetworkEditAsync()
+    {
+        networkEditor = new TrustedNetworkEntryEditor();
+        return Task.CompletedTask;
+    }
+
+    private void BeginNetworkEdit(TrustedNetworkEntryViewModel entry)
+    {
+        networkEditor = new TrustedNetworkEntryEditor
+        {
+            Id = entry.Id,
+            Label = entry.Label,
+            AddressOrCidr = entry.AddressOrCidr,
+            Description = entry.Description,
+            IsEnabled = entry.IsEnabled,
+            IsTrustedAccessEnabled = entry.IsTrustedAccessEnabled,
+            IsAuthenticationEnabled = entry.IsAuthenticationEnabled
+        };
+    }
+
+    private async Task ToggleTrustedNetworkAsync(TrustedNetworkEntryViewModel entry)
+    {
+        var targetEnabled = !entry.IsEnabled;
+        if (TryBuildRiskWarning(
+                entry.Id,
+                entry.Label,
+                entry.AddressOrCidr,
+                targetEnabled,
+                entry.IsAuthenticationEnabled,
+                out var warningTitle,
+                out var warningMessage,
+                out var currentAccessWarning,
+                out var recoveryWarning,
+                out var requiresTypedConfirmation))
+        {
+            ShowNetworkRiskModal(
+                warningTitle,
+                warningMessage,
+                currentAccessWarning,
+                recoveryWarning,
+                requiresTypedConfirmation,
+                () => ToggleTrustedNetworkCoreAsync(entry));
+            return;
+        }
+
+        await ToggleTrustedNetworkCoreAsync(entry);
+    }
+
+    private async Task ToggleTrustedNetworkCoreAsync(TrustedNetworkEntryViewModel entry)
+    {
+        try
+        {
+            await SecuritySettingsService.SetTrustedNetworkEnabledAsync(entry.Id, !entry.IsEnabled);
+            networkMessage = entry.IsEnabled ? "Access rule disabled." : "Access rule enabled.";
+            networkMessageIsError = false;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            networkMessage = exception.Message;
+            networkMessageIsError = true;
+        }
+    }
+
+    private async Task ToggleAuthenticationAccessAsync(TrustedNetworkEntryViewModel entry)
+    {
+        var targetAuthenticationEnabled = !entry.IsAuthenticationEnabled;
+        if (TryBuildRiskWarning(
+                entry.Id,
+                entry.Label,
+                entry.AddressOrCidr,
+                entry.IsEnabled,
+                targetAuthenticationEnabled,
+                out var warningTitle,
+                out var warningMessage,
+                out var currentAccessWarning,
+                out var recoveryWarning,
+                out var requiresTypedConfirmation))
+        {
+            ShowNetworkRiskModal(
+                warningTitle,
+                warningMessage,
+                currentAccessWarning,
+                recoveryWarning,
+                requiresTypedConfirmation,
+                () => ToggleAuthenticationAccessCoreAsync(entry));
+            return;
+        }
+
+        await ToggleAuthenticationAccessCoreAsync(entry);
+    }
+
+    private async Task ToggleAuthenticationAccessCoreAsync(TrustedNetworkEntryViewModel entry)
+    {
+        try
+        {
+            await SecuritySettingsService.SetTrustedNetworkAuthenticationEnabledAsync(entry.Id, !entry.IsAuthenticationEnabled);
+            networkMessage = entry.IsAuthenticationEnabled ? "Authenticated access disabled." : "Authenticated access enabled.";
+            networkMessageIsError = false;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            networkMessage = exception.Message;
+            networkMessageIsError = true;
+        }
+    }
+
+    private async Task DeleteTrustedNetworkAsync(TrustedNetworkEntryViewModel entry)
+    {
+        try
+        {
+            await SecuritySettingsService.DeleteTrustedNetworkAsync(entry.Id);
+            networkMessage = "Access rule deleted.";
+            networkMessageIsError = false;
+            if (networkEditor.Id == entry.Id)
+            {
+                networkEditor = new TrustedNetworkEntryEditor();
+            }
+
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            networkMessage = exception.Message;
+            networkMessageIsError = true;
+        }
+    }
+
+    private IReadOnlyList<TrustedNetworkEntryViewModel> GetTrustedNetworksForInterface(LocalNetworkInterfaceView networkInterface) =>
+        page.TrustedNetworks
+            .Where(entry => NetworkEntryMatchesInterface(entry, networkInterface))
+            .ToArray();
+
+    private static bool NetworkEntryMatchesInterface(TrustedNetworkEntryViewModel entry, LocalNetworkInterfaceView networkInterface) =>
+        networkInterface.Addresses.Any(address => TrustedNetworkContainsAddress(entry.AddressOrCidr, address.Address));
+
+    private static IReadOnlyList<NetworkAddressView> GetPrimaryAddresses(LocalNetworkInterfaceView networkInterface) =>
+        networkInterface.Addresses
+            .OrderBy(address => address.Family == "IPv4" ? 0 : 1)
+            .ThenBy(address => address.Address.ToString(), StringComparer.OrdinalIgnoreCase)
+            .Take(4)
+            .ToArray();
+
+    private static IReadOnlyList<LocalNetworkInterfaceView> LoadNetworkInterfaces()
+    {
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .Select(BuildNetworkInterfaceView)
+                .OrderByDescending(networkInterface => networkInterface.IsUp)
+                .ThenBy(networkInterface => networkInterface.Type == "Loopback" ? 1 : 0)
+                .ThenBy(networkInterface => networkInterface.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static LocalNetworkInterfaceView BuildNetworkInterfaceView(NetworkInterface networkInterface)
+    {
+        var properties = GetIPProperties(networkInterface);
+        var addresses = properties?.UnicastAddresses
+            .Select(address => new NetworkAddressView(NormalizeAddress(address.Address), GetAddressFamilyLabel(address.Address), address.PrefixLength))
+            .Where(address => IsUsefulAddress(address.Address))
+            .ToArray() ?? [];
+
+        var gateways = properties?.GatewayAddresses
+            .Select(address => NormalizeAddress(address.Address).ToString())
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray() ?? [];
+
+        var dnsServers = properties?.DnsAddresses
+            .Select(address => NormalizeAddress(address).ToString())
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray() ?? [];
+
+        return new LocalNetworkInterfaceView(
+            networkInterface.Id,
+            networkInterface.Name,
+            string.IsNullOrWhiteSpace(networkInterface.Description) ? networkInterface.Name : networkInterface.Description,
+            networkInterface.NetworkInterfaceType.ToString(),
+            networkInterface.OperationalStatus.ToString(),
+            FormatMacAddress(networkInterface.GetPhysicalAddress()),
+            FormatLinkSpeed(networkInterface.Speed),
+            addresses,
+            gateways,
+            dnsServers);
+    }
+
+    private static IPInterfaceProperties? GetIPProperties(NetworkInterface networkInterface)
+    {
+        try
+        {
+            return networkInterface.GetIPProperties();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool TrustedNetworkContainsAddress(string addressOrCidr, IPAddress address)
+    {
+        if (TryParseNetwork(addressOrCidr, out var network))
+        {
+            return NetworkContainsAddress(network.Address, network.PrefixLength, NormalizeAddress(address));
+        }
+
+        return false;
+    }
+
+    private static bool TryParseNetwork(string addressOrCidr, out (IPAddress Address, int PrefixLength) network)
+    {
+        try
+        {
+            var normalized = addressOrCidr.Trim();
+            var slashIndex = normalized.IndexOf('/');
+            if (slashIndex < 0)
+            {
+                var address = NormalizeAddress(IPAddress.Parse(normalized));
+                network = (address, address.GetAddressBytes().Length * 8);
+                return true;
+            }
+
+            var addressPart = normalized[..slashIndex];
+            var prefixPart = normalized[(slashIndex + 1)..];
+            var parsedAddress = NormalizeAddress(IPAddress.Parse(addressPart));
+            var maxPrefix = parsedAddress.GetAddressBytes().Length * 8;
+            if (!int.TryParse(prefixPart, out var prefixLength) || prefixLength < 0 || prefixLength > maxPrefix)
+            {
+                network = default;
+                return false;
+            }
+
+            network = (parsedAddress, prefixLength);
+            return true;
+        }
+        catch
+        {
+            network = default;
+            return false;
+        }
+    }
+
+    private static bool NetworkContainsAddress(IPAddress networkAddress, int prefixLength, IPAddress address)
+    {
+        if (networkAddress.AddressFamily != address.AddressFamily)
+        {
+            return false;
+        }
+
+        var networkBytes = networkAddress.GetAddressBytes();
+        var addressBytes = address.GetAddressBytes();
+        var fullBytes = prefixLength / 8;
+        var remainingBits = prefixLength % 8;
+
+        for (var index = 0; index < fullBytes; index++)
+        {
+            if (networkBytes[index] != addressBytes[index])
+            {
+                return false;
+            }
+        }
+
+        if (remainingBits == 0)
+        {
+            return true;
+        }
+
+        var mask = 0xff << (8 - remainingBits);
+        return (networkBytes[fullBytes] & mask) == (addressBytes[fullBytes] & mask);
+    }
+
+    private static IPAddress NormalizeAddress(IPAddress address) =>
+        address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+    private static bool IsUsefulAddress(IPAddress address) =>
+        !Equals(address, IPAddress.Any) &&
+        !Equals(address, IPAddress.IPv6Any) &&
+        !Equals(address, IPAddress.None) &&
+        !Equals(address, IPAddress.IPv6None);
+
+    private static string GetAddressFamilyLabel(IPAddress address) =>
+        NormalizeAddress(address).AddressFamily == AddressFamily.InterNetwork ? "IPv4" : "IPv6";
+
+    private static string FormatMacAddress(PhysicalAddress physicalAddress)
+    {
+        var bytes = physicalAddress.GetAddressBytes();
+        return bytes.Length == 0
+            ? "-"
+            : string.Join(":", bytes.Select(value => value.ToString("X2")));
+    }
+
+    private static string FormatLinkSpeed(long bitsPerSecond)
+    {
+        if (bitsPerSecond <= 0)
+        {
+            return "-";
+        }
+
+        string[] units = ["bps", "Kbps", "Mbps", "Gbps"];
+        double value = bitsPerSecond;
+        var index = 0;
+        while (value >= 1000 && index < units.Length - 1)
+        {
+            value /= 1000;
+            index++;
+        }
+
+        return $"{value:0.#} {units[index]}";
+    }
+
+    private static string FormatAddressList(IReadOnlyList<NetworkAddressView> addresses) =>
+        addresses.Count == 0
+            ? "-"
+            : string.Join(", ", addresses.Select(address => address.Display));
+
+    private static string FormatStringList(IReadOnlyList<string> values) =>
+        values.Count == 0 ? "-" : string.Join(", ", values);
+
+    private static string GetTrustedNetworkAccessSummary(TrustedNetworkEntryViewModel entry)
+    {
+        if (!entry.IsEnabled)
+        {
+            return "Interface disabled";
+        }
+
+        return "Enabled";
+    }
+
+    private static string GetTrustedNetworkAccessMeta(TrustedNetworkEntryViewModel entry)
+    {
+        if (!entry.IsEnabled)
+        {
+            return string.Empty;
+        }
+
+        return entry.IsAuthenticationEnabled
+            ? "Username or email plus OTP is required before access is allowed."
+            : "Straight through on this interface with no sign-in prompt.";
+    }
+
+    private static string GetTrustedNetworkAccessPillClass(TrustedNetworkEntryViewModel entry)
+    {
+        if (!entry.IsEnabled)
+        {
+            return "neutral";
+        }
+
+        return "success";
+    }
+
+    private static string GetTrustedNetworkAuthPillText(TrustedNetworkEntryViewModel entry) =>
+        entry.IsAuthenticationEnabled ? "Auth on" : "Auth off";
+
+    private bool TryBuildRiskWarning(
+        Guid? entryId,
+        string label,
+        string addressOrCidr,
+        bool targetEnabled,
+        bool targetAuthenticationEnabled,
+        out string title,
+        out string message,
+        out string currentAccessWarning,
+        out string recoveryWarning,
+        out bool requiresTypedConfirmation)
+    {
+        if (targetEnabled && !targetAuthenticationEnabled)
+        {
+            title = string.Empty;
+            message = string.Empty;
+            currentAccessWarning = string.Empty;
+            recoveryWarning = string.Empty;
+            requiresTypedConfirmation = false;
+            return false;
+        }
+
+        var plannedEntries = BuildPlannedTrustedNetworkEntries(
+            entryId,
+            label,
+            addressOrCidr,
+            targetEnabled,
+            targetAuthenticationEnabled);
+
+        PlannedAccessOutcome? currentSessionOutcome = null;
+        if (IPAddress.TryParse(currentAccess.RemoteAddress, out var remoteAddress))
+        {
+            currentSessionOutcome = EvaluatePlannedAccess(plannedEntries, remoteAddress);
+        }
+
+        var loopbackIpv4Outcome = EvaluatePlannedAccess(plannedEntries, IPAddress.Loopback);
+        var loopbackIpv6Outcome = EvaluatePlannedAccess(plannedEntries, IPAddress.IPv6Loopback);
+        var hasDirectConsoleRecovery =
+            loopbackIpv4Outcome == PlannedAccessOutcome.FullAccess ||
+            loopbackIpv6Outcome == PlannedAccessOutcome.FullAccess;
+
+        var currentSessionAffected =
+            currentSessionOutcome.HasValue &&
+            currentSessionOutcome.Value != PlannedAccessOutcome.FullAccess;
+        var consoleRecoveryAffected = !hasDirectConsoleRecovery;
+
+        if (!currentSessionAffected && !consoleRecoveryAffected)
+        {
+            title = string.Empty;
+            message = string.Empty;
+            currentAccessWarning = string.Empty;
+            recoveryWarning = string.Empty;
+            requiresTypedConfirmation = false;
+            return false;
+        }
+
+        title = !targetEnabled ? "Disable access rule?" : "Enable authentication on this interface?";
+        message = !targetEnabled
+            ? "This change reduces access on a rule that Linux Made Sane is actively using."
+            : "This change stops direct access and forces sign-in on a rule that Linux Made Sane is actively using.";
+
+        currentAccessWarning = currentSessionAffected
+            ? $"Current session after this change: {DescribePlannedAccess(currentSessionOutcome!.Value)} from {currentAccess.RemoteAddress}."
+            : string.Empty;
+
+        recoveryWarning = consoleRecoveryAffected
+            ? $"Direct localhost recovery would no longer be available. Planned localhost state: 127.0.0.1 = {DescribePlannedAccess(loopbackIpv4Outcome)}, ::1 = {DescribePlannedAccess(loopbackIpv6Outcome)}. If this locks you out, log into the server console and run Linux Made Sane with unlock-security, then reopen http://127.0.0.1:5080 to fix Security."
+            : "If this browser session gets stranded, recover from the server console over localhost. If localhost access also fails, run Linux Made Sane with unlock-security.";
+
+        requiresTypedConfirmation = true;
+        return true;
+    }
+
+    private IReadOnlyList<TrustedNetworkEntry> BuildPlannedTrustedNetworkEntries(
+        Guid? entryId,
+        string label,
+        string addressOrCidr,
+        bool targetEnabled,
+        bool targetAuthenticationEnabled)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var plannedEntries = page.TrustedNetworks
+            .Select(entry => new TrustedNetworkEntry(
+                entry.Id,
+                entry.Label,
+                entry.AddressOrCidr,
+                entry.Description,
+                entry.IsEnabled,
+                entry.IsEnabled && !entry.IsAuthenticationEnabled,
+                entry.IsAuthenticationEnabled,
+                entry.IsBuiltIn,
+                now,
+                now))
+            .ToList();
+
+        var plannedRule = new TrustedNetworkEntry(
+            entryId ?? Guid.NewGuid(),
+            string.IsNullOrWhiteSpace(label) ? "Planned access rule" : label.Trim(),
+            addressOrCidr.Trim(),
+            string.Empty,
+            targetEnabled,
+            targetEnabled && !targetAuthenticationEnabled,
+            targetAuthenticationEnabled,
+            false,
+            now,
+            now);
+
+        var existingIndex = entryId.HasValue
+            ? plannedEntries.FindIndex(entry => entry.Id == entryId.Value)
+            : -1;
+
+        if (existingIndex >= 0)
+        {
+            var existing = plannedEntries[existingIndex];
+            plannedEntries[existingIndex] = plannedRule with
+            {
+                Description = existing.Description,
+                IsBuiltIn = existing.IsBuiltIn,
+                CreatedAtUtc = existing.CreatedAtUtc
+            };
+        }
+        else
+        {
+            plannedEntries.Add(plannedRule);
+        }
+
+        return plannedEntries;
+    }
+
+    private static PlannedAccessOutcome EvaluatePlannedAccess(
+        IReadOnlyList<TrustedNetworkEntry> entries,
+        IPAddress address)
+    {
+        var match = TrustedNetworkMatcher.Match(address, entries);
+        if (match is null || !match.IsEnabled)
+        {
+            return PlannedAccessOutcome.Blocked;
+        }
+
+        return match.IsAuthenticationEnabled
+            ? PlannedAccessOutcome.LoginRequired
+            : PlannedAccessOutcome.FullAccess;
+    }
+
+    private static string DescribePlannedAccess(PlannedAccessOutcome outcome) =>
+        outcome switch
+        {
+            PlannedAccessOutcome.FullAccess => "Full access",
+            PlannedAccessOutcome.LoginRequired => "Login required",
+            _ => "No access"
+        };
+
+    private void ShowNetworkRiskModal(
+        string title,
+        string message,
+        string currentAccessWarning,
+        string recoveryWarning,
+        bool requiresTypedConfirmation,
+        Func<Task> action)
+    {
+        networkRiskModalTitle = title;
+        networkRiskModalMessage = message;
+        networkRiskCurrentAccessWarning = currentAccessWarning;
+        networkRiskRecoveryWarning = recoveryWarning;
+        networkRiskRequiresTypedConfirmation = requiresTypedConfirmation;
+        networkRiskAcknowledged = false;
+        networkRiskConfirmationInput = string.Empty;
+        pendingNetworkRiskAction = action;
+        showNetworkRiskModal = true;
+    }
+
+    private Task CancelNetworkRiskAsync()
+    {
+        showNetworkRiskModal = false;
+        pendingNetworkRiskAction = null;
+        networkRiskModalMessage = string.Empty;
+        networkRiskCurrentAccessWarning = string.Empty;
+        networkRiskRecoveryWarning = string.Empty;
+        networkRiskRequiresTypedConfirmation = false;
+        networkRiskAcknowledged = false;
+        networkRiskConfirmationInput = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmNetworkRiskAsync()
+    {
+        var action = pendingNetworkRiskAction;
+        showNetworkRiskModal = false;
+        pendingNetworkRiskAction = null;
+        networkRiskModalMessage = string.Empty;
+        networkRiskCurrentAccessWarning = string.Empty;
+        networkRiskRecoveryWarning = string.Empty;
+        networkRiskRequiresTypedConfirmation = false;
+        networkRiskAcknowledged = false;
+        networkRiskConfirmationInput = string.Empty;
+        if (action is not null)
+        {
+            await action();
+        }
+    }
+
+    private async Task CreateUserAsync()
+    {
+        isSavingUser = true;
+        userMessage = null;
+
+        try
+        {
+            provisioningResult = await SecuritySettingsService.CreateUserAsync(userEditor);
+            userEditor = new SecurityUserEditor();
+            userMessage = "Remote access user created. Finish authenticator setup in the authenticator app.";
+            userMessageIsError = false;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            userMessage = exception.Message;
+            userMessageIsError = true;
+        }
+        finally
+        {
+            isSavingUser = false;
+        }
+    }
+
+    private async Task ToggleUserAsync(SecurityUserViewModel user)
+    {
+        try
+        {
+            await SecuritySettingsService.SetUserEnabledAsync(user.Id, !user.IsEnabled);
+            userMessage = user.IsEnabled ? "Remote access user disabled." : "Remote access user enabled.";
+            userMessageIsError = false;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            userMessage = exception.Message;
+            userMessageIsError = true;
+        }
+    }
+
+    private async Task ResetUserOtpAsync(SecurityUserViewModel user)
+    {
+        try
+        {
+            provisioningResult = await SecuritySettingsService.ResetUserOtpAsync(user.Id);
+            userMessage = "Authenticator secret rotated. Re-register it in the authenticator app.";
+            userMessageIsError = false;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            userMessage = exception.Message;
+            userMessageIsError = true;
+        }
+    }
+
+    private async Task DeleteUserAsync(SecurityUserViewModel user)
+    {
+        try
+        {
+            await SecuritySettingsService.DeleteUserAsync(user.Id);
+            if (provisioningResult?.UserId == user.Id)
+            {
+                provisioningResult = null;
+            }
+
+            userMessage = "Remote access user deleted.";
+            userMessageIsError = false;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            userMessage = exception.Message;
+            userMessageIsError = true;
+        }
+    }
+
+    private static string FormatTimestamp(DateTimeOffset? value, string fallback) =>
+        value?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? fallback;
+
+    private sealed record LocalNetworkInterfaceView(
+        string Id,
+        string Name,
+        string Description,
+        string Type,
+        string Status,
+        string MacAddress,
+        string Speed,
+        IReadOnlyList<NetworkAddressView> Addresses,
+        IReadOnlyList<string> Gateways,
+        IReadOnlyList<string> DnsServers)
+    {
+        public bool IsUp => Status.Equals("Up", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed record NetworkAddressView(IPAddress Address, string Family, int PrefixLength)
+    {
+        public string Display => PrefixLength > 0 ? $"{Address}/{PrefixLength}" : Address.ToString();
+    }
+
+    private enum PlannedAccessOutcome
+    {
+        FullAccess,
+        LoginRequired,
+        Blocked
+    }
+}

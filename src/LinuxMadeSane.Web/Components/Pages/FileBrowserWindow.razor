@@ -1,0 +1,75 @@
+@page "/file-browser-window"
+@page "/file-browser-window/{BrowserId:guid}"
+@layout PopupLayout
+@rendermode InteractiveServer
+@using LinuxMadeSane.Core.Models.Ai
+@using LinuxMadeSane.Web.Components.Ui
+
+<PageTitle>File Browser | Linux Made Sane</PageTitle>
+
+<div class="page-shell file-browser-popup-page">
+    @if (BrowserId.HasValue)
+    {
+        <HostFileBrowserWorkspace DetachedBrowserId="@BrowserId" WorkspaceId="@WorkspaceId" AllowPopout="false" />
+    }
+    else if (HostId.HasValue)
+    {
+        <HostFileBrowserWorkspace HostId="@HostId.Value"
+                                  WorkspaceId="@WorkspaceId"
+                                  InitialPath="@Path"
+                                  ConnectionUsernameOverride="@Username"
+                                  ConnectionSecretHandle="@SecretHandle"
+                                  PreferStoredCredentialsOverride="@PreferStoredCredentials"
+                                  Title="@ResolvedTitle"
+                                  AllowPopout="false" />
+    }
+    else if (!string.IsNullOrWhiteSpace(RootPath))
+    {
+        <HostFileBrowserWorkspace HostId="@AiLocalMachine.ManagedHostId"
+                                  WorkspaceId="@WorkspaceId"
+                                  RootPath="@RootPath"
+                                  InitialPath="@Path"
+                                  Title="@ResolvedTitle"
+                                  AllowPopout="false" />
+    }
+    else
+    {
+        <section class="surface-card">
+            <div class="empty-state">
+                <p>File browser not found.</p>
+                <p class="meta-text">Open a new browser window from a file browser component.</p>
+            </div>
+        </section>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public Guid? BrowserId { get; set; }
+
+    [SupplyParameterFromQuery]
+    public string? RootPath { get; set; }
+
+    [SupplyParameterFromQuery]
+    public Guid? HostId { get; set; }
+
+    [SupplyParameterFromQuery]
+    public string? Path { get; set; }
+
+    [SupplyParameterFromQuery]
+    public string? Title { get; set; }
+
+    [SupplyParameterFromQuery(Name = "workspaceId")]
+    public string? WorkspaceId { get; set; }
+
+    [SupplyParameterFromQuery(Name = "username")]
+    public string? Username { get; set; }
+
+    [SupplyParameterFromQuery(Name = "secretHandle")]
+    public Guid? SecretHandle { get; set; }
+
+    [SupplyParameterFromQuery(Name = "preferStoredCredentials")]
+    public bool? PreferStoredCredentials { get; set; }
+
+    private string ResolvedTitle => string.IsNullOrWhiteSpace(Title) ? "Filesystem explorer" : Title.Trim();
+}

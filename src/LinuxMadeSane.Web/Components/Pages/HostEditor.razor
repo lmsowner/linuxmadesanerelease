@@ -1,0 +1,82 @@
+@page "/hosts/new"
+@page "/hosts/{HostId:guid}/edit"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Interfaces
+@inject IManagedHostService HostService
+@inject NavigationManager NavigationManager
+
+<PageTitle>@(IsEditMode ? "Edit Host" : "Add Host") | Linux Made Sane</PageTitle>
+
+@if (!isLoaded)
+{
+    <div class="page-shell">
+        <section class="surface-card compact-toolbar">
+            <p class="meta-text">Loading host configuration...</p>
+        </section>
+    </div>
+}
+else
+{
+    <ManagedHostEditorDialog IsOpen="true"
+                             Editor="@editor"
+                             IsEditMode="@IsEditMode"
+                             IsBusy="@isSaving"
+                             StatusMessage="@statusMessage"
+                             StatusTone="@statusTone"
+                             OnClose="CloseAsync"
+                             OnSave="SaveAsync" />
+}
+
+@code {
+    [Parameter]
+    public Guid? HostId { get; set; }
+
+    private ManagedHostEditor editor = new();
+    private bool isLoaded;
+    private bool isSaving;
+    private string statusMessage = string.Empty;
+    private string statusTone = "info";
+    private bool IsEditMode => HostId.HasValue;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        isLoaded = false;
+        statusMessage = string.Empty;
+        statusTone = "info";
+
+        if (!IsEditMode)
+        {
+            editor = new ManagedHostEditor();
+            isLoaded = true;
+            return;
+        }
+
+        var existing = await HostService.GetEditorAsync(HostId!.Value);
+        editor = existing ?? new ManagedHostEditor { Id = HostId };
+        isLoaded = true;
+    }
+
+    private async Task SaveAsync()
+    {
+        isSaving = true;
+        statusMessage = string.Empty;
+
+        try
+        {
+            var id = await HostService.SaveHostAsync(editor);
+            NavigationManager.NavigateTo($"/hosts/{id}");
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusTone = "error";
+            isSaving = false;
+        }
+    }
+
+    private Task CloseAsync()
+    {
+        NavigationManager.NavigateTo(IsEditMode ? $"/hosts/{HostId}" : "/hosts");
+        return Task.CompletedTask;
+    }
+}

@@ -1,0 +1,95 @@
+@inherits LayoutComponentBase
+@using System.Security.Claims
+@using LinuxMadeSane.Application.Interfaces
+@using Microsoft.AspNetCore.Components.Authorization
+@inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject IJSRuntime JSRuntime
+
+<div class="app-frame" data-sidebar-root>
+    <aside class="sidebar-shell sidebar-shell-docked">
+        <NavMenu IsAuthenticated="@IsAuthenticated"
+                 AuthenticatedEmail="@AuthenticatedEmail" />
+    </aside>
+
+    <div class="sidebar-flyout-zone">
+        <button class="sidebar-flyout-tab glass-button glass-button-toolbar"
+                type="button"
+                title="Show sidebar, click to pin open"
+                aria-label="Show sidebar, click to pin open"
+                data-sidebar-toggle="expand">
+            <UiGlyphIcon Glyph="UiIconGlyph.SidebarExpand" />
+        </button>
+
+        <aside class="sidebar-shell sidebar-shell-flyout">
+            <NavMenu IsAuthenticated="@IsAuthenticated"
+                     AuthenticatedEmail="@AuthenticatedEmail"
+                     IsFlyout="true" />
+        </aside>
+    </div>
+
+    <div class="content-shell">
+        <main>
+            @Body
+        </main>
+    </div>
+</div>
+
+<AboutSplash />
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">x</span>
+</div>
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private bool displayPreferencesLoaded;
+
+    private bool IsAuthenticated => HttpContext?.User?.Identity?.IsAuthenticated == true;
+
+    private string AuthenticatedEmail =>
+        HttpContext?.User?.FindFirstValue(ClaimTypes.Email) ??
+        HttpContext?.User?.Identity?.Name ??
+        "Authenticated";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || displayPreferencesLoaded)
+        {
+            return;
+        }
+
+        displayPreferencesLoaded = true;
+
+        var authenticationState = AuthenticationStateTask is null
+            ? null
+            : await AuthenticationStateTask;
+        var userIdValue = authenticationState?.User?.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (!Guid.TryParse(userIdValue, out var userId))
+        {
+            return;
+        }
+
+        var preference = await UserDisplayPreferenceService.GetAsync(userId);
+        if (preference is null)
+        {
+            return;
+        }
+
+        await JSRuntime.InvokeVoidAsync(
+            "lmsTheme.applyUserPreferences",
+            new
+            {
+                paletteId = preference.ThemePaletteId,
+                mode = preference.ThemeMode,
+                fontScalePercent = preference.FontScalePercent
+            });
+    }
+}

@@ -1,0 +1,760 @@
+@using LinuxMadeSane.Application.Contracts.Shares
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.Shares
+@inject ILocalFileBrowsingService LocalFileBrowsingService
+
+<UiModal IsOpen="@IsOpen"
+         Title="@(Editor.Id.HasValue ? $"Edit {Editor.Name}" : "Create share")"
+         Subtitle="Create or adjust an LMS Samba share, then control exactly which users and groups can see it."
+         Class="share-editor-dialog-modal"
+         CloseOnBackdrop="false"
+         OnClose="HandleCloseAsync">
+    <ChildContent>
+        <EditForm id="@formId" Model="@Editor" OnValidSubmit="HandleSaveAsync" class="share-editor-dialog-form">
+            <DataAnnotationsValidator />
+
+            <div class="share-editor-dialog-grid">
+                <UiTextField Label="Share name"
+                             Helper="The share name users will connect to."
+                             Value="@Editor.Name"
+                             ValueChanged="SetNameAsync"
+                             ValueExpression="@(() => Editor.Name)"
+                             Placeholder="projects"
+                             Compact="true" />
+
+                <UiPathAutocompleteField Label="Share path"
+                                         Helper="Suggested from the share name. Start typing to pick an existing LMS directory."
+                                         Value="@Editor.SharePath"
+                                         ValueChanged="SetPathAsync"
+                                         ValueExpression="@(() => Editor.SharePath)"
+                                         Placeholder="/srv/shares/projects"
+                                         Suggestions="@sharePathSuggestions"
+                                         Compact="true" />
+            </div>
+
+            <div class="share-editor-dialog-toggle-row">
+                <UiCheckboxField Value="@Editor.Browseable"
+                                 ValueChanged="SetBrowseableAsync"
+                                 ValueExpression="@(() => Editor.Browseable)"
+                                 Label="Browseable"
+                                 Helper="Visible when clients list LMS shares."
+                                 Compact="true"
+                                 Card="true" />
+
+                <UiCheckboxField Value="@Editor.GuestAccess"
+                                 ValueChanged="SetGuestAccessAsync"
+                                 ValueExpression="@(() => Editor.GuestAccess)"
+                                 Label="Guest access"
+                                 Helper="Allow anonymous access when appropriate."
+                                 Compact="true"
+                                 Card="true" />
+
+                <UiCheckboxField Value="@Editor.ReadOnly"
+                                 ValueChanged="SetReadOnlyAsync"
+                                 ValueExpression="@(() => Editor.ReadOnly)"
+                                 Label="Read-only"
+                                 Helper="Prevent writes unless a write list overrides it."
+                                 Compact="true"
+                                 Card="true" />
+            </div>
+
+            <section class="share-editor-dialog-access surface-subcard">
+                <div class="share-editor-dialog-section-header">
+                    <div class="stack-tight">
+                        <strong>Access</strong>
+                        <span class="helper-text">Click people or groups to add them. Selected entries stay visible as removable pills.</span>
+                    </div>
+                </div>
+
+                @if (Identities is null)
+                {
+                    <div class="empty-state">
+                        <p>Loading users and groups...</p>
+                    </div>
+                }
+                else if (Identities.Users.Count == 0 && Identities.Groups.Count == 0)
+                {
+                    <div class="empty-state">
+                        <p>No users or groups exist yet.</p>
+                        <p class="helper-text">Create them first in Users and Groups, then come back here and assign access.</p>
+                    </div>
+                }
+                else
+                {
+                    <div class="share-editor-dialog-access-grid">
+                        <UiIdentityTokenPicker Title="Allowed users"
+                                               Helper="All local accounts are listed. Interactive users stay first."
+                                               SearchPlaceholder="Search user accounts"
+                                               EmptySelectionText="No named users selected"
+                                               EmptyResultsText="No users match that search."
+                                               Glyph="UiIconGlyph.User"
+                                               Items="@GetUserItems()"
+                                               SelectedValues="@GetSelectedUsers()"
+                                               OnToggle="ToggleUserAsync"
+                                               OnRemove="RemoveUserAsync" />
+
+                        <UiIdentityTokenPicker Title="Allowed groups"
+                                               Helper="All local groups are listed. Working groups stay first."
+                                               SearchPlaceholder="Search groups"
+                                               EmptySelectionText="No named groups selected"
+                                               EmptyResultsText="No groups match that search."
+                                               Glyph="UiIconGlyph.Group"
+                                               Items="@GetGroupItems()"
+                                               SelectedValues="@GetSelectedGroups()"
+                                               OnToggle="ToggleGroupAsync"
+                                               OnRemove="RemoveGroupAsync" />
+                    </div>
+                }
+            </section>
+
+            <details class="share-editor-dialog-advanced">
+                <summary>Advanced share details</summary>
+
+                <div class="share-editor-dialog-grid">
+                    <UiTextAreaField Label="Description"
+                                     Helper="Optional. LMS writes a simple default description if left blank."
+                                     Value="@Editor.Description"
+                                     ValueChanged="SetDescriptionAsync"
+                                     ValueExpression="@(() => Editor.Description)"
+                                     Rows="3"
+                                     Compact="true" />
+
+                    <div class="share-editor-dialog-advanced-stack">
+                        <UiTextField Label="Force user"
+                                     Helper="Only use this when all writes should land as one Linux user."
+                                     Value="@Editor.ForceUser"
+                                     ValueChanged="SetForceUserAsync"
+                                     ValueExpression="@(() => Editor.ForceUser)"
+                                     Compact="true" />
+
+                        <UiTextField Label="Force group"
+                                     Helper="Only use this when all writes should land under one Linux group."
+                                     Value="@Editor.ForceGroup"
+                                     ValueChanged="SetForceGroupAsync"
+                                     ValueExpression="@(() => Editor.ForceGroup)"
+                                     Compact="true" />
+                    </div>
+                </div>
+
+                <div class="share-editor-dialog-grid">
+                    <UiTextField Label="Write list"
+                                 Helper="Optional manual override for write access."
+                                 Value="@Editor.WriteListCsv"
+                                 ValueChanged="SetWriteListAsync"
+                                 ValueExpression="@(() => Editor.WriteListCsv)"
+                                 Compact="true" />
+
+                    <UiTextField Label="Read list"
+                                 Helper="Optional manual override for read access."
+                                 Value="@Editor.ReadListCsv"
+                                 ValueChanged="SetReadListAsync"
+                                 ValueExpression="@(() => Editor.ReadListCsv)"
+                                 Compact="true" />
+                </div>
+
+                <div class="share-editor-dialog-grid">
+                    <UiTextField Label="Manual valid users"
+                                 Helper="Only use this if you need names not available in the picker."
+                                 Value="@Editor.ValidUsersCsv"
+                                 ValueChanged="SetValidUsersAsync"
+                                 ValueExpression="@(() => Editor.ValidUsersCsv)"
+                                 Compact="true" />
+
+                    <UiTextField Label="Manual valid groups"
+                                 Helper="Only use this if you need groups not available in the picker."
+                                 Value="@Editor.ValidGroupsCsv"
+                                 ValueChanged="SetValidGroupsAsync"
+                                 ValueExpression="@(() => Editor.ValidGroupsCsv)"
+                                 Compact="true" />
+                </div>
+
+                <div class="share-editor-dialog-grid">
+                    <UiTextField Label="Create mask"
+                                 Value="@Editor.CreateMask"
+                                 ValueChanged="SetCreateMaskAsync"
+                                 ValueExpression="@(() => Editor.CreateMask)"
+                                 Compact="true" />
+
+                    <UiTextField Label="Directory mask"
+                                 Value="@Editor.DirectoryMask"
+                                 ValueChanged="SetDirectoryMaskAsync"
+                                 ValueExpression="@(() => Editor.DirectoryMask)"
+                                 Compact="true" />
+                </div>
+            </details>
+        </EditForm>
+    </ChildContent>
+
+    <Footer>
+        <div class="share-editor-dialog-footer">
+            @if (!string.IsNullOrWhiteSpace(StatusMessage))
+            {
+                <p class="callout @StatusTone share-editor-dialog-status">@StatusMessage</p>
+            }
+
+            <div class="share-editor-dialog-actions">
+                <UiCommandButton Label="Close"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@IsBusy"
+                                 OnClick="HandleCloseAsync" />
+                @if (ShowCreateAnother)
+                {
+                    <UiCommandButton Label="Add another"
+                                     Glyph="UiIconGlyph.Plus"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@IsBusy"
+                                     OnClick="OnCreateAnother" />
+                }
+                @if (Editor.Id.HasValue)
+                {
+                    <UiCommandButton Label="Remove share"
+                                     Glyph="UiIconGlyph.Delete"
+                                     Variant="UiButtonVariant.Danger"
+                                     Disabled="@IsBusy"
+                                     OnClick="OnDelete" />
+                }
+                <UiCommandButton Label="@(IsBusy ? "Saving..." : "Save share")"
+                                 Glyph="UiIconGlyph.Save"
+                                 Disabled="@IsBusy"
+                                 Type="submit"
+                                 form="@formId" />
+            </div>
+        </div>
+    </Footer>
+</UiModal>
+
+@code {
+    private static readonly HashSet<string> CommonWorkingGroups = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "sudo",
+        "adm",
+        "docker",
+        "sambashare",
+        "www-data",
+        "libvirt"
+    };
+
+    private readonly string formId = $"share-editor-form-{Guid.NewGuid():N}";
+    private readonly Dictionary<string, IReadOnlyList<string>> directorySuggestionCache = new(StringComparer.Ordinal);
+    private ShareEditor? trackedEditor;
+    private IReadOnlyList<string> sharePathSuggestions = [];
+    private string lastSuggestedPath = string.Empty;
+    private bool pathEditedManually;
+    private int sharePathSuggestionRequestVersion;
+
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter, EditorRequired] public ShareEditor Editor { get; set; } = new();
+    [Parameter] public UsersGroupsManagerViewModel? Identities { get; set; }
+    [Parameter] public string? StatusMessage { get; set; }
+    [Parameter] public string StatusTone { get; set; } = "info";
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter] public bool ShowCreateAnother { get; set; } = true;
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnSave { get; set; }
+    [Parameter] public EventCallback OnDelete { get; set; }
+    [Parameter] public EventCallback OnCreateAnother { get; set; }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!ReferenceEquals(trackedEditor, Editor))
+        {
+            trackedEditor = Editor;
+            ApplyEditorDefaults();
+            await RefreshSharePathSuggestionsAsync();
+        }
+    }
+
+    private IReadOnlyList<string> GetSelectedUsers() =>
+        ParseCsv(Editor.ValidUsersCsv);
+
+    private IReadOnlyList<string> GetSelectedGroups() =>
+        ParseCsv(Editor.ValidGroupsCsv);
+
+    private IReadOnlyList<UiIdentityTokenPickerItem> GetUserItems()
+    {
+        if (Identities is null)
+        {
+            return [];
+        }
+
+        return Identities.Users
+            .OrderBy(GetUserSortRank)
+            .ThenBy(user => string.IsNullOrWhiteSpace(user.DisplayName) ? user.UserName : user.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .Select(user => new UiIdentityTokenPickerItem(
+                user.UserName,
+                string.IsNullOrWhiteSpace(user.DisplayName) ? user.UserName : user.DisplayName,
+                GetUserSubtitle(user),
+                $"{user.DisplayName} {user.UserName} {user.PrimaryGroup} {user.HomeDirectory} {user.LoginShell}"))
+            .ToArray();
+    }
+
+    private IReadOnlyList<UiIdentityTokenPickerItem> GetGroupItems()
+    {
+        if (Identities is null)
+        {
+            return [];
+        }
+
+        return Identities.Groups
+            .OrderBy(GetGroupSortRank)
+            .ThenBy(group => group.GroupName, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new UiIdentityTokenPickerItem(
+                group.GroupName,
+                group.GroupName,
+                GetGroupSubtitle(group),
+                $"{group.GroupName} {group.Description} {string.Join(' ', group.Members)}"))
+            .ToArray();
+    }
+
+    private Task SetNameAsync(string? value)
+    {
+        Editor.Name = value?.Trim() ?? string.Empty;
+
+        var suggestedPath = BuildSuggestedPath(Editor.Name);
+        if (string.IsNullOrWhiteSpace(Editor.SharePath) ||
+            !pathEditedManually ||
+            string.Equals(Editor.SharePath, lastSuggestedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            Editor.SharePath = suggestedPath;
+            pathEditedManually = false;
+        }
+
+        lastSuggestedPath = suggestedPath;
+        return RefreshSharePathSuggestionsAsync();
+    }
+
+    private Task SetPathAsync(string? value)
+    {
+        Editor.SharePath = value?.Trim() ?? string.Empty;
+        pathEditedManually = !string.IsNullOrWhiteSpace(Editor.SharePath) &&
+                             !string.Equals(Editor.SharePath, lastSuggestedPath, StringComparison.OrdinalIgnoreCase);
+        return RefreshSharePathSuggestionsAsync();
+    }
+
+    private Task SetDescriptionAsync(string? value)
+    {
+        Editor.Description = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetForceUserAsync(string? value)
+    {
+        Editor.ForceUser = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetForceGroupAsync(string? value)
+    {
+        Editor.ForceGroup = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetWriteListAsync(string? value)
+    {
+        Editor.WriteListCsv = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetReadListAsync(string? value)
+    {
+        Editor.ReadListCsv = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetValidUsersAsync(string? value)
+    {
+        Editor.ValidUsersCsv = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetValidGroupsAsync(string? value)
+    {
+        Editor.ValidGroupsCsv = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetCreateMaskAsync(string? value)
+    {
+        Editor.CreateMask = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetDirectoryMaskAsync(string? value)
+    {
+        Editor.DirectoryMask = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetBrowseableAsync(bool value)
+    {
+        Editor.Browseable = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetGuestAccessAsync(bool value)
+    {
+        Editor.GuestAccess = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetReadOnlyAsync(bool value)
+    {
+        Editor.ReadOnly = value;
+        return Task.CompletedTask;
+    }
+
+    private Task ToggleUserAsync(string userName)
+    {
+        var selectedUsers = GetSelectedUsers().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!selectedUsers.Add(userName))
+        {
+            selectedUsers.Remove(userName);
+        }
+
+        Editor.ValidUsersCsv = string.Join(", ", selectedUsers.OrderBy(static item => item, StringComparer.OrdinalIgnoreCase));
+        return Task.CompletedTask;
+    }
+
+    private Task RemoveUserAsync(string userName)
+    {
+        var selectedUsers = GetSelectedUsers().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        selectedUsers.Remove(userName);
+        Editor.ValidUsersCsv = string.Join(", ", selectedUsers.OrderBy(static item => item, StringComparer.OrdinalIgnoreCase));
+        return Task.CompletedTask;
+    }
+
+    private Task ToggleGroupAsync(string groupName)
+    {
+        var selectedGroups = GetSelectedGroups().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!selectedGroups.Add(groupName))
+        {
+            selectedGroups.Remove(groupName);
+        }
+
+        Editor.ValidGroupsCsv = string.Join(", ", selectedGroups.OrderBy(static item => item, StringComparer.OrdinalIgnoreCase));
+        return Task.CompletedTask;
+    }
+
+    private Task RemoveGroupAsync(string groupName)
+    {
+        var selectedGroups = GetSelectedGroups().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        selectedGroups.Remove(groupName);
+        Editor.ValidGroupsCsv = string.Join(", ", selectedGroups.OrderBy(static item => item, StringComparer.OrdinalIgnoreCase));
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleSaveAsync()
+    {
+        EnsureDefaults();
+        await OnSave.InvokeAsync();
+    }
+
+    private Task HandleCloseAsync() =>
+        IsBusy ? Task.CompletedTask : OnClose.InvokeAsync();
+
+    private void ApplyEditorDefaults()
+    {
+        lastSuggestedPath = BuildSuggestedPath(Editor.Name);
+
+        if (string.IsNullOrWhiteSpace(Editor.SharePath))
+        {
+            Editor.SharePath = lastSuggestedPath;
+            pathEditedManually = false;
+            return;
+        }
+
+        pathEditedManually = !string.Equals(Editor.SharePath, lastSuggestedPath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void EnsureDefaults()
+    {
+        if (string.IsNullOrWhiteSpace(Editor.SharePath))
+        {
+            Editor.SharePath = BuildSuggestedPath(Editor.Name);
+        }
+    }
+
+    private async Task RefreshSharePathSuggestionsAsync()
+    {
+        var requestVersion = ++sharePathSuggestionRequestVersion;
+        var query = Editor.SharePath;
+        var suggestions = await BuildSharePathSuggestionsAsync(query);
+        if (requestVersion != sharePathSuggestionRequestVersion)
+        {
+            return;
+        }
+
+        sharePathSuggestions = suggestions;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task<IReadOnlyList<string>> BuildSharePathSuggestionsAsync(string? query)
+    {
+        var suggestions = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var trimmedQuery = query?.Trim() ?? string.Empty;
+        var normalizedQuery = string.IsNullOrWhiteSpace(trimmedQuery)
+            ? string.Empty
+            : NormalizeSuggestedPath(trimmedQuery);
+
+        AddPathSuggestion(suggestions, "/srv/shares");
+        AddPathSuggestion(suggestions, "/srv");
+        AddPathSuggestion(suggestions, "/mnt");
+        AddPathSuggestion(suggestions, "/home");
+        AddPathSuggestion(suggestions, "/var/lib/samba");
+        AddPathSuggestion(suggestions, lastSuggestedPath);
+        AddPathSuggestion(suggestions, GetParentDirectory(lastSuggestedPath));
+
+        if (!string.IsNullOrWhiteSpace(normalizedQuery))
+        {
+            AddPathSuggestion(suggestions, normalizedQuery);
+            AddPathSuggestion(suggestions, GetParentDirectory(normalizedQuery));
+        }
+
+        foreach (var path in BuildInspectionPaths(normalizedQuery))
+        {
+            var directorySuggestions = await GetDirectorySuggestionsAsync(path);
+            foreach (var suggestion in directorySuggestions)
+            {
+                AddPathSuggestion(suggestions, suggestion);
+            }
+        }
+
+        var filtered = string.IsNullOrWhiteSpace(normalizedQuery)
+            ? suggestions.AsEnumerable()
+            : suggestions.Where(path =>
+                path.StartsWith(normalizedQuery, StringComparison.OrdinalIgnoreCase) ||
+                GetPathLabel(path).StartsWith(normalizedQuery.TrimStart('/'), StringComparison.OrdinalIgnoreCase) ||
+                path.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase));
+
+        return filtered
+            .Where(path => !string.Equals(path, Editor.SharePath, StringComparison.Ordinal))
+            .OrderBy(path => GetPathSuggestionRank(path, normalizedQuery))
+            .ThenBy(GetPathLabel, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Take(50)
+            .ToArray();
+    }
+
+    private async Task<IReadOnlyList<string>> GetDirectorySuggestionsAsync(string path)
+    {
+        var normalizedPath = NormalizeSuggestedPath(path);
+        if (directorySuggestionCache.TryGetValue(normalizedPath, out var cached))
+        {
+            return cached;
+        }
+
+        try
+        {
+            cached = (await LocalFileBrowsingService.ListItemsAsync("/", normalizedPath))
+                .Where(item => item.ItemType == SftpItemType.Folder)
+                .Select(item => NormalizeSuggestedPath(item.FullPath))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch
+        {
+            cached = [];
+        }
+
+        directorySuggestionCache[normalizedPath] = cached;
+        return cached;
+    }
+
+    private static IReadOnlyList<string> BuildInspectionPaths(string normalizedQuery)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "/srv",
+            "/srv/shares",
+            "/mnt",
+            "/home",
+            "/var/lib/samba"
+        };
+
+        if (!string.IsNullOrWhiteSpace(normalizedQuery))
+        {
+            paths.Add(normalizedQuery);
+            paths.Add(GetParentDirectory(normalizedQuery));
+        }
+
+        return paths
+            .Where(static path => !string.IsNullOrWhiteSpace(path))
+            .ToArray();
+    }
+
+    private static void AddPathSuggestion(ISet<string> suggestions, string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        suggestions.Add(NormalizeSuggestedPath(path));
+    }
+
+    private static int GetPathSuggestionRank(string path, string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return path is "/" or "/srv/shares" ? 0 : 1;
+        }
+
+        var label = GetPathLabel(path);
+        if (path.StartsWith(query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        if (label.StartsWith(query.TrimStart('/'), StringComparison.OrdinalIgnoreCase))
+        {
+            return 1;
+        }
+
+        return path.Contains(query, StringComparison.OrdinalIgnoreCase) ? 2 : 3;
+    }
+
+    private static string GetPathLabel(string path)
+    {
+        var normalizedPath = NormalizeSuggestedPath(path);
+        if (normalizedPath == "/")
+        {
+            return "/";
+        }
+
+        var separator = normalizedPath.LastIndexOf('/');
+        return separator >= 0 ? normalizedPath[(separator + 1)..] : normalizedPath;
+    }
+
+    private static string GetParentDirectory(string? path)
+    {
+        var normalizedPath = NormalizeSuggestedPath(path);
+        if (normalizedPath == "/")
+        {
+            return "/";
+        }
+
+        var separator = normalizedPath.LastIndexOf('/');
+        if (separator <= 0)
+        {
+            return "/";
+        }
+
+        return normalizedPath[..separator];
+    }
+
+    private static string NormalizeSuggestedPath(string? path)
+    {
+        var normalized = (path ?? string.Empty).Trim().Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return "/";
+        }
+
+        if (!normalized.StartsWith("/", StringComparison.Ordinal))
+        {
+            normalized = "/" + normalized.TrimStart('/');
+        }
+
+        while (normalized.Contains("//", StringComparison.Ordinal))
+        {
+            normalized = normalized.Replace("//", "/", StringComparison.Ordinal);
+        }
+
+        return normalized.Length > 1 ? normalized.TrimEnd('/') : normalized;
+    }
+
+    private bool IsWorkingGroup(LinuxShareGroup group)
+    {
+        if (Identities is null)
+        {
+            return false;
+        }
+
+        var humanUsers = Identities.Users.Where(IsHumanUser).ToArray();
+        return group.Members.Any(member => humanUsers.Any(user => user.UserName.Equals(member, StringComparison.OrdinalIgnoreCase))) ||
+               humanUsers.Any(user => user.PrimaryGroup.Equals(group.GroupName, StringComparison.OrdinalIgnoreCase) ||
+                                      user.SupplementaryGroups.Contains(group.GroupName, StringComparer.OrdinalIgnoreCase)) ||
+               CommonWorkingGroups.Contains(group.GroupName);
+    }
+
+    private static bool IsHumanUser(LinuxShareUser user) =>
+        user.HomeDirectory.StartsWith("/home/", StringComparison.OrdinalIgnoreCase) &&
+        !IsNonInteractiveShell(user.LoginShell);
+
+    private int GetUserSortRank(LinuxShareUser user)
+    {
+        if (GetSelectedUsers().Contains(user.UserName, StringComparer.OrdinalIgnoreCase))
+        {
+            return -1;
+        }
+
+        if (IsHumanUser(user))
+        {
+            return user.IsEnabled ? 0 : 1;
+        }
+
+        return 2;
+    }
+
+    private int GetGroupSortRank(LinuxShareGroup group) =>
+        GetSelectedGroups().Contains(group.GroupName, StringComparer.OrdinalIgnoreCase)
+            ? -1
+            : IsWorkingGroup(group)
+                ? 0
+                : 1;
+
+    private static string GetUserSubtitle(LinuxShareUser user)
+    {
+        var accountType = IsHumanUser(user) ? "Interactive" : "System";
+        var loginState = user.IsEnabled ? "Login enabled" : "No login shell";
+        return $"{user.UserName} • {accountType} • {loginState}";
+    }
+
+    private string GetGroupSubtitle(LinuxShareGroup group)
+    {
+        var groupType = IsWorkingGroup(group) ? "Working group" : "System group";
+        var memberSummary = group.Members.Count == 0 ? "No members yet" : $"{group.Members.Count} member(s)";
+        return $"{groupType} • {memberSummary}";
+    }
+
+    private static bool IsNonInteractiveShell(string shell) =>
+        shell.EndsWith("/nologin", StringComparison.OrdinalIgnoreCase) ||
+        shell.EndsWith("/false", StringComparison.OrdinalIgnoreCase);
+
+    private static IReadOnlyList<string> ParseCsv(string value) =>
+        value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string BuildSuggestedPath(string shareName)
+    {
+        var slugBuilder = new System.Text.StringBuilder();
+        var previousWasSeparator = false;
+
+        foreach (var character in shareName.Trim().ToLowerInvariant())
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                slugBuilder.Append(character);
+                previousWasSeparator = false;
+                continue;
+            }
+
+            if (previousWasSeparator)
+            {
+                continue;
+            }
+
+            slugBuilder.Append('-');
+            previousWasSeparator = true;
+        }
+
+        var slug = slugBuilder.ToString().Trim('-');
+        if (slug.Length == 0)
+        {
+            slug = "share";
+        }
+
+        return $"/srv/shares/{slug}";
+    }
+}

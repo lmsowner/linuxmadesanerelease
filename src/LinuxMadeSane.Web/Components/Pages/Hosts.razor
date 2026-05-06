@@ -1,0 +1,495 @@
+@page "/hosts"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@inject IManagedHostService HostService
+@inject IServiceScopeFactory ServiceScopeFactory
+@inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+
+<PageTitle>Hosts | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <UiHeroPanel Title="Hosts"
+                 Compact="true">
+        <Actions>
+            <UiCommandButton Label="Add host" Glyph="UiIconGlyph.Plus" Href="/hosts/new" />
+        </Actions>
+    </UiHeroPanel>
+
+    <div class="summary-pill-row">
+        <UiPill Tone="UiPillTone.Neutral">@($"{ActiveHostRows.Count} configured")</UiPill>
+        <UiPill Tone="@(ActiveOnlineHostCount > 0 ? UiPillTone.Success : UiPillTone.Warning)">
+            @(ActiveOnlineHostCount > 0 ? $"{ActiveOnlineHostCount} online" : "No online hosts")
+        </UiPill>
+        <UiPill Tone="@(ActiveCheckingHostCount > 0 ? UiPillTone.Warning : UiPillTone.Neutral)">
+            @(ActiveCheckingHostCount > 0 ? $"{ActiveCheckingHostCount} checking" : "No hosts checking")
+        </UiPill>
+        <UiPill Tone="@(ActiveOfflineHostCount > 0 ? UiPillTone.Failure : UiPillTone.Neutral)">
+            @(ActiveOfflineHostCount > 0 ? $"{ActiveOfflineHostCount} offline" : "No offline hosts")
+        </UiPill>
+    </div>
+
+    <TabControl ActiveValue="@activeHostTab"
+                ActiveValueChanged="HandleHostTabChangedAsync"
+                Class="page-tab-control hosts-tab-control"
+                PanelClass="page-tab-panel hosts-tab-panel">
+            <TabPage Value="@LmsHostsTabValue" Title="@($"LMS Hosts ({LmsHostRows.Count})")">
+                <table class="hosts-table">
+                    <thead>
+                        <tr>
+                            <th><span class="hosts-column-heading">Name</span></th>
+                            <th><span class="hosts-column-heading">Environment</span></th>
+                            <th><span class="hosts-column-heading">Status</span></th>
+                            <th><span class="hosts-column-heading">Auth</span></th>
+                            <th><span class="hosts-column-heading">Last seen</span></th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (LmsHostRows.Count == 0)
+                        {
+                            <tr>
+                                <td colspan="6" class="hosts-loading-cell">
+                                    <span class="meta-text">No LMS hosts registered yet.</span>
+                                </td>
+                            </tr>
+                        }
+                        else
+                        {
+                            @foreach (var row in LmsHostRows)
+                            {
+                                <tr>
+                                    <td>
+                                        <div class="stack-tight hosts-name-stack">
+                                            <div class="inventory-host-title">
+                                                <strong class="hosts-name-text">@row.Host.Name</strong>
+                                                <ManagedHostKindIndicator Host="@row.Host" Class="hosts-row-meta" />
+                                            </div>
+                                            <span class="meta-text hosts-row-meta">@row.Host.Hostname:@row.Host.Port</span>
+                                        </div>
+                                    </td>
+                                    <td><span class="hosts-row-value">@FormatEnvironment(row.Host.Environment)</span></td>
+                                    <td>
+                                        <div class="stack-tight hosts-status-stack">
+                                            <UiPill Tone="@GetStatusTone(row)" Class="hosts-status-pill">@GetStatusLabel(row)</UiPill>
+                                            @if (ShouldShowStatusSummary(row))
+                                            {
+                                                <span class="meta-text hosts-row-meta">@GetStatusSummary(row)</span>
+                                            }
+                                        </div>
+                                    </td>
+                                    <td><span class="hosts-row-value">@FormatAuthentication(row.Host.PrimaryAuthenticationType)</span></td>
+                                    <td><span class="hosts-row-value">@(row.Host.LastSeenUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "Never")</span></td>
+                                    <td class="actions-cell">
+                                        <div class="row-action-cluster">
+                                            <UiCommandButton Label="Details" Glyph="UiIconGlyph.Info" Href="@($"/hosts/{row.Host.Id}")" Variant="UiButtonVariant.Action" />
+                                            <UiCommandButton Label="Terminal"
+                                                             Glyph="UiIconGlyph.Run"
+                                                             Href="@($"/hosts/{row.Host.Id}/terminal")"
+                                                             Variant="UiButtonVariant.Action"
+                                                             SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
+                                            <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
+                                            <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Href="@($"/hosts/{row.Host.Id}/edit")" Variant="UiButtonVariant.Action" />
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </TabPage>
+
+            <TabPage Value="@SshHostsTabValue" Title="@($"SSH Hosts ({SshHostRows.Count})")">
+                <table class="hosts-table">
+                    <thead>
+                        <tr>
+                            <th><span class="hosts-column-heading">Name</span></th>
+                            <th><span class="hosts-column-heading">Environment</span></th>
+                            <th><span class="hosts-column-heading">Status</span></th>
+                            <th><span class="hosts-column-heading">Auth</span></th>
+                            <th><span class="hosts-column-heading">Last seen</span></th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (SshHostRows.Count == 0)
+                        {
+                            <tr>
+                                <td colspan="6" class="hosts-loading-cell">
+                                    <span class="meta-text">No SSH-only hosts registered yet.</span>
+                                </td>
+                            </tr>
+                        }
+                        else
+                        {
+                            @foreach (var row in SshHostRows)
+                            {
+                                <tr>
+                                    <td>
+                                        <div class="stack-tight hosts-name-stack">
+                                            <div class="inventory-host-title">
+                                                <strong class="hosts-name-text">@row.Host.Name</strong>
+                                                <ManagedHostKindIndicator Host="@row.Host" Class="hosts-row-meta" />
+                                            </div>
+                                            <span class="meta-text hosts-row-meta">@row.Host.Hostname:@row.Host.Port</span>
+                                        </div>
+                                    </td>
+                                    <td><span class="hosts-row-value">@FormatEnvironment(row.Host.Environment)</span></td>
+                                    <td>
+                                        <div class="stack-tight hosts-status-stack">
+                                            <UiPill Tone="@GetStatusTone(row)" Class="hosts-status-pill">@GetStatusLabel(row)</UiPill>
+                                            @if (ShouldShowStatusSummary(row))
+                                            {
+                                                <span class="meta-text hosts-row-meta">@GetStatusSummary(row)</span>
+                                            }
+                                        </div>
+                                    </td>
+                                    <td><span class="hosts-row-value">@FormatAuthentication(row.Host.PrimaryAuthenticationType)</span></td>
+                                    <td><span class="hosts-row-value">@(row.Host.LastSeenUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "Never")</span></td>
+                                    <td class="actions-cell">
+                                        <div class="row-action-cluster">
+                                            <UiCommandButton Label="Details" Glyph="UiIconGlyph.Info" Href="@($"/hosts/{row.Host.Id}")" Variant="UiButtonVariant.Action" />
+                                            <UiCommandButton Label="Terminal"
+                                                             Glyph="UiIconGlyph.Run"
+                                                             Href="@($"/hosts/{row.Host.Id}/terminal")"
+                                                             Variant="UiButtonVariant.Action"
+                                                             SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
+                                            <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
+                                            <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Href="@($"/hosts/{row.Host.Id}/edit")" Variant="UiButtonVariant.Action" />
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </TabPage>
+    </TabControl>
+</div>
+
+@code {
+    private const string LmsHostsTabValue = "lms";
+    private const string SshHostsTabValue = "ssh";
+    private static readonly TimeSpan StatusCheckTimeout = TimeSpan.FromSeconds(8);
+    private IReadOnlyList<HostRowState> hostRows = [];
+    private CancellationTokenSource? statusRefreshCancellationTokenSource;
+    private bool isStatusRefreshInProgress;
+    private string activeHostTab = LmsHostsTabValue;
+
+    private IReadOnlyList<HostRowState> LmsHostRows =>
+        hostRows
+            .Where(row => ManagedHostCapabilities.IsLmsHost(row.Host))
+            .ToArray();
+
+    private IReadOnlyList<HostRowState> SshHostRows =>
+        hostRows
+            .Where(row => !ManagedHostCapabilities.IsLmsHost(row.Host))
+            .ToArray();
+
+    private IReadOnlyList<HostRowState> ActiveHostRows =>
+        string.Equals(activeHostTab, SshHostsTabValue, StringComparison.Ordinal)
+            ? SshHostRows
+            : LmsHostRows;
+
+    private int ActiveOnlineHostCount => ActiveHostRows.Count(row => ResolveConnectionStatus(row) == ConnectionTestStatus.Succeeded);
+
+    private int ActiveCheckingHostCount => isStatusRefreshInProgress
+        ? ActiveHostRows.Count(row => !HasActiveTerminalSession(row.Host.Id))
+        : 0;
+
+    private int ActiveOfflineHostCount => ActiveHostRows.Count(row => !row.IsStatusLoading && ResolveConnectionStatus(row) != ConnectionTestStatus.Succeeded);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var hosts = await HostService.ListHostsAsync();
+        hostRows = hosts
+            .OrderBy(ManagedHostCapabilities.GetSortRank)
+            .ThenBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(host =>
+            {
+                var hasActiveSession = TerminalWorkspaceRegistry.HasActiveSession(host.Id);
+
+                return new HostRowState
+                {
+                    Host = host,
+                    ConnectionTest = hasActiveSession
+                        ? BuildLiveSessionConnectionResult()
+                        : BuildCachedConnectionResult(host),
+                    IsStatusLoading = false
+                };
+            })
+            .ToArray();
+
+        isStatusRefreshInProgress = hostRows.Any(row => !HasActiveTerminalSession(row.Host.Id));
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            statusRefreshCancellationTokenSource = new CancellationTokenSource();
+            _ = RefreshStatusesAsync(statusRefreshCancellationTokenSource.Token);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (statusRefreshCancellationTokenSource is not null)
+        {
+            await statusRefreshCancellationTokenSource.CancelAsync();
+            statusRefreshCancellationTokenSource.Dispose();
+        }
+    }
+
+    private Task HandleHostTabChangedAsync(string? value)
+    {
+        activeHostTab = string.Equals(value, SshHostsTabValue, StringComparison.Ordinal)
+            ? SshHostsTabValue
+            : LmsHostsTabValue;
+        return Task.CompletedTask;
+    }
+
+    private async Task RefreshStatusesAsync(CancellationToken cancellationToken)
+    {
+        var hostsToRefresh = hostRows
+            .Where(row => !HasActiveTerminalSession(row.Host.Id))
+            .Select(row => row.Host)
+            .ToArray();
+
+        if (hostsToRefresh.Length == 0)
+        {
+            isStatusRefreshInProgress = false;
+            return;
+        }
+
+        try
+        {
+            var work = hostsToRefresh
+                .Select(host => ProbeHostStatusAsync(host, cancellationToken))
+                .ToArray();
+            var results = await Task.WhenAll(work);
+            var resultMap = results.ToDictionary(result => result.HostId, result => result.Connection);
+
+            hostRows = hostRows
+                .Select(row =>
+                {
+                    if (HasActiveTerminalSession(row.Host.Id))
+                    {
+                        return new HostRowState
+                        {
+                            Host = row.Host,
+                            ConnectionTest = BuildLiveSessionConnectionResult(),
+                            IsStatusLoading = false
+                        };
+                    }
+
+                    return new HostRowState
+                    {
+                        Host = row.Host,
+                        ConnectionTest = resultMap.GetValueOrDefault(row.Host.Id) ?? row.ConnectionTest,
+                        IsStatusLoading = false
+                    };
+                })
+                .ToArray();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            isStatusRefreshInProgress = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+
+    private async Task<HostStatusProbeResult> ProbeHostStatusAsync(
+        ManagedHost host,
+        CancellationToken cancellationToken)
+    {
+        return await Task.Run(
+            () => ProbeHostStatusCoreAsync(host, cancellationToken),
+            cancellationToken);
+    }
+
+    private async Task<HostStatusProbeResult> ProbeHostStatusCoreAsync(
+        ManagedHost host,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var scope = ServiceScopeFactory.CreateAsyncScope();
+            var hostService = scope.ServiceProvider.GetRequiredService<IManagedHostService>();
+            using var probeCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            probeCancellationTokenSource.CancelAfter(StatusCheckTimeout);
+
+            var connectionTask = hostService.TestConnectionAsync(host, probeCancellationTokenSource.Token);
+
+            try
+            {
+                return new HostStatusProbeResult(
+                    host.Id,
+                    await connectionTask.WaitAsync(StatusCheckTimeout, cancellationToken));
+            }
+            catch (TimeoutException)
+            {
+                probeCancellationTokenSource.Cancel();
+                _ = ObserveLateConnectionResultAsync(connectionTask);
+                return new HostStatusProbeResult(host.Id, BuildTimedOutConnectionResult());
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new HostStatusProbeResult(
+                host.Id,
+                new HostConnectionTestResult(
+                    ConnectionTestStatus.Failed,
+                    "Connection check failed.",
+                    null,
+                    DateTimeOffset.UtcNow));
+        }
+    }
+
+    private UiPillTone GetStatusTone(HostRowState row) => ResolveConnectionStatus(row) switch
+    {
+        ConnectionTestStatus.Succeeded => UiPillTone.Success,
+        ConnectionTestStatus.InvalidConfiguration => UiPillTone.Warning,
+        ConnectionTestStatus.Failed => UiPillTone.Failure,
+        ConnectionTestStatus.TimedOut => UiPillTone.Failure,
+        _ => UiPillTone.Warning
+    };
+
+    private string GetStatusLabel(HostRowState row)
+    {
+        return ResolveConnectionStatus(row) switch
+        {
+            ConnectionTestStatus.Succeeded => "Online",
+            ConnectionTestStatus.Failed => "Offline",
+            ConnectionTestStatus.TimedOut => "Timed out",
+            ConnectionTestStatus.InvalidConfiguration => "Config issue",
+            _ => "Unavailable"
+        };
+    }
+
+    private string GetStatusSummary(HostRowState row)
+    {
+        if (HasActiveTerminalSession(row.Host.Id))
+        {
+            return "Live SSH terminal session open in Linux Made Sane.";
+        }
+
+        if (isStatusRefreshInProgress)
+        {
+            return "Showing last known status while Linux Made Sane refreshes the live SSH connection in the background.";
+        }
+
+        if (row.ConnectionTest is null)
+        {
+            return "Live connection state unavailable.";
+        }
+
+        return row.ConnectionTest.Summary;
+    }
+
+    private string? GetTerminalSessionBadge(Guid hostId)
+    {
+        var count = TerminalWorkspaceRegistry.GetOpenSessionCount(hostId);
+        return count > 0 ? count.ToString() : null;
+    }
+
+    private static string FormatEnvironment(string? environment) =>
+        string.IsNullOrWhiteSpace(environment) ? "Unlabeled" : environment;
+
+    private static string FormatAuthentication(AuthenticationType type) =>
+        ManagedHostAuthenticationPolicy.GetDisplayLabel(type);
+
+    private ConnectionTestStatus ResolveConnectionStatus(HostRowState row)
+    {
+        if (HasActiveTerminalSession(row.Host.Id))
+        {
+            return ConnectionTestStatus.Succeeded;
+        }
+
+        return row.ConnectionTest?.Status ?? ConnectionTestStatus.NotRun;
+    }
+
+    private bool ShouldShowStatusSummary(HostRowState row) =>
+        ResolveConnectionStatus(row) != ConnectionTestStatus.Succeeded;
+
+    private static HostConnectionTestResult BuildTimedOutConnectionResult() =>
+        new(
+            ConnectionTestStatus.TimedOut,
+            "Timed out establishing the SSH session.",
+            $"Linux Made Sane did not get a live SSH result within {StatusCheckTimeout.TotalSeconds:0} seconds.",
+            DateTimeOffset.UtcNow);
+
+    private static HostConnectionTestResult BuildLiveSessionConnectionResult() =>
+        new(
+            ConnectionTestStatus.Succeeded,
+            "Live SSH terminal session open.",
+            "This host already has an active terminal session in Linux Made Sane.",
+            DateTimeOffset.UtcNow);
+
+    private static HostConnectionTestResult BuildCachedConnectionResult(ManagedHost host) =>
+        host.LastConnectionTestStatus switch
+        {
+            ConnectionTestStatus.Succeeded => new HostConnectionTestResult(
+                ConnectionTestStatus.Succeeded,
+                "Last known check succeeded.",
+                "Showing the previous successful SSH connection result until the live refresh completes.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow),
+            ConnectionTestStatus.Failed => new HostConnectionTestResult(
+                ConnectionTestStatus.Failed,
+                "Last known check failed.",
+                "Showing the previous failed SSH connection result until the live refresh completes.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow),
+            ConnectionTestStatus.TimedOut => new HostConnectionTestResult(
+                ConnectionTestStatus.TimedOut,
+                "Last known check timed out.",
+                "Showing the previous timed-out SSH connection result until the live refresh completes.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow),
+            ConnectionTestStatus.InvalidConfiguration => new HostConnectionTestResult(
+                ConnectionTestStatus.InvalidConfiguration,
+                "Last known configuration issue.",
+                "Showing the previous configuration issue until the live refresh completes.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow),
+            _ => new HostConnectionTestResult(
+                ConnectionTestStatus.NotRun,
+                "No live check recorded yet.",
+                "Linux Made Sane has not recorded a completed SSH connection result for this host yet.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow)
+        };
+
+    private bool HasActiveTerminalSession(Guid hostId) =>
+        TerminalWorkspaceRegistry.HasActiveSession(hostId);
+
+    private static async Task ObserveLateConnectionResultAsync(Task<HostConnectionTestResult> connectionTask)
+    {
+        try
+        {
+            await connectionTask;
+        }
+        catch
+        {
+        }
+    }
+
+    private sealed class HostRowState
+    {
+        public required ManagedHost Host { get; init; }
+        public HostConnectionTestResult? ConnectionTest { get; set; }
+        public bool IsStatusLoading { get; set; }
+    }
+
+    private sealed record HostStatusProbeResult(
+        Guid HostId,
+        HostConnectionTestResult Connection);
+}

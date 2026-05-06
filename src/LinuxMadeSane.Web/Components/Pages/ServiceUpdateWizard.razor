@@ -1,0 +1,108 @@
+@page "/services/update-wizard"
+@using LinuxMadeSane.Application.Contracts.Services
+@using LinuxMadeSane.Application.Interfaces
+@inject IServiceOperationsService ServiceOperations
+
+<PageTitle>Safe Update Wizard | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <section class="hero-panel compact">
+        <div>
+            <p class="eyebrow">Safe update workflow</p>
+            <h1>Update the service without copying files and praying</h1>
+            <p class="hero-copy">Select the service, choose the release source, validate the contents, stop safely, back up the current deployment, copy the new version, fix permissions, reload systemd if needed, restart, health check, and rollback on failure.</p>
+        </div>
+    </section>
+
+    @if (viewModel is null)
+    {
+        <section class="surface-card">
+            <div class="empty-state">
+                <h3>No services yet</h3>
+                <p>Create a service profile first.</p>
+            </div>
+        </section>
+    }
+    else
+    {
+        <section class="surface-card">
+            <div class="table-header">
+                <h2>Update wizard</h2>
+                <span>Controlled deployment flow</span>
+            </div>
+
+            <div class="field-row">
+                <label>
+                    <span>Service</span>
+                    <UiCombobox @bind-Value="selectedServiceId" @bind-Value:after="ReloadAsync">
+                        @foreach (var service in viewModel.AvailableServices)
+                        {
+                            <option value="@service.Id">@service.DisplayName (@service.UnitName)</option>
+                        }
+                    </UiCombobox>
+                </label>
+                <label>
+                    <span>Accepted source types</span>
+                    <input class="service-readonly-input" value="@string.Join(", ", viewModel.UpdatePlan.AcceptedSourceTypes)" readonly />
+                </label>
+            </div>
+        </section>
+
+        <div class="dashboard-columns">
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Validation + workflow</h2>
+                    <span>@viewModel.UpdatePlan.UnitName</span>
+                </div>
+
+                <div class="decision-list">
+                    @foreach (var check in viewModel.UpdatePlan.ValidationChecks)
+                    {
+                        <InfoPill Eyebrow="Validate" Text="@check" />
+                    }
+                    @foreach (var step in viewModel.UpdatePlan.PlannedSteps)
+                    {
+                        <InfoPill Eyebrow="Step" Text="@step" />
+                    }
+                </div>
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Success + rollback</h2>
+                    <span>@viewModel.UpdatePlan.TargetVersion</span>
+                </div>
+
+                <div class="decision-list">
+                    @foreach (var check in viewModel.UpdatePlan.SuccessChecks)
+                    {
+                        <InfoPill Eyebrow="Confirm success" Text="@check" />
+                    }
+                    @foreach (var trigger in viewModel.UpdatePlan.RollbackTriggers)
+                    {
+                        <article class="issue-card warning">
+                            <strong>Rollback trigger</strong>
+                            <p>@trigger</p>
+                        </article>
+                    }
+                </div>
+            </section>
+        </div>
+    }
+</div>
+
+@code {
+    private SaneUpdaterViewModel? viewModel;
+    private Guid selectedServiceId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        viewModel = await ServiceOperations.GetUpdaterAsync(Guid.Empty);
+        selectedServiceId = viewModel?.UpdatePlan.ServiceId ?? Guid.Empty;
+    }
+
+    private async Task ReloadAsync()
+    {
+        viewModel = await ServiceOperations.GetUpdaterAsync(selectedServiceId);
+    }
+}

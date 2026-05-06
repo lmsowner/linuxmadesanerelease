@@ -1,0 +1,1384 @@
+@page "/ai/engine"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts.LocalAi
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.LocalAi
+@inject ILocalAiEngineManagerService LocalAiService
+@inject ILmsConnectClientFeature ConnectClientFeature
+
+@if (!Embedded)
+{
+    <PageTitle>Local AI Engine | Linux Made Sane</PageTitle>
+}
+
+<div class="page-shell local-ai-page">
+    @if (!Embedded)
+    {
+        <UiHeroPanel Eyebrow="LinuxMadeSane.AI"
+                     Title="Local AI Engine"
+                     Description="Install and manage a private LMS AI runtime, recommend models from local hardware, and securely share that engine with other LMS instances through LMS Connect without exposing Ollama publicly.">
+            <Actions>
+                <UiCommandButton Label="Refresh"
+                                 Glyph="UiIconGlyph.Refresh"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@isBusy"
+                                 OnClick="RefreshAsync" />
+                <UiCommandButton Label="Provider settings"
+                                 Glyph="UiIconGlyph.Connection"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Href="/ai/providers" />
+            </Actions>
+        </UiHeroPanel>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(statusMessage))
+    {
+        <p class="callout @statusTone">@statusMessage</p>
+    }
+
+    @if (!isLoaded || workspace is null || sharingEditor is null)
+    {
+        <UiPanel>
+            <p class="meta-text">Loading Local AI Engine...</p>
+        </UiPanel>
+    }
+    else
+    {
+        <TabControl ActiveValue="@activeTab"
+                    ActiveValueChanged="SetActiveTabAsync"
+                    Class="page-tab-control local-ai-tab-control"
+                    PanelClass="page-tab-panel local-ai-tab-panel">
+            <ChildContent>
+                <TabPage Value="@OverviewTabValue" Title="Status">
+                    <ChildContent>
+                        <div class="local-ai-tab-content">
+                            <div class="local-ai-summary-grid">
+                                <article class="local-ai-summary-card">
+                                    <span class="local-ai-summary-label">Runtime</span>
+                                    <strong>@workspace.Status.Runtime.DisplayName</strong>
+                                    <span class="meta-text">@workspace.Status.Runtime.Detail</span>
+                                    <UiPill Tone="@MapHealthTone(workspace.Status.Runtime.Health)">@workspace.Status.Runtime.Health</UiPill>
+                                </article>
+
+                                <article class="local-ai-summary-card">
+                                    <span class="local-ai-summary-label">Endpoint</span>
+                                    <strong class="local-ai-break">@workspace.Status.Runtime.ApiEndpoint</strong>
+                                    <span class="meta-text">Ollama stays on localhost unless Linux Made Sane relays requests through LMS Connect.</span>
+                                    <UiPill Tone="@(workspace.Status.Runtime.IsApiReachable ? UiPillTone.Success : UiPillTone.Warning)">
+                                        @(workspace.Status.Runtime.IsApiReachable ? "Reachable" : "Unavailable")
+                                    </UiPill>
+                                </article>
+
+                                <article class="local-ai-summary-card">
+                                    <span class="local-ai-summary-label">Default model</span>
+                                    <strong>@GetCurrentModelDisplayName()</strong>
+                                    <span class="meta-text">@workspace.Status.Capability.Summary</span>
+                                    <UiPill Tone="@(HasInstalledModels ? UiPillTone.Success : UiPillTone.Warning)">
+                                        @(HasInstalledModels ? $"{workspace.InstalledModels.Count} installed" : "No models")
+                                    </UiPill>
+                                </article>
+
+                                <article class="local-ai-summary-card">
+                                    <span class="local-ai-summary-label">Hardware</span>
+                                    <strong>@workspace.Status.Hardware.CpuModel</strong>
+                                    <span class="meta-text">@GetHardwareSummaryLine()</span>
+                                    <UiPill Tone="@MapGpuTone(workspace.Status.Hardware.GpuAccelerationState)">
+                                        @GetGpuLabel(workspace.Status.Hardware)
+                                    </UiPill>
+                                </article>
+
+                                <article class="local-ai-summary-card">
+                                    <span class="local-ai-summary-label">Provider wiring</span>
+                                    <strong>@(workspace.Status.IsLocalProviderConfigured ? "Ready" : "Pending")</strong>
+                                    <span class="meta-text">@(workspace.Status.IsLocalProviderConfigured ? "Existing chat and Deep Fix can select the local provider." : "Run setup or set a default model to register the local provider.")</span>
+                                    <UiPill Tone="@(workspace.Status.IsLocalProviderConfigured ? UiPillTone.Success : UiPillTone.Warning)">
+                                        @(workspace.Status.IsLocalProviderConfigured ? "Provider configured" : "Not configured")
+                                    </UiPill>
+                                </article>
+
+                                @if (SupportsConnectSharing)
+                                {
+                                    <article class="local-ai-summary-card">
+                                        <span class="local-ai-summary-label">Sharing</span>
+                                        <strong>@(workspace.Status.IsSharedToOtherInstances ? "Enabled" : "Disabled")</strong>
+                                        <span class="meta-text">@GetSharingSummary()</span>
+                                        <UiPill Tone="@(workspace.Status.IsSharedToOtherInstances ? UiPillTone.Success : UiPillTone.Neutral)">
+                                            @(workspace.Status.IsSharedToOtherInstances ? "Shared AI engine" : "Local only")
+                                        </UiPill>
+                                    </article>
+                                }
+                            </div>
+
+                            <div class="local-ai-overview-grid">
+                                <section class="surface-subcard local-ai-card">
+                                    <div class="table-header">
+                                        <div>
+                                            <p class="eyebrow">Health</p>
+                                            <h2>Runtime health and service control</h2>
+                                        </div>
+                                        <span>@workspace.Status.CheckedAtUtc.ToLocalTime().ToString("dd MMM yyyy HH:mm")</span>
+                                    </div>
+
+                                    <div class="local-ai-fact-grid">
+                                        <article class="local-ai-fact-card">
+                                            <span class="eyebrow">Binary</span>
+                                            <strong class="local-ai-break">@(string.IsNullOrWhiteSpace(workspace.Status.Runtime.ExecutablePath) ? "Not found" : workspace.Status.Runtime.ExecutablePath)</strong>
+                                            <span class="meta-text">@(string.IsNullOrWhiteSpace(workspace.Status.Runtime.Version) ? "Version unknown." : workspace.Status.Runtime.Version)</span>
+                                        </article>
+                                        <article class="local-ai-fact-card">
+                                            <span class="eyebrow">Service</span>
+                                            <strong>@workspace.Status.Runtime.ServiceName</strong>
+                                            <span class="meta-text">@(workspace.Status.Runtime.IsServiceActive ? "Service is active." : "Service is not active.")</span>
+                                        </article>
+                                        <article class="local-ai-fact-card">
+                                            <span class="eyebrow">Capability warning</span>
+                                            <strong>@workspace.Status.Capability.ProviderLabel</strong>
+                                            <span class="meta-text">@(string.IsNullOrWhiteSpace(workspace.Status.Capability.Warning) ? "No extra provider warning." : workspace.Status.Capability.Warning)</span>
+                                        </article>
+                                    </div>
+
+                                    <div class="local-ai-approval-row">
+                                        <label class="local-ai-approval-toggle" title="Linux Made Sane requires explicit approval before it mutates the local AI runtime.">
+                                            <UiCompactCheckbox Label="Approve runtime actions"
+                                                               Value="@runtimeActionsApproved"
+                                                               ValueChanged="SetRuntimeActionsApprovedAsync" />
+                                            <span>I approve start, stop, and restart of the local AI runtime.</span>
+                                        </label>
+
+                                        <div class="local-ai-inline-actions">
+                                            <UiCommandButton Label="Test current model"
+                                                             Glyph="UiIconGlyph.Analyze"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@(!CanTestCurrentModel || isBusy)"
+                                                             OnClick="TestCurrentModelAsync" />
+                                            <UiCommandButton Label="Start"
+                                                             Glyph="UiIconGlyph.Run"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@(!runtimeActionsApproved || isBusy)"
+                                                             OnClick="StartRuntimeAsync" />
+                                            <UiCommandButton Label="Stop"
+                                                             Glyph="UiIconGlyph.Stop"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@(!runtimeActionsApproved || isBusy)"
+                                                             OnClick="StopRuntimeAsync" />
+                                            <UiCommandButton Label="Restart"
+                                                             Glyph="UiIconGlyph.Restart"
+                                                             Disabled="@(!runtimeActionsApproved || isBusy)"
+                                                             OnClick="RestartRuntimeAsync" />
+                                        </div>
+                                    </div>
+                                </section>
+
+                                <section class="surface-subcard local-ai-card">
+                                    <div class="table-header">
+                                        <div>
+                                            <p class="eyebrow">Warnings</p>
+                                            <h2>What still needs attention</h2>
+                                        </div>
+                                        <span>@workspace.Status.Warnings.Count item(s)</span>
+                                    </div>
+
+                                    @if (workspace.Status.Warnings.Count == 0)
+                                    {
+                                        <div class="empty-state compact-empty-state">
+                                            <p>No Local AI Engine warnings are currently active.</p>
+                                            <p class="meta-text">Linux Made Sane still keeps provider capability warnings visible in Deep Fix approvals when the selected model is weaker.</p>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="local-ai-warning-list">
+                                            @foreach (var warning in workspace.Status.Warnings)
+                                            {
+                                                <div class="local-ai-warning-item">@warning</div>
+                                            }
+                                        </div>
+                                    }
+                                </section>
+                            </div>
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@SetupTabValue" Title="Setup Wizard">
+                    <ChildContent>
+                        <div class="local-ai-tab-content">
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Setup Wizard</p>
+                                        <h2>Prepare this LMS host as a private AI engine</h2>
+                                        <p class="meta-text">Linux Made Sane builds a dry-run action plan first, shows command previews, then applies only after approval.</p>
+                                    </div>
+                                </div>
+
+                                <EditForm Model="@setupEditor" class="stack-form">
+                                    <div class="local-ai-form-grid">
+                                        <UiComboboxField TValue="string"
+                                                         @bind-Value="setupEditor.SelectedModelId"
+                                                         Label="Recommended model"
+                                                         Helper="Linux Made Sane recommends a model from detected CPU, RAM, GPU, and VRAM."
+                                                         Compact="true">
+                                            @foreach (var model in workspace.RecommendedModels)
+                                            {
+                                                <option value="@model.ModelId">@model.DisplayName</option>
+                                            }
+                                        </UiComboboxField>
+
+                                        @if (SupportsConnectSharing)
+                                        {
+                                            <UiCheckboxField @bind-Value="setupEditor.EnableSharing"
+                                                             Label="Enable sharing after setup"
+                                                             Helper="Publish this LMS host as a shared AI engine for other authorized LMS instances."
+                                                             Compact="true" />
+                                        }
+                                    </div>
+                                </EditForm>
+
+                                <div class="local-ai-recommendation-card">
+                                    <span class="eyebrow">Recommendation</span>
+                                    <strong>@CurrentSetupModel?.DisplayName</strong>
+                                    <p class="meta-text">@GetCurrentSetupRecommendation()</p>
+                                </div>
+
+                                <div class="local-ai-approval-row">
+                                        <label class="local-ai-approval-toggle" title="Required before Linux Made Sane installs Ollama or pulls models.">
+                                            <UiCompactCheckbox Label="Approve setup changes"
+                                                           Value="@setupApproved"
+                                                           ValueChanged="SetSetupApprovedAsync" />
+                                            <span>I approve the local AI setup actions shown below.</span>
+                                        </label>
+
+                                        <div class="local-ai-inline-actions">
+                                            <UiCommandButton Label="Preview plan"
+                                                         Glyph="UiIconGlyph.Analyze"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@isBusy"
+                                                         OnClick="PreviewSetupAsync" />
+                                        <UiCommandButton Label="@(isApplyingSetup ? "Applying..." : "Apply setup")"
+                                                         Glyph="UiIconGlyph.Save"
+                                                         Disabled="@(!setupApproved || isBusy)"
+                                                         OnClick="ApplySetupAsync" />
+                                        </div>
+                                    </div>
+
+                                @if (isApplyingSetup || setupProgressUpdates.Count > 0)
+                                {
+                                    <div class="local-ai-output-shell">
+                                        <div class="table-header">
+                                            <h3>Setup activity</h3>
+                                            <span>@(CurrentSetupProgress is null ? "Waiting..." : CurrentSetupProgress.ReportedAtUtc.ToLocalTime().ToString("HH:mm:ss"))</span>
+                                        </div>
+
+                                        @if (CurrentSetupProgress is not null)
+                                        {
+                                            <div class="local-ai-setup-progress-current">
+                                                <div class="provider-record-heading">
+                                                    <strong>@CurrentSetupProgress.Step</strong>
+                                                    <UiPill Tone="@MapSetupProgressTone(CurrentSetupProgress.State)">@FormatSetupProgressState(CurrentSetupProgress.State)</UiPill>
+                                                </div>
+                                                <p class="meta-text">@CurrentSetupProgress.Detail</p>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <p class="meta-text">Preparing the Local AI setup steps...</p>
+                                        }
+
+                                        @if (setupProgressUpdates.Count > 0)
+                                        {
+                                            <div class="compact-list local-ai-setup-progress-list">
+                                                @foreach (var update in setupProgressUpdates)
+                                                {
+                                                    <div class="compact-row compact-row-block local-ai-setup-progress-row">
+                                                        <div class="compact-row-main">
+                                                            <div class="provider-record-heading">
+                                                                <strong>@update.Step</strong>
+                                                                <UiPill Tone="@MapSetupProgressTone(update.State)">@FormatSetupProgressState(update.State)</UiPill>
+                                                            </div>
+                                                            <p class="meta-text">@update.Detail</p>
+                                                        </div>
+                                                        <div class="compact-row-side">
+                                                            <span class="meta-text">@update.ReportedAtUtc.ToLocalTime().ToString("HH:mm:ss")</span>
+                                                        </div>
+                                                    </div>
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                }
+
+                                @if (setupPlan is not null)
+                                {
+                                    <div class="local-ai-plan-shell">
+                                        <div class="local-ai-plan-summary">
+                                            <strong>@setupPlan.Summary</strong>
+                                            <p class="meta-text">@setupPlan.Recommendation</p>
+                                            <div class="summary-pill-row">
+                                                <UiPill Tone="UiPillTone.Neutral">@($"Estimated RAM {FormatBytes(setupPlan.EstimatedMemoryBytes)}")</UiPill>
+                                                <UiPill Tone="UiPillTone.Neutral">@($"Estimated disk {FormatBytes(setupPlan.EstimatedDiskBytes)}")</UiPill>
+                                                <UiPill Tone="@(setupPlan.RollbackAvailable ? UiPillTone.Success : UiPillTone.Warning)">
+                                                    @(setupPlan.RollbackAvailable ? "Rollback available" : "Rollback limited")
+                                                </UiPill>
+                                            </div>
+                                            <p class="helper-text">@setupPlan.VerificationPlan</p>
+                                        </div>
+
+                                        <div class="compact-list local-ai-action-list">
+                                            @foreach (var action in setupPlan.Actions)
+                                            {
+                                                <div class="compact-row compact-row-block local-ai-action-row">
+                                                    <div class="compact-row-main">
+                                                        <div class="provider-record-heading">
+                                                            <strong>@action.Title</strong>
+                                                            <UiPill Tone="@(action.Mutating ? UiPillTone.Warning : UiPillTone.Neutral)">
+                                                                @(action.Mutating ? "Mutating" : "Check")
+                                                            </UiPill>
+                                                            @if (action.RequiresSudo)
+                                                            {
+                                                                <UiPill Tone="UiPillTone.Neutral">sudo</UiPill>
+                                                            }
+                                                        </div>
+                                                        <p class="compact-row-summary">@action.Description</p>
+                                                        <p class="meta-text">@action.ExpectedImpact</p>
+                                                        <code class="local-ai-command-preview">@action.CommandPreview</code>
+                                                    </div>
+                                                </div>
+                                            }
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (lastApplyResult is not null)
+                                {
+                                    <div class="local-ai-output-shell">
+                                        <div class="table-header">
+                                            <h3>Last apply result</h3>
+                                            <span>@lastApplyResult.CompletedAtUtc.ToLocalTime().ToString("HH:mm:ss")</span>
+                                        </div>
+                                        <p class="meta-text">@lastApplyResult.Detail</p>
+                                        @if (lastApplyResult.OutputLines.Count > 0)
+                                        {
+                                            <pre class="local-ai-output-log">@string.Join(Environment.NewLine, lastApplyResult.OutputLines)</pre>
+                                        }
+                                    </div>
+                                }
+                            </section>
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@ModelsTabValue" Title="Models">
+                    <ChildContent>
+                        <div class="local-ai-tab-content">
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Models</p>
+                                        <h2>Recommended and installed models</h2>
+                                    </div>
+                                    <span>@workspace.RecommendedModels.Count recommendation(s)</span>
+                                </div>
+
+                                <div class="local-ai-approval-row">
+                                    <label class="local-ai-approval-toggle" title="Required before Linux Made Sane pulls or removes local models.">
+                                        <UiCompactCheckbox Label="Approve model changes"
+                                                           Value="@modelActionsApproved"
+                                                           ValueChanged="SetModelActionsApprovedAsync" />
+                                        <span>I approve local model pulls and removals.</span>
+                                    </label>
+                                </div>
+
+                                <div class="compact-list local-ai-model-list">
+                                    @foreach (var model in workspace.RecommendedModels)
+                                    {
+                                        var installedModel = FindInstalledModel(model.ModelId);
+                                        var isInstalled = installedModel is not null;
+                                        var isDefault = IsCurrentDefaultModel(model.ModelId);
+
+                                        <div class="compact-row compact-row-block local-ai-model-row">
+                                            <div class="compact-row-main">
+                                                <div class="provider-record-heading">
+                                                    <strong>@model.DisplayName</strong>
+                                                    <UiPill Tone="@MapSuitabilityTone(model.Suitability)">@model.Suitability</UiPill>
+                                                    @if (isDefault)
+                                                    {
+                                                        <UiPill Tone="UiPillTone.Success">Default</UiPill>
+                                                    }
+                                                    @if (isInstalled)
+                                                    {
+                                                        <UiPill Tone="UiPillTone.Neutral">Installed</UiPill>
+                                                    }
+                                                </div>
+                                                <p class="compact-row-summary">@model.Description</p>
+                                                <div class="local-ai-inline-meta">
+                                                    <span>RAM @FormatBytes(model.EstimatedRamBytes)</span>
+                                                    <span>VRAM @(model.EstimatedVramBytes.HasValue ? FormatBytes(model.EstimatedVramBytes.Value) : "CPU mode")</span>
+                                                    <span>@DescribeCapability(model.Capabilities)</span>
+                                                </div>
+                                                @if (!string.IsNullOrWhiteSpace(model.SuitabilityWarning))
+                                                {
+                                                    <p class="meta-text">@model.SuitabilityWarning</p>
+                                                }
+                                                @if (installedModel is not null && !string.IsNullOrWhiteSpace(installedModel.Detail))
+                                                {
+                                                    <p class="helper-text">@installedModel.Detail</p>
+                                                }
+                                            </div>
+
+                                            <div class="compact-row-side">
+                                                <div class="toolbar-cluster">
+                                                    @if (!isInstalled)
+                                                    {
+                                                        <UiCommandButton Label="Pull"
+                                                                         Glyph="UiIconGlyph.Upload"
+                                                                         Disabled="@(!modelActionsApproved || isBusy)"
+                                                                         OnClick="@(() => PullModelAsync(model.ModelId))" />
+                                                    }
+                                                    else
+                                                    {
+                                                        <UiCommandButton Label="Remove"
+                                                                         Glyph="UiIconGlyph.Delete"
+                                                                         Variant="UiButtonVariant.Danger"
+                                                                         Disabled="@(!modelActionsApproved || isBusy)"
+                                                                         OnClick="@(() => RemoveModelAsync(model.ModelId))" />
+                                                    }
+                                                    <UiCommandButton Label="Test"
+                                                                     Glyph="UiIconGlyph.Analyze"
+                                                                     Variant="UiButtonVariant.Ghost"
+                                                                     Disabled="@isBusy"
+                                                                     OnClick="@(() => TestModelAsync(model.ModelId))" />
+                                                    <UiCommandButton Label="Set default"
+                                                                     Glyph="UiIconGlyph.Save"
+                                                                     Variant="UiButtonVariant.Ghost"
+                                                                     Disabled="@(!isInstalled || isBusy)"
+                                                                     OnClick="@(() => SetDefaultModelAsync(model.ModelId))" />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    }
+                                </div>
+                            </section>
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@HardwareTabValue" Title="Hardware">
+                    <ChildContent>
+                        <div class="local-ai-tab-content">
+                            <div class="local-ai-overview-grid">
+                                <section class="surface-subcard local-ai-card">
+                                    <div class="table-header">
+                                        <div>
+                                            <p class="eyebrow">Hardware</p>
+                                            <h2>Detected CPU, RAM, GPU, and disk</h2>
+                                        </div>
+                                        <span>@workspace.Status.Hardware.CapturedAtUtc.ToLocalTime().ToString("dd MMM yyyy HH:mm")</span>
+                                    </div>
+
+                                    <div class="local-ai-fact-grid">
+                                        <article class="local-ai-fact-card">
+                                            <span class="eyebrow">CPU</span>
+                                            <strong>@workspace.Status.Hardware.CpuModel</strong>
+                                            <span class="meta-text">@workspace.Status.Hardware.PhysicalCoreCount physical / @workspace.Status.Hardware.LogicalCoreCount logical core(s)</span>
+                                        </article>
+                                        <article class="local-ai-fact-card">
+                                            <span class="eyebrow">Memory</span>
+                                            <strong>@FormatBytes(workspace.Status.Hardware.TotalMemoryBytes)</strong>
+                                            <span class="meta-text">@FormatBytes(workspace.Status.Hardware.AvailableMemoryBytes) available now</span>
+                                        </article>
+                                        <article class="local-ai-fact-card">
+                                            <span class="eyebrow">Disk</span>
+                                            <strong>@FormatBytes(workspace.Status.Hardware.AvailableDiskBytes)</strong>
+                                            <span class="meta-text">Free space on the local AI runtime volume.</span>
+                                        </article>
+                                        <article class="local-ai-fact-card">
+                                            <span class="eyebrow">GPU acceleration</span>
+                                            <strong>@workspace.Status.Hardware.GpuAccelerationState</strong>
+                                            <span class="meta-text">@workspace.Status.Hardware.Summary</span>
+                                        </article>
+                                    </div>
+
+                                    @if (workspace.Status.Hardware.Gpus.Count == 0)
+                                    {
+                                        <div class="empty-state compact-empty-state">
+                                            <p>No supported GPU was detected.</p>
+                                            <p class="meta-text">Linux Made Sane will continue in CPU mode and recommend smaller local models.</p>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="compact-list local-ai-gpu-list">
+                                            @foreach (var gpu in workspace.Status.Hardware.Gpus)
+                                            {
+                                                <div class="compact-row compact-row-block local-ai-gpu-row">
+                                                    <div class="compact-row-main">
+                                                        <div class="provider-record-heading">
+                                                            <strong>@gpu.Name</strong>
+                                                            <UiPill Tone="@(gpu.IsCudaAvailable || gpu.IsRocmAvailable ? UiPillTone.Success : UiPillTone.Warning)">
+                                                                @(gpu.IsCudaAvailable ? "CUDA" : gpu.IsRocmAvailable ? "ROCm" : "Detection only")
+                                                            </UiPill>
+                                                        </div>
+                                                        <div class="local-ai-inline-meta">
+                                                            <span>@gpu.Vendor</span>
+                                                            <span>@(gpu.TotalVramBytes.HasValue ? FormatBytes(gpu.TotalVramBytes.Value) : "VRAM unknown")</span>
+                                                            <span>@(string.IsNullOrWhiteSpace(gpu.DriverVersion) ? "Driver unknown" : gpu.DriverVersion)</span>
+                                                        </div>
+                                                        <p class="meta-text">@gpu.DetectionSummary</p>
+                                                    </div>
+                                                </div>
+                                            }
+                                        </div>
+                                    }
+                                </section>
+
+                                <section class="surface-subcard local-ai-card">
+                                    <div class="table-header">
+                                        <div>
+                                            <p class="eyebrow">Benchmarks</p>
+                                            <h2>Quick local inference checks</h2>
+                                        </div>
+                                        <UiCommandButton Label="Benchmark current model"
+                                                         Glyph="UiIconGlyph.Analyze"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@(!CanTestCurrentModel || isBusy)"
+                                                         OnClick="BenchmarkCurrentModelAsync" />
+                                    </div>
+
+                                    @if (workspace.Benchmarks.Count == 0)
+                                    {
+                                        <div class="empty-state compact-empty-state">
+                                            <p>No benchmark runs recorded yet.</p>
+                                            <p class="meta-text">Run a benchmark against the current model to capture a baseline response time.</p>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="compact-list local-ai-benchmark-list">
+                                            @foreach (var benchmark in workspace.Benchmarks.OrderByDescending(item => item.ExecutedAtUtc).Take(10))
+                                            {
+                                                <div class="compact-row compact-row-block local-ai-benchmark-row">
+                                                    <div class="compact-row-main">
+                                                        <div class="provider-record-heading">
+                                                            <strong>@benchmark.ModelId</strong>
+                                                            <UiPill Tone="@(benchmark.Succeeded ? UiPillTone.Success : UiPillTone.Warning)">
+                                                                @(benchmark.Succeeded ? "Passed" : "Failed")
+                                                            </UiPill>
+                                                        </div>
+                                                        <div class="local-ai-inline-meta">
+                                                            <span>@FormatDuration(benchmark.Duration)</span>
+                                                            <span>@benchmark.ExecutedAtUtc.ToLocalTime().ToString("dd MMM HH:mm")</span>
+                                                        </div>
+                                                        <p class="meta-text">@benchmark.Detail</p>
+                                                    </div>
+                                                </div>
+                                            }
+                                        </div>
+                                    }
+                                </section>
+                            </div>
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                @if (SupportsConnectSharing)
+                {
+                    <TabPage Value="@SharingTabValue" Title="Sharing">
+                        <ChildContent>
+                            <div class="local-ai-tab-content">
+                                @if (!workspace.IsPortalConnected)
+                                {
+                                    <div class="callout warning">Linux Made Sane must be paired with LMS Portal before this host can share a private AI engine or discover AI engines exposed by other LMS instances.</div>
+                                }
+
+                                <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Sharing</p>
+                                        <h2>Allow other LMS instances to use this AI engine</h2>
+                                    </div>
+                                </div>
+
+                                <EditForm Model="@sharingEditor" OnValidSubmit="SaveSharingAsync" class="stack-form">
+                                    <DataAnnotationsValidator />
+                                    <ValidationSummary />
+
+                                    <div class="local-ai-form-grid">
+                                        <UiCheckboxField @bind-Value="sharingEditor.SharingEnabled"
+                                                         Label="Share this AI engine"
+                                                         Helper="Relay remote AI requests through LMS Connect. Ollama itself stays on localhost."
+                                                         Compact="true" />
+                                        <UiCheckboxField @bind-Value="sharingEditor.AllowOrganizationInstances"
+                                                         Label="Allow this organisation by default"
+                                                         Helper="If off, only the explicitly listed organisation and instance IDs may use this engine."
+                                                         Compact="true" />
+                                    </div>
+
+                                    <div class="local-ai-form-grid local-ai-number-grid">
+                                        <UiNumberField TValue="int"
+                                                       @bind-Value="sharingEditor.MaxConcurrentRequests"
+                                                       Label="Max concurrent"
+                                                       Compact="true"
+                                                       min="1"
+                                                       step="1" />
+                                        <UiNumberField TValue="int"
+                                                       @bind-Value="sharingEditor.MaxQueuedRequests"
+                                                       Label="Max queued"
+                                                       Compact="true"
+                                                       min="0"
+                                                       step="1" />
+                                        <UiNumberField TValue="int"
+                                                       @bind-Value="sharingEditor.MaxRequestsPerMinute"
+                                                       Label="Rate limit / min"
+                                                       Compact="true"
+                                                       min="1"
+                                                       step="1" />
+                                        <UiNumberField TValue="int"
+                                                       @bind-Value="sharingEditor.MaxPromptCharacters"
+                                                       Label="Max prompt chars"
+                                                       Compact="true"
+                                                       min="512"
+                                                       step="1" />
+                                        <UiNumberField TValue="int"
+                                                       @bind-Value="sharingEditor.RequestTimeoutSeconds"
+                                                       Label="Timeout seconds"
+                                                       Compact="true"
+                                                       min="10"
+                                                       step="1" />
+                                    </div>
+
+                                    <div class="local-ai-form-grid">
+                                        <UiTextAreaField @bind-Value="sharingEditor.AllowedModelIdsText"
+                                                         Label="Allowed models"
+                                                         Helper="Optional newline-separated model IDs. Leave blank to allow the current recommended catalog."
+                                                         Rows="3" />
+                                        <UiTextAreaField @bind-Value="sharingEditor.AllowedOrganizationIdsText"
+                                                         Label="Allowed organisation IDs"
+                                                         Helper="Optional newline-separated LMS Portal organisation IDs."
+                                                         Rows="3" />
+                                        <UiTextAreaField @bind-Value="sharingEditor.AllowedInstanceIdsText"
+                                                         Label="Allowed instance IDs"
+                                                         Helper="Optional newline-separated LMS instance IDs."
+                                                         Rows="3" />
+                                    </div>
+
+                                    <div class="local-ai-inline-actions">
+                                        <UiCommandButton Label="Save sharing"
+                                                         Glyph="UiIconGlyph.Save"
+                                                         Disabled="@isBusy"
+                                                         Type="submit" />
+                                    </div>
+                                </EditForm>
+                                </section>
+
+                                <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Remote engines</p>
+                                        <h2>Shared AI engines discovered through LMS Portal</h2>
+                                    </div>
+                                    <span>@workspace.RemoteEngines.Count engine(s)</span>
+                                </div>
+
+                                @if (workspace.RemoteEngines.Count == 0)
+                                {
+                                    <div class="empty-state compact-empty-state">
+                                        <p>No shared LMS AI engines are currently visible.</p>
+                                        <p class="meta-text">Once another LMS instance enables AI sharing for your organisation, Linux Made Sane can register it as a remote provider here.</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="compact-list local-ai-remote-list">
+                                        @foreach (var engine in workspace.RemoteEngines.OrderBy(item => item.EngineDisplayName, StringComparer.OrdinalIgnoreCase))
+                                        {
+                                            <div class="compact-row compact-row-block local-ai-remote-row">
+                                                <div class="compact-row-main">
+                                                    <div class="provider-record-heading">
+                                                        <strong>@engine.EngineDisplayName</strong>
+                                                        <UiPill Tone="@(engine.IsOnline ? UiPillTone.Success : UiPillTone.Warning)">
+                                                            @(engine.IsOnline ? "Online" : "Offline")
+                                                        </UiPill>
+                                                    </div>
+                                                    <div class="local-ai-inline-meta">
+                                                        <span>@engine.InstanceDisplayName</span>
+                                                        <span>@engine.DefaultModelId</span>
+                                                        <span>@engine.HardwareSummary</span>
+                                                    </div>
+                                                    <p class="meta-text">@engine.Capability.Summary</p>
+                                                </div>
+
+                                                <div class="compact-row-side">
+                                                    <UiCommandButton Label="Add provider"
+                                                                     Glyph="UiIconGlyph.Plus"
+                                                                     Disabled="@(!engine.IsOnline || isBusy)"
+                                                                     OnClick="@(() => AddRemoteProviderAsync(engine))" />
+                                                </div>
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                                </section>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+                }
+
+                <TabPage Value="@UsageTabValue" Title="Usage">
+                    <ChildContent>
+                        <div class="local-ai-tab-content">
+                            <section class="surface-subcard local-ai-card">
+                                <div class="summary-pill-row">
+                                    <UiPill Tone="UiPillTone.Neutral">@($"{LocalUsageEntries.Count} local requests")</UiPill>
+                                    @if (SupportsConnectSharing)
+                                    {
+                                        <UiPill Tone="UiPillTone.Neutral">@($"{RemoteUsageEntries.Count} remote requests")</UiPill>
+                                    }
+                                    <UiPill Tone="@(workspace.UsageEntries.Any(item => !item.Succeeded) ? UiPillTone.Warning : UiPillTone.Success)">
+                                        @(workspace.UsageEntries.Any(item => !item.Succeeded) ? $"{workspace.UsageEntries.Count(item => !item.Succeeded)} failure(s)" : "No recorded failures")
+                                    </UiPill>
+                                </div>
+
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Usage</p>
+                                        <h2>Local and remote AI requests</h2>
+                                    </div>
+                                    <span>@workspace.UsageEntries.Count item(s)</span>
+                                </div>
+
+                                @if (workspace.UsageEntries.Count == 0)
+                                {
+                                    <div class="empty-state compact-empty-state">
+                                        <p>No Local AI Engine usage has been recorded yet.</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="compact-list local-ai-usage-list">
+                                        @foreach (var entry in workspace.UsageEntries.OrderByDescending(item => item.CompletedAtUtc).Take(40))
+                                        {
+                                            <div class="compact-row compact-row-block local-ai-usage-row">
+                                                <div class="compact-row-main">
+                                                    <div class="provider-record-heading">
+                                                        <strong>@entry.ModelId</strong>
+                                                        <UiPill Tone="@(entry.Scope == LocalAiUsageScope.Remote ? UiPillTone.Neutral : UiPillTone.Success)">
+                                                            @entry.Scope
+                                                        </UiPill>
+                                                        <UiPill Tone="@(entry.Succeeded ? UiPillTone.Success : UiPillTone.Warning)">
+                                                            @(entry.Succeeded ? "Succeeded" : "Failed")
+                                                        </UiPill>
+                                                    </div>
+                                                    <div class="local-ai-inline-meta">
+                                                        <span>@entry.ConsumerDisplayName</span>
+                                                        <span>@FormatDuration(entry.Duration)</span>
+                                                        <span>@entry.PromptCharacterCount chars in</span>
+                                                        <span>@entry.OutputCharacterCount chars out</span>
+                                                        <span>@entry.CompletedAtUtc.ToLocalTime().ToString("dd MMM HH:mm")</span>
+                                                    </div>
+                                                    <p class="meta-text">@entry.ResultSummary</p>
+                                                </div>
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                            </section>
+
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Audit</p>
+                                        <h2>Configuration and sharing history</h2>
+                                    </div>
+                                    <span>@workspace.AuditEntries.Count entry(s)</span>
+                                </div>
+
+                                @if (workspace.AuditEntries.Count == 0)
+                                {
+                                    <div class="empty-state compact-empty-state">
+                                        <p>No Local AI Engine audit entries recorded yet.</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="compact-list local-ai-audit-list">
+                                        @foreach (var entry in workspace.AuditEntries.OrderByDescending(item => item.CreatedAtUtc).Take(40))
+                                        {
+                                            <div class="compact-row compact-row-block local-ai-audit-row">
+                                                <div class="compact-row-main">
+                                                    <div class="provider-record-heading">
+                                                        <strong>@entry.Summary</strong>
+                                                        <UiPill Tone="@(entry.Succeeded ? UiPillTone.Success : UiPillTone.Warning)">
+                                                            @(entry.Succeeded ? "Succeeded" : "Failed")
+                                                        </UiPill>
+                                                    </div>
+                                                    <div class="local-ai-inline-meta">
+                                                        <span>@entry.Scope</span>
+                                                        <span>@entry.EventType</span>
+                                                        <span>@entry.CreatedAtUtc.ToLocalTime().ToString("dd MMM HH:mm")</span>
+                                                    </div>
+                                                    <p class="meta-text">@entry.Detail</p>
+                                                </div>
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                            </section>
+                        </div>
+                    </ChildContent>
+                </TabPage>
+            </ChildContent>
+        </TabControl>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public bool Embedded { get; set; }
+
+    private const string OverviewTabValue = "overview";
+    private const string SetupTabValue = "setup";
+    private const string ModelsTabValue = "models";
+    private const string HardwareTabValue = "hardware";
+    private const string SharingTabValue = "sharing";
+    private const string UsageTabValue = "usage";
+
+    private LocalAiEngineWorkspaceViewModel? workspace;
+    private LocalAiSharingEditor? sharingEditor;
+    private LocalAiSetupEditor setupEditor = new();
+    private LocalAiSetupPlan? setupPlan;
+    private LocalAiApplyResult? lastApplyResult;
+    private readonly List<LocalAiSetupProgressUpdate> setupProgressUpdates = [];
+    private string activeTab = OverviewTabValue;
+    private string statusMessage = string.Empty;
+    private string statusTone = "info";
+    private bool isLoaded;
+    private bool isBusy;
+    private bool isApplyingSetup;
+    private bool setupApproved;
+    private bool runtimeActionsApproved;
+    private bool modelActionsApproved;
+    private bool SupportsConnectSharing => ConnectClientFeature.SupportsRemoteAiSharing;
+
+    private IReadOnlyList<LocalAiUsageEntry> LocalUsageEntries =>
+        workspace?.UsageEntries.Where(item => item.Scope == LocalAiUsageScope.Local).ToArray() ?? [];
+
+    private IReadOnlyList<LocalAiUsageEntry> RemoteUsageEntries =>
+        workspace?.UsageEntries.Where(item => item.Scope == LocalAiUsageScope.Remote).ToArray() ?? [];
+
+    private bool HasInstalledModels => workspace?.InstalledModels.Count > 0;
+
+    private bool CanTestCurrentModel =>
+        workspace is not null &&
+        !string.IsNullOrWhiteSpace(GetCurrentModelId()) &&
+        workspace.InstalledModels.Any(model => model.ModelId.Equals(GetCurrentModelId(), StringComparison.OrdinalIgnoreCase));
+
+    private LocalAiSetupProgressUpdate? CurrentSetupProgress =>
+        setupProgressUpdates.Count == 0 ? null : setupProgressUpdates[^1];
+
+    private LocalAiModelDefinition? CurrentSetupModel =>
+        workspace?.RecommendedModels.FirstOrDefault(model => model.ModelId.Equals(setupEditor.SelectedModelId, StringComparison.OrdinalIgnoreCase));
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private Task RefreshAsync() => LoadAsync();
+
+    private async Task LoadAsync(bool clearStatus = true)
+    {
+        isBusy = true;
+
+        try
+        {
+            workspace = await LocalAiService.GetWorkspaceAsync();
+            sharingEditor = SupportsConnectSharing
+                ? await LocalAiService.GetSharingEditorAsync()
+                : new LocalAiSharingEditor();
+            EnsureSetupModelSelection();
+            if (!SupportsConnectSharing && string.Equals(activeTab, SharingTabValue, StringComparison.Ordinal))
+            {
+                activeTab = OverviewTabValue;
+            }
+            if (clearStatus)
+            {
+                SetStatus(string.Empty);
+            }
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isLoaded = true;
+            isBusy = false;
+        }
+    }
+
+    private Task SetActiveTabAsync(string value)
+    {
+        activeTab = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetSetupApprovedAsync(bool value)
+    {
+        setupApproved = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetRuntimeActionsApprovedAsync(bool value)
+    {
+        runtimeActionsApproved = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetModelActionsApprovedAsync(bool value)
+    {
+        modelActionsApproved = value;
+        return Task.CompletedTask;
+    }
+
+    private async Task PreviewSetupAsync()
+    {
+        if (workspace is null)
+        {
+            return;
+        }
+
+        isBusy = true;
+        try
+        {
+            setupPlan = await LocalAiService.PreviewSetupAsync(setupEditor);
+            SetStatus("Local AI setup plan generated.", "info");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task ApplySetupAsync()
+    {
+        isBusy = true;
+        isApplyingSetup = true;
+        lastApplyResult = null;
+        setupProgressUpdates.Clear();
+        SetStatus("Applying Local AI setup...", "info");
+
+        var progress = new Progress<LocalAiSetupProgressUpdate>(update =>
+        {
+            setupProgressUpdates.Add(update);
+            SetStatus(
+                update.Detail,
+                update.State == LocalAiSetupProgressState.Failed
+                    ? "error"
+                    : update.State == LocalAiSetupProgressState.Completed
+                        ? "success"
+                        : "info");
+            _ = InvokeAsync(StateHasChanged);
+        });
+
+        try
+        {
+            lastApplyResult = await LocalAiService.ApplySetupAsync(setupEditor, setupApproved, progress);
+            SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
+            await LoadAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isApplyingSetup = false;
+            isBusy = false;
+        }
+    }
+
+    private async Task StartRuntimeAsync() =>
+        await RunRuntimeActionAsync(() => LocalAiService.StartRuntimeAsync(runtimeActionsApproved));
+
+    private async Task StopRuntimeAsync() =>
+        await RunRuntimeActionAsync(() => LocalAiService.StopRuntimeAsync(runtimeActionsApproved));
+
+    private async Task RestartRuntimeAsync() =>
+        await RunRuntimeActionAsync(() => LocalAiService.RestartRuntimeAsync(runtimeActionsApproved));
+
+    private async Task PullModelAsync(string modelId)
+    {
+        isBusy = true;
+        try
+        {
+            lastApplyResult = await LocalAiService.PullModelAsync(modelId, modelActionsApproved);
+            SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task RemoveModelAsync(string modelId)
+    {
+        isBusy = true;
+        try
+        {
+            lastApplyResult = await LocalAiService.RemoveModelAsync(modelId, modelActionsApproved);
+            SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task TestCurrentModelAsync()
+    {
+        var modelId = GetCurrentModelId();
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return;
+        }
+
+        await TestModelAsync(modelId);
+    }
+
+    private async Task TestModelAsync(string modelId)
+    {
+        isBusy = true;
+        try
+        {
+            var result = await LocalAiService.TestModelAsync(modelId);
+            SetStatus(
+                result.Succeeded
+                    ? $"{modelId} responded in {FormatDuration(result.Duration)}."
+                    : $"{modelId} test failed: {result.Detail}",
+                result.Succeeded ? "success" : "error");
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task BenchmarkCurrentModelAsync()
+    {
+        var modelId = GetCurrentModelId();
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return;
+        }
+
+        isBusy = true;
+        try
+        {
+            var result = await LocalAiService.BenchmarkAsync(modelId);
+            SetStatus(
+                result.Succeeded
+                    ? $"Benchmark completed in {FormatDuration(result.Duration)}."
+                    : $"Benchmark failed: {result.Detail}",
+                result.Succeeded ? "success" : "error");
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task SetDefaultModelAsync(string modelId)
+    {
+        isBusy = true;
+        try
+        {
+            var provider = await LocalAiService.CreateOrUpdateLocalProviderAsync(modelId);
+            setupEditor.SelectedModelId = modelId;
+            SetStatus($"{provider.DisplayName} now defaults to {modelId}.", "success");
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task SaveSharingAsync()
+    {
+        if (sharingEditor is null)
+        {
+            return;
+        }
+
+        isBusy = true;
+        try
+        {
+            sharingEditor = await LocalAiService.SaveSharingAsync(sharingEditor);
+            SetStatus("Local AI sharing settings saved.", "success");
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task AddRemoteProviderAsync(RemoteLmsAiEngineDescriptor engine)
+    {
+        isBusy = true;
+        try
+        {
+            var provider = await LocalAiService.CreateOrUpdateRemoteProviderAsync(
+                $"{engine.EngineDisplayName} ({engine.InstanceDisplayName})",
+                engine.DefaultModelId,
+                new RemoteLmsAiEngineReference(
+                    engine.OrganizationId,
+                    engine.ProviderInstanceId,
+                    engine.EngineDisplayName,
+                    engine.InstanceDisplayName,
+                    engine.AllowedModelIds));
+            SetStatus($"{provider.DisplayName} is now available in AI Providers.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task RunRuntimeActionAsync(Func<Task<LocalAiApplyResult>> action)
+    {
+        isBusy = true;
+        try
+        {
+            lastApplyResult = await action();
+            SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private void EnsureSetupModelSelection()
+    {
+        if (workspace is null || workspace.RecommendedModels.Count == 0)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(setupEditor.SelectedModelId) ||
+            workspace.RecommendedModels.All(model => !model.ModelId.Equals(setupEditor.SelectedModelId, StringComparison.OrdinalIgnoreCase)))
+        {
+            setupEditor.SelectedModelId = workspace.Status.Settings.DefaultModelId;
+        }
+
+        if (string.IsNullOrWhiteSpace(setupEditor.SelectedModelId) ||
+            workspace.RecommendedModels.All(model => !model.ModelId.Equals(setupEditor.SelectedModelId, StringComparison.OrdinalIgnoreCase)))
+        {
+            setupEditor.SelectedModelId = workspace.RecommendedModels.FirstOrDefault(model => model.IsDefaultRecommendation)?.ModelId
+                                          ?? workspace.RecommendedModels[0].ModelId;
+        }
+    }
+
+    private LocalAiInstalledModel? FindInstalledModel(string modelId) =>
+        workspace?.InstalledModels.FirstOrDefault(model => model.ModelId.Equals(modelId, StringComparison.OrdinalIgnoreCase));
+
+    private bool IsCurrentDefaultModel(string modelId) =>
+        workspace is not null &&
+        modelId.Equals(workspace.Status.Settings.DefaultModelId, StringComparison.OrdinalIgnoreCase);
+
+    private string GetCurrentModelId()
+    {
+        if (workspace is null)
+        {
+            return string.Empty;
+        }
+
+        if (!string.IsNullOrWhiteSpace(workspace.Status.Settings.DefaultModelId))
+        {
+            return workspace.Status.Settings.DefaultModelId;
+        }
+
+        return workspace.InstalledModels.FirstOrDefault(model => model.IsDefault)?.ModelId
+               ?? workspace.InstalledModels.FirstOrDefault()?.ModelId
+               ?? string.Empty;
+    }
+
+    private string GetCurrentModelDisplayName()
+    {
+        var modelId = GetCurrentModelId();
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return "Not set";
+        }
+
+        return workspace?.RecommendedModels.FirstOrDefault(model => model.ModelId.Equals(modelId, StringComparison.OrdinalIgnoreCase))?.DisplayName
+               ?? workspace?.InstalledModels.FirstOrDefault(model => model.ModelId.Equals(modelId, StringComparison.OrdinalIgnoreCase))?.DisplayName
+               ?? modelId;
+    }
+
+    private string GetCurrentSetupRecommendation() =>
+        CurrentSetupModel is null
+            ? "Linux Made Sane does not have a local recommendation yet."
+            : string.IsNullOrWhiteSpace(CurrentSetupModel.SuitabilityWarning)
+                ? CurrentSetupModel.Description
+                : $"{CurrentSetupModel.Description} {CurrentSetupModel.SuitabilityWarning}";
+
+    private string GetSharingSummary()
+    {
+        if (workspace is null)
+        {
+            return string.Empty;
+        }
+
+        if (!workspace.IsPortalConnected)
+        {
+            return "Pair LMS Portal before this host can publish or consume shared AI engines.";
+        }
+
+        return workspace.Status.Settings.SharingEnabled
+            ? "This host can relay private AI inference to other authorised LMS instances."
+            : "Sharing is off. This AI engine is only available to the local LMS instance.";
+    }
+
+    private string GetHardwareSummaryLine() =>
+        workspace is null
+            ? string.Empty
+            : $"{FormatBytes(workspace.Status.Hardware.TotalMemoryBytes)} RAM, {FormatBytes(workspace.Status.Hardware.AvailableDiskBytes)} free disk";
+
+    private static string GetGpuLabel(LocalAiHardwareProfile hardware) =>
+        hardware.Gpus.Count == 0
+            ? "CPU mode"
+            : hardware.GpuAccelerationState switch
+            {
+                LocalAiGpuAccelerationState.Confirmed => "Acceleration confirmed",
+                LocalAiGpuAccelerationState.Available => "GPU detected",
+                _ => "GPU unknown"
+            };
+
+    private static string DescribeCapability(AiProviderCapabilityFlag capabilities)
+    {
+        if (capabilities.HasFlag(AiProviderCapabilityFlag.DeepFixRecommended))
+        {
+            return "Deep Fix recommended";
+        }
+
+        if (capabilities.HasFlag(AiProviderCapabilityFlag.DeepFixAllowedWithExtraApproval))
+        {
+            return "Deep Fix with extra approval";
+        }
+
+        return "Basic chat";
+    }
+
+    private static UiPillTone MapHealthTone(LocalAiHealthState state) => state switch
+    {
+        LocalAiHealthState.Healthy => UiPillTone.Success,
+        LocalAiHealthState.Warning => UiPillTone.Warning,
+        LocalAiHealthState.Failure => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+
+    private static UiPillTone MapGpuTone(LocalAiGpuAccelerationState state) => state switch
+    {
+        LocalAiGpuAccelerationState.Confirmed => UiPillTone.Success,
+        LocalAiGpuAccelerationState.Available => UiPillTone.Warning,
+        _ => UiPillTone.Neutral
+    };
+
+    private static UiPillTone MapSuitabilityTone(LocalAiModelSuitability suitability) => suitability switch
+    {
+        LocalAiModelSuitability.Recommended => UiPillTone.Success,
+        LocalAiModelSuitability.Supported => UiPillTone.Neutral,
+        LocalAiModelSuitability.Limited => UiPillTone.Warning,
+        _ => UiPillTone.Failure
+    };
+
+    private static UiPillTone MapSetupProgressTone(LocalAiSetupProgressState state) => state switch
+    {
+        LocalAiSetupProgressState.Completed => UiPillTone.Success,
+        LocalAiSetupProgressState.Failed => UiPillTone.Failure,
+        _ => UiPillTone.Warning
+    };
+
+    private static string FormatSetupProgressState(LocalAiSetupProgressState state) => state switch
+    {
+        LocalAiSetupProgressState.Completed => "Done",
+        LocalAiSetupProgressState.Failed => "Failed",
+        _ => "Running"
+    };
+
+    private static string FormatBytes(long value)
+    {
+        if (value <= 0)
+        {
+            return "0 B";
+        }
+
+        string[] suffixes = ["B", "KB", "MB", "GB", "TB"];
+        double size = value;
+        var order = 0;
+        while (size >= 1024 && order < suffixes.Length - 1)
+        {
+            order++;
+            size /= 1024;
+        }
+
+        return $"{size:0.#} {suffixes[order]}";
+    }
+
+    private static string FormatDuration(TimeSpan duration) =>
+        duration.TotalSeconds >= 10
+            ? $"{duration.TotalSeconds:0.#} sec"
+            : $"{duration.TotalMilliseconds:0} ms";
+
+    private void SetStatus(string message, string tone = "info")
+    {
+        statusMessage = message;
+        statusTone = tone;
+    }
+}

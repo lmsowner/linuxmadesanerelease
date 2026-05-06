@@ -1,0 +1,387 @@
+@page "/services"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts.Services
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@inject IServiceOperationsService ServiceOperations
+
+<PageTitle>Services | Linux Made Sane</PageTitle>
+
+<div class="page-shell services-page-shell">
+    <UiHeroPanel Title="Services"
+                 Compact="true">
+        <Actions>
+            <UiCommandButton Label="Refresh services" Glyph="UiIconGlyph.Refresh" OnClick="LoadAsync" />
+            <UiCommandButton Label="Deployment patterns" Glyph="UiIconGlyph.Connection" Variant="UiButtonVariant.Ghost" Href="/services/patterns" />
+        </Actions>
+    </UiHeroPanel>
+
+    @if (dashboard is null)
+    {
+        <section class="surface-card services-inventory-card">
+            <p class="meta-text">Loading service module...</p>
+        </section>
+    }
+    else
+    {
+        <section class="surface-card services-inventory-card">
+            <div class="table-header services-inventory-header">
+                <h2>Service inventory</h2>
+                <span>@FilteredServices.Count of @dashboard.Services.Count service(s)</span>
+            </div>
+
+            <div class="services-filter-bar">
+                <label class="service-search compact-search services-search">
+                    <span>Search services</span>
+                    <InputText @bind-Value="searchText" @bind-Value:event="oninput" placeholder="cron, docker, cups..." />
+                </label>
+
+                <div class="services-health-filters" role="group" aria-label="Filter services by health">
+                    <button type="button"
+                            class="services-health-filter @(activeHealthFilter is null ? "active" : string.Empty)"
+                            @onclick="() => SetHealthFilter(null)">
+                        <span>All</span>
+                        <span>@dashboard.Services.Count</span>
+                    </button>
+                    @foreach (var healthFilterOption in HealthFilterOptions)
+                    {
+                        <button type="button"
+                                class="services-health-filter services-health-filter-@healthFilterOption.CssClass @(activeHealthFilter == healthFilterOption.Status ? "active" : string.Empty)"
+                                @onclick="() => SetHealthFilter(healthFilterOption.Status)">
+                            <span>@healthFilterOption.Label</span>
+                            <span>@dashboard.Services.Count(service => service.HealthStatus == healthFilterOption.Status)</span>
+                        </button>
+                    }
+                </div>
+            </div>
+
+            @if (FilteredServices.Count == 0)
+            {
+                <div class="empty-state services-empty-state">
+                    <p>No services match that filter.</p>
+                </div>
+            }
+            else
+            {
+                <div class="services-grid-shell">
+                    <div class="services-grid-head" aria-hidden="true">
+                        <span>Name</span>
+                        <span>Description</span>
+                        <span>State</span>
+                        <span>Health</span>
+                        <span>Actions</span>
+                    </div>
+
+                    <div class="services-row-list">
+                        @foreach (var service in FilteredServices)
+                        {
+                            <article class="services-row-card @(selectedServiceId == service.Id ? "selected" : string.Empty)">
+                                <div class="services-row-grid"
+                                     role="button"
+                                     tabindex="0"
+                                     title="Expand service details"
+                                    @onclick="@(() => SelectServiceAsync(service.Id))"
+                                    @onkeydown="@(args => HandleRowKeyDownAsync(args, service.Id))">
+                                    <div class="services-cell services-cell-name">
+                                        <strong class="services-service-title">@GetServiceDisplayName(service)</strong>
+                                        <span class="services-service-unit">@GetServiceUnitName(service)</span>
+                                    </div>
+
+                                    <div class="services-cell services-cell-summary">
+                                        <span class="services-summary-text" title="@GetServiceSummary(service)">@GetServiceSummary(service)</span>
+                                    </div>
+
+                                    <div class="services-cell services-cell-state">
+                                        <UiPill Tone="@GetRuntimeTone(service.RuntimeState)">@service.RuntimeState</UiPill>
+                                    </div>
+
+                                    <div class="services-cell services-cell-health">
+                                        <UiPill Tone="@GetHealthTone(service.HealthStatus)">@service.HealthStatus</UiPill>
+                                    </div>
+
+                                    <div class="services-row-actions" @onclick:stopPropagation="true">
+                                        <UiCommandButton Label="Start"
+                                                         Glyph="UiIconGlyph.Run"
+                                                         Variant="UiButtonVariant.Action"
+                                                         Class="services-row-action"
+                                                         Disabled="@(busyServiceId == service.Id)"
+                                                         OnClick="@(() => ControlAsync(service.Id, ServiceControlAction.Start))" />
+                                        <UiCommandButton Label="Stop"
+                                                         Glyph="UiIconGlyph.Stop"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Class="services-row-action"
+                                                         Disabled="@(busyServiceId == service.Id)"
+                                                         OnClick="@(() => ControlAsync(service.Id, ServiceControlAction.Stop))" />
+                                        <UiCommandButton Label="Restart"
+                                                         Glyph="UiIconGlyph.Restart"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Class="services-row-action"
+                                                         Disabled="@(busyServiceId == service.Id)"
+                                                         OnClick="@(() => ControlAsync(service.Id, ServiceControlAction.Restart))" />
+                                        <UiCommandButton Label="Tail"
+                                                         Glyph="UiIconGlyph.Analyze"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Class="services-row-action"
+                                                         Disabled="@(isInspectionLoading && selectedServiceId == service.Id)"
+                                                         OnClick="@(() => TailAsync(service.Id))" />
+                                    </div>
+                                </div>
+
+                                @if (selectedServiceId == service.Id)
+                                {
+                                    <section class="services-expand-panel">
+                                        @if (isInspectionLoading || selectedInspection is null)
+                                        {
+                                            <div class="empty-state services-expand-loading">
+                                                <p>Loading live status and recent logs...</p>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            @if (!string.IsNullOrWhiteSpace(actionMessage))
+                                            {
+                                                <p class="callout @(actionError ? "error" : string.Empty) services-action-message">@actionMessage</p>
+                                            }
+
+                                            <div class="services-expand-grid">
+                                                <div class="services-details-stack">
+                                                    <div class="services-fact-grid">
+                                                        <article class="services-fact-card">
+                                                            <span class="eyebrow">Unit file</span>
+                                                            <strong>@selectedInspection.UnitFileState</strong>
+                                                            <span class="meta-text services-break">@selectedInspection.UnitFilePath</span>
+                                                        </article>
+                                                        <article class="services-fact-card">
+                                                            <span class="eyebrow">Runtime</span>
+                                                            <strong>@selectedInspection.RunningUser / @selectedInspection.RunningGroup</strong>
+                                                            <span class="meta-text services-break">@selectedInspection.WorkingDirectory</span>
+                                                        </article>
+                                                        <article class="services-fact-card">
+                                                            <span class="eyebrow">Restart policy</span>
+                                                            <strong>@selectedInspection.RestartPolicy</strong>
+                                                            <span class="meta-text">Exit code @selectedInspection.LastExitCode</span>
+                                                        </article>
+                                                        <article class="services-fact-card">
+                                                            <span class="eyebrow">Exec start</span>
+                                                            <strong class="services-break">@selectedInspection.UnitName</strong>
+                                                            <span class="meta-text services-break">@selectedInspection.ExecStart</span>
+                                                        </article>
+                                                    </div>
+
+                                                    <div class="services-findings-panel">
+                                                        <div class="table-header services-expand-header">
+                                                            <h3>Notes</h3>
+                                                            <span>@GetNotesCount(selectedInspection)</span>
+                                                        </div>
+                                                        <div class="services-note-list">
+                                                            @foreach (var note in GetExpandedNotes(selectedInspection))
+                                                            {
+                                                                <div class="services-note-item">@note</div>
+                                                            }
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div class="services-log-panel">
+                                                    <div class="table-header services-expand-header">
+                                                        <h3>Recent log tail</h3>
+                                                        <span>journalctl -u</span>
+                                                    </div>
+                                                    <code class="block-code service-log-block services-log-block-compact">@GetLogTailText(selectedInspection)</code>
+                                                </div>
+                                            </div>
+                                        }
+                                    </section>
+                                }
+                            </article>
+                        }
+                    </div>
+                </div>
+            }
+        </section>
+    }
+</div>
+
+@code {
+    private static readonly IReadOnlyList<ServiceHealthFilterOption> HealthFilterOptions =
+    [
+        new(ServiceHealthStatus.Healthy, "Healthy", "healthy"),
+        new(ServiceHealthStatus.Warning, "Warning", "warning"),
+        new(ServiceHealthStatus.Broken, "Broken", "broken")
+    ];
+
+    private ServiceDashboardViewModel? dashboard;
+    private LinuxMadeSane.Core.Models.Services.ServiceInspectionResult? selectedInspection;
+    private Guid? selectedServiceId;
+    private string searchText = string.Empty;
+    private ServiceHealthStatus? activeHealthFilter;
+    private string actionMessage = string.Empty;
+    private bool actionError;
+    private bool isInspectionLoading;
+    private Guid? busyServiceId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        dashboard = await ServiceOperations.GetDashboardAsync();
+
+        if (selectedServiceId.HasValue &&
+            dashboard.Services.Any(service => service.Id == selectedServiceId.Value))
+        {
+            await LoadInspectionAsync(selectedServiceId.Value);
+        }
+        else
+        {
+            selectedServiceId = null;
+            selectedInspection = null;
+        }
+
+        actionMessage = string.Empty;
+        actionError = false;
+    }
+
+    private async Task SelectServiceAsync(Guid id)
+    {
+        if (selectedServiceId == id && !isInspectionLoading)
+        {
+            selectedServiceId = null;
+            selectedInspection = null;
+            actionMessage = string.Empty;
+            actionError = false;
+            return;
+        }
+
+        actionMessage = string.Empty;
+        actionError = false;
+        await LoadInspectionAsync(id);
+    }
+
+    private Task HandleRowKeyDownAsync(KeyboardEventArgs args, Guid id)
+    {
+        if (args.Key is "Enter" or " ")
+        {
+            return SelectServiceAsync(id);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task TailAsync(Guid serviceId)
+    {
+        actionMessage = string.Empty;
+        actionError = false;
+        await LoadInspectionAsync(serviceId);
+    }
+
+    private async Task LoadInspectionAsync(Guid serviceId)
+    {
+        selectedServiceId = serviceId;
+        isInspectionLoading = true;
+        selectedInspection = null;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            selectedInspection = await ServiceOperations.GetInspectionAsync(serviceId);
+        }
+        finally
+        {
+            isInspectionLoading = false;
+        }
+    }
+
+    private void SetHealthFilter(ServiceHealthStatus? status)
+    {
+        activeHealthFilter = status;
+    }
+
+    private async Task ControlAsync(Guid serviceId, ServiceControlAction action)
+    {
+        busyServiceId = serviceId;
+        selectedServiceId = serviceId;
+        actionMessage = string.Empty;
+        actionError = false;
+
+        try
+        {
+            var result = await ServiceOperations.ControlServiceAsync(serviceId, action);
+            actionMessage = result.Message;
+            actionError = !result.Success;
+            dashboard = await ServiceOperations.GetDashboardAsync();
+            await LoadInspectionAsync(serviceId);
+        }
+        finally
+        {
+            busyServiceId = null;
+        }
+    }
+
+    private IReadOnlyList<LinuxMadeSane.Core.Models.Services.LinuxServiceDefinition> FilteredServices =>
+        dashboard?.Services
+            .Where(service =>
+                MatchesHealthFilter(service) &&
+                MatchesSearchText(service))
+            .ToArray() ?? [];
+
+    private bool MatchesHealthFilter(LinuxMadeSane.Core.Models.Services.LinuxServiceDefinition service) =>
+        activeHealthFilter is null || service.HealthStatus == activeHealthFilter;
+
+    private bool MatchesSearchText(LinuxMadeSane.Core.Models.Services.LinuxServiceDefinition service) =>
+        string.IsNullOrWhiteSpace(searchText) ||
+        GetServiceDisplayName(service).Contains(searchText, StringComparison.OrdinalIgnoreCase) ||
+        GetServiceUnitName(service).Contains(searchText, StringComparison.OrdinalIgnoreCase) ||
+        GetServiceSummary(service).Contains(searchText, StringComparison.OrdinalIgnoreCase) ||
+        service.RuntimeState.ToString().Contains(searchText, StringComparison.OrdinalIgnoreCase) ||
+        service.HealthStatus.ToString().Contains(searchText, StringComparison.OrdinalIgnoreCase);
+
+    private static IReadOnlyList<string> GetExpandedNotes(LinuxMadeSane.Core.Models.Services.ServiceInspectionResult inspection) =>
+        inspection.Findings.Count > 0
+            ? inspection.Findings
+            : inspection.PlainEnglishSummary;
+
+    private static string GetNotesCount(LinuxMadeSane.Core.Models.Services.ServiceInspectionResult inspection) =>
+        $"{GetExpandedNotes(inspection).Count} note(s)";
+
+    private static string GetLogTailText(LinuxMadeSane.Core.Models.Services.ServiceInspectionResult inspection) =>
+        inspection.LiveLogLines.Count == 0
+            ? "No recent log lines captured."
+            : string.Join(Environment.NewLine, inspection.LiveLogLines);
+
+    private static UiPillTone GetHealthTone(ServiceHealthStatus status) => status switch
+    {
+        ServiceHealthStatus.Healthy => UiPillTone.Success,
+        ServiceHealthStatus.Warning => UiPillTone.Warning,
+        _ => UiPillTone.Failure
+    };
+
+    private static UiPillTone GetRuntimeTone(ServiceRuntimeState state) => state switch
+    {
+        ServiceRuntimeState.Running => UiPillTone.Success,
+        ServiceRuntimeState.Stopped => UiPillTone.Neutral,
+        _ => UiPillTone.Failure
+    };
+
+    private static string GetServiceDisplayName(LinuxMadeSane.Core.Models.Services.LinuxServiceDefinition service) =>
+        string.IsNullOrWhiteSpace(service.DisplayName)
+            ? GetServiceUnitName(service)
+            : service.DisplayName;
+
+    private static string GetServiceUnitName(LinuxMadeSane.Core.Models.Services.LinuxServiceDefinition service) =>
+        string.IsNullOrWhiteSpace(service.UnitName)
+            ? "unknown.service"
+            : service.UnitName;
+
+    private static string GetServiceSummary(LinuxMadeSane.Core.Models.Services.LinuxServiceDefinition service) =>
+        string.IsNullOrWhiteSpace(service.Summary)
+            ? $"No summary is available for {GetServiceUnitName(service)}."
+            : service.Summary;
+
+    private sealed record ServiceHealthFilterOption(
+        ServiceHealthStatus Status,
+        string Label,
+        string CssClass);
+}

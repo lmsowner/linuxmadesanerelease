@@ -1,0 +1,739 @@
+@using System.Text
+@using LinuxMadeSane.Application.Contracts.Caddy
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.Ai
+@using LinuxMadeSane.Core.Models.RdpOptimizer
+@inject ICaddyIntegrationService CaddyIntegrationService
+
+@if (!IsLocalHost)
+{
+    <section class="surface-card caddy-unsupported-card">
+        <div class="table-header">
+            <div>
+                <p class="eyebrow">Caddy</p>
+                <h3>Local LMS host only</h3>
+                <p class="meta-text">Caddy management currently works on the machine running Linux Made Sane. Select <strong>Local machine</strong> to manage the local reverse proxy and generated Caddy config.</p>
+            </div>
+        </div>
+    </section>
+}
+else if (!isLoaded || dashboard is null)
+{
+    <section class="surface-card caddy-loading-card">
+        <p class="meta-text">Loading Caddy integration...</p>
+    </section>
+}
+else
+{
+    <div class="caddy-workspace-shell">
+        @if (!string.IsNullOrWhiteSpace(statusMessage))
+        {
+            <p class="callout @(statusIsError ? "error" : "success")">@statusMessage</p>
+        }
+
+        <section class="surface-card caddy-overview-card">
+            <div class="table-header">
+                <div>
+                    <p class="eyebrow">Caddy</p>
+                    <h3>Reverse proxy manager</h3>
+                    <p class="meta-text">Keep LMS-managed reverse proxy routes tidy, validate the active configuration, and push changes back through the Caddy include file.</p>
+                </div>
+
+                <div class="caddy-header-actions">
+                    <UiCommandButton Label="Add route"
+                                     Glyph="UiIconGlyph.Plus"
+                                     Disabled="@(!dashboard.IsInstalled || IsBusy)"
+                                     OnClick="OpenCreateRouteDialogAsync" />
+                    <UiCommandButton Label="Reload config"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@(!dashboard.IsInstalled || IsBusy)"
+                                     OnClick="ReloadAsync" />
+                    <UiCommandButton Label="Restart service"
+                                     Glyph="UiIconGlyph.Restart"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@(!dashboard.IsInstalled || IsBusy)"
+                                     OnClick="RestartAsync" />
+                </div>
+            </div>
+
+            <div class="caddy-summary-grid">
+                <article class="caddy-summary-tile">
+                    <span class="caddy-summary-label">Installed</span>
+                    <strong>@(dashboard.IsInstalled ? "Installed" : "Not installed")</strong>
+                    <span class="caddy-summary-detail">@GetInstallDetail()</span>
+                    <UiPill Tone="@(dashboard.IsInstalled ? UiPillTone.Success : UiPillTone.Warning)">
+                        @(dashboard.IsInstalled ? "Ready" : "Needs install")
+                    </UiPill>
+                </article>
+
+                <article class="caddy-summary-tile">
+                    <span class="caddy-summary-label">Service</span>
+                    <strong>@(dashboard.IsServiceActive ? "Running" : "Stopped")</strong>
+                    <span class="caddy-summary-detail">@GetServiceDetail()</span>
+                    <UiPill Tone="@(dashboard.IsServiceActive ? UiPillTone.Success : UiPillTone.Warning)">
+                        @(dashboard.IsServiceActive ? "Active" : "Attention")
+                    </UiPill>
+                </article>
+
+                <article class="caddy-summary-tile">
+                    <span class="caddy-summary-label">Configuration</span>
+                    <strong>@(dashboard.IsConfigurationValid ? "Valid" : "Needs attention")</strong>
+                    <span class="caddy-summary-detail">@dashboard.ValidationSummary</span>
+                    <UiPill Tone="@(dashboard.IsConfigurationValid ? UiPillTone.Success : UiPillTone.Warning)">
+                        @(dashboard.IsConfigurationValid ? "Validated" : "Check config")
+                    </UiPill>
+                </article>
+
+                <article class="caddy-summary-tile">
+                    <span class="caddy-summary-label">Managed routes</span>
+                    <strong>@dashboard.Routes.Count</strong>
+                    <span class="caddy-summary-detail">@GetRouteDetail()</span>
+                    <UiPill Tone="@(dashboard.IsManagedImportConfigured ? UiPillTone.Success : UiPillTone.Warning)">
+                        @(dashboard.IsManagedImportConfigured ? "Import wired" : "Import missing")
+                    </UiPill>
+                </article>
+            </div>
+
+            <div class="caddy-config-strip">
+                <div class="caddy-config-point">
+                    <span>Main config</span>
+                    <code>@dashboard.MainConfigPath</code>
+                </div>
+                <div class="caddy-config-point">
+                    <span>LMS include</span>
+                    <code>@dashboard.ManagedConfigPath</code>
+                </div>
+            </div>
+        </section>
+
+        @if (!dashboard.IsInstalled)
+        {
+            <section class="surface-card caddy-install-card">
+                <div class="caddy-install-copy">
+                    <p class="eyebrow">Install</p>
+                    <h3>Install Caddy on this LMS host</h3>
+                    <p class="meta-text">LMS will install the package, enable the systemd service, create the managed include, and wire the import into the main <code>Caddyfile</code>.</p>
+                </div>
+
+                <div class="caddy-install-actions">
+                    <UiCommandButton Label="@(isInstalling ? "Installing..." : "Install Caddy")"
+                                     Glyph="UiIconGlyph.Save"
+                                     Variant="UiButtonVariant.Primary"
+                                     Disabled="@IsBusy"
+                                     OnClick="InstallAsync" />
+                    <span class="meta-text">Route editing unlocks once Caddy is installed locally.</span>
+                </div>
+            </section>
+        }
+        else if (!dashboard.IsManagedImportConfigured)
+        {
+            <p class="callout warning">The LMS import line is missing from the main Caddyfile. Reloading or saving a route will rewrite the managed import.</p>
+        }
+
+        <section class="surface-card caddy-routes-card">
+            <div class="table-header">
+                <div>
+                    <p class="eyebrow">Routes</p>
+                    <h3>Reverse proxy routes</h3>
+                    <p class="meta-text">Keep the list clean, expand the generated Caddy block only when you need to inspect what LMS will write.</p>
+                </div>
+                <span>@dashboard.Routes.Count item(s)</span>
+            </div>
+
+            @if (dashboard.Routes.Count == 0)
+            {
+                <div class="empty-state caddy-empty-state">
+                    <p>No Caddy routes yet.</p>
+                    <p class="meta-text">Add the first hostname once Caddy is installed and LMS will generate the managed reverse proxy include for you.</p>
+                </div>
+            }
+            else
+            {
+                <div class="caddy-route-list">
+                    @foreach (var route in dashboard.Routes)
+                    {
+                        <article class="caddy-route-row @(IsRouteExpanded(route.Id) ? "expanded" : string.Empty)">
+                            <div class="caddy-route-head">
+                                <div class="caddy-route-copy">
+                                    <div class="caddy-route-title-line">
+                                        <strong>@route.Name</strong>
+                                        @if (!string.IsNullOrWhiteSpace(route.Description))
+                                        {
+                                            <span class="caddy-route-summary">@route.Description</span>
+                                        }
+                                    </div>
+
+                                    <div class="caddy-route-meta">
+                                        <span><strong>Public:</strong> @route.AddressLabel</span>
+                                        <span><strong>Upstream:</strong> @route.UpstreamUrl</span>
+                                        <span><strong>Updated:</strong> @route.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
+                                    </div>
+                                </div>
+
+                                <div class="caddy-route-side">
+                                    <span class="caddy-route-access @(route.EnableTls ? "caddy-route-access-secure" : "caddy-route-access-plain")">
+                                        @(route.EnableTls ? "https" : "http")
+                                    </span>
+
+                                    <div class="caddy-route-actions">
+                                        <UiCommandButton Label="@(IsRouteExpanded(route.Id) ? "Hide config" : "Show config")"
+                                                         Glyph="UiIconGlyph.Info"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@IsBusy"
+                                                         OnClick="@(() => ToggleRouteExpandedAsync(route.Id))" />
+                                        <UiCommandButton Label="Edit"
+                                                         Glyph="UiIconGlyph.Edit"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@(!dashboard.IsInstalled || IsBusy)"
+                                                         OnClick="@(() => OpenEditRouteDialogAsync(route.Id))" />
+                                        <UiCommandButton Label="Delete"
+                                                         Glyph="UiIconGlyph.Delete"
+                                                         Variant="UiButtonVariant.Danger"
+                                                         Disabled="@(!dashboard.IsInstalled || IsBusy)"
+                                                         OnClick="@(() => OpenDeleteDialogAsync(route))" />
+                                    </div>
+                                </div>
+                            </div>
+
+                            @if (IsRouteExpanded(route.Id))
+                            {
+                                <div class="caddy-route-body">
+                                    <pre class="caddy-route-code"><code>@route.GeneratedSnippet</code></pre>
+                                </div>
+                            }
+                        </article>
+                    }
+                </div>
+            }
+        </section>
+
+        @if (lastOperationLogs.Count > 0)
+        {
+            <section class="surface-card caddy-logs-card">
+                <details class="caddy-log-details">
+                    <summary>Latest system output</summary>
+
+                    <div class="caddy-log-list">
+                        @foreach (var log in lastOperationLogs)
+                        {
+                            <article class="caddy-log-row">
+                                <div class="caddy-log-header">
+                                    <strong>@log.Message</strong>
+                                    <UiPill Tone="@GetLogTone(log.Level)">@log.Level</UiPill>
+                                </div>
+
+                                @if (!string.IsNullOrWhiteSpace(log.CommandText))
+                                {
+                                    <pre class="caddy-log-code"><code>@log.CommandText</code></pre>
+                                }
+
+                                @if (!string.IsNullOrWhiteSpace(log.StandardError))
+                                {
+                                    <pre class="caddy-log-output caddy-log-output-error"><code>@log.StandardError</code></pre>
+                                }
+                                else if (!string.IsNullOrWhiteSpace(log.StandardOutput))
+                                {
+                                    <pre class="caddy-log-output"><code>@log.StandardOutput</code></pre>
+                                }
+                            </article>
+                        }
+                    </div>
+                </details>
+            </section>
+        }
+    </div>
+}
+
+@if (showEditorModal)
+{
+    <div class="caddy-dialog-shell" role="presentation">
+        <section class="caddy-dialog-panel caddy-dialog-panel-editor"
+                 role="dialog"
+                 aria-modal="true"
+                 aria-labelledby="@editorDialogTitleId"
+                 @onclick:stopPropagation="true">
+            <header class="caddy-dialog-header">
+                <div class="caddy-dialog-title-block">
+                    <h2 id="@editorDialogTitleId">@(editor.Id.HasValue ? $"Edit {editor.Name}" : "Add Caddy route")</h2>
+                    <p>Define the public hostname and local upstream, then let LMS generate the managed Caddy block.</p>
+                </div>
+                <UiIconButton Label="Close" Glyph="UiIconGlyph.Clear" OnClick="CloseEditorDialogAsync" />
+            </header>
+
+            <div class="caddy-dialog-body">
+                <EditForm id="@editorFormId"
+                          Model="@editor"
+                          OnValidSubmit="HandleSaveRouteAsync"
+                          class="stack-form caddy-editor-form">
+                    <DataAnnotationsValidator />
+
+                    @if (!string.IsNullOrWhiteSpace(editorStatusMessage))
+                    {
+                        <p class="callout @(editorStatusIsError ? "error" : "success")">@editorStatusMessage</p>
+                    }
+
+                    <div class="caddy-editor-top-grid">
+                        <UiTextField Value="@editor.Name"
+                                     ValueChanged="SetEditorNameAsync"
+                                     ValueExpression="@(() => editor.Name)"
+                                     Label="Route name"
+                                     Placeholder="App frontend"
+                                     Compact="true" />
+
+                        <UiTextField Value="@editor.Description"
+                                     ValueChanged="SetEditorDescriptionAsync"
+                                     ValueExpression="@(() => editor.Description)"
+                                     Label="Summary"
+                                     Placeholder="Public entry for the app UI"
+                                     Compact="true" />
+                    </div>
+
+                    <div class="caddy-editor-address-grid">
+                        <UiTextField Value="@editor.Hostname"
+                                     ValueChanged="SetEditorHostnameAsync"
+                                     ValueExpression="@(() => editor.Hostname)"
+                                     Label="Public hostname"
+                                     Helper="For example app.example.com"
+                                     Placeholder="app.example.com"
+                                     Compact="true" />
+
+                        <UiTextField Value="@editor.UpstreamUrl"
+                                     ValueChanged="SetEditorUpstreamUrlAsync"
+                                     ValueExpression="@(() => editor.UpstreamUrl)"
+                                     Label="Upstream URL"
+                                     Helper="For example http://127.0.0.1:3000"
+                                     Placeholder="http://127.0.0.1:3000"
+                                     Compact="true" />
+                    </div>
+
+                    <UiCheckboxField Value="@editor.EnableTls"
+                                     ValueChanged="SetEditorEnableTlsAsync"
+                                     ValueExpression="@(() => editor.EnableTls)"
+                                     Label="Terminate TLS in Caddy"
+                                     Helper="Disable this only when you intentionally want a plain HTTP listener on the public side."
+                                     Compact="true"
+                                     Class="caddy-editor-toggle" />
+
+                    <section class="surface-subcard caddy-editor-preview-card">
+                        <div class="caddy-editor-preview-header">
+                            <div class="stack-tight">
+                                <strong>Generated Caddy block</strong>
+                                <span class="helper-text">This is the managed snippet LMS will write into the Caddy include.</span>
+                            </div>
+                            <UiPill Tone="@(editor.EnableTls ? UiPillTone.Success : UiPillTone.Warning)">
+                                @(editor.EnableTls ? "https" : "http")
+                            </UiPill>
+                        </div>
+
+                        <pre class="caddy-route-code"><code>@BuildEditorSnippet()</code></pre>
+                    </section>
+                </EditForm>
+            </div>
+
+            <footer class="caddy-dialog-footer">
+                <UiCommandButton Label="Cancel"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@isSavingRoute"
+                                 OnClick="CloseEditorDialogAsync" />
+                <UiCommandButton Label="@(isSavingRoute ? "Saving..." : "Save route")"
+                                 Glyph="UiIconGlyph.Save"
+                                 Variant="UiButtonVariant.Primary"
+                                 Disabled="@isSavingRoute"
+                                 Type="submit"
+                                 form="@editorFormId" />
+            </footer>
+        </section>
+    </div>
+}
+
+@if (showDeleteModal)
+{
+    <div class="caddy-dialog-shell" role="presentation">
+        <section class="caddy-dialog-panel caddy-dialog-panel-delete"
+                 role="dialog"
+                 aria-modal="true"
+                 aria-labelledby="@deleteDialogTitleId"
+                 @onclick:stopPropagation="true">
+            <header class="caddy-dialog-header">
+                <div class="caddy-dialog-title-block">
+                    <h2 id="@deleteDialogTitleId">Delete Caddy route</h2>
+                    <p>Remove this LMS-managed route from the generated Caddy include.</p>
+                </div>
+                <UiIconButton Label="Close" Glyph="UiIconGlyph.Clear" OnClick="CloseDeleteDialogAsync" />
+            </header>
+
+            <div class="caddy-dialog-body">
+                @if (routePendingDelete is not null)
+                {
+                    <div class="caddy-delete-copy">
+                        <p>Delete <strong>@routePendingDelete.Name</strong>?</p>
+                        <p class="meta-text">@routePendingDelete.AddressLabel -> @routePendingDelete.UpstreamUrl</p>
+                    </div>
+                }
+            </div>
+
+            <footer class="caddy-dialog-footer">
+                <UiCommandButton Label="Cancel"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@isDeletingRoute"
+                                 OnClick="CloseDeleteDialogAsync" />
+                <UiCommandButton Label="@(isDeletingRoute ? "Deleting..." : "Delete route")"
+                                 Glyph="UiIconGlyph.Delete"
+                                 Variant="UiButtonVariant.Danger"
+                                 Disabled="@isDeletingRoute"
+                                 OnClick="DeleteRouteAsync" />
+            </footer>
+        </section>
+    </div>
+}
+
+@code {
+    private readonly string editorFormId = $"caddy-route-editor-{Guid.NewGuid():N}";
+    private readonly string editorDialogTitleId = $"caddy-route-editor-title-{Guid.NewGuid():N}";
+    private readonly string deleteDialogTitleId = $"caddy-route-delete-title-{Guid.NewGuid():N}";
+    private readonly HashSet<Guid> expandedRouteIds = [];
+
+    [Parameter]
+    public Guid HostId { get; set; }
+
+    private CaddyIntegrationDashboardViewModel? dashboard;
+    private CaddyProxyRouteEditor editor = new();
+    private CaddyProxyRouteListItem? routePendingDelete;
+    private Guid? loadedHostId;
+    private IReadOnlyList<OperationLogEntry> lastOperationLogs = [];
+    private string statusMessage = string.Empty;
+    private string editorStatusMessage = string.Empty;
+    private bool statusIsError;
+    private bool editorStatusIsError;
+    private bool isLoaded;
+    private bool showEditorModal;
+    private bool showDeleteModal;
+    private bool isInstalling;
+    private bool isReloading;
+    private bool isRestarting;
+    private bool isSavingRoute;
+    private bool isDeletingRoute;
+
+    private bool IsLocalHost => AiLocalMachine.IsLocalMachine(HostId);
+    private bool IsBusy => isInstalling || isReloading || isRestarting || isSavingRoute || isDeletingRoute;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedHostId == HostId)
+        {
+            return;
+        }
+
+        loadedHostId = HostId;
+        expandedRouteIds.Clear();
+        showEditorModal = false;
+        showDeleteModal = false;
+        routePendingDelete = null;
+        statusMessage = string.Empty;
+        editorStatusMessage = string.Empty;
+        lastOperationLogs = [];
+
+        if (!IsLocalHost)
+        {
+            dashboard = null;
+            isLoaded = true;
+            return;
+        }
+
+        await LoadDashboardAsync(clearStatus: true);
+    }
+
+    private async Task LoadDashboardAsync(bool clearStatus)
+    {
+        isLoaded = false;
+        if (clearStatus)
+        {
+            statusMessage = string.Empty;
+            statusIsError = false;
+            lastOperationLogs = [];
+        }
+
+        dashboard = await CaddyIntegrationService.GetDashboardAsync();
+        isLoaded = true;
+    }
+
+    private async Task OpenCreateRouteDialogAsync()
+    {
+        if (dashboard?.IsInstalled != true)
+        {
+            return;
+        }
+
+        editor = await CaddyIntegrationService.GetEditorAsync(null);
+        editorStatusMessage = string.Empty;
+        editorStatusIsError = false;
+        showEditorModal = true;
+    }
+
+    private async Task OpenEditRouteDialogAsync(Guid routeId)
+    {
+        if (dashboard?.IsInstalled != true)
+        {
+            return;
+        }
+
+        editor = await CaddyIntegrationService.GetEditorAsync(routeId);
+        editorStatusMessage = string.Empty;
+        editorStatusIsError = false;
+        showEditorModal = true;
+    }
+
+    private Task CloseEditorDialogAsync()
+    {
+        showEditorModal = false;
+        editorStatusMessage = string.Empty;
+        editorStatusIsError = false;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenDeleteDialogAsync(CaddyProxyRouteListItem route)
+    {
+        routePendingDelete = route;
+        showDeleteModal = true;
+        return Task.CompletedTask;
+    }
+
+    private Task CloseDeleteDialogAsync()
+    {
+        routePendingDelete = null;
+        showDeleteModal = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleSaveRouteAsync()
+    {
+        isSavingRoute = true;
+        editorStatusMessage = string.Empty;
+        editorStatusIsError = false;
+
+        try
+        {
+            var wasEdit = editor.Id.HasValue;
+            var savedId = await CaddyIntegrationService.SaveRouteAsync(editor);
+            expandedRouteIds.Add(savedId);
+            await LoadDashboardAsync(clearStatus: false);
+            statusMessage = wasEdit
+                ? $"Updated `{editor.Name}`."
+                : $"Saved `{editor.Name}`.";
+            statusIsError = false;
+            showEditorModal = false;
+        }
+        catch (Exception exception)
+        {
+            editorStatusMessage = exception.Message;
+            editorStatusIsError = true;
+        }
+        finally
+        {
+            isSavingRoute = false;
+        }
+    }
+
+    private async Task DeleteRouteAsync()
+    {
+        if (routePendingDelete is null)
+        {
+            return;
+        }
+
+        isDeletingRoute = true;
+
+        try
+        {
+            var deleted = routePendingDelete;
+            await CaddyIntegrationService.DeleteRouteAsync(deleted.Id);
+            expandedRouteIds.Remove(deleted.Id);
+            await LoadDashboardAsync(clearStatus: false);
+            statusMessage = $"Deleted `{deleted.Name}`.";
+            statusIsError = false;
+            showDeleteModal = false;
+            routePendingDelete = null;
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusIsError = true;
+        }
+        finally
+        {
+            isDeletingRoute = false;
+        }
+    }
+
+    private async Task InstallAsync()
+    {
+        isInstalling = true;
+
+        try
+        {
+            ApplyOperationResult(await CaddyIntegrationService.InstallAsync());
+            await LoadDashboardAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusIsError = true;
+            lastOperationLogs = [];
+        }
+        finally
+        {
+            isInstalling = false;
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        isReloading = true;
+
+        try
+        {
+            ApplyOperationResult(await CaddyIntegrationService.ReloadAsync());
+            await LoadDashboardAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusIsError = true;
+            lastOperationLogs = [];
+        }
+        finally
+        {
+            isReloading = false;
+        }
+    }
+
+    private async Task RestartAsync()
+    {
+        isRestarting = true;
+
+        try
+        {
+            ApplyOperationResult(await CaddyIntegrationService.RestartAsync());
+            await LoadDashboardAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusIsError = true;
+            lastOperationLogs = [];
+        }
+        finally
+        {
+            isRestarting = false;
+        }
+    }
+
+    private void ApplyOperationResult(CaddyOperationResultViewModel result)
+    {
+        statusMessage = result.Summary;
+        statusIsError = !result.Success;
+        lastOperationLogs = result.Logs;
+    }
+
+    private Task ToggleRouteExpandedAsync(Guid routeId)
+    {
+        if (!expandedRouteIds.Add(routeId))
+        {
+            expandedRouteIds.Remove(routeId);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private bool IsRouteExpanded(Guid routeId) =>
+        expandedRouteIds.Contains(routeId);
+
+    private Task SetEditorNameAsync(string? value)
+    {
+        editor.Name = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetEditorDescriptionAsync(string? value)
+    {
+        editor.Description = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetEditorHostnameAsync(string? value)
+    {
+        editor.Hostname = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetEditorUpstreamUrlAsync(string? value)
+    {
+        editor.UpstreamUrl = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetEditorEnableTlsAsync(bool value)
+    {
+        editor.EnableTls = value;
+        return Task.CompletedTask;
+    }
+
+    private string BuildEditorSnippet()
+    {
+        var hostname = string.IsNullOrWhiteSpace(editor.Hostname)
+            ? "app.example.com"
+            : editor.Hostname.Trim().TrimEnd('/');
+        var upstream = string.IsNullOrWhiteSpace(editor.UpstreamUrl)
+            ? "http://127.0.0.1:3000"
+            : editor.UpstreamUrl.Trim();
+        var address = editor.EnableTls ? hostname : $"http://{hostname}";
+
+        var builder = new StringBuilder();
+        builder.AppendLine($"{address} {{");
+        builder.AppendLine("    encode zstd gzip");
+        builder.AppendLine($"    reverse_proxy {upstream}");
+        builder.Append('}');
+        return builder.ToString();
+    }
+
+    private string GetInstallDetail()
+    {
+        if (!dashboard!.IsInstalled)
+        {
+            return "Install Caddy to enable local reverse proxy management.";
+        }
+
+        return string.IsNullOrWhiteSpace(dashboard.InstalledVersion)
+            ? "Installed on the LMS host."
+            : dashboard.InstalledVersion;
+    }
+
+    private string GetServiceDetail() =>
+        dashboard!.IsServiceEnabled
+            ? "Enabled at boot."
+            : "Not enabled at boot.";
+
+    private string GetRouteDetail()
+    {
+        if (dashboard!.Routes.Count == 0)
+        {
+            return "No LMS-managed reverse proxy entries yet.";
+        }
+
+        return dashboard.Routes.Count == 1
+            ? "1 LMS-managed hostname."
+            : $"{dashboard.Routes.Count} LMS-managed hostnames.";
+    }
+
+    private static UiPillTone GetLogTone(OperationLogLevel level) =>
+        level switch
+        {
+            OperationLogLevel.Success => UiPillTone.Success,
+            OperationLogLevel.Warning => UiPillTone.Warning,
+            OperationLogLevel.Error => UiPillTone.Failure,
+            _ => UiPillTone.Neutral
+        };
+}

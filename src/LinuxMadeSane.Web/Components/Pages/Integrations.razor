@@ -1,0 +1,404 @@
+@page "/integrations"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
+@using Microsoft.Extensions.DependencyInjection
+@inject IManagedHostService HostService
+@inject ILmsConnectClientFeature ConnectClientFeature
+@inject IServiceProvider Services
+
+<PageTitle>Integrations | Linux Made Sane</PageTitle>
+
+<div class="page-shell integrations-page-shell">
+    <UiHeroPanel Title="Integrations"
+                 Compact="true" />
+
+    <TabControl ActiveValue="@activeIntegrationTab"
+                ActiveValueChanged="HandleIntegrationTabChangedAsync"
+                Class="page-tab-control integrations-page-tab-control"
+                PanelClass="page-tab-panel integrations-page-tab-panel">
+            <ChildContent>
+                @if (PortalTabAvailable)
+                {
+	                    <TabPage Value="@PortalTabValue" Title="Portal">
+	                        <ChildContent>
+	                            <div style="display:flex; justify-content:flex-end; margin-bottom:0.75rem;">
+	                                <UiCommandButton Label="Help"
+	                                                 Glyph="UiIconGlyph.Info"
+	                                                 Variant="UiButtonVariant.Ghost"
+	                                                 OnClick="OpenPortalSetupGuide" />
+	                            </div>
+                            <DynamicComponent Type="@ConnectClientFeature.IntegrationPageComponentType"
+                                              Parameters="@portalIntegrationParameters"
+                                              @key="portalComponentVersion" />
+	                        </ChildContent>
+	                    </TabPage>
+                }
+
+                <TabPage Value="@CaddyTabValue" Title="Caddy">
+                    <ChildContent>
+                        @if (localLmsHost is null)
+                        {
+                            <section class="surface-subcard integrations-empty-card">
+                                <h2>Local LMS host unavailable</h2>
+                                <p class="meta-text">Caddy management only runs on the local LMS host, and Linux Made Sane could not resolve that host record.</p>
+                            </section>
+                        }
+                        else
+                        {
+                            <section class="surface-subcard integrations-host-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Caddy</p>
+                                        <h2>@localLmsHost.Name</h2>
+                                        <p class="meta-text">Caddy route management is local LMS-host only. Remote SSH hosts do not expose this workflow here.</p>
+                                    </div>
+                                    <span>@localLmsHost.Hostname</span>
+                                </div>
+
+                                <div class="integrations-host-grid">
+                                    <div class="integrations-host-summary">
+                                        <UiPill Tone="@GetStatusTone(localLmsHost.OperatingStatus)">@localLmsHost.OperatingStatus</UiPill>
+                                        <ManagedHostKindIndicator Host="@localLmsHost" />
+                                        <UiPill Tone="UiPillTone.Neutral">@($"{localLmsHost.Hostname}:{localLmsHost.Port}")</UiPill>
+                                    </div>
+                                </div>
+                            </section>
+
+                            <section class="surface-subcard integrations-caddy-card">
+                                <CaddyIntegrationWorkspace HostId="@localLmsHost.Id" @key="localLmsHost.Id" />
+                            </section>
+                        }
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@MediaLibraryTabValue" Title="Media Library">
+                    <ChildContent>
+                        <section class="surface-subcard integrations-caddy-card">
+                            <MediaLibraryIntegrationWorkspace />
+                        </section>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@CloudflareTabValue" Title="Cloudflare">
+                    <ChildContent>
+                        @if (localLmsHost is null)
+                        {
+                            <section class="surface-subcard integrations-empty-card">
+                                <h2>Local LMS host unavailable</h2>
+                                <p class="meta-text">Cloudflare publishing in this area now targets the local LMS host only, and Linux Made Sane could not resolve that host record.</p>
+                            </section>
+                        }
+                        else
+                        {
+                            <section class="surface-subcard integrations-cloudflare-card">
+                                <CloudflareExposeServicePage HostId="@localLmsHost.Id"
+                                                            OnOpenSetupGuide="OpenCloudflareSetupGuide" />
+                            </section>
+                        }
+                    </ChildContent>
+                </TabPage>
+            </ChildContent>
+    </TabControl>
+
+    <UiModal IsOpen="@showCloudflareSetupGuide"
+             Title="Cloudflare setup guide"
+             Subtitle="Create the API token, choose the right tunnel, and understand when the host-side connector is needed."
+             Class="integrations-cloudflare-guide-modal"
+             OnClose="CloseCloudflareSetupGuide">
+        <ChildContent>
+            <div class="integrations-cloudflare-guide-body">
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>How to create the Cloudflare API token</h3>
+                        <p class="meta-text">Linux Made Sane only needs a scoped Bearer token here. The simplest option is usually a <strong>user token</strong> from the user’s Cloudflare profile. Paste the token into LMS, then click <strong>Validate token</strong> to load the Cloudflare accounts and zones that token can actually use.</p>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Open <a href="@CloudflareUserTokenUrl" target="_blank" rel="noreferrer">Cloudflare My Profile -> API Tokens</a>. If you specifically need an account-owned token instead, use the <a href="@CloudflareAccountTokenDocsUrl" target="_blank" rel="noreferrer">Cloudflare account-owned token guide</a>.</li>
+                        <li>Choose <strong>Create Token</strong>, then <strong>Create Custom Token</strong>.</li>
+                        <li>Name it something obvious, for example <strong>Linux Made Sane</strong>.</li>
+                        <li>Add the required permissions shown below. Cloudflare may label the write-capable option as <strong>Edit</strong> or <strong>Write</strong> depending on the screen.</li>
+                        <li>In <strong>Account Resources</strong>, include the specific Cloudflare account that owns the Zero Trust tunnel.</li>
+                        <li>In <strong>Zone Resources</strong>, include the specific public zone/domain that will hold the hostname, for example <strong>example.com</strong>.</li>
+                        <li>Leave <strong>TTL</strong> and <strong>Client IP Address Filtering</strong> empty the first time unless you have a specific reason to restrict them. Over-restricting the token is a common cause of confusing failures.</li>
+                        <li>Create the token, copy it immediately, paste it into LMS, and click <strong>Validate token</strong>. Cloudflare only shows the full token once.</li>
+                    </ol>
+
+                    <div class="integrations-cloudflare-guide-points">
+                        <div class="integrations-cloudflare-guide-point">
+                            <strong>Always required</strong>
+                            <span><code>Account -> Cloudflare Tunnel -> Edit/Write</code></span>
+                        </div>
+                        <div class="integrations-cloudflare-guide-point">
+                            <strong>Always required</strong>
+                            <span><code>Zone -> DNS -> Edit/Write</code></span>
+                        </div>
+                        <div class="integrations-cloudflare-guide-point">
+                            <strong>Required for protected modes</strong>
+                            <span><code>Account -> Access: Apps and Policies -> Edit/Write</code></span>
+                        </div>
+                    </div>
+
+                    <div class="integrations-cloudflare-guide-points">
+                        <div class="integrations-cloudflare-guide-point">
+                            <strong>Common token mistakes</strong>
+                            <span>The token can validate but still fail later if it is scoped to the wrong account, scoped to the wrong zone, or missing the Access permission for protected modes.</span>
+                        </div>
+                        <div class="integrations-cloudflare-guide-point">
+                            <strong>Saved token note</strong>
+                            <span>If you created a new token and LMS still behaves like the old one, use <strong>Forget saved token</strong>, paste the new token again, and re-validate.</span>
+                        </div>
+                    </div>
+
+                    <p class="meta-text">User tokens usually start with <code>cfut_</code>. Account-owned tokens usually start with <code>cfat_</code>. Either format works here.</p>
+                    <p class="meta-text">Cloudflare docs: <a href="@CloudflareCreateTokenDocsUrl" target="_blank" rel="noreferrer">Create API token</a>, <a href="@CloudflareTokenPermissionsUrl" target="_blank" rel="noreferrer">API token permissions</a>, and <a href="@CloudflareTunnelApiDocsUrl" target="_blank" rel="noreferrer">Create a tunnel via API</a>.</p>
+                </section>
+
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>Server-side connector requirement</h3>
+                        <p class="meta-text">This page configures the Cloudflare side of the tunnel. The target machine must also run a <code>cloudflared</code> connector, otherwise the tunnel will exist in Cloudflare but never become live.</p>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Pick an existing tunnel when this machine already has one. A single Cloudflare tunnel can front multiple applications, so reuse is usually the sane option.</li>
+                        <li>If you choose <strong>Create new tunnel</strong>, LMS will create the remote tunnel in Cloudflare during apply.</li>
+                        <li>If <strong>Run cloudflared install on this managed host after apply</strong> stays enabled, LMS will also execute the connector install command over SSH on this managed host.</li>
+                        <li>If you leave that disabled, or if Cloudflare does not return the install token, LMS will still show the exact <code>cloudflared service install ...</code> command so you can run it manually.</li>
+                    </ol>
+
+                    <p class="meta-text">LMS is reducing the friction around wiring the tunnel, DNS, Access policy, and host-side connector together. Cloudflare still remains the source of truth for the connector install token.</p>
+                    <p class="meta-text">Cloudflare docs: <a href="@CloudflareTunnelDashboardDocsUrl" target="_blank" rel="noreferrer">Create a tunnel in the dashboard</a> and <a href="@CloudflareTunnelTokenDocsUrl" target="_blank" rel="noreferrer">Tunnel tokens</a>.</p>
+                </section>
+            </div>
+        </ChildContent>
+        <Footer>
+            <UiCommandButton Label="Close"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             OnClick="CloseCloudflareSetupGuide" />
+        </Footer>
+    </UiModal>
+
+    <UiModal IsOpen="@showPortalSetupGuide"
+             Title="Portal setup guide"
+             Subtitle="Use this LMS page to register the instance, then approve it in LMS Portal."
+             OnClose="ClosePortalSetupGuide">
+        <ChildContent>
+            <div class="integrations-cloudflare-guide-body">
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>Before you start</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Make sure you know the exact public LMS Portal URL.</li>
+                        <li>Make sure you have a portal login that can approve a new LMS instance.</li>
+                        <li>Make sure this LMS server can reach the portal from the server itself.</li>
+                    </ol>
+                </section>
+
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>On this LMS page</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Enter the portal URL.</li>
+                        <li>Set the instance name you want users to see in the portal.</li>
+                        <li>Turn on <strong>Enable LMS Portal outbound connector</strong>.</li>
+                        <li>Click <strong>Save portal settings</strong>.</li>
+                    </ol>
+                </section>
+
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>In LMS Portal</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Sign in to LMS Portal.</li>
+                        <li>Open the pairing screen.</li>
+                        <li>Scan the QR code on this page or paste the pairing code.</li>
+                        <li>Approve this LMS instance.</li>
+                    </ol>
+                </section>
+
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>What success looks like</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>The status on this page changes to <strong>Connected</strong>.</li>
+                        <li>You see the portal organisation name.</li>
+                        <li>You see the portal instance ID.</li>
+                        <li>You see a recent heartbeat time.</li>
+                    </ol>
+                </section>
+
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>If it fails</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Check that the portal URL is exact.</li>
+                        <li>Check that this LMS server can reach the portal over the network.</li>
+                        <li>Rotate the pairing code and try again.</li>
+                        <li>If the portal reports an instance limit, remove an old LMS instance there or change the plan.</li>
+                    </ol>
+                </section>
+            </div>
+        </ChildContent>
+        <Footer>
+            <UiCommandButton Label="Close"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             OnClick="ClosePortalSetupGuide" />
+        </Footer>
+    </UiModal>
+</div>
+
+@code {
+    private const string PortalTabValue = "portal";
+    private const string CaddyTabValue = "caddy";
+    private const string MediaLibraryTabValue = "media-library";
+    private const string CloudflareTabValue = "cloudflare";
+    private const string CloudflareUserTokenUrl = "https://dash.cloudflare.com/profile/api-tokens";
+    private const string CloudflareAccountTokenDocsUrl = "https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/";
+    private const string CloudflareCreateTokenDocsUrl = "https://developers.cloudflare.com/fundamentals/api/get-started/create-token/";
+    private const string CloudflareTokenPermissionsUrl = "https://developers.cloudflare.com/fundamentals/api/reference/permissions/";
+    private const string CloudflareTunnelApiDocsUrl = "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel-api/";
+    private const string CloudflareTunnelDashboardDocsUrl = "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/";
+    private const string CloudflareTunnelTokenDocsUrl = "https://developers.cloudflare.com/tunnel/advanced/tunnel-tokens/";
+
+    [SupplyParameterFromQuery(Name = "hostId")]
+    public Guid? HostId { get; set; }
+
+    [SupplyParameterFromQuery(Name = "tab")]
+    public string? Tab { get; set; }
+
+    private IReadOnlyList<ManagedHost> hosts = [];
+    private ManagedHost? localLmsHost;
+    private string activeIntegrationTab = PortalTabValue;
+    private bool showCloudflareSetupGuide;
+    private bool showPortalSetupGuide;
+    private bool isRotatingPortalPairingCode;
+    private int portalComponentVersion;
+    private bool PortalTabAvailable =>
+        ConnectClientFeature.IsAvailable &&
+        ConnectClientFeature.IntegrationPageComponentType is not null;
+    private IDictionary<string, object> portalIntegrationParameters =>
+        new Dictionary<string, object>
+        {
+            ["Actions"] = PortalIntegrationActions
+        };
+    private RenderFragment PortalIntegrationActions => @<UiCommandButton Label="@(isRotatingPortalPairingCode ? "Rotating..." : "Rotate pairing code")"
+                                                                         Glyph="UiIconGlyph.Refresh"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         Disabled="@isRotatingPortalPairingCode"
+                                                                         OnClick="RotatePortalPairingCodeAsync" />;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        hosts = await HostService.ListHostsAsync();
+        localLmsHost = hosts.FirstOrDefault(host => AiLocalMachine.IsLocalMachine(host.Id))
+            ?? hosts.FirstOrDefault(ManagedHostCapabilities.SupportsCaddyIntegration);
+        activeIntegrationTab = ResolveSelectedIntegrationTab();
+    }
+
+    private Task HandleIntegrationTabChangedAsync(string? value)
+    {
+        activeIntegrationTab = IsSupportedTab(value)
+            ? value!
+            : PortalTabAvailable
+                ? PortalTabValue
+                : CaddyTabValue;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenCloudflareSetupGuide()
+    {
+        showCloudflareSetupGuide = true;
+        return Task.CompletedTask;
+    }
+
+    private Task CloseCloudflareSetupGuide()
+    {
+        showCloudflareSetupGuide = false;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenPortalSetupGuide()
+    {
+        showPortalSetupGuide = true;
+        return Task.CompletedTask;
+    }
+
+    private Task ClosePortalSetupGuide()
+    {
+        showPortalSetupGuide = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task RotatePortalPairingCodeAsync()
+    {
+        if (isRotatingPortalPairingCode)
+        {
+            return;
+        }
+
+        var portalConnectionService = Services.GetService<IPortalConnectionService>();
+        if (portalConnectionService is null)
+        {
+            return;
+        }
+
+        isRotatingPortalPairingCode = true;
+
+        try
+        {
+            await portalConnectionService.RotatePairingCodeAsync();
+            portalComponentVersion++;
+        }
+        finally
+        {
+            isRotatingPortalPairingCode = false;
+        }
+    }
+
+    private string ResolveSelectedIntegrationTab()
+    {
+        if (IsSupportedTab(Tab))
+        {
+            return Tab!;
+        }
+
+        if (IsSupportedTab(activeIntegrationTab))
+        {
+            return activeIntegrationTab;
+        }
+
+        return PortalTabAvailable
+            ? PortalTabValue
+            : CaddyTabValue;
+    }
+
+    private bool IsSupportedTab(string? value) =>
+        string.Equals(value, CloudflareTabValue, StringComparison.Ordinal) ||
+        string.Equals(value, CaddyTabValue, StringComparison.Ordinal) ||
+        string.Equals(value, MediaLibraryTabValue, StringComparison.Ordinal) ||
+        (PortalTabAvailable && string.Equals(value, PortalTabValue, StringComparison.Ordinal));
+
+    private static UiPillTone GetStatusTone(HostOperatingStatus status) => status switch
+    {
+        HostOperatingStatus.Online => UiPillTone.Success,
+        HostOperatingStatus.Degraded => UiPillTone.Warning,
+        HostOperatingStatus.Offline => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+}

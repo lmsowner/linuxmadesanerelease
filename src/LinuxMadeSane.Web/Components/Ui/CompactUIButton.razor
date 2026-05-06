@@ -1,0 +1,107 @@
+@using System.Collections.Generic
+@using System.Linq
+
+@if (IsEnabledLink)
+{
+    @if (OnClick.HasDelegate)
+    {
+        <a class="@CssClass"
+           href="@Href"
+           title="@ResolvedTitle"
+           target="@Target"
+           rel="@Rel"
+           onpointerdown="@ResolvedPointerDownClientScript"
+           @onclick="OnClick"
+           @attributes="AdditionalAttributes">
+            @ButtonContent
+        </a>
+    }
+    else
+    {
+        <a class="@CssClass"
+           href="@Href"
+           title="@ResolvedTitle"
+           target="@Target"
+           rel="@Rel"
+           onpointerdown="@OnClientPointerDown"
+           onclick="@OnClientClick"
+           @attributes="AdditionalAttributes">
+            @ButtonContent
+        </a>
+    }
+}
+else
+{
+    @if (OnClick.HasDelegate)
+    {
+        <button class="@CssClass"
+                type="@Type"
+                title="@ResolvedTitle"
+                disabled="@Disabled"
+                onpointerdown="@ResolvedPointerDownClientScript"
+                @onclick="OnClick"
+                @attributes="AdditionalAttributes">
+            @ButtonContent
+        </button>
+    }
+    else
+    {
+        <button class="@CssClass"
+                type="@Type"
+                title="@ResolvedTitle"
+                disabled="@Disabled"
+                onpointerdown="@OnClientPointerDown"
+                onclick="@OnClientClick"
+                @attributes="AdditionalAttributes">
+            @ButtonContent
+        </button>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public string Label { get; set; } = string.Empty;
+    [Parameter] public string? Title { get; set; }
+    [Parameter] public UiIconGlyph Glyph { get; set; }
+    [Parameter] public string Type { get; set; } = "button";
+    [Parameter] public string? Href { get; set; }
+    [Parameter] public string? Target { get; set; }
+    [Parameter] public string? Rel { get; set; }
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public bool HideIcon { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public string? OnClientPointerDown { get; set; }
+    [Parameter] public string? OnClientClick { get; set; }
+    [Parameter] public EventCallback OnClick { get; set; }
+    [Parameter(CaptureUnmatchedValues = true)] public IReadOnlyDictionary<string, object>? AdditionalAttributes { get; set; }
+
+    private bool IsEnabledLink => !Disabled && !string.IsNullOrWhiteSpace(Href);
+    private string ResolvedTitle => string.IsNullOrWhiteSpace(Title) ? Label : Title.Trim();
+    private string? ResolvedPointerDownClientScript =>
+        !string.IsNullOrWhiteSpace(OnClientPointerDown) ? OnClientPointerDown : OnClientClick;
+    private string CssClass => string.Join(" ", BuildCssClasses());
+
+    private IEnumerable<string> BuildCssClasses()
+    {
+        yield return "compact-ui-button";
+
+        if (HideIcon)
+        {
+            yield return "compact-ui-button-no-icon";
+        }
+
+        if (!string.IsNullOrWhiteSpace(Class))
+        {
+            yield return Class.Trim();
+        }
+    }
+
+    private RenderFragment ButtonContent => @<text>
+        @if (!HideIcon)
+        {
+            <span class="compact-ui-button-icon" aria-hidden="true">
+                <UiGlyphIcon Glyph="@Glyph" />
+            </span>
+        }
+        <span class="compact-ui-button-label">@Label</span>
+    </text>;
+}

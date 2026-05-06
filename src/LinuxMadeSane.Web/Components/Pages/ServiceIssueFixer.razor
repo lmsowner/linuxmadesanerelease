@@ -1,0 +1,115 @@
+@page "/services/issue-fixer"
+@using LinuxMadeSane.Application.Contracts.Services
+@using LinuxMadeSane.Application.Interfaces
+@inject IServiceOperationsService ServiceOperations
+
+<PageTitle>Service Issue Fixer | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <section class="hero-panel compact">
+        <div>
+            <p class="eyebrow">Weird update issue fixer</p>
+            <h1>Tell me what is wrong, why it matters, and how to fix it</h1>
+            <p class="hero-copy">This surface is for the subtle post-update failures: wrong path, missing env, broken symlink, stale files, wrong ownership, daemon-reload miss, malformed config, and other nonsense that wastes time.</p>
+        </div>
+    </section>
+
+    @if (viewModel is null)
+    {
+        <section class="surface-card">
+            <div class="empty-state">
+                <h3>No services yet</h3>
+                <p>Create a service profile first.</p>
+            </div>
+        </section>
+    }
+    else
+    {
+        <section class="surface-card">
+            <div class="table-header">
+                <h2>Select service</h2>
+                <span>Update failure diagnosis</span>
+            </div>
+
+            <div class="field-row">
+                <label>
+                    <span>Service</span>
+                    <UiCombobox @bind-Value="selectedServiceId" @bind-Value:after="ReloadAsync">
+                        @foreach (var service in viewModel.AvailableServices)
+                        {
+                            <option value="@service.Id">@service.DisplayName (@service.UnitName)</option>
+                        }
+                    </UiCombobox>
+                </label>
+            </div>
+        </section>
+
+        <div class="dashboard-columns">
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Detected issues</h2>
+                    <span>@viewModel.IssueReport.UnitName</span>
+                </div>
+
+                <div class="issue-list">
+                    @foreach (var issue in viewModel.IssueReport.Issues)
+                    {
+                        <article class="issue-card @GetSeverityClass(issue.Severity)">
+                            <div class="share-card-header">
+                                <strong>@issue.Title</strong>
+                                <span class="status-pill @GetSeverityPillClass(issue.Severity)">@issue.Severity</span>
+                            </div>
+                            <p>@issue.Detail</p>
+                            <p class="meta-text">@issue.WhyItBreaks</p>
+                            <p class="meta-text">@issue.RecommendedRepair</p>
+                        </article>
+                    }
+                </div>
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>One-click fix candidates</h2>
+                    <span>Where automation is safe</span>
+                </div>
+
+                <div class="decision-list">
+                    @foreach (var candidate in viewModel.IssueReport.OneClickFixCandidates)
+                    {
+                        <InfoPill Eyebrow="Safe fix candidate" Text="@candidate" />
+                    }
+                </div>
+            </section>
+        </div>
+    }
+</div>
+
+@code {
+    private ServiceIssueFixerViewModel? viewModel;
+    private Guid selectedServiceId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        viewModel = await ServiceOperations.GetIssueFixerAsync(Guid.Empty);
+        selectedServiceId = viewModel?.IssueReport.ServiceId ?? Guid.Empty;
+    }
+
+    private async Task ReloadAsync()
+    {
+        viewModel = await ServiceOperations.GetIssueFixerAsync(selectedServiceId);
+    }
+
+    private static string GetSeverityClass(ServiceDiagnosticSeverity severity) => severity switch
+    {
+        ServiceDiagnosticSeverity.Critical => "critical",
+        ServiceDiagnosticSeverity.Warning => "warning",
+        _ => "info"
+    };
+
+    private static string GetSeverityPillClass(ServiceDiagnosticSeverity severity) => severity switch
+    {
+        ServiceDiagnosticSeverity.Critical => "failure",
+        ServiceDiagnosticSeverity.Warning => "warning",
+        _ => "neutral"
+    };
+}

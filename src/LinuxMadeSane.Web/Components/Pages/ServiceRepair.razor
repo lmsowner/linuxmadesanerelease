@@ -1,0 +1,115 @@
+@page "/services/repair"
+@using LinuxMadeSane.Application.Contracts.Services
+@using LinuxMadeSane.Application.Interfaces
+@inject IServiceOperationsService ServiceOperations
+
+<PageTitle>Repair Mode | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <section class="hero-panel compact">
+        <div>
+            <p class="eyebrow">Repair mode</p>
+            <h1>Repair this service with categorized checks</h1>
+            <p class="hero-copy">Verify unit correctness, referenced files, user existence, directory paths, sane permissions, port availability, writable logs/data, environment presence, manual launch behavior, and real health endpoint response.</p>
+        </div>
+    </section>
+
+    @if (viewModel is null)
+    {
+        <section class="surface-card">
+            <div class="empty-state">
+                <h3>No services yet</h3>
+                <p>Create a service profile first.</p>
+            </div>
+        </section>
+    }
+    else
+    {
+        <section class="surface-card">
+            <div class="table-header">
+                <h2>Select service</h2>
+                <span>Repair planning</span>
+            </div>
+
+            <div class="field-row">
+                <label>
+                    <span>Service</span>
+                    <UiCombobox @bind-Value="selectedServiceId" @bind-Value:after="ReloadAsync">
+                        @foreach (var service in viewModel.AvailableServices)
+                        {
+                            <option value="@service.Id">@service.DisplayName (@service.UnitName)</option>
+                        }
+                    </UiCombobox>
+                </label>
+            </div>
+        </section>
+
+        <div class="dashboard-columns">
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Categorized findings</h2>
+                    <span>@viewModel.RepairPlan.UnitName</span>
+                </div>
+
+                <div class="issue-list">
+                    @foreach (var issue in viewModel.RepairPlan.Issues)
+                    {
+                        <article class="issue-card @GetSeverityClass(issue.Severity)">
+                            <div class="share-card-header">
+                                <strong>@issue.Title</strong>
+                                <span class="status-pill @GetSeverityPillClass(issue.Severity)">@issue.Severity</span>
+                            </div>
+                            <p>@issue.Detail</p>
+                            <p class="meta-text">@issue.WhyItBreaks</p>
+                            <p class="meta-text">@issue.RecommendedRepair</p>
+                        </article>
+                    }
+                </div>
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Repair sequence</h2>
+                    <span>Work in this order</span>
+                </div>
+
+                <div class="decision-list">
+                    @foreach (var step in viewModel.RepairPlan.SafeRepairSequence)
+                    {
+                        <InfoPill Eyebrow="Repair step" Text="@step" />
+                    }
+                </div>
+            </section>
+        </div>
+    }
+</div>
+
+@code {
+    private ServiceRepairToolViewModel? viewModel;
+    private Guid selectedServiceId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        viewModel = await ServiceOperations.GetRepairToolAsync(Guid.Empty);
+        selectedServiceId = viewModel?.RepairPlan.ServiceId ?? Guid.Empty;
+    }
+
+    private async Task ReloadAsync()
+    {
+        viewModel = await ServiceOperations.GetRepairToolAsync(selectedServiceId);
+    }
+
+    private static string GetSeverityClass(ServiceDiagnosticSeverity severity) => severity switch
+    {
+        ServiceDiagnosticSeverity.Critical => "critical",
+        ServiceDiagnosticSeverity.Warning => "warning",
+        _ => "info"
+    };
+
+    private static string GetSeverityPillClass(ServiceDiagnosticSeverity severity) => severity switch
+    {
+        ServiceDiagnosticSeverity.Critical => "failure",
+        ServiceDiagnosticSeverity.Warning => "warning",
+        _ => "neutral"
+    };
+}

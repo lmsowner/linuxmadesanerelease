@@ -1,0 +1,21 @@
+using LinuxMadeSane.Application.Contracts.Security;
+
+namespace LinuxMadeSane.Application.Interfaces;
+
+public interface ISecuritySettingsService
+{
+    Task<SecuritySettingsPageViewModel> GetPageAsync(CancellationToken cancellationToken = default);
+    Task<SecurityUserProvisioningViewModel> CreateUserAsync(SecurityUserEditor editor, CancellationToken cancellationToken = default);
+    Task<SecurityUserAccessEditor> GetUserEditorAsync(Guid userId, CancellationToken cancellationToken = default);
+    Task SaveUserAsync(SecurityUserAccessEditor editor, CancellationToken cancellationToken = default);
+    Task<SecurityUserProvisioningViewModel> ResetUserOtpAsync(Guid userId, CancellationToken cancellationToken = default);
+    Task<SecurityUserPasswordResetViewModel> BuildPasswordResetAsync(Guid userId, CancellationToken cancellationToken = default);
+    Task ResetUserPasswordAsync(Guid userId, string newPassword, CancellationToken cancellationToken = default);
+    Task SetUserEnabledAsync(Guid userId, bool isEnabled, CancellationToken cancellationToken = default);
+    Task DeleteUserAsync(Guid userId, CancellationToken cancellationToken = default);
+    Task<Guid> SaveTrustedNetworkAsync(TrustedNetworkEntryEditor editor, CancellationToken cancellationToken = default);
+    Task SetTrustedNetworkEnabledAsync(Guid entryId, bool isEnabled, CancellationToken cancellationToken = default);
+    Task SetTrustedNetworkTrustedAccessEnabledAsync(Guid entryId, bool isEnabled, CancellationToken cancellationToken = default);
+    Task SetTrustedNetworkAuthenticationEnabledAsync(Guid entryId, bool isEnabled, CancellationToken cancellationToken = default);
+    Task DeleteTrustedNetworkAsync(Guid entryId, CancellationToken cancellationToken = default);
+}

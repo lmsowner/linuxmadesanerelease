@@ -1,0 +1,1623 @@
+@page "/ai/threads"
+@page "/ai/threads/new"
+@page "/ai/threads/{ThreadId:guid}"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@using LinuxMadeSane.Core.Models.Ai
+@using Microsoft.JSInterop
+@inject IAiApprovalService ApprovalService
+@inject IAiThreadService ThreadService
+@inject IAiChatService ChatService
+@inject IJSRuntime JSRuntime
+@inject NavigationManager NavigationManager
+
+<PageTitle>Redirecting | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <UiPanel>
+        <p class="meta-text">Redirecting to AI Services...</p>
+    </UiPanel>
+</div>
+
+@code {
+    [Parameter]
+    public Guid? ThreadId { get; set; }
+
+    private AiChatThreadEditorContextViewModel? selectedThreadContext;
+    private AiChatWorkspaceViewModel? workspace;
+    private AiChatMessageComposer messageComposer = new();
+    private IReadOnlyList<AiChatThreadListItemViewModel> threads = [];
+    private string threadSearch = string.Empty;
+    private ThreadSidebarFilter activeThreadFilter = ThreadSidebarFilter.All;
+    private string workspaceError = string.Empty;
+    private string loadError = string.Empty;
+    private string messageError = string.Empty;
+    private string approvalError = string.Empty;
+    private bool isLoaded;
+    private bool hasLoadedOnce;
+    private bool isCreatingThread;
+    private bool isSavingWorkspace;
+    private bool isApplyingProviderSelection;
+    private bool isSendingMessage;
+    private bool isClearingConversation;
+    private Guid? loadingThreadId;
+    private readonly Dictionary<Guid, AiApprovalDecisionCommand> approvalDrafts = [];
+    private readonly HashSet<Guid> submittingApprovalIds = [];
+    private readonly HashSet<Guid> mutatingMessageIds = [];
+    private readonly HashSet<Guid> mutatingToolIds = [];
+
+    private bool IsNewRoute =>
+        NavigationManager.ToBaseRelativePath(NavigationManager.Uri).TrimEnd('/')
+            .Equals("ai/threads/new", StringComparison.OrdinalIgnoreCase);
+
+    private bool HasActiveWorkspace =>
+        ThreadId.HasValue &&
+        selectedThreadContext is not null &&
+        workspace is not null;
+
+    private bool HasActiveRun =>
+        ActiveRun is not null;
+
+    private bool HasPersistedConversationState =>
+        workspace is not null &&
+        (workspace.Messages.Count > 0 ||
+         workspace.ToolInvocations.Count > 0 ||
+         workspace.ApprovalRequests.Count > 0 ||
+         workspace.ChatRuns.Count > 0 ||
+         workspace.Checkpoints.Count > 0);
+
+    private bool IsInitialLoadPending =>
+        !hasLoadedOnce &&
+        !isLoaded &&
+        selectedThreadContext is null &&
+        workspace is null &&
+        threads.Count == 0 &&
+        string.IsNullOrWhiteSpace(loadError);
+
+    private IReadOnlyList<AiModelDefinition> CurrentModels =>
+        selectedThreadContext is null || string.IsNullOrWhiteSpace(selectedThreadContext.Editor.ProviderKey)
+            ? []
+            : selectedThreadContext.Models
+                .Where(model => model.ProviderKey.Equals(selectedThreadContext.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> AvailableThreadProviders =>
+        selectedThreadContext is null
+            ? []
+            : selectedThreadContext.ConfiguredProviders
+                .Where(provider =>
+                    (provider.IsEnabled &&
+                     selectedThreadContext.SupportedProviders.FirstOrDefault(definition => definition.ProviderType == provider.ProviderType)?.IsRuntimeImplemented != false) ||
+                    provider.ProviderKey.Equals(selectedThreadContext.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(provider => provider.IsDefault)
+                .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private IReadOnlyList<LinuxMadeSane.Core.Models.ManagedHost> ExplicitSelectedServers =>
+        selectedThreadContext is null
+            ? []
+            : selectedThreadContext.AvailableServers
+                .Where(server => selectedThreadContext.Editor.AttachedServerIds.Contains(server.Id))
+                .OrderBy(server => server.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private IReadOnlyList<AiAttachedServer> EffectiveAttachedServers =>
+        workspace is null
+            ? []
+            : workspace.AttachedServers
+                .OrderBy(server => server.ServerName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private AiChatThreadListItemViewModel? SelectedThreadListItem =>
+        ThreadId.HasValue
+            ? threads.FirstOrDefault(thread => thread.Id == ThreadId.Value)
+            : null;
+
+    private IReadOnlyList<AiChatThreadListItemViewModel> FilteredThreads
+    {
+        get
+        {
+            var filtered = threads
+                .Where(MatchesSearch)
+                .Where(MatchesFilter)
+                .ToList();
+
+            if (SelectedThreadListItem is not null &&
+                filtered.All(thread => thread.Id != SelectedThreadListItem.Id))
+            {
+                filtered.Insert(0, SelectedThreadListItem);
+            }
+
+            return filtered;
+        }
+    }
+
+    private IReadOnlyList<AiApprovalRequest> PendingApprovalRequests =>
+        workspace is null
+            ? []
+            : workspace.ApprovalRequests
+                .Where(request => request.State == AiApprovalState.Pending)
+                .OrderByDescending(request => request.RequestedAtUtc)
+                .Take(5)
+                .ToArray();
+
+    private IReadOnlyList<AiChatToolExecutionTimelineItemViewModel> RecentToolEvents =>
+        workspace is null
+            ? []
+            : workspace.Timeline
+                .OfType<AiChatToolExecutionTimelineItemViewModel>()
+                .OrderByDescending(item => item.StartedAtUtc)
+                .Take(5)
+                .ToArray();
+
+    private IReadOnlyList<string> AttachedEnvironments =>
+        EffectiveAttachedServers
+            .Select(server => string.IsNullOrWhiteSpace(server.Environment) ? "Unlabeled" : server.Environment)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(environment => environment, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private bool UsesImplicitLocalMachine =>
+        selectedThreadContext is not null &&
+        selectedThreadContext.Editor.AttachedServerIds.Count == 0;
+
+    private string? SelectedThreadTabValue =>
+        ThreadId?.ToString();
+
+    private bool IsThreadWorkspaceReady(Guid threadId) =>
+        ThreadId.HasValue &&
+        ThreadId.Value == threadId &&
+        selectedThreadContext?.Editor.Id == threadId &&
+        workspace?.Thread.Id == threadId;
+
+    private bool IsThreadWorkspaceLoading(Guid threadId) =>
+        ThreadId.HasValue &&
+        ThreadId.Value == threadId &&
+        (loadingThreadId == threadId || (!isLoaded && !IsThreadWorkspaceReady(threadId)));
+
+    private AiProviderDefinition SelectedProviderDefinition =>
+        selectedThreadContext is null
+            ? new AiProviderDefinition("unknown", AiProviderType.Unknown, "Unknown", "Unknown provider type.", false, false)
+            : selectedThreadContext.SupportedProviders.FirstOrDefault(provider =>
+                    provider.Key.Equals(selectedThreadContext.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase) ||
+                    provider.ProviderType == workspace?.Thread.ProviderType)
+                ?? new AiProviderDefinition("unknown", AiProviderType.Unknown, "Unknown", "Unknown provider type.", false, false);
+
+    private AiChatRun? ActiveRun =>
+        workspace?.ChatRuns
+            .OrderByDescending(run => run.UpdatedAtUtc)
+            .FirstOrDefault(run => !run.IsTerminal);
+
+    private AiChatRun? LatestRun =>
+        workspace?.ChatRuns
+            .OrderByDescending(run => run.UpdatedAtUtc)
+            .FirstOrDefault();
+
+    private AiChatRun? DisplayedRun => ActiveRun ?? LatestRun;
+
+    private bool CanCancelRun =>
+        ActiveRun is not null &&
+        ActiveRun.Status is AiChatRunStatus.Queued or AiChatRunStatus.Running or AiChatRunStatus.CancellationRequested;
+
+    private bool ShouldPollRun =>
+        ActiveRun is not null &&
+        ActiveRun.Status is AiChatRunStatus.Queued or AiChatRunStatus.Running or AiChatRunStatus.CancellationRequested;
+
+    private string ServerContextSummary =>
+        UsesImplicitLocalMachine
+            ? "No explicit machines linked. This chat defaults to the local Linux Made Sane machine."
+            : $"{EffectiveAttachedServers.Count} linked machine(s) across {AttachedEnvironments.Count} environment label(s).";
+
+    private string MachineScopeLabel =>
+        UsesImplicitLocalMachine
+            ? "Local default"
+            : $"{ExplicitSelectedServers.Count} linked";
+
+    private CancellationTokenSource? workspaceRefreshCancellationTokenSource;
+    private Task? workspaceRefreshTask;
+
+    private RenderFragment ActiveThreadWorkspaceContent => @<section class="workspace-thread-shell">
+            <div class="workspace-thread-header">
+                <div class="workspace-thread-title">
+                    <label class="workspace-thread-title-field">
+                        <span>Chat title</span>
+                        <InputText @bind-Value="selectedThreadContext!.Editor.Title" />
+                    </label>
+                    <span class="meta-text">Thread ID: @workspace!.Thread.Id</span>
+                </div>
+                <div class="workspace-thread-actions">
+                    <div class="workspace-thread-menus">
+                        <div class="workspace-provider-switcher-card">
+                            @if (AvailableThreadProviders.Count == 0)
+                            {
+                                <div class="callout info">
+                                    No enabled runnable provider is configured. Add one in Provider settings.
+                                </div>
+                            }
+                            else
+                            {
+                                @if (!SelectedProviderDefinition.IsRuntimeImplemented)
+                                {
+                                    <div class="callout warning">
+                                        @SelectedProviderDefinition.RuntimeNotes
+                                    </div>
+                                }
+
+                                <AiProviderSwitcher Providers="@AvailableThreadProviders"
+                                                    Models="@selectedThreadContext!.Models"
+                                                    ProviderKey="@selectedThreadContext.Editor.ProviderKey"
+                                                    ProviderKeyChanged="HandleThreadProviderChangedAsync"
+                                                    ModelId="@selectedThreadContext.Editor.ModelId"
+                                                    ModelIdChanged="HandleThreadModelChangedAsync"
+                                                    Disabled="@(HasActiveRun || isSavingWorkspace || isApplyingProviderSelection)"
+                                                    ProviderLabel="AI provider"
+                                                    ModelLabel="Model"
+                                                    Class="workspace-provider-switcher" />
+                            }
+                        </div>
+
+                        <details class="workspace-popover">
+                            <summary class="workspace-menu-button">
+                                <span class="workspace-menu-label">Trust</span>
+                                <span class="workspace-menu-value">@workspace.Thread.TrustProfile.TrustLevel</span>
+                            </summary>
+                            <div class="workspace-menu-panel">
+                                <div class="stack-form workspace-menu-form">
+                                    <label>
+                                        <span>Trust preset</span>
+                                        <UiCombobox @bind-Value="selectedThreadContext.Editor.TrustLevel" @bind-Value:after="OnTrustLevelChangedAsync">
+                                            @foreach (var level in Enum.GetValues<AiTrustLevel>())
+                                            {
+                                                <option value="@level">@level</option>
+                                            }
+                                        </UiCombobox>
+                                    </label>
+
+                                    <div class="workspace-toggle-grid">
+                                        <label class="checkbox-row">
+                                            <span>Read-only tools</span>
+                                            <InputCheckbox @bind-Value="selectedThreadContext.Editor.AllowReadOnlyTools" />
+                                        </label>
+
+                                        <label class="checkbox-row">
+                                            <span>Mutating tools</span>
+                                            <InputCheckbox @bind-Value="selectedThreadContext.Editor.AllowMutatingTools" />
+                                        </label>
+
+                                        <label class="checkbox-row">
+                                            <span>Approve medium risk</span>
+                                            <InputCheckbox @bind-Value="selectedThreadContext.Editor.RequireApprovalForMediumRisk" />
+                                        </label>
+
+                                        <label class="checkbox-row">
+                                            <span>Approve high risk</span>
+                                            <InputCheckbox @bind-Value="selectedThreadContext.Editor.RequireApprovalForHighRisk" />
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </details>
+
+                        <details class="workspace-popover">
+                            <summary class="workspace-menu-button">
+                                <span class="workspace-menu-label">Machines</span>
+                                <span class="workspace-menu-value">@MachineScopeLabel</span>
+                            </summary>
+                            <div class="workspace-menu-panel workspace-menu-panel-wide">
+                                <p class="helper-text">@ServerContextSummary</p>
+
+                                @if (EffectiveAttachedServers.Count > 0)
+                                {
+                                    <div class="selection-pill-row compact">
+                                        @foreach (var server in EffectiveAttachedServers)
+                                        {
+                                            <span class="selection-pill">@server.ServerName</span>
+                                        }
+                                    </div>
+                                }
+
+                                @if (selectedThreadContext.AvailableServers.Count == 0)
+                                {
+                                    <div class="empty-state">
+                                        @(UsesImplicitLocalMachine
+                                            ? "No saved machine profiles. This chat still uses the local Linux Made Sane machine by default."
+                                            : "No machine profiles available.")
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="compact-picker-list">
+                                        @foreach (var server in selectedThreadContext.AvailableServers)
+                                        {
+                                            <button class="compact-picker-option @(IsServerSelected(server.Id) ? "selected" : string.Empty)"
+                                                    type="button"
+                                                    @onclick="(() => ToggleServer(server.Id))">
+                                                <div class="stack-tight">
+                                                    <strong>@server.Name</strong>
+                                                    <span class="meta-text">@server.Hostname:@server.Port</span>
+                                                    <span class="meta-text">@server.Environment</span>
+                                                </div>
+                                                <span class="status-pill @(IsServerSelected(server.Id) ? "success" : "neutral")">
+                                                    @(IsServerSelected(server.Id) ? "Linked" : "Available")
+                                                </span>
+                                            </button>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        </details>
+                    </div>
+
+                    <div class="workspace-thread-command-bar">
+                        @if (DisplayedRun is not null)
+                        {
+                            <span class="status-pill @GetRunPillClass(DisplayedRun.Status)">@DisplayedRun.Status</span>
+                            <span class="status-pill neutral">@DisplayedRun.Step</span>
+                        }
+                        <UiCommandButton Label="@(isCreatingThread ? "Creating..." : "New chat")"
+                                         Glyph="UiIconGlyph.Plus"
+                                         Variant="UiButtonVariant.Toolbar"
+                                         Class="workspace-quick-button"
+                                         OnClick="CreateThreadAndNavigateAsync"
+                                         Disabled="@isCreatingThread" />
+                        <UiCommandButton Label="@(isSavingWorkspace ? "Saving..." : "Save")"
+                                         Glyph="UiIconGlyph.Connect"
+                                         Variant="UiButtonVariant.Action"
+                                         OnClick="SaveWorkspaceAsync"
+                                         Disabled="@isSavingWorkspace" />
+                        @if (CanCancelRun)
+                        {
+                            <UiCommandButton Label="Cancel run" Glyph="UiIconGlyph.Interrupt" Variant="UiButtonVariant.Danger" OnClick="RequestRunCancellationAsync" />
+                        }
+                    </div>
+                </div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(workspaceError))
+            {
+                <div class="callout error">@workspaceError</div>
+            }
+
+            @if (DisplayedRun is not null)
+            {
+                <div class="callout @GetRunCalloutClass(DisplayedRun.Status)">
+                    <div class="workspace-run-status">
+                        <div class="stack-tight">
+                            <strong>Turn status</strong>
+                            <span class="meta-text">Updated @DisplayedRun.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                        </div>
+                        <div class="row-action-cluster">
+                            <span class="status-pill @GetRunPillClass(DisplayedRun.Status)">@DisplayedRun.Status</span>
+                            <span class="status-pill neutral">@DisplayedRun.Step</span>
+                        </div>
+                    </div>
+                    <p class="chat-run-summary">@DisplayedRun.StatusSummary</p>
+                    @if (!string.IsNullOrWhiteSpace(DisplayedRun.LastError))
+                    {
+                        <pre class="command-preview-block">@DisplayedRun.LastError</pre>
+                    }
+                </div>
+            }
+
+            <div class="chat-history-shell">
+                <div class="table-header">
+                    <h2 class="section-title-compact">Conversation timeline</h2>
+                    <div class="row-action-cluster">
+                        <span>@workspace.Timeline.Count item(s)</span>
+                        <UiCommandButton Label="@(isClearingConversation ? "Clearing..." : "Clear conversation")"
+                                         Glyph="UiIconGlyph.Clear"
+                                         Variant="UiButtonVariant.Toolbar"
+                                         OnClick="ConfirmAndClearConversationAsync"
+                                         Disabled="@(HasActiveRun || isClearingConversation || !HasPersistedConversationState)" />
+                    </div>
+                </div>
+
+                @if (workspace.Timeline.Count == 0)
+                {
+                    <div class="empty-state">
+                        No events yet.
+                    </div>
+                }
+                else
+                {
+                    <div class="chat-history-list">
+                        @foreach (var timelineItem in workspace.Timeline)
+                        {
+                            if (timelineItem is AiChatMessageTimelineItemViewModel messageItem)
+                            {
+                                var message = messageItem.Message;
+
+                                <article class="chat-message-card @GetMessageCardClass(message)">
+                                    <div class="chat-card-header">
+                                        <div class="row-action-cluster">
+                                            <span class="status-pill @GetMessagePillClass(message.Role)">@message.Role</span>
+                                            <span class="meta-text">#@message.SequenceNumber</span>
+                                            <span class="meta-text">@message.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
+                                        </div>
+                                        <div class="row-action-cluster">
+                                            <UiCommandButton Label="@(IsMutatingMessage(message.Id) ? "Removing..." : "Remove")"
+                                                             Glyph="UiIconGlyph.Delete"
+                                                             Variant="UiButtonVariant.Toolbar"
+                                                             OnClick="@(() => ConfirmAndRemoveMessageAsync(message.Id, false))"
+                                                             Disabled="@(HasActiveRun || IsMutatingMessage(message.Id))" />
+                                            @if (message.Role == AiChatMessageRole.User)
+                                            {
+                                                <UiCommandButton Label="Trim here"
+                                                                 Glyph="UiIconGlyph.Cut"
+                                                                 Variant="UiButtonVariant.Toolbar"
+                                                                 OnClick="@(() => ConfirmAndRemoveMessageAsync(message.Id, true))"
+                                                                 Disabled="@(HasActiveRun || IsMutatingMessage(message.Id))" />
+                                            }
+                                        </div>
+                                    </div>
+                                    <p class="chat-message-content">@message.Content</p>
+                                </article>
+                            }
+                            else if (timelineItem is AiChatToolExecutionTimelineItemViewModel toolItem)
+                            {
+                                <article class="chat-message-card tool-event-card @GetToolEventCardClass(toolItem)">
+                                    <div class="chat-card-header">
+                                        <div class="row-action-cluster">
+                                            <span class="status-pill warning">Tool</span>
+                                            <span class="status-pill @GetToolStatusPillClass(toolItem.Status)">@toolItem.Status</span>
+                                            <span class="status-pill @GetApprovalStatusPillClass(toolItem.ApprovalStatus)">@toolItem.ApprovalStatus</span>
+                                            @if (toolItem.SafeChange is not null)
+                                            {
+                                                <span class="status-pill neutral">@toolItem.RiskLevel</span>
+                                            }
+                                            <span class="meta-text">@toolItem.ToolName</span>
+                                            <span class="meta-text">@toolItem.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
+                                        </div>
+                                        @if (toolItem.IsCommandExecution && toolItem.Status != AiInvocationStatus.Running)
+                                        {
+                                            <div class="row-action-cluster">
+                                                <UiCommandButton Label="@(IsMutatingTool(toolItem.InvocationId) ? "Working..." : "Re-run command")"
+                                                                 Glyph="UiIconGlyph.Run"
+                                                                 Variant="UiButtonVariant.Toolbar"
+                                                                 OnClick="@(() => ReRunCommandAsync(toolItem.InvocationId))"
+                                                                 Disabled="@(HasActiveRun || IsMutatingTool(toolItem.InvocationId))" />
+                                                <UiCommandButton Label="Ask AI to retry"
+                                                                 Glyph="UiIconGlyph.Ai"
+                                                                 Variant="UiButtonVariant.Toolbar"
+                                                                 OnClick="@(() => AskAiToRetryCommandAsync(toolItem.InvocationId))"
+                                                                 Disabled="@(HasActiveRun || IsMutatingTool(toolItem.InvocationId))" />
+                                                @if (CanRequestRollback(toolItem))
+                                                {
+                                                    <UiIconButton Label="Rollback"
+                                                                  Title="Rollback this change"
+                                                                  Glyph="UiIconGlyph.Refresh"
+                                                                  Variant="UiButtonVariant.Ghost"
+                                                                  OnClick="@(() => RequestRollbackAsync(toolItem))"
+                                                                  Disabled="@(HasActiveRun || IsMutatingTool(toolItem.InvocationId))" />
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                    <p class="chat-message-content">@toolItem.Title</p>
+                                    <p class="meta-text">@toolItem.Summary</p>
+
+                                    <div class="tool-event-meta-grid">
+                                        @if (!string.IsNullOrWhiteSpace(toolItem.TargetServerName))
+                                        {
+                                            <span class="meta-text"><strong>Target</strong> @toolItem.TargetServerName</span>
+                                        }
+                                        <span class="meta-text"><strong>Approval</strong> @toolItem.ApprovalStatus</span>
+                                        <span class="meta-text"><strong>Started</strong> @toolItem.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                                        <span class="meta-text"><strong>Ended</strong> @FormatCompletedAt(toolItem.CompletedAtUtc)</span>
+                                        @if (toolItem.ExitCode.HasValue)
+                                        {
+                                            <span class="meta-text"><strong>Exit code</strong> @toolItem.ExitCode.Value</span>
+                                        }
+                                        @if (toolItem.SafeChange is not null)
+                                        {
+                                            <span class="meta-text"><strong>Rollback</strong> @toolItem.SafeChange.RollbackPlan.SupportLevel</span>
+                                        }
+                                    </div>
+
+                                    <details class="tool-event-details" open="@toolItem.IsFailure">
+                                        <summary>@GetToolDetailsLabel(toolItem)</summary>
+                                        <div class="tool-output-panel">
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.CommandText))
+                                            {
+                                                <div class="tool-output-block">
+                                                    <span class="selection-title">Command</span>
+                                                    <pre class="command-preview-block command-display-block">@FormatCommandForDisplay(toolItem.CommandText)</pre>
+                                                </div>
+                                            }
+
+                                            @if (toolItem.SafeChange is not null)
+                                            {
+                                                <div class="tool-output-block safe-change-block">
+                                                    <span class="selection-title">What changed</span>
+                                                    <p class="meta-text">@(string.IsNullOrWhiteSpace(toolItem.SafeChange.ChangeSummary) ? toolItem.SafeChange.ImpactPreview.WhatWillChange : toolItem.SafeChange.ChangeSummary)</p>
+                                                    <p class="helper-text">@toolItem.SafeChange.ImpactPreview.WhyItIsNeeded</p>
+                                                </div>
+
+                                                <div class="tool-output-block safe-change-block">
+                                                    <span class="selection-title">Verification result</span>
+                                                    @if (toolItem.SafeChange.VerificationResult is null)
+                                                    {
+                                                        <p class="meta-text">Verification has not been recorded yet.</p>
+                                                    }
+                                                    else
+                                                    {
+                                                        <p class="meta-text">@toolItem.SafeChange.VerificationResult.Summary</p>
+                                                        <ul class="safe-change-list">
+                                                            @foreach (var step in toolItem.SafeChange.VerificationResult.Steps)
+                                                            {
+                                                                <li class="@(step.Succeeded ? "safe-change-step-success" : "safe-change-step-failure")">
+                                                                    <strong>@step.Label</strong> @step.Details
+                                                                </li>
+                                                            }
+                                                        </ul>
+                                                    }
+                                                </div>
+
+                                                <details class="tool-output-block safe-change-detail-panel">
+                                                    <summary class="selection-title">Snapshot and rollback details</summary>
+                                                    <div class="stack-tight">
+                                                        <p class="meta-text"><strong>Rollback support</strong> @toolItem.SafeChange.RollbackPlan.SupportLevel</p>
+                                                        <p class="meta-text">@toolItem.SafeChange.RollbackPlan.Summary</p>
+                                                        @if (toolItem.SafeChange.Snapshot is not null)
+                                                        {
+                                                            <p class="meta-text"><strong>Snapshot</strong> @toolItem.SafeChange.Snapshot.Id</p>
+                                                            <p class="meta-text">@toolItem.SafeChange.Snapshot.Summary</p>
+                                                            <ul class="safe-change-list">
+                                                                @foreach (var item in toolItem.SafeChange.Snapshot.CapturedItems)
+                                                                {
+                                                                    <li>@item</li>
+                                                                }
+                                                            </ul>
+                                                        }
+                                                        @if (toolItem.SafeChange.RollbackResult is not null)
+                                                        {
+                                                            <p class="meta-text"><strong>Rollback result</strong> @toolItem.SafeChange.RollbackResult.Summary</p>
+                                                            <ul class="safe-change-list">
+                                                                @foreach (var item in toolItem.SafeChange.RollbackResult.RestoredItems)
+                                                                {
+                                                                    <li>@item</li>
+                                                                }
+                                                                @foreach (var item in toolItem.SafeChange.RollbackResult.RemainingItems)
+                                                                {
+                                                                    <li class="safe-change-step-failure">@item</li>
+                                                                }
+                                                            </ul>
+                                                        }
+                                                    </div>
+                                                </details>
+                                            }
+
+                                            @if (toolItem.Status == AiInvocationStatus.Running && !toolItem.IsProgressiveOutputAvailable)
+                                            {
+                                                <p class="helper-text">
+                                                    Running. Output appears when the command finishes.
+                                                </p>
+                                            }
+
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.StandardOutput))
+                                            {
+                                                <div class="tool-output-block">
+                                                    <span class="selection-title">stdout</span>
+                                                    <pre class="command-preview-block tool-text-block">@toolItem.StandardOutput</pre>
+                                                </div>
+                                            }
+
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.StandardError))
+                                            {
+                                                <div class="tool-output-block tool-output-block-failure">
+                                                    <span class="selection-title">stderr</span>
+                                                    <pre class="command-preview-block tool-text-block">@toolItem.StandardError</pre>
+                                                </div>
+                                            }
+
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.OutputText))
+                                            {
+                                                <div class="tool-output-block">
+                                                    <span class="selection-title">Output</span>
+                                                    <pre class="command-preview-block tool-text-block">@toolItem.OutputText</pre>
+                                                </div>
+                                            }
+
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.PayloadText))
+                                            {
+                                                <div class="tool-output-block">
+                                                    <span class="selection-title">Structured payload</span>
+                                                    <pre class="command-preview-block tool-text-block">@toolItem.PayloadText</pre>
+                                                </div>
+                                            }
+                                        </div>
+                                    </details>
+                                </article>
+                            }
+                        }
+                    </div>
+                }
+            </div>
+
+            <EditForm Model="@messageComposer" OnValidSubmit="SendMessageAsync" class="stack-form chat-compose-form">
+                <DataAnnotationsValidator />
+
+                @if (!string.IsNullOrWhiteSpace(messageError))
+                {
+                    <div class="callout error">@messageError</div>
+                }
+
+                <label>
+                    <span>New user message</span>
+                    <InputTextArea @bind-Value="messageComposer.Content" placeholder="Describe the Linux task, question, or context you want to keep in this chat." />
+                    <ValidationMessage For="@(() => messageComposer.Content)" />
+                </label>
+
+                <div class="hero-actions">
+                    <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Turn in progress" : "Send message")"
+                                     Glyph="UiIconGlyph.Send"
+                                     Type="submit"
+                                     Disabled="@(isSendingMessage || HasActiveRun)" />
+                </div>
+
+                @if (HasActiveRun)
+                {
+                    <p class="helper-text">
+                        Finish or cancel the current turn before sending another message.
+                    </p>
+                }
+            </EditForm>
+            <div class="workspace-support-panels">
+                <details class="surface-subcard workspace-drawer" open="@(PendingApprovalRequests.Count > 0)">
+                    <summary class="workspace-drawer-summary">
+                        <span>Approvals</span>
+                        <span class="meta-text">@PendingApprovalRequests.Count pending</span>
+                    </summary>
+
+                    @if (!string.IsNullOrWhiteSpace(approvalError))
+                    {
+                        <div class="callout error">@approvalError</div>
+                    }
+
+                    @if (PendingApprovalRequests.Count == 0)
+                    {
+                        <div class="empty-state">
+                            No pending approvals.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="stack-list">
+                            @foreach (var request in PendingApprovalRequests)
+                            {
+                                var draft = GetApprovalDraft(request.Id);
+                                var pendingAction = GetProposedAction(request.ProposedActionId);
+
+                                <div class="surface-subcard approval-card">
+                                    <div class="row-action-cluster">
+                                        <strong>@request.Title</strong>
+                                        <span class="status-pill warning">@request.RiskLevel</span>
+                                        <span class="status-pill neutral">@request.Requirement</span>
+                                    </div>
+                                    <p class="meta-text">@request.Summary</p>
+                                    <div class="stack-tight">
+                                        <span class="meta-text">Tool: @request.ToolName</span>
+                                        <span class="meta-text">Needs reviewer trust: @request.RequiredTrustLevel</span>
+                                        <span class="meta-text">Requested: @request.RequestedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
+                                    </div>
+                                    <p class="helper-text">@request.PolicyReason</p>
+
+                                    @if (pendingAction?.SafeChange is not null)
+                                    {
+                                        var preview = pendingAction.SafeChange.ImpactPreview;
+                                        var rollbackPlan = pendingAction.SafeChange.RollbackPlan;
+                                        var verificationPlan = pendingAction.SafeChange.VerificationPlan;
+
+                                        <div class="safe-change-preview-card">
+                                            <div class="row-action-cluster">
+                                                <strong>Impact Preview</strong>
+                                                <span class="status-pill warning">@pendingAction.RiskLevel</span>
+                                                <span class="status-pill neutral">Rollback @rollbackPlan.SupportLevel</span>
+                                            </div>
+                                            <p class="meta-text">@preview.WhatWillChange</p>
+                                            <p class="helper-text">@preview.WhyItIsNeeded</p>
+                                            <div class="tool-event-meta-grid safe-change-meta-grid">
+                                                <span class="meta-text"><strong>Service effect</strong> @preview.ServiceImpact</span>
+                                                <span class="meta-text"><strong>Interruption</strong> @preview.ExpectedInterruption</span>
+                                                <span class="meta-text"><strong>Risk</strong> @preview.RiskSummary</span>
+                                                <span class="meta-text"><strong>Verification</strong> @verificationPlan.Summary</span>
+                                            </div>
+
+                                            @if (preview.AffectedTargets.Count > 0)
+                                            {
+                                                <div class="safe-change-block">
+                                                    <span class="selection-title">Affected resources</span>
+                                                    <ul class="safe-change-list">
+                                                        @foreach (var target in preview.AffectedTargets)
+                                                        {
+                                                            <li><strong>@target.Kind</strong> @target.Name @target.Detail</li>
+                                                        }
+                                                    </ul>
+                                                </div>
+                                            }
+
+                                            <div class="safe-change-block">
+                                                <span class="selection-title">Verification steps</span>
+                                                <ul class="safe-change-list">
+                                                    @foreach (var step in verificationPlan.Steps)
+                                                    {
+                                                        <li>@step</li>
+                                                    }
+                                                </ul>
+                                            </div>
+
+                                            @if (preview.Warnings.Count > 0 || rollbackPlan.ManualSteps.Count > 0 || !string.IsNullOrWhiteSpace(rollbackPlan.Limitations))
+                                            {
+                                                <div class="safe-change-block">
+                                                    <span class="selection-title">Rollback notes</span>
+                                                    <ul class="safe-change-list">
+                                                        @foreach (var warning in preview.Warnings)
+                                                        {
+                                                            <li>@warning</li>
+                                                        }
+                                                        @foreach (var step in rollbackPlan.ManualSteps)
+                                                        {
+                                                            <li>@step</li>
+                                                        }
+                                                    </ul>
+                                                    @if (!string.IsNullOrWhiteSpace(rollbackPlan.Limitations))
+                                                    {
+                                                        <p class="helper-text">@rollbackPlan.Limitations</p>
+                                                    }
+                                                </div>
+                                            }
+                                        </div>
+                                    }
+
+                                    @if (!string.IsNullOrWhiteSpace(request.CommandPreview))
+                                    {
+                                        <div class="approval-command-preview">
+                                            <span class="selection-title">Command preview</span>
+                                            <pre class="command-preview-block command-display-block">@FormatCommandForDisplay(request.CommandPreview)</pre>
+                                        </div>
+                                    }
+
+                                    <div class="stack-form approval-review-form">
+                                        <div class="field-row">
+                                            <label>
+                                                <span>Reviewer name</span>
+                                                <InputText @bind-Value="draft.ActorName" />
+                                            </label>
+
+                                            <label>
+                                                <span>Reviewer trust</span>
+                                                <UiCombobox @bind-Value="draft.UserTrustLevel">
+                                                    @foreach (var trustLevel in Enum.GetValues<AiUserTrustLevel>())
+                                                    {
+                                                        <option value="@trustLevel">@trustLevel</option>
+                                                    }
+                                                </UiCombobox>
+                                            </label>
+                                        </div>
+
+                                        @if (request.RequiredTrustLevel == AiUserTrustLevel.Admin)
+                                        {
+                                            <label class="checkbox-row">
+                                                <span>Use admin override</span>
+                                                <InputCheckbox @bind-Value="draft.AdminOverrideUsed" />
+                                            </label>
+                                        }
+
+                                        @if (request.RememberDecisionSupported)
+                                        {
+                                            <label class="checkbox-row">
+                                                <span>Remember this decision later</span>
+                                                <InputCheckbox @bind-Value="draft.RememberDecision" />
+                                            </label>
+                                        }
+
+                                        <label>
+                                            <span>Decision note</span>
+                                            <InputTextArea @bind-Value="draft.Reason" placeholder="Optional audit note for this approval decision." />
+                                        </label>
+
+                                        <div class="hero-actions">
+                                            <UiCommandButton Label="Approve"
+                                                             Glyph="UiIconGlyph.Connect"
+                                                             Variant="UiButtonVariant.Action"
+                                                             OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.Approve))"
+                                                             Disabled="@IsSubmittingApproval(request.Id)" />
+                                            <UiCommandButton Label="Approve once"
+                                                             Glyph="UiIconGlyph.Connect"
+                                                             Variant="UiButtonVariant.Action"
+                                                             OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.ApproveOnce))"
+                                                             Disabled="@IsSubmittingApproval(request.Id)" />
+                                            <UiCommandButton Label="Deny"
+                                                             Glyph="UiIconGlyph.Disconnect"
+                                                             Variant="UiButtonVariant.Danger"
+                                                             OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.Deny))"
+                                                             Disabled="@IsSubmittingApproval(request.Id)" />
+                                        </div>
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    }
+                </details>
+
+                <details class="surface-subcard workspace-drawer">
+                    <summary class="workspace-drawer-summary">
+                        <span>Recent tool activity</span>
+                        <span class="meta-text">@RecentToolEvents.Count item(s)</span>
+                    </summary>
+
+                    @if (RecentToolEvents.Count == 0)
+                    {
+                        <div class="empty-state">
+                            No tool activity yet.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="stack-list">
+                            @foreach (var toolEvent in RecentToolEvents)
+                            {
+                                <div class="surface-subcard">
+                                    <div class="row-action-cluster">
+                                        <strong>@toolEvent.Title</strong>
+                                        <span class="status-pill @GetToolStatusPillClass(toolEvent.Status)">@toolEvent.Status</span>
+                                    </div>
+                                    <p class="meta-text">@toolEvent.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</p>
+                                    @if (!string.IsNullOrWhiteSpace(toolEvent.TargetServerName))
+                                    {
+                                        <p class="meta-text">Target: @toolEvent.TargetServerName</p>
+                                    }
+                                    <p class="meta-text">Approval: @toolEvent.ApprovalStatus</p>
+                                    @if (toolEvent.ExitCode.HasValue)
+                                    {
+                                        <p class="meta-text">Exit code: @toolEvent.ExitCode.Value</p>
+                                    }
+                                    <p class="meta-text">@toolEvent.Summary</p>
+                                </div>
+                            }
+                        </div>
+                    }
+                </details>
+            </div>
+        </section>;
+
+    protected override Task OnParametersSetAsync()
+    {
+        NavigationManager.NavigateTo("/ai", replace: true);
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAsync()
+    {
+        isLoaded = false;
+        loadingThreadId = ThreadId;
+        loadError = string.Empty;
+        workspaceError = string.Empty;
+        messageError = string.Empty;
+
+        try
+        {
+            await RefreshThreadsAsync();
+
+            if (IsNewRoute)
+            {
+                loadingThreadId = null;
+                await CreateThreadAndNavigateAsync();
+                return;
+            }
+
+            if (!ThreadId.HasValue)
+            {
+                loadingThreadId = null;
+                if (threads.Count > 0)
+                {
+                    NavigationManager.NavigateTo($"/ai/threads/{threads[0].Id}", replace: true);
+                    return;
+                }
+
+                selectedThreadContext = null;
+                workspace = null;
+                SyncApprovalDrafts();
+                StopWorkspaceRefreshLoop();
+                return;
+            }
+
+            await LoadSelectedThreadAsync(ThreadId.Value);
+        }
+        catch (Exception exception)
+        {
+            selectedThreadContext = null;
+            workspace = null;
+            StopWorkspaceRefreshLoop();
+            loadError = exception.Message;
+        }
+        finally
+        {
+            loadingThreadId = null;
+            isLoaded = true;
+            hasLoadedOnce = true;
+        }
+    }
+
+    private async Task RefreshThreadsAsync()
+    {
+        threads = await ThreadService.ListThreadsAsync();
+    }
+
+    private async Task LoadSelectedThreadAsync(Guid threadId)
+    {
+        selectedThreadContext = await ThreadService.GetEditorAsync(threadId);
+        workspace = await ChatService.GetWorkspaceAsync(threadId);
+        SyncApprovalDrafts();
+        UpdateWorkspaceRefreshLoop();
+    }
+
+    private async Task RefreshWorkspaceAsync()
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        workspace = await ChatService.GetWorkspaceAsync(ThreadId.Value);
+        SyncApprovalDrafts();
+        UpdateWorkspaceRefreshLoop();
+    }
+
+    private async Task CreateThreadAndNavigateAsync()
+    {
+        isCreatingThread = true;
+
+        try
+        {
+            var threadId = await ThreadService.CreateThreadAsync();
+            NavigationManager.NavigateTo($"/ai/threads/{threadId}", replace: true);
+        }
+        catch (Exception exception)
+        {
+            workspaceError = exception.Message;
+            isLoaded = true;
+        }
+        finally
+        {
+            isCreatingThread = false;
+        }
+    }
+
+    private async Task SaveWorkspaceAsync()
+    {
+        if (!HasActiveWorkspace)
+        {
+            return;
+        }
+
+        isSavingWorkspace = true;
+        workspaceError = string.Empty;
+
+        try
+        {
+            var threadId = await ThreadService.SaveThreadAsync(selectedThreadContext!.Editor);
+            await RefreshThreadsAsync();
+            await LoadSelectedThreadAsync(threadId);
+        }
+        catch (Exception exception)
+        {
+            workspaceError = exception.Message;
+        }
+        finally
+        {
+            isSavingWorkspace = false;
+        }
+    }
+
+    private async Task SendMessageAsync()
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        isSendingMessage = true;
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.SendUserMessageAsync(ThreadId.Value, messageComposer);
+            messageComposer = new AiChatMessageComposer();
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            isSendingMessage = false;
+        }
+    }
+
+    private async Task RequestRunCancellationAsync()
+    {
+        if (ActiveRun is null)
+        {
+            return;
+        }
+
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.RequestCancellationAsync(ActiveRun.Id);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+    }
+
+    private async Task ConfirmAndRemoveMessageAsync(Guid messageId, bool truncateFromMessage)
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        var confirmationText = truncateFromMessage
+            ? "Trim the conversation from this message onward? This resets the provider conversation state for the thread."
+            : "Remove this message? Removing a user message also removes its assistant replies for that turn.";
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", confirmationText))
+        {
+            return;
+        }
+
+        mutatingMessageIds.Add(messageId);
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.RemoveMessageAsync(ThreadId.Value, messageId, truncateFromMessage);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            mutatingMessageIds.Remove(messageId);
+        }
+    }
+
+    private async Task ConfirmAndClearConversationAsync()
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", "Clear the whole conversation for this thread? This removes messages, runs, approvals, command results, checkpoints, and resets the provider state."))
+        {
+            return;
+        }
+
+        isClearingConversation = true;
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.ClearConversationAsync(ThreadId.Value);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            isClearingConversation = false;
+        }
+    }
+
+    private async Task ReRunCommandAsync(Guid invocationId)
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        mutatingToolIds.Add(invocationId);
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.ReRunCommandAsync(ThreadId.Value, invocationId);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            mutatingToolIds.Remove(invocationId);
+        }
+    }
+
+    private async Task AskAiToRetryCommandAsync(Guid invocationId)
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        mutatingToolIds.Add(invocationId);
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.AskAiToRetryCommandAsync(ThreadId.Value, invocationId);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            mutatingToolIds.Remove(invocationId);
+        }
+    }
+
+    private async Task RequestRollbackAsync(AiChatToolExecutionTimelineItemViewModel toolItem)
+    {
+        if (!ThreadId.HasValue || !toolItem.ProposedActionId.HasValue)
+        {
+            return;
+        }
+
+        mutatingToolIds.Add(toolItem.InvocationId);
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.RequestRollbackAsync(ThreadId.Value, toolItem.ProposedActionId.Value);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            mutatingToolIds.Remove(toolItem.InvocationId);
+        }
+    }
+
+    private async Task HandleThreadProviderChangedAsync(string providerKey)
+    {
+        if (selectedThreadContext is null)
+        {
+            return;
+        }
+
+        selectedThreadContext.Editor.ProviderKey = providerKey;
+        SyncSelectedModelForCurrentProvider();
+        await ApplyThreadProviderSelectionAsync();
+    }
+
+    private async Task HandleThreadModelChangedAsync(string modelId)
+    {
+        if (selectedThreadContext is null)
+        {
+            return;
+        }
+
+        selectedThreadContext.Editor.ModelId = modelId;
+        await ApplyThreadProviderSelectionAsync();
+    }
+
+    private void SyncSelectedModelForCurrentProvider()
+    {
+        if (selectedThreadContext is null)
+        {
+            return;
+        }
+
+        var selection = AiProviderSelectionResolver.Resolve(
+            selectedThreadContext.Editor.ProviderKey,
+            selectedThreadContext.Editor.ModelId,
+            selectedThreadContext.Editor.ProviderKey,
+            string.Empty,
+            AvailableThreadProviders,
+            selectedThreadContext.Models);
+        selectedThreadContext.Editor.ProviderKey = selection.ProviderKey;
+        selectedThreadContext.Editor.ModelId = selection.ModelId;
+    }
+
+    private async Task ApplyThreadProviderSelectionAsync()
+    {
+        if (!HasActiveWorkspace || selectedThreadContext is null || workspace is null)
+        {
+            return;
+        }
+
+        var providerKey = selectedThreadContext.Editor.ProviderKey.Trim();
+        var modelId = selectedThreadContext.Editor.ModelId.Trim();
+        if (string.Equals(providerKey, workspace.Thread.ProviderKey, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(modelId, workspace.Thread.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        isApplyingProviderSelection = true;
+        workspaceError = string.Empty;
+
+        try
+        {
+            await ThreadService.UpdateProviderSelectionAsync(workspace.Thread.Id, providerKey, modelId);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            workspaceError = exception.Message;
+            selectedThreadContext.Editor.ProviderKey = workspace.Thread.ProviderKey;
+            selectedThreadContext.Editor.ModelId = workspace.Thread.ModelId;
+        }
+        finally
+        {
+            isApplyingProviderSelection = false;
+        }
+    }
+
+    private Task OnTrustLevelChangedAsync()
+    {
+        if (selectedThreadContext is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        var preset = AiTrustProfile.CreatePreset(selectedThreadContext.Editor.TrustLevel);
+        selectedThreadContext.Editor.AllowReadOnlyTools = preset.AllowReadOnlyTools;
+        selectedThreadContext.Editor.AllowMutatingTools = preset.AllowMutatingTools;
+        selectedThreadContext.Editor.RequireApprovalForMediumRisk = preset.RequireApprovalForMediumRisk;
+        selectedThreadContext.Editor.RequireApprovalForHighRisk = preset.RequireApprovalForHighRisk;
+        return Task.CompletedTask;
+    }
+
+    private bool IsServerSelected(Guid serverId) =>
+        selectedThreadContext?.Editor.AttachedServerIds.Contains(serverId) ?? false;
+
+    private AiApprovalDecisionCommand GetApprovalDraft(Guid requestId)
+    {
+        if (approvalDrafts.TryGetValue(requestId, out var draft))
+        {
+            return draft;
+        }
+
+        draft = new AiApprovalDecisionCommand();
+        approvalDrafts[requestId] = draft;
+        return draft;
+    }
+
+    private bool IsSubmittingApproval(Guid requestId) =>
+        submittingApprovalIds.Contains(requestId);
+
+    private bool IsMutatingMessage(Guid messageId) =>
+        mutatingMessageIds.Contains(messageId);
+
+    private bool IsMutatingTool(Guid invocationId) =>
+        mutatingToolIds.Contains(invocationId);
+
+    private AiProposedAction? GetProposedAction(Guid? proposedActionId) =>
+        !proposedActionId.HasValue || workspace is null
+            ? null
+            : workspace.ExecutionPlans
+                .SelectMany(plan => plan.Actions)
+                .FirstOrDefault(action => action.Id == proposedActionId.Value);
+
+    private static bool CanRequestRollback(AiChatToolExecutionTimelineItemViewModel toolItem) =>
+        toolItem.ProposedActionId.HasValue &&
+        !toolItem.ToolName.Equals(AiToolNames.RollbackSafeChange, StringComparison.OrdinalIgnoreCase) &&
+        toolItem.SafeChange?.SupportsRollback == true &&
+        toolItem.SafeChange.RollbackResult is null &&
+        toolItem.Status != AiInvocationStatus.Running;
+
+    private async Task SubmitApprovalDecisionAsync(Guid requestId, AiApprovalDecisionType decisionType)
+    {
+        var draft = GetApprovalDraft(requestId);
+        approvalError = string.Empty;
+        submittingApprovalIds.Add(requestId);
+
+        try
+        {
+            await ApprovalService.DecideApprovalAsync(
+                requestId,
+                new AiApprovalDecisionCommand
+                {
+                    DecisionType = decisionType,
+                    ActorName = draft.ActorName,
+                    UserTrustLevel = draft.UserTrustLevel,
+                    AdminOverrideUsed = draft.AdminOverrideUsed,
+                    RememberDecision = draft.RememberDecision,
+                    Reason = draft.Reason
+                });
+
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            approvalError = exception.Message;
+        }
+        finally
+        {
+            submittingApprovalIds.Remove(requestId);
+        }
+    }
+
+    private void ToggleServer(Guid serverId)
+    {
+        if (selectedThreadContext is null)
+        {
+            return;
+        }
+
+        if (selectedThreadContext.Editor.AttachedServerIds.Contains(serverId))
+        {
+            selectedThreadContext.Editor.AttachedServerIds.Remove(serverId);
+        }
+        else
+        {
+            selectedThreadContext.Editor.AttachedServerIds.Add(serverId);
+        }
+    }
+
+    private Task HandleThreadTabChangedAsync(string? value)
+    {
+        if (Guid.TryParse(value, out var threadId))
+        {
+            NavigationManager.NavigateTo($"/ai/threads/{threadId}");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private void SetThreadFilter(ThreadSidebarFilter filter) =>
+        activeThreadFilter = filter;
+
+    private bool MatchesSearch(AiChatThreadListItemViewModel thread)
+    {
+        var search = threadSearch.Trim();
+        if (string.IsNullOrWhiteSpace(search))
+        {
+            return true;
+        }
+
+        return thread.Title.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+               thread.ProviderLabel.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+               thread.ModelId.Contains(search, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool MatchesFilter(AiChatThreadListItemViewModel thread) => activeThreadFilter switch
+    {
+        ThreadSidebarFilter.PendingApproval => thread.PendingApprovalCount > 0,
+        ThreadSidebarFilter.NoServers => thread.AttachedServerCount == 0,
+        _ => true
+    };
+
+    private static string GetMessageCardClass(AiChatMessage message) => message.Role switch
+    {
+        AiChatMessageRole.User => "chat-message-user",
+        AiChatMessageRole.Assistant => "chat-message-assistant",
+        AiChatMessageRole.System => "chat-message-system",
+        _ => "chat-message-system"
+    };
+
+    private static string GetMessagePillClass(AiChatMessageRole role) => role switch
+    {
+        AiChatMessageRole.User => "success",
+        AiChatMessageRole.Assistant => "neutral",
+        AiChatMessageRole.System => "neutral",
+        _ => "neutral"
+    };
+
+    private static string GetToolEventCardClass(AiChatToolExecutionTimelineItemViewModel toolItem) =>
+        toolItem.IsFailure
+            ? "chat-message-tool chat-message-tool-failed"
+            : toolItem.Status == AiInvocationStatus.Running
+                ? "chat-message-tool chat-message-tool-running"
+                : "chat-message-tool";
+
+    private static string GetToolStatusPillClass(AiInvocationStatus status) => status switch
+    {
+        AiInvocationStatus.Succeeded => "success",
+        AiInvocationStatus.Failed => "failure",
+        AiInvocationStatus.Cancelled => "failure",
+        AiInvocationStatus.Running => "warning",
+        _ => "neutral"
+    };
+
+    private static string GetApprovalStatusPillClass(string approvalStatus)
+    {
+        if (approvalStatus.Contains("Denied", StringComparison.OrdinalIgnoreCase) ||
+            approvalStatus.Contains("Blocked", StringComparison.OrdinalIgnoreCase))
+        {
+            return "failure";
+        }
+
+        if (approvalStatus.Contains("Pending", StringComparison.OrdinalIgnoreCase))
+        {
+            return "warning";
+        }
+
+        if (approvalStatus.Contains("Approved", StringComparison.OrdinalIgnoreCase))
+        {
+            return "success";
+        }
+
+        return "neutral";
+    }
+
+    private static string GetRunPillClass(AiChatRunStatus status) => status switch
+    {
+        AiChatRunStatus.Completed => "success",
+        AiChatRunStatus.Failed => "failure",
+        AiChatRunStatus.Cancelled => "failure",
+        AiChatRunStatus.AwaitingApproval => "warning",
+        _ => "neutral"
+    };
+
+    private static string GetRunCalloutClass(AiChatRunStatus status) => status switch
+    {
+        AiChatRunStatus.Completed => "success",
+        AiChatRunStatus.Failed => "error",
+        AiChatRunStatus.Cancelled => "error",
+        AiChatRunStatus.AwaitingApproval => "warning",
+        _ => "info"
+    };
+
+    private static string GetToolDetailsLabel(AiChatToolExecutionTimelineItemViewModel toolItem) =>
+        toolItem.IsCommandExecution ? "Command result" : "Tool result";
+
+    private static string FormatCommandForDisplay(string commandText) =>
+        AiCommandDisplayFormatter.SanitizeDisplayText(commandText);
+
+    private static string BuildThreadTabTooltip(AiChatThreadListItemViewModel thread) =>
+        $"{thread.Title} | {thread.ProviderLabel} | {thread.ModelId} | {BuildThreadScopeSummary(thread)} | {thread.MessageCount} message(s) | updated {thread.UpdatedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm}";
+
+    private static string BuildThreadScopeSummary(AiChatThreadListItemViewModel thread) =>
+        thread.AttachedServerCount == 0
+            ? "local default"
+            : $"{thread.AttachedServerCount} machine(s)";
+
+    private static string FormatCompletedAt(DateTimeOffset? completedAtUtc) =>
+        completedAtUtc.HasValue
+            ? completedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+            : "Still running";
+
+    private void UpdateWorkspaceRefreshLoop()
+    {
+        if (ThreadId.HasValue && ShouldPollRun)
+        {
+            if (workspaceRefreshCancellationTokenSource is not null)
+            {
+                return;
+            }
+
+            workspaceRefreshCancellationTokenSource = new CancellationTokenSource();
+            workspaceRefreshTask = RunWorkspaceRefreshLoopAsync(ThreadId.Value, workspaceRefreshCancellationTokenSource.Token);
+            return;
+        }
+
+        StopWorkspaceRefreshLoop();
+    }
+
+    private async Task RunWorkspaceRefreshLoopAsync(Guid threadId, CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await InvokeAsync(async () =>
+                {
+                    if (!ThreadId.HasValue || ThreadId.Value != threadId)
+                    {
+                        StopWorkspaceRefreshLoop();
+                        return;
+                    }
+
+                    try
+                    {
+                        await RefreshThreadsAsync();
+                        workspace = await ChatService.GetWorkspaceAsync(threadId);
+                        SyncApprovalDrafts();
+                        UpdateWorkspaceRefreshLoop();
+                    }
+                    catch (Exception exception)
+                    {
+                        workspaceError = $"Workspace refresh failed: {exception.Message}";
+                        StopWorkspaceRefreshLoop();
+                    }
+
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void StopWorkspaceRefreshLoop()
+    {
+        if (workspaceRefreshCancellationTokenSource is null)
+        {
+            return;
+        }
+
+        workspaceRefreshCancellationTokenSource.Cancel();
+        workspaceRefreshCancellationTokenSource.Dispose();
+        workspaceRefreshCancellationTokenSource = null;
+        workspaceRefreshTask = null;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        var refreshTask = workspaceRefreshTask;
+        StopWorkspaceRefreshLoop();
+
+        if (refreshTask is not null)
+        {
+            try
+            {
+                await refreshTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+    }
+
+    private void SyncApprovalDrafts()
+    {
+        var pendingIds = PendingApprovalRequests
+            .Select(request => request.Id)
+            .ToHashSet();
+
+        foreach (var requestId in approvalDrafts.Keys.Where(id => !pendingIds.Contains(id)).ToArray())
+        {
+            approvalDrafts.Remove(requestId);
+        }
+
+        foreach (var requestId in pendingIds)
+        {
+            if (!approvalDrafts.ContainsKey(requestId))
+            {
+                approvalDrafts[requestId] = new AiApprovalDecisionCommand();
+            }
+        }
+
+        submittingApprovalIds.RemoveWhere(id => !pendingIds.Contains(id));
+    }
+
+    private enum ThreadSidebarFilter
+    {
+        All = 0,
+        PendingApproval = 1,
+        NoServers = 2
+    }
+}

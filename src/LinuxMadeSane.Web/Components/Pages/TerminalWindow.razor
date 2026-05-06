@@ -1,0 +1,929 @@
+@page "/terminal-window/{TabId:guid}"
+@layout PopupLayout
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@inject IManagedHostService HostService
+@inject ITerminalSessionService TerminalSessionService
+@inject ITransientConnectionSecretStore ConnectionSecretStore
+@inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+@inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
+@inject IJSRuntime JSRuntime
+@inject NavigationManager NavigationManager
+
+<PageTitle>Detached Terminal | Linux Made Sane</PageTitle>
+
+@* Guardrail: this detached window is a second terminal surface, not a second SSH
+   implementation. Reuse the shared workspace/session/secret abstractions and extract
+   common UI logic when behavior changes instead of re-implementing transport here. *@
+<div class="terminal-popup-page">
+    @if (tab is null)
+    {
+        <section class="surface-card">
+            <div class="table-header">
+                <h1 class="section-title-compact">Detached terminal</h1>
+                <span>Unavailable</span>
+            </div>
+            <div class="empty-state">
+                <p>Terminal tab not found.</p>
+                <p class="meta-text">Open the terminal workspace and create or re-open a tab.</p>
+            </div>
+        </section>
+    }
+    else
+    {
+        <section class="surface-card terminal-popup-shell">
+            <div class="terminal-popup-toolbar">
+                <div class="stack-tight">
+                    <p class="eyebrow">Detached terminal</p>
+                    <h1 class="section-title-compact">@tab.HostName</h1>
+                    <p class="meta-text">@tab.WorkingDirectory</p>
+                </div>
+
+                <div class="terminal-popup-actions">
+                    <UiPill Tone="@GetSessionTone(tab)" Class="terminal-status-pill">@GetSessionLabel(tab)</UiPill>
+                    @if (tab.SessionId.HasValue)
+                    {
+                        <UiPill Tone="UiPillTone.Neutral" Class="terminal-status-pill">@tab.Snapshot?.LastActivityUtc.ToLocalTime().ToString("HH:mm:ss")</UiPill>
+                    }
+                    <UiCommandButton Label="Dock" Glyph="UiIconGlyph.Dock" Variant="UiButtonVariant.Toolbar" OnClick="ReattachAsync" />
+                    <UiCommandButton Label="Close" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="CloseWindowAsync" />
+                </div>
+            </div>
+
+            <div class="terminal-session-actions terminal-session-actions-detached">
+                <UiCommandButton Label="Connect" Glyph="UiIconGlyph.Connect" OnClick="ConnectAsync" Disabled="@(tab.IsBusy || tab.IsSessionActive)" />
+                <UiCommandButton Label="Disconnect" Glyph="UiIconGlyph.Disconnect" Variant="UiButtonVariant.Ghost" OnClick="DisconnectAsync" Disabled="@(tab.IsBusy || tab.SessionId is null)" />
+                <UiCommandButton Label="Focus" Glyph="UiIconGlyph.Focus" Variant="UiButtonVariant.Ghost" OnClick="FocusTerminalAsync" Disabled="@(!tab.IsSessionActive)" />
+                <UiCommandButton Label="Ctrl+C" Glyph="UiIconGlyph.Interrupt" Variant="UiButtonVariant.Ghost" OnClick="SendInterruptAsync" Disabled="@(!tab.IsSessionActive)" />
+                <UiCommandButton Label="Clear" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="SendClearScreenAsync" Disabled="@(!tab.IsSessionActive)" />
+                <UiCommandButton Label="@(tab.IsAiPanelOpen ? "Hide AI" : "AI")" Glyph="UiIconGlyph.Ai" Variant="UiButtonVariant.Toolbar" OnClick="ToggleAiPanelAsync" />
+                <UiCommandButton Label="Connection" Glyph="UiIconGlyph.Connection" Variant="UiButtonVariant.Toolbar" OnClick="ToggleConnectionPanelAsync" />
+            </div>
+
+            @if (tab.ConnectionOptionsOpen)
+            {
+                <section class="terminal-inline-panel">
+                    <div class="terminal-inline-grid">
+                        <label class="terminal-inline-field">
+                            <span>Username</span>
+                            <InputText @bind-Value="tab.Username" />
+                        </label>
+
+                        <label class="terminal-inline-field">
+                            <span>Password</span>
+                            <input type="password"
+                                   value="@GetPassword(tab)"
+                                   @oninput="@((ChangeEventArgs args) => SetPassword(tab, args.Value?.ToString()))" />
+                        </label>
+
+                        <label class="terminal-inline-field">
+                            <span>Client key passphrase</span>
+                            <input type="password"
+                                   value="@GetPrivateKeyPassphrase(tab)"
+                                   @oninput="@((ChangeEventArgs args) => SetPrivateKeyPassphrase(tab, args.Value?.ToString()))" />
+                        </label>
+
+                        <UiCheckboxField @bind-Value="tab.PreferStoredCredentials"
+                                         Label="Use saved credentials"
+                                         Compact="true"
+                                         Class="terminal-inline-checkbox" />
+                    </div>
+
+                    <details class="terminal-advanced-auth terminal-advanced-auth-compact">
+                        <summary>Public key authentication</summary>
+                        <div class="advanced-auth-body compact-stack-form">
+                            <label class="terminal-inline-field">
+                                <span>Client private key PEM</span>
+                                <textarea @oninput="@((ChangeEventArgs args) => SetPrivateKey(tab, args.Value?.ToString()))">@GetPrivateKey(tab)</textarea>
+                            </label>
+                        </div>
+                    </details>
+                </section>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
+            {
+                <div class="callout error terminal-callout">@tab.ErrorMessage</div>
+            }
+
+            <div class="terminal-console-layout @(tab.IsAiPanelOpen ? "with-ai" : string.Empty)"
+                 style="@GetConsoleLayoutStyle(tab)"
+                 @ref="terminalConsoleLayoutElement">
+                <div class="terminal-console-main">
+                    <div class="terminal-shell terminal-shell-large terminal-shell-interactive terminal-shell-detached"
+                         @ref="terminalShellElement"
+                         @oncontextmenu="ShowContextMenu"
+                         @oncontextmenu:preventDefault="true"
+                         @onclick="FocusTerminalAsync">
+                        <div class="terminal-prompt-bar terminal-prompt-bar-compact">
+                            <span class="terminal-dot"></span>
+                            <span class="terminal-dot"></span>
+                            <span class="terminal-dot"></span>
+                            <span class="meta-text">@tab.HostName</span>
+                        </div>
+
+                        <div id="@terminalElementId" class="terminal-emulator-host"></div>
+
+                        @if (contextMenuOpen)
+                        {
+                            <div class="terminal-context-menu"
+                                 style="@($"left:{contextMenuX}px;top:{contextMenuY}px;")"
+                                 @onclick:stopPropagation="true">
+                                <UiContextMenuButton Label="Copy selection" Glyph="UiIconGlyph.Copy" OnClick="CopySelectionAsync" />
+                                <UiContextMenuButton Label="Paste" Glyph="UiIconGlyph.Paste" OnClick="PasteClipboardAsync" />
+                                <UiContextMenuButton Label="Ask AI" Glyph="UiIconGlyph.Ai" OnClick="AskAiAsync" />
+                                @if (hasContextMenuSelection)
+                                {
+                                    <UiContextMenuButton Label="Ask AI - selection" Glyph="UiIconGlyph.Ai" OnClick="AskAiAboutSelectionAsync" />
+                                }
+                                <TerminalRunbooksMenu HostId="@tab.HostId"
+                                                      PasteCommand="RunCommandAsync" />
+                                <UiContextMenuButton Label="Send Ctrl+C" Glyph="UiIconGlyph.Interrupt" OnClick="SendInterruptAsync" />
+                                <UiContextMenuButton Label="Clear local view" Glyph="UiIconGlyph.Clear" OnClick="ClearTerminalAsync" />
+                                <UiContextMenuButton Label="Disconnect" Glyph="UiIconGlyph.Disconnect" OnClick="DisconnectAsync" />
+                                <UiContextMenuButton Label="Dock" Glyph="UiIconGlyph.Dock" OnClick="ReattachAsync" />
+                            </div>
+                        }
+                    </div>
+
+                    <div class="terminal-console-note">
+                        <span class="meta-text">Right-click for copy, paste, runbooks, interrupt, local clear, and dock.</span>
+                    </div>
+                </div>
+
+                @if (tab.IsAiPanelOpen)
+                {
+                    <div class="terminal-ai-splitter"
+                         role="separator"
+                         aria-label="Resize AI panel"
+                         aria-orientation="vertical"
+                         title="Drag to resize the AI panel"
+                         @onpointerdown="@(args => OnAiSplitterPointerDownAsync(args))"
+                         @onpointerdown:preventDefault="true"></div>
+                    <TerminalAiPanel Tab="tab"
+                                     @ref="terminalAiPanel"
+                                     RunCommand="RunCommandAsync" />
+                }
+            </div>
+        </section>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public Guid TabId { get; set; }
+
+    [SupplyParameterFromQuery(Name = "autoconnect")]
+    public bool AutoConnect { get; set; }
+
+    private readonly string terminalElementId = $"terminal-popup-{Guid.NewGuid():N}";
+    private readonly string terminalClientId = $"detached-{Guid.NewGuid():N}";
+    private readonly Dictionary<Guid, long> renderedOutputRevisions = [];
+    private DotNetObjectReference<TerminalWindow>? dotNetReference;
+    private TerminalAiPanel? terminalAiPanel;
+    private TerminalWorkspaceState? terminalWorkspace;
+    private TerminalTabState? tab;
+    private ElementReference terminalShellElement;
+    private ElementReference terminalConsoleLayoutElement;
+    private IReadOnlyList<ManagedHost> hosts = [];
+    private CancellationTokenSource? pollingCts;
+    private bool terminalInitialized;
+    private bool contextMenuOpen;
+    private bool hasContextMenuSelection;
+    private bool reattachIssued;
+    private double contextMenuX;
+    private double contextMenuY;
+    private int terminalColumns = 160;
+    private int terminalRows = 40;
+    private long observedWorkspaceVersion;
+    private bool pendingAiAnalyzeSession;
+    private string? pendingAiSelectionText;
+    private bool autoConnectIssued;
+
+    protected override Task OnInitializedAsync()
+    {
+        terminalWorkspace = TerminalWorkspaceRegistry.GetOrCreate(TerminalWorkspaceAccessor.GetWorkspaceId());
+        observedWorkspaceVersion = terminalWorkspace.Version;
+        dotNetReference = DotNetObjectReference.Create(this);
+        TerminalSessionService.OutputAppended += HandleTerminalOutputAppended;
+        pollingCts = new CancellationTokenSource();
+        _ = PollAsync(pollingCts.Token);
+        return Task.CompletedTask;
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        await LoadAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (tab is null)
+        {
+            if (terminalInitialized)
+            {
+                await JSRuntime.InvokeVoidAsync("lmsTerminal.disposeTerminal", terminalClientId);
+                terminalInitialized = false;
+            }
+
+            return;
+        }
+
+        if (dotNetReference is null)
+        {
+            return;
+        }
+
+        if (!terminalInitialized)
+        {
+            terminalInitialized = await JSRuntime.InvokeAsync<bool>("lmsTerminal.createTerminal", terminalClientId, terminalElementId, dotNetReference);
+            renderedOutputRevisions[tab.Id] = -1;
+        }
+
+        await WriteSnapshotAsync();
+
+        if (AutoConnect &&
+            !autoConnectIssued &&
+            tab is { SessionId: null, IsBusy: false })
+        {
+            autoConnectIssued = true;
+            await ConnectAsync();
+        }
+
+        if (pendingAiSelectionText is not null && terminalAiPanel is not null)
+        {
+            var selectionText = pendingAiSelectionText;
+            pendingAiSelectionText = null;
+            await terminalAiPanel.AnalyzeSelectionAsync(selectionText);
+        }
+        else if (pendingAiAnalyzeSession && terminalAiPanel is not null)
+        {
+            pendingAiAnalyzeSession = false;
+            await terminalAiPanel.AnalyzeSessionAsync();
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        hosts = (await HostService.ListHostsAsync())
+            .OrderBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        terminalWorkspace?.SyncHosts(hosts);
+        tab = terminalWorkspace?.FindTab(TabId);
+    }
+
+    private async Task<TerminalRefreshResult> RefreshAsync(CancellationToken cancellationToken = default)
+    {
+        if (terminalWorkspace is null)
+        {
+            return TerminalRefreshResult.None;
+        }
+
+        var uiChanged = false;
+        var outputChanged = false;
+        var currentVersion = terminalWorkspace.Version;
+        if (currentVersion != observedWorkspaceVersion)
+        {
+            observedWorkspaceVersion = currentVersion;
+            tab = terminalWorkspace.FindTab(TabId);
+            uiChanged = true;
+        }
+
+        if (tab?.SessionId is not Guid sessionId)
+        {
+            if (tab is not null && !tab.IsDetached && !reattachIssued)
+            {
+                reattachIssued = true;
+                await InvokeAsync(ReattachToMainAsync);
+            }
+
+            return new TerminalRefreshResult(uiChanged, outputChanged);
+        }
+
+        var snapshot = await TerminalSessionService.GetSnapshotAsync(sessionId, cancellationToken);
+        if (snapshot is null)
+        {
+            tab.SessionId = null;
+            if (tab.Snapshot is not null)
+            {
+                tab.Snapshot = tab.Snapshot with
+                {
+                    Status = TerminalSessionStatus.Closed,
+                    LastActivityUtc = DateTimeOffset.UtcNow
+                };
+            }
+
+            return new TerminalRefreshResult(true, false);
+        }
+
+        var previousSnapshot = tab.Snapshot;
+        if (previousSnapshot != snapshot)
+        {
+            tab.Snapshot = snapshot;
+            if (!string.Equals(previousSnapshot?.Output, snapshot.Output, StringComparison.Ordinal))
+            {
+                outputChanged = true;
+            }
+
+            if (RequiresUiRefresh(previousSnapshot, snapshot))
+            {
+                uiChanged = true;
+            }
+        }
+
+        if (!tab.IsDetached && !reattachIssued)
+        {
+            reattachIssued = true;
+            await InvokeAsync(ReattachToMainAsync);
+            uiChanged = true;
+        }
+
+        return new TerminalRefreshResult(uiChanged, outputChanged);
+    }
+
+    private async Task PollAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(150));
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                var refresh = await RefreshAsync(cancellationToken);
+                if (refresh.RequiresUiRefresh)
+                {
+                    await InvokeAsync(async () =>
+                    {
+                        StateHasChanged();
+                        await WriteSnapshotAsync();
+                    });
+                }
+                else if (refresh.HasOutputChanges)
+                {
+                    await InvokeAsync(WriteSnapshotAsync);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task ConnectAsync()
+    {
+        if (tab is null)
+        {
+            return;
+        }
+
+        var host = hosts.FirstOrDefault(item => item.Id == tab.HostId);
+        if (host is null)
+        {
+            tab.ErrorMessage = "Host not found.";
+            return;
+        }
+
+        if (tab.SessionId.HasValue)
+        {
+            await DisconnectAsync();
+        }
+
+        tab.IsBusy = true;
+        tab.ErrorMessage = string.Empty;
+        contextMenuOpen = false;
+
+        try
+        {
+            var request = new TerminalConnectionRequest(
+                tab.Username.Trim(),
+                string.IsNullOrWhiteSpace(GetPassword(tab)) ? null : GetPassword(tab),
+                string.IsNullOrWhiteSpace(GetPrivateKey(tab)) ? null : GetPrivateKey(tab),
+                string.IsNullOrWhiteSpace(GetPrivateKeyPassphrase(tab)) ? null : GetPrivateKeyPassphrase(tab),
+                tab.PreferStoredCredentials,
+                terminalColumns,
+                terminalRows,
+                tab.DefaultWorkingDirectory);
+
+            var session = await TerminalSessionService.StartSessionAsync(host, request);
+            tab.SessionId = session.Id;
+            await Task.Delay(200);
+            tab.Snapshot = await TerminalSessionService.GetSnapshotAsync(session.Id)
+                ?? new TerminalSessionSnapshot(
+                    session.Id,
+                    session.Status,
+                    session.WorkingDirectory,
+                    string.Empty,
+                    0,
+                    session.StartedAtUtc,
+                    session.LastActivityUtc);
+            ConnectionSecretStore.Delete(tab.SecretHandle);
+            tab.SecretHandle = null;
+            tab.ConnectionOptionsOpen = false;
+            renderedOutputRevisions[tab.Id] = -1;
+            await InvokeAsync(StateHasChanged);
+            await WriteSnapshotAsync();
+            await FocusTerminalAsync();
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = exception.Message;
+        }
+        finally
+        {
+            tab.IsBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task DisconnectAsync()
+    {
+        if (tab is null)
+        {
+            return;
+        }
+
+        tab.IsBusy = true;
+        contextMenuOpen = false;
+
+        try
+        {
+            if (tab.SessionId.HasValue)
+            {
+                await TerminalSessionService.CloseSessionAsync(tab.SessionId.Value);
+            }
+
+            tab.SessionId = null;
+            if (tab.Snapshot is not null)
+            {
+                tab.Snapshot = tab.Snapshot with
+                {
+                    Status = TerminalSessionStatus.Closed,
+                    LastActivityUtc = DateTimeOffset.UtcNow
+                };
+            }
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = exception.Message;
+        }
+        finally
+        {
+            tab.IsBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ToggleConnectionPanelAsync()
+    {
+        if (tab is null)
+        {
+            return;
+        }
+
+        tab.ConnectionOptionsOpen = !tab.ConnectionOptionsOpen;
+        contextMenuOpen = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ToggleAiPanelAsync()
+    {
+        if (tab is null || terminalWorkspace is null)
+        {
+            return;
+        }
+
+        terminalWorkspace.SetAiPanelOpen(tab.Id, !tab.IsAiPanelOpen);
+        observedWorkspaceVersion = terminalWorkspace.Version;
+        contextMenuOpen = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnTerminalData(string data)
+    {
+        if (tab?.SessionId is not Guid sessionId || string.IsNullOrEmpty(data))
+        {
+            return;
+        }
+
+        await TerminalSessionService.SendInputAsync(sessionId, data);
+    }
+
+    [JSInvokable]
+    public Task OnTerminalResize(int columns, int rows)
+    {
+        terminalColumns = Math.Max(columns, 20);
+        terminalRows = Math.Max(rows, 8);
+        return Task.CompletedTask;
+    }
+
+    [JSInvokable]
+    public Task OnAiPanelWidthChanged(string tabIdValue, int width)
+    {
+        if (!Guid.TryParseExact(tabIdValue, "N", out var parsedTabId) || terminalWorkspace is null || tab is null || parsedTabId != tab.Id)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (!terminalWorkspace.SetAiPanelWidth(tab.Id, Math.Clamp(width, 360, 1200)))
+        {
+            return Task.CompletedTask;
+        }
+
+        observedWorkspaceVersion = terminalWorkspace.Version;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task WriteSnapshotAsync()
+    {
+        if (!terminalInitialized || tab is null)
+        {
+            return;
+        }
+
+        var snapshot = tab.Snapshot;
+        var output = snapshot?.Output ?? string.Empty;
+        var outputRevision = snapshot?.OutputRevision ?? 0;
+        var renderedRevision = renderedOutputRevisions.GetValueOrDefault(tab.Id, -1);
+        if (outputRevision == renderedRevision)
+        {
+            return;
+        }
+
+        await JSRuntime.InvokeVoidAsync("lmsTerminal.writeDelta", terminalClientId, output);
+        renderedOutputRevisions[tab.Id] = outputRevision;
+    }
+
+    private async Task ShowContextMenu(MouseEventArgs args)
+    {
+        var position = await JSRuntime.InvokeAsync<TerminalContextMenuPosition>(
+            "lmsTerminal.getContextMenuPosition",
+            terminalShellElement,
+            args.ClientX,
+            args.ClientY);
+        var selection = await JSRuntime.InvokeAsync<string>("lmsTerminal.getSelection", terminalClientId);
+        contextMenuOpen = true;
+        hasContextMenuSelection = !string.IsNullOrWhiteSpace(selection);
+        contextMenuX = position.Left;
+        contextMenuY = position.Top;
+    }
+
+    private async Task FocusTerminalAsync()
+    {
+        contextMenuOpen = false;
+        if (terminalInitialized)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.focus", terminalClientId);
+        }
+    }
+
+    private async Task CopySelectionAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        await JSRuntime.InvokeVoidAsync("lmsTerminal.copySelection", terminalClientId);
+    }
+
+    private async Task AskAiAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+
+        if (tab is null)
+        {
+            return;
+        }
+
+        tab.ErrorMessage = string.Empty;
+
+        if (!tab.IsAiPanelOpen && terminalWorkspace is not null)
+        {
+            terminalWorkspace.SetAiPanelOpen(tab.Id, true);
+            observedWorkspaceVersion = terminalWorkspace.Version;
+        }
+
+        pendingAiAnalyzeSession = true;
+        pendingAiSelectionText = null;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task AskAiAboutSelectionAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+
+        if (tab is null)
+        {
+            return;
+        }
+
+        var selection = (await JSRuntime.InvokeAsync<string>("lmsTerminal.getSelection", terminalClientId)).Trim();
+        if (string.IsNullOrWhiteSpace(selection))
+        {
+            tab.ErrorMessage = "Select terminal output first.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        tab.ErrorMessage = string.Empty;
+        pendingAiAnalyzeSession = false;
+
+        if (!tab.IsAiPanelOpen && terminalWorkspace is not null)
+        {
+            terminalWorkspace.SetAiPanelOpen(tab.Id, true);
+            observedWorkspaceVersion = terminalWorkspace.Version;
+        }
+
+        pendingAiSelectionText = selection;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task PasteClipboardAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        if (tab?.SessionId is not Guid sessionId)
+        {
+            return;
+        }
+
+        var clipboard = await JSRuntime.InvokeAsync<string>("lmsTerminal.readClipboard");
+        if (!string.IsNullOrWhiteSpace(clipboard))
+        {
+            await TerminalSessionService.SendInputAsync(sessionId, clipboard);
+        }
+    }
+
+    private async Task SendInterruptAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        if (tab?.SessionId is Guid sessionId)
+        {
+            await TerminalSessionService.SendInputAsync(sessionId, "\u0003");
+        }
+    }
+
+    private async Task SendClearScreenAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        if (tab?.SessionId is Guid sessionId)
+        {
+            await TerminalSessionService.SendInputAsync(sessionId, "clear" + Environment.NewLine);
+        }
+    }
+
+    private async Task PasteCommandAsync(string commandText)
+    {
+        if (tab?.SessionId is not Guid sessionId)
+        {
+            if (tab is not null)
+            {
+                tab.ErrorMessage = "Connect the terminal before sending commands.";
+                await InvokeAsync(StateHasChanged);
+            }
+
+            return;
+        }
+
+        contextMenuOpen = false;
+        await TerminalSessionService.SendInputAsync(sessionId, commandText);
+        await FocusTerminalAsync();
+    }
+
+    private async Task RunCommandAsync(string commandText)
+    {
+        var normalizedCommand = commandText.TrimEnd();
+        if (string.IsNullOrWhiteSpace(normalizedCommand))
+        {
+            return;
+        }
+
+        await PasteCommandAsync(normalizedCommand + Environment.NewLine);
+    }
+
+    private async Task ClearTerminalAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        await JSRuntime.InvokeVoidAsync("lmsTerminal.clear", terminalClientId);
+
+        if (tab is not null)
+        {
+            renderedOutputRevisions[tab.Id] = tab.Snapshot?.OutputRevision ?? 0;
+        }
+    }
+
+    private async Task ReattachAsync()
+    {
+        if (tab is null || terminalWorkspace is null)
+        {
+            return;
+        }
+
+        terminalWorkspace.SetDetached(tab.Id, false);
+        reattachIssued = true;
+        await ReattachToMainAsync();
+    }
+
+    private async Task ReattachToMainAsync()
+    {
+        if (tab is null)
+        {
+            return;
+        }
+
+        await JSRuntime.InvokeVoidAsync("lmsTerminalWindow.handleReattachToMain", BuildMainTerminalUrl(tab.HostId));
+    }
+
+    private async Task CloseWindowAsync()
+    {
+        await JSRuntime.InvokeVoidAsync("lmsTerminalWindow.closeSelf");
+    }
+
+    private string BuildMainTerminalUrl(Guid hostId) =>
+        NavigationManager.ToAbsoluteUri($"/hosts/{hostId}/terminal").ToString();
+
+    private async Task OnAiSplitterPointerDownAsync(PointerEventArgs args)
+    {
+        if (tab is null || !tab.IsAiPanelOpen || dotNetReference is null)
+        {
+            return;
+        }
+
+        contextMenuOpen = false;
+
+        await JSRuntime.InvokeVoidAsync(
+            "lmsTerminal.beginAiPanelResize",
+            terminalConsoleLayoutElement,
+            args.ClientX,
+            360,
+            1200,
+            420,
+            dotNetReference,
+            tab.Id.ToString("N"));
+    }
+
+    private static string GetConsoleLayoutStyle(TerminalTabState terminalTab) =>
+        terminalTab.IsAiPanelOpen
+            ? $"--terminal-ai-panel-width:{Math.Clamp(terminalTab.AiPanelWidthPx, 360, 1200)}px;"
+            : string.Empty;
+
+    private static bool RequiresUiRefresh(TerminalSessionSnapshot? previous, TerminalSessionSnapshot current)
+    {
+        if (previous is null)
+        {
+            return true;
+        }
+
+        return previous.Status != current.Status
+               || !string.Equals(previous.WorkingDirectory, current.WorkingDirectory, StringComparison.Ordinal);
+    }
+
+    private void HandleTerminalOutputAppended(TerminalSessionOutputAppended update)
+    {
+        if (tab?.SessionId != update.SessionId)
+        {
+            return;
+        }
+
+        _ = InvokeAsync(() => ApplyTerminalOutputUpdateAsync(update));
+    }
+
+    private async Task ApplyTerminalOutputUpdateAsync(TerminalSessionOutputAppended update)
+    {
+        if (tab is null)
+        {
+            return;
+        }
+
+        tab.Snapshot = MergeTerminalSnapshot(tab, tab.Snapshot, update);
+
+        if (terminalInitialized)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.appendChunk", terminalClientId, update.Chunk, update.OutputRevision);
+            renderedOutputRevisions[tab.Id] = update.OutputRevision;
+        }
+    }
+
+    private static TerminalSessionSnapshot MergeTerminalSnapshot(
+        TerminalTabState tabState,
+        TerminalSessionSnapshot? previous,
+        TerminalSessionOutputAppended update)
+    {
+        var nextOutput = (previous?.Output ?? string.Empty) + update.Chunk;
+        if (nextOutput.Length > 120_000)
+        {
+            nextOutput = nextOutput[^120_000..];
+        }
+
+        return previous is null
+            ? new TerminalSessionSnapshot(
+                update.SessionId,
+                update.Status,
+                tabState.WorkingDirectory,
+                nextOutput,
+                update.OutputRevision,
+                update.LastActivityUtc,
+                update.LastActivityUtc)
+            : previous with
+            {
+                Status = update.Status,
+                Output = nextOutput,
+                OutputRevision = update.OutputRevision,
+                LastActivityUtc = update.LastActivityUtc
+            };
+    }
+
+    private static UiPillTone GetSessionTone(TerminalTabState terminalTab) =>
+        terminalTab.Snapshot?.Status switch
+        {
+            TerminalSessionStatus.Active => UiPillTone.Success,
+            TerminalSessionStatus.Faulted => UiPillTone.Failure,
+            _ => UiPillTone.Neutral
+        };
+
+    private static string GetSessionLabel(TerminalTabState terminalTab) =>
+        terminalTab.Snapshot?.Status switch
+        {
+            TerminalSessionStatus.Active => "Connected",
+            TerminalSessionStatus.Faulted => "Faulted",
+            TerminalSessionStatus.Closed => "Closed",
+            _ => terminalTab.SessionId.HasValue ? "Opening" : "Ready"
+        };
+
+    private sealed class TerminalContextMenuPosition
+    {
+        public double Left { get; set; }
+
+        public double Top { get; set; }
+    }
+
+    private readonly record struct TerminalRefreshResult(bool RequiresUiRefresh, bool HasOutputChanges)
+    {
+        public static TerminalRefreshResult None => new(false, false);
+    }
+
+    private string GetPassword(TerminalTabState terminalTab) =>
+        ConnectionSecretStore.Get(terminalTab.SecretHandle).Password;
+
+    private string GetPrivateKey(TerminalTabState terminalTab) =>
+        ConnectionSecretStore.Get(terminalTab.SecretHandle).PrivateKey;
+
+    private string GetPrivateKeyPassphrase(TerminalTabState terminalTab) =>
+        ConnectionSecretStore.Get(terminalTab.SecretHandle).PrivateKeyPassphrase;
+
+    private void SetPassword(TerminalTabState terminalTab, string? value)
+    {
+        var existing = ConnectionSecretStore.Get(terminalTab.SecretHandle);
+        terminalTab.SecretHandle = ConnectionSecretStore.Save(terminalTab.SecretHandle, value, existing.PrivateKey, existing.PrivateKeyPassphrase);
+    }
+
+    private void SetPrivateKey(TerminalTabState terminalTab, string? value)
+    {
+        var existing = ConnectionSecretStore.Get(terminalTab.SecretHandle);
+        terminalTab.SecretHandle = ConnectionSecretStore.Save(terminalTab.SecretHandle, existing.Password, value, existing.PrivateKeyPassphrase);
+    }
+
+    private void SetPrivateKeyPassphrase(TerminalTabState terminalTab, string? value)
+    {
+        var existing = ConnectionSecretStore.Get(terminalTab.SecretHandle);
+        terminalTab.SecretHandle = ConnectionSecretStore.Save(terminalTab.SecretHandle, existing.Password, existing.PrivateKey, value);
+    }
+
+    private async Task DisposeTerminalClientAsync()
+    {
+        if (!terminalInitialized)
+        {
+            return;
+        }
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.disposeTerminal", terminalClientId);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        finally
+        {
+            terminalInitialized = false;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        pollingCts?.Cancel();
+        pollingCts?.Dispose();
+        TerminalSessionService.OutputAppended -= HandleTerminalOutputAppended;
+
+        await DisposeTerminalClientAsync();
+
+        dotNetReference?.Dispose();
+    }
+}

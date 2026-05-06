@@ -1,0 +1,133 @@
+@page "/shares/access"
+@using LinuxMadeSane.Application.Contracts.Shares
+@using LinuxMadeSane.Application.Interfaces
+@inject IShareManagementService ShareService
+
+<PageTitle>Effective Access | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <section class="hero-panel compact">
+        <div>
+            <p class="eyebrow">Effective access checker</p>
+            <h1>Answer access questions before someone starts chmod roulette</h1>
+            <p class="hero-copy">Select a share, model the user and group membership, and surface whether they can access, list, create, or delete with concrete reasons.</p>
+        </div>
+    </section>
+
+    @if (viewModel is null)
+    {
+        <section class="surface-card">
+            <p class="meta-text">Loading access checker...</p>
+        </section>
+    }
+    else
+    {
+        <section class="surface-card">
+            <div class="table-header">
+                <h2>Check a principal</h2>
+                <span>Policy simulation</span>
+            </div>
+
+            <div class="field-row">
+                <label>
+                    <span>Share</span>
+                    <UiCombobox @bind-Value="selectedShareId">
+                        @foreach (var share in viewModel.AvailableShares)
+                        {
+                            <option value="@share.Id">@share.Name</option>
+                        }
+                    </UiCombobox>
+                </label>
+                <label>
+                    <span>User</span>
+                    <InputText @bind-Value="principal" />
+                </label>
+            </div>
+
+            <div class="field-row">
+                <label>
+                    <span>Groups</span>
+                    <InputText @bind-Value="groupsCsv" />
+                </label>
+                <div class="checkbox-row action-row">
+                    <UiCommandButton Label="Check effective access" Glyph="UiIconGlyph.Analyze" OnClick="ReloadAsync" />
+                </div>
+            </div>
+        </section>
+
+        <div class="dashboard-columns">
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Access verdict</h2>
+                    <span>@viewModel.Result.Principal</span>
+                </div>
+
+                <div class="capability-grid">
+                    <article class="capability-card @(viewModel.Result.CanAccessShare ? "allow" : "deny")">
+                        <strong>Access share</strong>
+                        <span>@ToVerdict(viewModel.Result.CanAccessShare)</span>
+                    </article>
+                    <article class="capability-card @(viewModel.Result.CanListFiles ? "allow" : "deny")">
+                        <strong>List files</strong>
+                        <span>@ToVerdict(viewModel.Result.CanListFiles)</span>
+                    </article>
+                    <article class="capability-card @(viewModel.Result.CanCreateFile ? "allow" : "deny")">
+                        <strong>Create file</strong>
+                        <span>@ToVerdict(viewModel.Result.CanCreateFile)</span>
+                    </article>
+                    <article class="capability-card @(viewModel.Result.CanDeleteOwnFile ? "allow" : "deny")">
+                        <strong>Delete own</strong>
+                        <span>@ToVerdict(viewModel.Result.CanDeleteOwnFile)</span>
+                    </article>
+                    <article class="capability-card @(viewModel.Result.CanDeleteOthersFiles ? "allow" : "deny")">
+                        <strong>Delete others</strong>
+                        <span>@ToVerdict(viewModel.Result.CanDeleteOthersFiles)</span>
+                    </article>
+                </div>
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Why</h2>
+                    <span>@string.Join(", ", viewModel.Result.GroupMembership)</span>
+                </div>
+
+                <div class="issue-list">
+                    @foreach (var reason in viewModel.Result.Reasons)
+                    {
+                        <article class="issue-card info">
+                            <strong>@reason</strong>
+                        </article>
+                    }
+                </div>
+            </section>
+        </div>
+    }
+</div>
+
+@code {
+    private EffectiveAccessCheckerViewModel? viewModel;
+    private Guid selectedShareId;
+    private string principal = "alex";
+    private string groupsCsv = "engineering, design";
+
+    protected override async Task OnInitializedAsync()
+    {
+        viewModel = await ShareService.GetEffectiveAccessCheckerAsync(Guid.Empty, principal, []);
+        selectedShareId = viewModel.Result.ShareId;
+        groupsCsv = string.Join(", ", viewModel.Result.GroupMembership);
+    }
+
+    private async Task ReloadAsync()
+    {
+        viewModel = await ShareService.GetEffectiveAccessCheckerAsync(
+            selectedShareId,
+            principal,
+            ParseGroups(groupsCsv));
+    }
+
+    private static IReadOnlyList<string> ParseGroups(string value) =>
+        value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string ToVerdict(bool allowed) => allowed ? "Yes" : "No";
+}

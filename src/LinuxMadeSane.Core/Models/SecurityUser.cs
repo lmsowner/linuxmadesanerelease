@@ -1,0 +1,17 @@
+using LinuxMadeSane.Core.Enums;
+
+namespace LinuxMadeSane.Core.Models;
+
+public sealed record SecurityUser(
+    Guid Id,
+    string Email,
+    string LinuxUsername,
+    bool IsEnabled,
+    RemoteAccessSshAuthenticationMode SshAuthenticationMode,
+    string AuthorizedKeyEntries,
+    bool IsLocalAccountManaged,
+    string OtpSecretReference,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    DateTimeOffset? LastLoginAtUtc,
+    DateTimeOffset? PasswordChangedAtUtc);

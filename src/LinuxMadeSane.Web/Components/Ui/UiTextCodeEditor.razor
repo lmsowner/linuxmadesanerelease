@@ -1,0 +1,37 @@
+<section class="@CssClass">
+    <textarea class="ui-text-code-editor-input"
+              value="@ResolvedValue"
+              placeholder="@Placeholder"
+              title="@ResolvedTitle"
+              aria-label="@ResolvedAriaLabel"
+              spellcheck="false"
+              wrap="off"
+              readonly="@ReadOnly"
+              disabled="@Disabled"
+              @oninput="HandleInputAsync"></textarea>
+    <footer class="ui-text-code-editor-footer" aria-hidden="true">
+        <span>@LineCount line@(LineCount == 1 ? string.Empty : "s")</span>
+        <span>@CharacterCount character@(CharacterCount == 1 ? string.Empty : "s")</span>
+    </footer>
+</section>
+
+@code {
+    [Parameter] public string? Value { get; set; }
+    [Parameter] public EventCallback<string?> ValueChanged { get; set; }
+    [Parameter] public string Placeholder { get; set; } = "Text";
+    [Parameter] public string? Title { get; set; }
+    [Parameter] public string? AriaLabel { get; set; }
+    [Parameter] public bool ReadOnly { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public string? Class { get; set; }
+
+    private string ResolvedValue => Value ?? string.Empty;
+    private string ResolvedTitle => string.IsNullOrWhiteSpace(Title) ? Placeholder : Title.Trim();
+    private string ResolvedAriaLabel => string.IsNullOrWhiteSpace(AriaLabel) ? ResolvedTitle : AriaLabel.Trim();
+    private int CharacterCount => ResolvedValue.Length;
+    private int LineCount => ResolvedValue.Length == 0 ? 1 : ResolvedValue.Count(character => character == '\n') + 1;
+    private string CssClass => string.IsNullOrWhiteSpace(Class) ? "ui-text-code-editor" : $"ui-text-code-editor {Class}";
+
+    private Task HandleInputAsync(ChangeEventArgs args) =>
+        ValueChanged.InvokeAsync(args.Value?.ToString() ?? string.Empty);
+}

@@ -1,0 +1,88 @@
+@using LinuxMadeSane.Application.Contracts.Ai
+@using LinuxMadeSane.Core.Models.Ai
+
+<div class="@BuildShellClass()">
+    <label class="ai-provider-switcher-field">
+        @if (ShowLabels)
+        {
+            <span class="ai-provider-switcher-label">@ProviderLabel</span>
+        }
+        <UiCombobox TValue="string"
+                    Value="@ProviderKey"
+                    ValueChanged="HandleProviderChangedAsync"
+                    ValueExpression="@(() => ProviderKey)"
+                    Class="ai-provider-switcher-input"
+                    disabled="@Disabled">
+            @if (AllowEmptySelection)
+            {
+                <option value="">Use default provider</option>
+            }
+            @foreach (var provider in OrderedProviders)
+            {
+                <option value="@provider.ProviderKey">@provider.DisplayName@(provider.IsDefault ? " (default)" : string.Empty)</option>
+            }
+        </UiCombobox>
+    </label>
+
+    <label class="ai-provider-switcher-field">
+        @if (ShowLabels)
+        {
+            <span class="ai-provider-switcher-label">@ModelLabel</span>
+        }
+        <UiCombobox TValue="string"
+                    Value="@ModelId"
+                    ValueChanged="HandleModelChangedAsync"
+                    ValueExpression="@(() => ModelId)"
+                    Class="ai-provider-switcher-input"
+                    disabled="@(Disabled || CurrentModels.Count == 0)">
+            @if (AllowEmptySelection || CurrentModels.Count == 0)
+            {
+                <option value="">@(CurrentModels.Count == 0 ? "No model available" : "Use provider default")</option>
+            }
+            @foreach (var model in CurrentModels)
+            {
+                <option value="@model.ModelId">@model.DisplayName</option>
+            }
+        </UiCombobox>
+    </label>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<AiConfiguredProviderViewModel> Providers { get; set; } = [];
+    [Parameter] public IReadOnlyList<AiModelDefinition> Models { get; set; } = [];
+    [Parameter] public string ProviderKey { get; set; } = string.Empty;
+    [Parameter] public EventCallback<string> ProviderKeyChanged { get; set; }
+    [Parameter] public string ModelId { get; set; } = string.Empty;
+    [Parameter] public EventCallback<string> ModelIdChanged { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public bool ShowLabels { get; set; } = true;
+    [Parameter] public bool AllowEmptySelection { get; set; }
+    [Parameter] public string ProviderLabel { get; set; } = "Provider";
+    [Parameter] public string ModelLabel { get; set; } = "Model";
+    [Parameter] public string? Class { get; set; }
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> OrderedProviders =>
+        Providers
+            .OrderByDescending(provider => provider.IsDefault)
+            .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private IReadOnlyList<AiModelDefinition> CurrentModels =>
+        string.IsNullOrWhiteSpace(ProviderKey)
+            ? []
+            : Models
+                .Where(model => model.ProviderKey.Equals(ProviderKey, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private Task HandleProviderChangedAsync(string value) =>
+        ProviderKeyChanged.InvokeAsync(value);
+
+    private Task HandleModelChangedAsync(string value) =>
+        ModelIdChanged.InvokeAsync(value);
+
+    private string BuildShellClass() =>
+        string.IsNullOrWhiteSpace(Class)
+            ? "ai-provider-switcher"
+            : $"ai-provider-switcher {Class}";
+}

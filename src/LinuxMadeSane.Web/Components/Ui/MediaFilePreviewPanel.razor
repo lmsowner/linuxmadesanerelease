@@ -1,0 +1,270 @@
+@using LinuxMadeSane.Application.Contracts.MediaLibrary
+@using LinuxMadeSane.Core.Models.MediaLibrary
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
+@inject IJSRuntime JSRuntime
+@inject LinuxMadeSane.Web.Services.MediaLibraryTranscodePreviewService TranscodePreviewService
+
+<div class="media-file-preview-panel @Class">
+    <div class="media-file-preview-header">
+        <div class="media-file-preview-actions">
+            <CompactUIButton Label="Open VLC URL"
+                             Glyph="UiIconGlyph.Run"
+                             Href="@StreamUrl"
+                             Target="_blank"
+                             Rel="noreferrer" />
+            <CompactUIButton Label="Copy stream URL"
+                             Glyph="UiIconGlyph.Copy"
+                             OnClick="CopyStreamUrlAsync" />
+        </div>
+    </div>
+
+    @if (Preview.CanBrowserPlay)
+    {
+        @if (Preview.Item.MediaKind == MediaKind.Audio)
+        {
+            <audio class="media-file-preview-player"
+                   controls
+                   preload="metadata"
+                   src="@PlaybackUrl"></audio>
+        }
+        else if (UseConvertedVideoPreview)
+        {
+            <div class="media-file-preview-js-player">
+                @if (!string.IsNullOrWhiteSpace(playerError))
+                {
+                    <p class="callout error">@playerError</p>
+                }
+                <video id="@videoElementId"
+                       class="media-file-preview-player"
+                       controls
+                       autoplay
+                       muted
+                       playsinline
+                       preload="auto"></video>
+                <div id="@scrubberElementId"
+                     class="media-file-preview-scrubber"
+                     hidden>
+                    <span data-lms-media-current>0:00</span>
+                    <input data-lms-media-seek
+                           type="range"
+                           min="0"
+                           max="@PreviewDurationSliderMax"
+                           step="1"
+                           value="0"
+                           aria-label="Seek preview" />
+                    <span data-lms-media-duration>@PreviewDurationLabel</span>
+                </div>
+            </div>
+        }
+        else
+        {
+            <video class="media-file-preview-player"
+                   controls
+                   autoplay
+                   muted
+                   playsinline
+                   preload="auto"
+                   src="@PlaybackUrl"></video>
+        }
+    }
+    else
+    {
+        <div class="empty-state media-file-preview-empty">
+            <h3>Browser playback unavailable</h3>
+            <p>@Preview.BrowserPlaybackMessage</p>
+            <div class="media-file-preview-empty-actions">
+                <UiCommandButton Label="Open playback settings"
+                                 Glyph="UiIconGlyph.Info"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Href="/integrations/media-library?tab=settings" />
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public MediaFilePreviewViewModel Preview { get; set; } = default!;
+    [Parameter, EditorRequired] public string PlaybackUrl { get; set; } = string.Empty;
+    [Parameter] public string? FallbackPlaybackUrl { get; set; }
+    [Parameter, EditorRequired] public string StreamUrl { get; set; } = string.Empty;
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public EventCallback<string> Copied { get; set; }
+
+    private readonly string videoElementId = $"media-preview-video-{Guid.NewGuid():N}";
+    private readonly string scrubberElementId = $"media-preview-scrubber-{Guid.NewGuid():N}";
+    private bool playerRenderPending;
+    private bool playerReleasePending;
+    private bool renderedConvertedPreview;
+    private string? renderedPlaybackUrl;
+    private Guid? renderedPreviewItemId;
+    private string? playerError;
+    private DotNetObjectReference<MediaFilePreviewPanel>? dotNetReference;
+
+    private bool UseConvertedVideoPreview =>
+        Preview.CanBrowserPlay &&
+        Preview.Item.MediaKind == MediaKind.Video &&
+        Preview.UsesTranscodedPlayback;
+
+    private double PreviewDurationSeconds => Preview.Item.DurationSeconds.GetValueOrDefault();
+    private int PreviewDurationSliderMax => Math.Max(1, (int)Math.Ceiling(PreviewDurationSeconds));
+    private string PreviewDurationLabel => FormatDurationLabel(PreviewDurationSeconds);
+
+    protected override void OnParametersSet()
+    {
+        if (UseConvertedVideoPreview)
+        {
+            if (!renderedConvertedPreview ||
+                !string.Equals(PlaybackUrl, renderedPlaybackUrl, StringComparison.Ordinal))
+            {
+                playerError = null;
+                playerRenderPending = true;
+            }
+
+            return;
+        }
+
+        if (renderedConvertedPreview)
+        {
+            playerReleasePending = true;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (playerReleasePending)
+        {
+            playerReleasePending = false;
+            await ReleaseConvertedPreviewAsync();
+        }
+
+        if (!playerRenderPending)
+        {
+            return;
+        }
+
+        playerRenderPending = false;
+        await LoadConvertedPreviewAsync();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await ReleaseConvertedPreviewAsync();
+        dotNetReference?.Dispose();
+        dotNetReference = null;
+    }
+
+    private async Task CopyStreamUrlAsync()
+    {
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", StreamUrl);
+        await Copied.InvokeAsync(copied ? "Stream URL copied." : "Clipboard copy was blocked by the browser.");
+    }
+
+    private async Task LoadConvertedPreviewAsync()
+    {
+        if (string.IsNullOrWhiteSpace(PlaybackUrl))
+        {
+            return;
+        }
+
+        try
+        {
+            if (renderedPreviewItemId.HasValue &&
+                renderedPreviewItemId.Value != Preview.Item.Id)
+            {
+                TranscodePreviewService.CloseHlsSession(renderedPreviewItemId.Value);
+            }
+
+            dotNetReference ??= DotNetObjectReference.Create(this);
+            await JSRuntime.InvokeVoidAsync(
+                "lmsMediaHlsPreview.load",
+                videoElementId,
+                PlaybackUrl,
+                new
+                {
+                    autoPlay = true,
+                    allowMutedAutoplay = true,
+                    fallbackUrl = FallbackPlaybackUrl,
+                    durationSeconds = PreviewDurationSeconds,
+                    scrubberId = scrubberElementId
+                },
+                dotNetReference);
+
+            renderedPlaybackUrl = PlaybackUrl;
+            renderedPreviewItemId = Preview.Item.Id;
+            renderedConvertedPreview = true;
+            playerError = null;
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (Exception exception)
+        {
+            playerError = exception.Message;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ReleaseConvertedPreviewAsync()
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsMediaHlsPreview.release", videoElementId);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        finally
+        {
+            if (renderedPreviewItemId.HasValue)
+            {
+                TranscodePreviewService.CloseHlsSession(renderedPreviewItemId.Value);
+            }
+
+            renderedPreviewItemId = null;
+            renderedPlaybackUrl = null;
+            renderedConvertedPreview = false;
+        }
+    }
+
+    [JSInvokable]
+    public Task OnMediaPreviewHlsFallback()
+    {
+        TranscodePreviewService.CloseHlsSession(Preview.Item.Id);
+        return Task.CompletedTask;
+    }
+
+    [JSInvokable]
+    public Task OnMediaPreviewPlayerStatus(string message)
+    {
+        if (!string.IsNullOrWhiteSpace(message) &&
+            !message.Contains("error", StringComparison.OrdinalIgnoreCase))
+        {
+            playerError = null;
+        }
+
+        return InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnMediaPreviewPlayerError(string message)
+    {
+        playerError = string.IsNullOrWhiteSpace(message)
+            ? "Preview playback failed."
+            : message;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private static string FormatDurationLabel(double seconds)
+    {
+        if (seconds <= 0)
+        {
+            return "0:00";
+        }
+
+        var duration = TimeSpan.FromSeconds(seconds);
+        return duration.TotalHours >= 1
+            ? $"{(int)duration.TotalHours}:{duration.Minutes:00}:{duration.Seconds:00}"
+            : $"{duration.Minutes}:{duration.Seconds:00}";
+    }
+}

@@ -1,0 +1,256 @@
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
+@inject IJSRuntime JSRuntime
+
+<div class="@CssClass">
+    @if (ShowToolbar)
+    {
+        <div class="file-visual-preview-toolbar">
+            @if (HasPagedPreview)
+            {
+                <div class="file-visual-preview-toolbar-group">
+                    <UiCommandButton Label="Previous page"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     HideIcon="true"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     Disabled="@(currentPageIndex <= 0)"
+                                     OnClick="ShowPreviousPageAsync" />
+                    <span class="file-visual-preview-page-label">Page @(currentPageIndex + 1) of @pageCount</span>
+                    <UiCommandButton Label="Next page"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     HideIcon="true"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     Disabled="@(currentPageIndex >= pageCount - 1)"
+                                     OnClick="ShowNextPageAsync" />
+                </div>
+            }
+
+            @if (SupportsZoomControls)
+            {
+                @if (HasPagedPreview)
+                {
+                    <div class="file-visual-preview-toolbar-spacer"></div>
+                }
+                <div class="file-visual-preview-toolbar-group file-visual-preview-toolbar-group-zoom">
+                    <UiCommandButton Label="Fit"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     HideIcon="true"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     OnClick="FitVisualAsync" />
+                    <UiCommandButton Label="100%"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     HideIcon="true"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     OnClick="ActualSizeVisualAsync" />
+                    <UiCommandButton Label="-"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     HideIcon="true"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     OnClick="ZoomOutVisualAsync" />
+                    <span class="file-visual-preview-zoom-label">@($"{visualZoomPercent}%")</span>
+                    <UiCommandButton Label="+"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     HideIcon="true"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     OnClick="ZoomInVisualAsync" />
+                </div>
+            }
+        </div>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(renderError))
+    {
+        <div class="callout error">@renderError</div>
+    }
+
+    <div class="file-visual-preview-stage" @ref="previewHost"></div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string FileName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string ContentType { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public byte[] ContentBytes { get; set; } = [];
+    [Parameter] public string? Class { get; set; }
+
+    private ElementReference previewHost;
+    private byte[]? renderedContentBytes;
+    private string renderedFileName = string.Empty;
+    private string renderedContentType = string.Empty;
+    private DotNetObjectReference<FileVisualPreview>? dotNetReference;
+    private bool previewRenderPending;
+    private string? renderError;
+    private int pageCount = 1;
+    private int currentPageIndex;
+    private int visualZoomPercent = 100;
+
+    private string CssClass => string.IsNullOrWhiteSpace(Class)
+        ? "file-visual-preview"
+        : $"file-visual-preview {Class}";
+
+    private bool IsPdfPreview => string.Equals(ContentType, "application/pdf", StringComparison.OrdinalIgnoreCase);
+    private bool IsTiffPreview => string.Equals(ContentType, "image/tiff", StringComparison.OrdinalIgnoreCase);
+    private bool SupportsZoomControls =>
+        IsPdfPreview ||
+        ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
+    private bool HasPagedPreview => pageCount > 1;
+    private bool ShowToolbar => HasPagedPreview || SupportsZoomControls;
+
+    protected override void OnParametersSet()
+    {
+        if (ContentBytes is null || ContentBytes.Length == 0)
+        {
+            return;
+        }
+
+        if (!ReferenceEquals(ContentBytes, renderedContentBytes) ||
+            !string.Equals(FileName, renderedFileName, StringComparison.Ordinal) ||
+            !string.Equals(ContentType, renderedContentType, StringComparison.Ordinal))
+        {
+            renderError = null;
+            previewRenderPending = true;
+            currentPageIndex = 0;
+            pageCount = 1;
+            visualZoomPercent = 100;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!previewRenderPending)
+        {
+            return;
+        }
+
+        previewRenderPending = false;
+        await RenderPreviewAsync();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsFilePreview.dispose", previewHost);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        finally
+        {
+            dotNetReference?.Dispose();
+            dotNetReference = null;
+        }
+    }
+
+    private async Task RenderPreviewAsync()
+    {
+        if (ContentBytes is null || ContentBytes.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            dotNetReference ??= DotNetObjectReference.Create(this);
+            using var stream = new MemoryStream(ContentBytes, writable: false);
+            using var streamReference = new DotNetStreamReference(stream);
+            var result = await JSRuntime.InvokeAsync<FileVisualPreviewLoadResult>(
+                "lmsFilePreview.load",
+                previewHost,
+                FileName,
+                ContentType,
+                streamReference,
+                currentPageIndex,
+                dotNetReference);
+
+            renderedContentBytes = ContentBytes;
+            renderedFileName = FileName;
+            renderedContentType = ContentType;
+            pageCount = Math.Max(1, result.PageCount);
+            currentPageIndex = Math.Clamp(result.CurrentPageIndex, 0, pageCount - 1);
+            visualZoomPercent = result.ZoomPercent;
+            renderError = null;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception exception)
+        {
+            renderError = exception.Message;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ShowPreviousPageAsync()
+    {
+        if (currentPageIndex <= 0)
+        {
+            return;
+        }
+
+        await ShowPageAsync(currentPageIndex - 1);
+    }
+
+    private async Task ShowNextPageAsync()
+    {
+        if (currentPageIndex >= pageCount - 1)
+        {
+            return;
+        }
+
+        await ShowPageAsync(currentPageIndex + 1);
+    }
+
+    private async Task ShowPageAsync(int pageIndex)
+    {
+        try
+        {
+            var result = await JSRuntime.InvokeAsync<FileVisualPreviewLoadResult>(
+                "lmsFilePreview.showPage",
+                previewHost,
+                pageIndex);
+            pageCount = Math.Max(1, result.PageCount);
+            currentPageIndex = Math.Clamp(result.CurrentPageIndex, 0, pageCount - 1);
+            visualZoomPercent = result.ZoomPercent;
+            renderError = null;
+        }
+        catch (Exception exception)
+        {
+            renderError = exception.Message;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public Task SyncViewerState(int pageIndex, int pageTotal, int zoomPercent)
+    {
+        pageCount = Math.Max(1, pageTotal);
+        currentPageIndex = Math.Clamp(pageIndex, 0, pageCount - 1);
+        visualZoomPercent = Math.Max(1, zoomPercent);
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ZoomInVisualAsync() => await UpdateZoomAsync("lmsFilePreview.zoomIn");
+
+    private async Task ZoomOutVisualAsync() => await UpdateZoomAsync("lmsFilePreview.zoomOut");
+
+    private async Task FitVisualAsync() => await UpdateZoomAsync("lmsFilePreview.fit");
+
+    private async Task ActualSizeVisualAsync() => await UpdateZoomAsync("lmsFilePreview.actualSize");
+
+    private async Task UpdateZoomAsync(string methodName)
+    {
+        try
+        {
+            var result = await JSRuntime.InvokeAsync<FileVisualPreviewLoadResult>(methodName, previewHost);
+            visualZoomPercent = result.ZoomPercent;
+            renderError = null;
+        }
+        catch (Exception exception)
+        {
+            renderError = exception.Message;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private sealed record FileVisualPreviewLoadResult(int PageCount, int CurrentPageIndex, int ZoomPercent);
+}

@@ -1,0 +1,129 @@
+@page "/shares/explainer"
+@using LinuxMadeSane.Application.Contracts.Shares
+@using LinuxMadeSane.Application.Interfaces
+@inject IShareManagementService ShareService
+
+<PageTitle>Permission Explainer | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <section class="hero-panel compact">
+        <div>
+            <p class="eyebrow">Permission explainer</p>
+            <h1>Turn Linux ownership and ACL state into plain English</h1>
+            <p class="hero-copy">Point at a folder and the module explains who owns it, what the mode means, whether ACLs exist, and where Samba and Linux are likely to disagree.</p>
+        </div>
+    </section>
+
+    <section class="surface-card">
+        <div class="table-header">
+            <h2>Inspect a path</h2>
+            <span>Explain before changing</span>
+        </div>
+
+        <div class="field-row">
+            <label>
+                <span>Folder path</span>
+                <InputText @bind-Value="path" />
+            </label>
+            <div class="checkbox-row action-row">
+                <UiCommandButton Label="Explain folder" Glyph="UiIconGlyph.Analyze" OnClick="ReloadAsync" />
+            </div>
+        </div>
+    </section>
+
+    @if (viewModel is not null)
+    {
+        <div class="dashboard-columns">
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Current state</h2>
+                    <span>@viewModel.Explanation.Path</span>
+                </div>
+
+                <div class="policy-grid">
+                    <div class="stack-tight">
+                        <span class="eyebrow">Owner</span>
+                        <strong>@viewModel.Explanation.Owner</strong>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">Group</span>
+                        <strong>@viewModel.Explanation.Group</strong>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">Mode</span>
+                        <code>@viewModel.Explanation.Mode</code>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">ACLs</span>
+                        <strong>@(viewModel.Explanation.HasAclEntries ? "Present" : "None detected")</strong>
+                    </div>
+                </div>
+
+                <InfoPill Eyebrow="What this means" Text="@viewModel.Explanation.PlainEnglishSummary" Class="info-pill-wide" />
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Effective capability</h2>
+                    <span>Filesystem view</span>
+                </div>
+
+                <div class="capability-grid">
+                    <article class="capability-card @(viewModel.Explanation.CanRead ? "allow" : "deny")">
+                        <strong>Read</strong>
+                        <span>@ToVerdict(viewModel.Explanation.CanRead)</span>
+                    </article>
+                    <article class="capability-card @(viewModel.Explanation.CanWrite ? "allow" : "deny")">
+                        <strong>Write</strong>
+                        <span>@ToVerdict(viewModel.Explanation.CanWrite)</span>
+                    </article>
+                    <article class="capability-card @(viewModel.Explanation.CanCreate ? "allow" : "deny")">
+                        <strong>Create</strong>
+                        <span>@ToVerdict(viewModel.Explanation.CanCreate)</span>
+                    </article>
+                    <article class="capability-card @(viewModel.Explanation.CanDelete ? "allow" : "deny")">
+                        <strong>Delete</strong>
+                        <span>@ToVerdict(viewModel.Explanation.CanDelete)</span>
+                    </article>
+                    <article class="capability-card @(viewModel.Explanation.CanRename ? "allow" : "deny")">
+                        <strong>Rename</strong>
+                        <span>@ToVerdict(viewModel.Explanation.CanRename)</span>
+                    </article>
+                </div>
+            </section>
+        </div>
+
+        <section class="surface-card">
+            <div class="table-header">
+                <h2>Conflict highlights</h2>
+                <span>What will confuse operators or users</span>
+            </div>
+
+            <div class="issue-list">
+                @foreach (var conflict in viewModel.Explanation.Conflicts)
+                {
+                    <article class="issue-card warning">
+                        <strong>@conflict</strong>
+                    </article>
+                }
+            </div>
+        </section>
+    }
+</div>
+
+@code {
+    private string path = "/srv/shares/team";
+    private PermissionExplainerViewModel? viewModel;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        viewModel = await ShareService.GetPermissionExplainerAsync(path);
+    }
+
+    private static string ToVerdict(bool allowed) => allowed ? "Allowed" : "Blocked";
+}

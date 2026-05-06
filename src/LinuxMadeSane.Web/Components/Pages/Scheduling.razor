@@ -1,0 +1,1355 @@
+@page "/scheduling"
+@rendermode InteractiveServer
+@using System.ComponentModel.DataAnnotations
+@using LinuxMadeSane.Application.Contracts.Scheduling
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.Scheduling
+@inject IScheduledTaskService ScheduledTaskService
+@inject ILocalFileBrowsingService LocalFileBrowsingService
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Scheduling | Linux Made Sane</PageTitle>
+
+<div class="page-shell scheduling-page-shell">
+    <UiHeroPanel Title="Scheduling"
+                 Compact="true" />
+
+    @if (workspace is null)
+    {
+        <UiPanel>
+            <p class="meta-text">Loading scheduler module...</p>
+        </UiPanel>
+    }
+    else
+    {
+        <p class="callout info scheduling-scope-note">
+            This page manages LMS-created schedules in <code>/etc/cron.d</code>. Existing user crontabs stay untouched.
+        </p>
+
+        @if (!string.IsNullOrWhiteSpace(statusMessage))
+        {
+            <p class="callout @statusTone">@statusMessage</p>
+        }
+
+        <section class="surface-card scheduling-summary-card">
+            <div class="scheduling-summary-copy">
+                <div class="table-header scheduling-summary-header">
+                    <h2>Scheduler health</h2>
+                    <span>@GetSchedulerSummary(workspace.Health)</span>
+                </div>
+                <p class="meta-text">@workspace.Health.Summary</p>
+            </div>
+            <div class="token-row compact-token-row scheduling-summary-pills">
+                <UiPill Tone="@(workspace.Health.CronDirectoryAvailable ? UiPillTone.Success : UiPillTone.Failure)">/etc/cron.d</UiPill>
+                <UiPill Tone="@(workspace.Health.CrontabBinaryAvailable ? UiPillTone.Success : UiPillTone.Warning)">crontab</UiPill>
+                @if (!string.IsNullOrWhiteSpace(workspace.Health.DetectedServiceName))
+                {
+                    <UiPill Tone="@GetSchedulerServiceTone(workspace.Health.ServiceState)">@workspace.Health.DetectedServiceName:@workspace.Health.ServiceState</UiPill>
+                }
+                <UiPill Tone="UiPillTone.Neutral">@workspace.Tasks.Count task(s)</UiPill>
+                <UiPill Tone="UiPillTone.Success">@workspace.Tasks.Count(task => task.IsEnabled) enabled</UiPill>
+            </div>
+        </section>
+
+        <section class="surface-card scheduling-list-card">
+            <div class="scheduling-list-header">
+                <div class="table-header">
+                    <h2>Scheduled tasks</h2>
+                    <span>@VisibleTasks.Count task(s)</span>
+                </div>
+                <UiCommandButton Label="Refresh" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" OnClick="RefreshAsync" />
+            </div>
+
+            <label class="service-search compact-search scheduling-search">
+                <span>Search schedules</span>
+                <input @bind="taskFilter" @bind:event="oninput" placeholder="updates, backups, rsync, reboot..." />
+            </label>
+
+            @if (VisibleTasks.Count == 0)
+            {
+                <div class="empty-state scheduling-empty-state">
+                    <p>No scheduled tasks match that filter.</p>
+                </div>
+            }
+            else
+            {
+                <div class="scheduling-table-shell">
+                    <div class="scheduling-row-list">
+                        @foreach (var task in VisibleTasks)
+                        {
+                            <article class="scheduling-row-card @(isEditorOpen && selectedTaskId == task.Id ? "selected" : string.Empty)">
+                                <div class="scheduling-row-grid">
+                                    <div class="scheduling-row-cell scheduling-row-cell-name">
+                                        <UiLabelText Class="scheduling-row-inline-label">Name</UiLabelText>
+                                        <div class="scheduling-name-line">
+                                            <button class="scheduling-row-link"
+                                                    type="button"
+                                                    @onclick="@(() => OpenEditAsync(task.Id))">
+                                                @task.Name
+                                            </button>
+                                            <UiPill Tone="@(task.IsEnabled ? UiPillTone.Success : UiPillTone.Neutral)">
+                                                @(task.IsEnabled ? "Enabled" : "Paused")
+                                            </UiPill>
+                                        </div>
+                                    </div>
+
+                                    <div class="scheduling-row-cell">
+                                        <UiLabelText Class="scheduling-row-inline-label">Description</UiLabelText>
+                                        <span class="scheduling-cell-copy scheduling-row-value"
+                                              title="@GetTaskDescription(task)">
+                                            @GetTaskDescription(task)
+                                        </span>
+                                    </div>
+
+                                    <div class="scheduling-row-cell">
+                                        <UiLabelText Class="scheduling-row-inline-label">Schedule</UiLabelText>
+                                        <span class="scheduling-cell-copy scheduling-row-value"
+                                              title="@task.ScheduleSummary">
+                                            @task.ScheduleSummary
+                                        </span>
+                                    </div>
+
+                                    <div class="scheduling-row-cell scheduling-row-cell-task">
+                                        <UiLabelText Class="scheduling-row-inline-label">Task</UiLabelText>
+                                        <div class="scheduling-task-line">
+                                            <UiPill Tone="@GetTaskKindTone(task.TaskKind)">@GetTaskKindLabel(task.TaskKind)</UiPill>
+                                            <span class="scheduling-cell-copy scheduling-task-preview"
+                                                  title="@task.CommandPreview">
+                                                @task.CommandPreview
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    <div class="scheduling-row-cell scheduling-row-cell-next-run">
+                                        <UiLabelText Class="scheduling-row-inline-label">Next run</UiLabelText>
+                                        <span class="scheduling-cell-copy scheduling-next-run">@task.NextRunDisplay</span>
+                                    </div>
+
+                                    <div class="scheduling-row-cell scheduling-row-cell-actions">
+                                        <UiLabelText Class="scheduling-row-inline-label">Actions</UiLabelText>
+                                        <div class="scheduling-row-actions">
+                                            <UiIconButton Label="@(runningTaskId == task.Id ? "Running task" : "Run now")"
+                                                          Title="@(runningTaskId == task.Id ? "Running task" : "Run now")"
+                                                          Glyph="UiIconGlyph.Run"
+                                                          Variant="UiButtonVariant.ActionSubtle"
+                                                          Disabled="@(runningTaskId == task.Id)"
+                                                          OnClick="@(() => RunNowAsync(task.Id))" />
+                                            <UiIconButton Label="View log"
+                                                          Title="View log"
+                                                          Glyph="UiIconGlyph.TextFile"
+                                                          Variant="UiButtonVariant.ActionSubtle"
+                                                          OnClick="@(() => OpenLogAsync(task.Id))" />
+                                            <UiIconButton Label="Edit"
+                                                          Title="Edit"
+                                                          Glyph="UiIconGlyph.Edit"
+                                                          Variant="UiButtonVariant.Action"
+                                                          OnClick="@(() => OpenEditAsync(task.Id))" />
+                                        </div>
+                                    </div>
+                                </div>
+                            </article>
+                        }
+                    </div>
+                </div>
+            }
+
+            <div class="scheduling-list-footer">
+                <UiCommandButton Label="Add scheduled task" Glyph="UiIconGlyph.Plus" OnClick="OpenCreateAsync" />
+            </div>
+        </section>
+    }
+</div>
+
+<UiModal IsOpen="@isEditorOpen"
+         Title="@GetEditorTitle()"
+         Subtitle="@GetEditorSubtitle()"
+         Class="scheduling-editor-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseEditorAsync">
+    @if (workspace is not null && editor is not null)
+    {
+        <EditForm Model="@editor" OnValidSubmit="SaveAsync" class="stack-form scheduling-form">
+            <DataAnnotationsValidator />
+
+            <section class="scheduling-form-section scheduling-form-section-identity">
+                <div class="table-header scheduling-section-header">
+                    <h3>Task Name</h3>
+                    <UiSwitchField Label="Enabled"
+                                   Title="Install or remove the cron file for this task"
+                                   Value="@editor.IsEnabled"
+                                   ValueChanged="HandleEnabledChangedAsync"
+                                   Compact="true"
+                                   Class="scheduling-title-switch" />
+                </div>
+
+                <UiTextField @bind-Value="editor.Name"
+                             Placeholder="Nightly package updates" />
+
+                <UiTextField Label="Description"
+                             @bind-Value="editor.Description"
+                             Placeholder="Refresh apt metadata and install safe package upgrades overnight." />
+            </section>
+
+            <div class="scheduling-form-shell">
+                <section class="scheduling-form-section scheduling-form-section-task">
+                    <div class="table-header scheduling-section-header">
+                        <h3>What Should Happen</h3>
+                    </div>
+
+                    <div class="scheduling-task-toolbar">
+                        <UiComboboxField TValue="ScheduledTaskKind"
+                                       Label="Task type"
+                                       Compact="true"
+                                       Class="scheduling-compact-field scheduling-task-type-field"
+                                       Value="@editor.TaskKind"
+                                       ValueChanged="HandleTaskKindChangedAsync"
+                                       ValueExpression="@(() => editor.TaskKind)">
+                            <option value="@ScheduledTaskKind.ShellCommand">Shell command</option>
+                            <option value="@ScheduledTaskKind.FileCopy">File copy</option>
+                            <option value="@ScheduledTaskKind.Cleanup">Clean up files</option>
+                            <option value="@ScheduledTaskKind.Runbook">Runbook</option>
+                            <option value="@ScheduledTaskKind.ShellScript">Shell script</option>
+                            <option value="@ScheduledTaskKind.SystemUpdate">System updates</option>
+                        </UiComboboxField>
+
+                        @if (editor.TaskKind == ScheduledTaskKind.Runbook && workspace.Runbooks.Count > 0)
+                        {
+                            <UiComboboxField TValue="string"
+                                           Label="Runbook"
+                                           Compact="true"
+                                           Class="scheduling-compact-field scheduling-task-runbook-field"
+                                           Value="@selectedRunbookIdText"
+                                           ValueChanged="HandleSelectedRunbookChangedAsync"
+                                           ValueExpression="@(() => selectedRunbookIdText)">
+                                <option value="">Choose a runbook</option>
+                                @foreach (var runbook in workspace.Runbooks)
+                                {
+                                    <option value="@runbook.Id.ToString()">@GetRunbookOptionLabel(runbook)</option>
+                                }
+                            </UiComboboxField>
+                        }
+                        else if (editor.TaskKind == ScheduledTaskKind.Runbook)
+                        {
+                            <div class="scheduling-runbook-action scheduling-task-runbook-action">
+                                <UiCommandButton Label="Open runbooks"
+                                                 Glyph="UiIconGlyph.Run"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Class="scheduling-task-runbook-button"
+                                                 Href="/commands" />
+                            </div>
+                        }
+                    </div>
+
+                    @switch (editor.TaskKind)
+                    {
+                        case ScheduledTaskKind.Runbook:
+                            @if (SelectedRunbookOption is not null)
+                            {
+                                <div class="scheduling-runbook-preview">
+                                    <div class="scheduling-runbook-preview-header">
+                                        <div class="stack-tight">
+                                            <strong>@SelectedRunbookOption.Name</strong>
+                                            @if (!string.IsNullOrWhiteSpace(SelectedRunbookOption.Description))
+                                            {
+                                                <span class="meta-text">@SelectedRunbookOption.Description</span>
+                                            }
+                                        </div>
+                                        <div class="token-row compact-token-row">
+                                            @if (SelectedRunbookOption.IsQuickAccess)
+                                            {
+                                                <UiPill Tone="UiPillTone.Success">Favourite</UiPill>
+                                            }
+                                            <UiPill Tone="UiPillTone.Neutral">
+                                                @(SelectedRunbookOption.IsScript ? "script" : "command")
+                                            </UiPill>
+                                            <UiPill Tone="@(SelectedRunbookOption.RequiresSudo ? UiPillTone.Warning : UiPillTone.Neutral)">
+                                                @(SelectedRunbookOption.RequiresSudo ? "sudo" : "user")
+                                            </UiPill>
+                                        </div>
+                                    </div>
+                                    <code class="block-code scheduling-runbook-command">@SelectedRunbookOption.CommandText</code>
+                                </div>
+                            }
+                            else
+                            {
+                                <p class="callout info scheduling-runbook-empty-callout">Choose a runbook to schedule it.</p>
+                            }
+                            break;
+                        case ScheduledTaskKind.ShellCommand:
+                            <UiTextAreaField Label="Shell command"
+                                             @bind-Value="editor.CommandText"
+                                             Placeholder="apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y upgrade"
+                                             Rows="3" />
+                            break;
+                        case ScheduledTaskKind.ShellScript:
+                            <div class="field-row scheduling-field-row">
+                                <UiTextField Label="Script path"
+                                             @bind-Value="editor.ScriptPath"
+                                             Placeholder="/usr/local/bin/nightly-maintenance.sh" />
+                                <UiTextField Label="Script arguments"
+                                             @bind-Value="editor.ScriptArguments"
+                                             Placeholder="--quiet --rotate" />
+                            </div>
+                            break;
+                        case ScheduledTaskKind.FileCopy:
+                            <div class="field-row scheduling-field-row">
+                                <UiPathAutocompleteField Label="Source path"
+                                                         Helper="@(isSourcePathSuggestionsLoading ? "Looking up local folders..." : "Start typing to pick an existing local path.")"
+                                                         Value="@editor.SourcePath"
+                                                         ValueChanged="SetSourcePathAsync"
+                                                         ValueExpression="@(() => editor.SourcePath)"
+                                                         Placeholder="/srv/app/.env"
+                                                         Suggestions="@sourcePathSuggestions"
+                                                         IsLoadingSuggestions="@isSourcePathSuggestionsLoading"
+                                                         KeepSuggestionsOpenOnSelect="true" />
+                                <UiPathAutocompleteField Label="Destination path"
+                                                         Helper="@(isDestinationPathSuggestionsLoading ? "Looking up local folders..." : "Start typing to pick an existing local path.")"
+                                                         Value="@editor.DestinationPath"
+                                                         ValueChanged="SetDestinationPathAsync"
+                                                         ValueExpression="@(() => editor.DestinationPath)"
+                                                         Placeholder="/srv/backups/app/.env"
+                                                         Suggestions="@destinationPathSuggestions"
+                                                         IsLoadingSuggestions="@isDestinationPathSuggestionsLoading"
+                                                         KeepSuggestionsOpenOnSelect="true" />
+                            </div>
+                            @if (HasSelectionFilters(editor))
+                            {
+                                <p class="callout info scheduling-filter-callout">
+                                    With filters enabled, LMS treats the destination as the root folder for matching files and keeps their relative folders underneath it.
+                                </p>
+                            }
+                            <div class="scheduling-choice-grid scheduling-choice-grid-compact">
+                                <UiCheckboxField Label="Include subfolders"
+                                                 Helper="Include matching files from nested folders."
+                                                 Compact="true"
+                                                 @bind-Value="editor.CopyRecursive" />
+                                <UiCheckboxField Label="Preserve attributes"
+                                                 Helper="Keep ownership, mode, and timestamps with archive copy behaviour."
+                                                 Compact="true"
+                                                 @bind-Value="editor.CopyPreserveAttributes" />
+                                <UiCheckboxField Label="Delete source after copy"
+                                                 Helper="Turn successful matching copies into moves."
+                                                 Compact="true"
+                                                 @bind-Value="editor.CopyDeleteSourceAfterCopy" />
+                                <UiCheckboxField Label="Case insensitive matches"
+                                                 Helper="Ignore letter casing when checking file name and extension rules."
+                                                 Compact="true"
+                                                 @bind-Value="editor.MatchCaseInsensitive" />
+                            </div>
+                            <UiTextField Label="Name / extension matches"
+                                         Helper="Optional comma-separated file names, extensions, or glob patterns like *.log, .tmp, backup-*."
+                                         @bind-Value="editor.MatchPatternsCsv"
+                                         Placeholder="*.log, .tmp, backup-*" />
+                            <div class="scheduling-schedule-controls scheduling-age-controls">
+                                <UiComboboxField TValue="ScheduledTaskAgeFilterMode"
+                                               Label="Age rule"
+                                               Compact="true"
+                                               Class="scheduling-compact-field scheduling-schedule-type-field"
+                                               @bind-Value="editor.AgeFilterMode">
+                                    <option value="@ScheduledTaskAgeFilterMode.Any">Any age</option>
+                                    <option value="@ScheduledTaskAgeFilterMode.OlderThan">Older than</option>
+                                    <option value="@ScheduledTaskAgeFilterMode.NewerThan">Newer than</option>
+                                </UiComboboxField>
+
+                                @if (editor.AgeFilterMode != ScheduledTaskAgeFilterMode.Any)
+                                {
+                                    <UiNumberField TValue="int?"
+                                                   Label="Age"
+                                                   Compact="true"
+                                                   Class="scheduling-compact-field scheduling-inline-time-field"
+                                                   InputClass="scheduling-time-input scheduling-compact-input"
+                                                   @bind-Value="editor.AgeFilterValue"
+                                                   min="1"
+                                                   step="1"
+                                                   inputmode="numeric" />
+                                    <UiComboboxField TValue="ScheduledTaskAgeUnit"
+                                                   Label="Unit"
+                                                   Compact="true"
+                                                   Class="scheduling-compact-field scheduling-run-as-field"
+                                                   @bind-Value="editor.AgeFilterUnit">
+                                        <option value="@ScheduledTaskAgeUnit.Minutes">Minutes</option>
+                                        <option value="@ScheduledTaskAgeUnit.Hours">Hours</option>
+                                        <option value="@ScheduledTaskAgeUnit.Days">Days</option>
+                                        <option value="@ScheduledTaskAgeUnit.Weeks">Weeks</option>
+                                    </UiComboboxField>
+                                }
+                            </div>
+                            break;
+                        case ScheduledTaskKind.Cleanup:
+                            <UiPathAutocompleteField Label="Target path"
+                                                     Helper="Pick the folder or file tree that LMS should clean."
+                                                     Value="@editor.SourcePath"
+                                                     ValueChanged="SetSourcePathAsync"
+                                                     ValueExpression="@(() => editor.SourcePath)"
+                                                     Placeholder="/var/log/myapp"
+                                                     Suggestions="@sourcePathSuggestions"
+                                                     IsLoadingSuggestions="@isSourcePathSuggestionsLoading"
+                                                     KeepSuggestionsOpenOnSelect="true" />
+                            <div class="scheduling-choice-grid scheduling-choice-grid-compact">
+                                <UiCheckboxField Label="Include subfolders"
+                                                 Helper="Also inspect nested folders below the target path."
+                                                 Compact="true"
+                                                 @bind-Value="editor.CopyRecursive" />
+                                <UiCheckboxField Label="Remove files"
+                                                 Helper="Delete matching files."
+                                                 Compact="true"
+                                                 @bind-Value="editor.CleanupDeleteFiles" />
+                                <UiCheckboxField Label="Remove folders"
+                                                 Helper="Delete matching folders recursively once they match."
+                                                 Compact="true"
+                                                 @bind-Value="editor.CleanupDeleteDirectories" />
+                                <UiCheckboxField Label="Case insensitive matches"
+                                                 Helper="Ignore letter casing when checking file name and extension rules."
+                                                 Compact="true"
+                                                 @bind-Value="editor.MatchCaseInsensitive" />
+                            </div>
+                            <UiTextField Label="Name / extension matches"
+                                         Helper="Comma-separated file names, extensions, or glob patterns like *.log, .tmp, cache-*."
+                                         @bind-Value="editor.MatchPatternsCsv"
+                                         Placeholder="*.log, *.tmp, cache-*" />
+                            <div class="scheduling-schedule-controls scheduling-age-controls">
+                                <UiComboboxField TValue="ScheduledTaskAgeFilterMode"
+                                               Label="Age rule"
+                                               Compact="true"
+                                               Class="scheduling-compact-field scheduling-schedule-type-field"
+                                               @bind-Value="editor.AgeFilterMode">
+                                    <option value="@ScheduledTaskAgeFilterMode.Any">Any age</option>
+                                    <option value="@ScheduledTaskAgeFilterMode.OlderThan">Older than</option>
+                                    <option value="@ScheduledTaskAgeFilterMode.NewerThan">Newer than</option>
+                                </UiComboboxField>
+
+                                @if (editor.AgeFilterMode != ScheduledTaskAgeFilterMode.Any)
+                                {
+                                    <UiNumberField TValue="int?"
+                                                   Label="Age"
+                                                   Compact="true"
+                                                   Class="scheduling-compact-field scheduling-inline-time-field"
+                                                   InputClass="scheduling-time-input scheduling-compact-input"
+                                                   @bind-Value="editor.AgeFilterValue"
+                                                   min="1"
+                                                   step="1"
+                                                   inputmode="numeric" />
+                                    <UiComboboxField TValue="ScheduledTaskAgeUnit"
+                                                   Label="Unit"
+                                                   Compact="true"
+                                                   Class="scheduling-compact-field scheduling-run-as-field"
+                                                   @bind-Value="editor.AgeFilterUnit">
+                                        <option value="@ScheduledTaskAgeUnit.Minutes">Minutes</option>
+                                        <option value="@ScheduledTaskAgeUnit.Hours">Hours</option>
+                                        <option value="@ScheduledTaskAgeUnit.Days">Days</option>
+                                        <option value="@ScheduledTaskAgeUnit.Weeks">Weeks</option>
+                                    </UiComboboxField>
+                                }
+                            </div>
+                            <p class="callout info scheduling-filter-callout">
+                                Cleanup needs a name or extension rule, an age rule, or both, so LMS does not blindly wipe a whole path.
+                            </p>
+                            break;
+                        case ScheduledTaskKind.SystemUpdate:
+                            <div class="scheduling-choice-grid scheduling-choice-grid-compact">
+                                <UiCheckboxField Label="Refresh package lists"
+                                                 Helper="Refresh package indexes before installing updates."
+                                                 Compact="true"
+                                                 @bind-Value="editor.UpdatePackageLists" />
+                                <UiCheckboxField Label="Upgrade installed packages"
+                                                 Helper="Install available package upgrades automatically."
+                                                 Compact="true"
+                                                 @bind-Value="editor.UpgradeInstalledPackages" />
+                                <UiCheckboxField Label="Remove unused packages"
+                                                 Helper="Clean up packages that are no longer needed."
+                                                 Compact="true"
+                                                 @bind-Value="editor.RemoveUnusedPackages" />
+                            </div>
+                            break;
+                    }
+                </section>
+
+                <section class="scheduling-form-section scheduling-form-section-schedule">
+                    <div class="table-header scheduling-section-header">
+                        <h3>When It Should Run</h3>
+                    </div>
+
+                    <div class="scheduling-schedule-controls">
+                        <UiComboboxField TValue="ScheduledTaskScheduleMode"
+                                       Label="Schedule"
+                                       Compact="true"
+                                       Class="scheduling-compact-field scheduling-schedule-type-field"
+                                       @bind-Value="editor.ScheduleMode">
+                            <option value="@ScheduledTaskScheduleMode.Hourly">Hourly</option>
+                            <option value="@ScheduledTaskScheduleMode.Daily">Daily</option>
+                            <option value="@ScheduledTaskScheduleMode.Weekly">Weekly</option>
+                            <option value="@ScheduledTaskScheduleMode.Monthly">Monthly</option>
+                            <option value="@ScheduledTaskScheduleMode.CustomCron">Custom cron</option>
+                            <option value="@ScheduledTaskScheduleMode.Reboot">At startup</option>
+                        </UiComboboxField>
+
+                        @if (editor.ScheduleMode == ScheduledTaskScheduleMode.Monthly)
+                        {
+                            <UiNumberField TValue="int?"
+                                           Label="Day"
+                                           Compact="true"
+                                           Class="scheduling-compact-field scheduling-inline-time-field"
+                                           InputClass="scheduling-time-input scheduling-compact-input"
+                                           @bind-Value="editor.DayOfMonth"
+                                           min="1"
+                                           max="31"
+                                           step="1"
+                                           inputmode="numeric" />
+                        }
+
+                        @if (ScheduleModeUsesHour(editor.ScheduleMode))
+                        {
+                            <UiNumberField TValue="int?"
+                                           Label="Hour"
+                                           Compact="true"
+                                           Class="scheduling-compact-field scheduling-inline-time-field"
+                                           InputClass="scheduling-time-input scheduling-compact-input"
+                                           @bind-Value="editor.Hour"
+                                           min="0"
+                                           max="23"
+                                           step="1"
+                                           inputmode="numeric" />
+                        }
+
+                        @if (ScheduleModeUsesMinute(editor.ScheduleMode))
+                        {
+                            <UiNumberField TValue="int?"
+                                           Label="Min"
+                                           Compact="true"
+                                           Class="scheduling-compact-field scheduling-inline-time-field"
+                                           InputClass="scheduling-time-input scheduling-compact-input"
+                                           @bind-Value="editor.Minute"
+                                           min="0"
+                                           max="59"
+                                           step="1"
+                                           inputmode="numeric" />
+                        }
+
+                        @if (editor.ScheduleMode == ScheduledTaskScheduleMode.CustomCron)
+                        {
+                            <UiTextField Label="Cron"
+                                         Compact="true"
+                                         Class="scheduling-compact-field scheduling-cron-field"
+                                         InputClass="scheduling-compact-input"
+                                         @bind-Value="editor.CustomCronExpression"
+                                         Placeholder="15 2 * * 1-5" />
+                        }
+
+                        <UiComboboxField TValue="string"
+                                       Label="Run as"
+                                       Compact="true"
+                                       Class="scheduling-compact-field scheduling-run-as-field"
+                                       @bind-Value="editor.RunAsUser">
+                            @foreach (var user in workspace.UserOptions)
+                            {
+                                <option value="@user.UserName">@user.DisplayLabel</option>
+                            }
+                        </UiComboboxField>
+                    </div>
+
+                    <UiTextField Label="Working directory"
+                                 Helper="Optional working folder to switch into before the command runs."
+                                 @bind-Value="editor.WorkingDirectory"
+                                 Placeholder="/srv/app" />
+
+                    @if (editor.ScheduleMode == ScheduledTaskScheduleMode.Weekly)
+                    {
+                        <div class="scheduling-weekday-inline">
+                            <span class="scheduling-weekday-inline-label">Days</span>
+                            <div class="scheduling-weekday-switches">
+                                @foreach (var weekday in WeekdayOptions)
+                                {
+                                    <div class="scheduling-weekday-option" title="@weekday.FullLabel">
+                                        <UiCompactCheckbox Label="@weekday.FullLabel"
+                                                           Value="@IsWeekdaySelected(weekday.Value)"
+                                                           ValueChanged="@((bool value) => HandleWeekdayChangedAsync(weekday.Value, value))"
+                                                           Class="scheduling-weekday-checkbox" />
+                                        <span class="scheduling-weekday-option-label">@weekday.Label</span>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+
+                    @if (editor.ScheduleMode == ScheduledTaskScheduleMode.Weekly)
+                    {
+                        <div class="ui-field-validation scheduling-weekday-validation">
+                            <ValidationMessage For="@(() => editor.DaysOfWeekCsv)" />
+                        </div>
+                    }
+                </section>
+            </div>
+
+            <div class="toolbar-row scheduling-form-actions">
+                <UiCommandButton Label="Save schedule" Glyph="UiIconGlyph.Connect" Type="submit" Disabled="@isSaving" />
+                <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="CloseEditorAsync" Disabled="@isSaving" />
+                <UiCommandButton Label="Delete task"
+                                 Glyph="UiIconGlyph.Delete"
+                                 Variant="UiButtonVariant.Danger"
+                                 OnClick="DeleteAsync"
+                                 Disabled="@(!editor.Id.HasValue || isSaving)" />
+            </div>
+        </EditForm>
+    }
+</UiModal>
+
+<UiModal IsOpen="@isLogOpen"
+         Title="@GetLogModalTitle()"
+         Subtitle="@GetLogModalSubtitle()"
+         Class="scheduling-log-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseLogAsync">
+    <div class="scheduling-log-shell">
+        @if (isLogLoading)
+        {
+            <p class="meta-text">Loading task log...</p>
+        }
+        else if (!string.IsNullOrWhiteSpace(logErrorMessage))
+        {
+            <p class="callout error">@logErrorMessage</p>
+        }
+        else if (taskLog is not null)
+        {
+            <div class="scheduling-log-toolbar">
+                <div class="scheduling-log-meta">
+                    <span class="meta-text">@taskLog.LogFilePath</span>
+                    <div class="scheduling-log-meta-line">
+                        <span class="meta-text">@GetTaskLogUpdatedDisplay(taskLog)</span>
+                        @if (taskLog.IsTruncated)
+                        {
+                            <span class="meta-text">Showing the latest log lines only.</span>
+                        }
+                    </div>
+                </div>
+
+                <UiIconButton Label="Refresh log"
+                              Title="Refresh log"
+                              Glyph="UiIconGlyph.Refresh"
+                              Variant="UiButtonVariant.ActionSubtle"
+                              Disabled="@(viewingLogTaskId is null)"
+                              OnClick="RefreshLogAsync" />
+            </div>
+
+            @if (!taskLog.Exists || string.IsNullOrWhiteSpace(taskLog.Content))
+            {
+                <div class="empty-state scheduling-log-empty-state">
+                    <p>No log output has been captured for this task yet.</p>
+                </div>
+            }
+            else
+            {
+                <pre class="scheduling-log-output"><code>@taskLog.Content</code></pre>
+            }
+        }
+    </div>
+</UiModal>
+
+@code {
+    private static readonly IReadOnlyList<WeekdayOption> WeekdayOptions =
+    [
+        new(1, "Mon", "Monday"),
+        new(2, "Tue", "Tuesday"),
+        new(3, "Wed", "Wednesday"),
+        new(4, "Thu", "Thursday"),
+        new(5, "Fri", "Friday"),
+        new(6, "Sat", "Saturday"),
+        new(0, "Sun", "Sunday")
+    ];
+
+    private ScheduledTaskWorkspaceViewModel? workspace;
+    private ScheduledTaskEditor? editor;
+    private Guid? selectedTaskId;
+    private bool isEditorOpen;
+    private string selectedRunbookIdText = string.Empty;
+    private string taskFilter = string.Empty;
+    private string statusMessage = string.Empty;
+    private string statusTone = "info";
+    private bool isSaving;
+    private Guid? runningTaskId;
+    private Guid? viewingLogTaskId;
+    private ScheduledTaskLogViewModel? taskLog;
+    private bool isLogOpen;
+    private bool isLogLoading;
+    private string logErrorMessage = string.Empty;
+    private IReadOnlyList<string> sourcePathSuggestions = [];
+    private IReadOnlyList<string> destinationPathSuggestions = [];
+    private readonly Dictionary<string, IReadOnlyList<string>> directorySuggestionCache = new(StringComparer.OrdinalIgnoreCase);
+    private int sourcePathSuggestionRequestVersion;
+    private int destinationPathSuggestionRequestVersion;
+    private bool isSourcePathSuggestionsLoading;
+    private bool isDestinationPathSuggestionsLoading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+    }
+
+    private IReadOnlyList<ScheduledTaskListItem> VisibleTasks =>
+        workspace?.Tasks
+            .Where(task =>
+                string.IsNullOrWhiteSpace(taskFilter) ||
+                task.Name.Contains(taskFilter, StringComparison.OrdinalIgnoreCase) ||
+                task.Description.Contains(taskFilter, StringComparison.OrdinalIgnoreCase) ||
+                task.ScheduleSummary.Contains(taskFilter, StringComparison.OrdinalIgnoreCase) ||
+                task.NextRunDisplay.Contains(taskFilter, StringComparison.OrdinalIgnoreCase) ||
+                task.CommandPreview.Contains(taskFilter, StringComparison.OrdinalIgnoreCase))
+            .ToArray() ?? [];
+
+    private ScheduledTaskRunbookOption? SelectedRunbookOption =>
+        workspace?.Runbooks.FirstOrDefault(runbook =>
+            runbook.Id.ToString().Equals(selectedRunbookIdText, StringComparison.OrdinalIgnoreCase));
+
+    private async Task LoadWorkspaceAsync()
+    {
+        workspace = await ScheduledTaskService.GetWorkspaceAsync();
+    }
+
+    private async Task RefreshAsync()
+    {
+        await LoadWorkspaceAsync();
+        SetStatus("Scheduler view refreshed.", "info");
+    }
+
+    private async Task RunNowAsync(Guid taskId)
+    {
+        runningTaskId = taskId;
+
+        try
+        {
+            var result = await ScheduledTaskService.RunTaskNowAsync(taskId);
+            SetStatus(result.Summary, result.Success ? "success" : "error");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            runningTaskId = null;
+        }
+    }
+
+    private async Task OpenLogAsync(Guid taskId)
+    {
+        viewingLogTaskId = taskId;
+        taskLog = null;
+        logErrorMessage = string.Empty;
+        isLogLoading = true;
+        isLogOpen = true;
+
+        try
+        {
+            taskLog = await ScheduledTaskService.GetTaskLogAsync(taskId);
+        }
+        catch (Exception exception)
+        {
+            logErrorMessage = exception.Message;
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isLogLoading = false;
+        }
+    }
+
+    private Task RefreshLogAsync() =>
+        viewingLogTaskId is Guid taskId
+            ? OpenLogAsync(taskId)
+            : Task.CompletedTask;
+
+    private async Task OpenCreateAsync()
+    {
+        selectedTaskId = null;
+        selectedRunbookIdText = string.Empty;
+        editor = await ScheduledTaskService.GetEditorAsync(null);
+        SyncSelectedRunbookSelection();
+        isEditorOpen = true;
+        QueueTaskPathSuggestionsRefresh();
+        ClearStatus();
+    }
+
+    private async Task OpenEditAsync(Guid taskId)
+    {
+        selectedTaskId = taskId;
+        selectedRunbookIdText = string.Empty;
+        editor = await ScheduledTaskService.GetEditorAsync(taskId);
+        SyncSelectedRunbookSelection();
+        isEditorOpen = true;
+        QueueTaskPathSuggestionsRefresh();
+        ClearStatus();
+    }
+
+    private Task CloseEditorAsync()
+    {
+        isEditorOpen = false;
+        selectedTaskId = null;
+        selectedRunbookIdText = string.Empty;
+        editor = null;
+        sourcePathSuggestionRequestVersion++;
+        destinationPathSuggestionRequestVersion++;
+        sourcePathSuggestions = [];
+        destinationPathSuggestions = [];
+        isSourcePathSuggestionsLoading = false;
+        isDestinationPathSuggestionsLoading = false;
+        return Task.CompletedTask;
+    }
+
+    private Task CloseLogAsync()
+    {
+        isLogOpen = false;
+        isLogLoading = false;
+        viewingLogTaskId = null;
+        taskLog = null;
+        logErrorMessage = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (editor is null)
+        {
+            return;
+        }
+
+        isSaving = true;
+
+        try
+        {
+            var taskId = await ScheduledTaskService.SaveTaskAsync(editor);
+            selectedTaskId = taskId;
+            await LoadWorkspaceAsync();
+            await CloseEditorAsync();
+            SetStatus("Scheduled task saved.", "success");
+        }
+        catch (ValidationException exception)
+        {
+            SetStatus(exception.Message, "warning");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isSaving = false;
+        }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (editor?.Id is not Guid taskId)
+        {
+            return;
+        }
+
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", $"Delete scheduled task '{editor.Name}'? LMS will remove its cron file as well."))
+        {
+            return;
+        }
+
+        try
+        {
+            await ScheduledTaskService.DeleteTaskAsync(taskId);
+            await LoadWorkspaceAsync();
+            await CloseEditorAsync();
+            SetStatus("Scheduled task deleted.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+    }
+
+    private Task HandleEnabledChangedAsync(bool value)
+    {
+        if (editor is not null)
+        {
+            editor.IsEnabled = value;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleTaskKindChangedAsync(ScheduledTaskKind value)
+    {
+        if (editor is null)
+        {
+            return;
+        }
+
+        editor.TaskKind = value;
+
+        if (value != ScheduledTaskKind.Runbook)
+        {
+            editor.RunbookId = null;
+            selectedRunbookIdText = string.Empty;
+        }
+        else
+        {
+            SyncSelectedRunbookSelection();
+            await ApplySelectedRunbookAsync(SelectedRunbookOption, showStatus: false);
+        }
+
+        if (UsesSourcePathSuggestions(value))
+        {
+            QueueTaskPathSuggestionsRefresh();
+        }
+        else
+        {
+            sourcePathSuggestionRequestVersion++;
+            destinationPathSuggestionRequestVersion++;
+            sourcePathSuggestions = [];
+            destinationPathSuggestions = [];
+            isSourcePathSuggestionsLoading = false;
+            isDestinationPathSuggestionsLoading = false;
+        }
+    }
+
+    private Task SetSourcePathAsync(string? value)
+    {
+        if (editor is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        editor.SourcePath = value?.Trim() ?? string.Empty;
+        QueueSourcePathSuggestionsRefresh();
+        return Task.CompletedTask;
+    }
+
+    private Task SetDestinationPathAsync(string? value)
+    {
+        if (editor is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        editor.DestinationPath = value?.Trim() ?? string.Empty;
+        QueueDestinationPathSuggestionsRefresh();
+        return Task.CompletedTask;
+    }
+
+    private void QueueTaskPathSuggestionsRefresh()
+    {
+        if (editor is null || !UsesSourcePathSuggestions(editor.TaskKind))
+        {
+            sourcePathSuggestions = [];
+            destinationPathSuggestions = [];
+            return;
+        }
+
+        QueueSourcePathSuggestionsRefresh();
+        if (UsesDestinationPathSuggestions(editor.TaskKind))
+        {
+            QueueDestinationPathSuggestionsRefresh();
+        }
+        else
+        {
+            destinationPathSuggestionRequestVersion++;
+            destinationPathSuggestions = [];
+            isDestinationPathSuggestionsLoading = false;
+        }
+    }
+
+    private void QueueSourcePathSuggestionsRefresh()
+    {
+        if (editor is null || !UsesSourcePathSuggestions(editor.TaskKind))
+        {
+            return;
+        }
+
+        var requestVersion = ++sourcePathSuggestionRequestVersion;
+        var query = editor.SourcePath;
+        var relatedPath = editor.DestinationPath;
+        sourcePathSuggestions = BuildCachedFileCopyPathSuggestions(query, relatedPath);
+        isSourcePathSuggestionsLoading = true;
+        _ = InvokeAsync(StateHasChanged);
+        _ = RefreshSourcePathSuggestionsAsync(requestVersion, query, relatedPath);
+    }
+
+    private void QueueDestinationPathSuggestionsRefresh()
+    {
+        if (editor is null || !UsesDestinationPathSuggestions(editor.TaskKind))
+        {
+            return;
+        }
+
+        var requestVersion = ++destinationPathSuggestionRequestVersion;
+        var query = editor.DestinationPath;
+        var relatedPath = editor.SourcePath;
+        destinationPathSuggestions = BuildCachedFileCopyPathSuggestions(query, relatedPath);
+        isDestinationPathSuggestionsLoading = true;
+        _ = InvokeAsync(StateHasChanged);
+        _ = RefreshDestinationPathSuggestionsAsync(requestVersion, query, relatedPath);
+    }
+
+    private async Task RefreshSourcePathSuggestionsAsync(int requestVersion, string? query, string? relatedPath)
+    {
+        try
+        {
+            var suggestions = await BuildFileCopyPathSuggestionsAsync(query, relatedPath);
+            if (requestVersion != sourcePathSuggestionRequestVersion)
+            {
+                return;
+            }
+
+            sourcePathSuggestions = suggestions;
+        }
+        finally
+        {
+            if (requestVersion == sourcePathSuggestionRequestVersion)
+            {
+                isSourcePathSuggestionsLoading = false;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private async Task RefreshDestinationPathSuggestionsAsync(int requestVersion, string? query, string? relatedPath)
+    {
+        try
+        {
+            var suggestions = await BuildFileCopyPathSuggestionsAsync(query, relatedPath);
+            if (requestVersion != destinationPathSuggestionRequestVersion)
+            {
+                return;
+            }
+
+            destinationPathSuggestions = suggestions;
+        }
+        finally
+        {
+            if (requestVersion == destinationPathSuggestionRequestVersion)
+            {
+                isDestinationPathSuggestionsLoading = false;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private async Task<IReadOnlyList<string>> BuildFileCopyPathSuggestionsAsync(string? query, string? relatedPath)
+    {
+        var trimmedQuery = query?.Trim() ?? string.Empty;
+        var normalizedQuery = string.IsNullOrWhiteSpace(trimmedQuery)
+            ? string.Empty
+            : ScheduledTaskPathSuggestions.NormalizeSuggestedPath(trimmedQuery);
+        var suggestions = new SortedSet<string>(
+            ScheduledTaskPathSuggestions.BuildBaseSuggestions(query, relatedPath),
+            StringComparer.OrdinalIgnoreCase);
+
+        if (string.IsNullOrWhiteSpace(normalizedQuery) && string.IsNullOrWhiteSpace(relatedPath))
+        {
+            return ScheduledTaskPathSuggestions.FilterAndOrderSuggestions(suggestions, normalizedQuery, query);
+        }
+
+        foreach (var path in ScheduledTaskPathSuggestions.BuildInspectionPaths(normalizedQuery, relatedPath))
+        {
+            var directorySuggestions = await GetDirectorySuggestionsAsync(path);
+            foreach (var suggestion in directorySuggestions)
+            {
+                suggestions.Add(ScheduledTaskPathSuggestions.NormalizeSuggestedPath(suggestion));
+            }
+        }
+
+        return ScheduledTaskPathSuggestions.FilterAndOrderSuggestions(suggestions, normalizedQuery, query);
+    }
+
+    private IReadOnlyList<string> BuildCachedFileCopyPathSuggestions(string? query, string? relatedPath)
+    {
+        var trimmedQuery = query?.Trim() ?? string.Empty;
+        var normalizedQuery = string.IsNullOrWhiteSpace(trimmedQuery)
+            ? string.Empty
+            : ScheduledTaskPathSuggestions.NormalizeSuggestedPath(trimmedQuery);
+        var suggestions = new SortedSet<string>(
+            ScheduledTaskPathSuggestions.BuildBaseSuggestions(query, relatedPath),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var path in ScheduledTaskPathSuggestions.BuildInspectionPaths(normalizedQuery, relatedPath))
+        {
+            foreach (var suggestion in GetCachedDirectorySuggestions(path))
+            {
+                suggestions.Add(ScheduledTaskPathSuggestions.NormalizeSuggestedPath(suggestion));
+            }
+        }
+
+        return ScheduledTaskPathSuggestions.FilterAndOrderSuggestions(suggestions, normalizedQuery, query);
+    }
+
+    private async Task<IReadOnlyList<string>> GetDirectorySuggestionsAsync(string path)
+    {
+        var normalizedPath = ScheduledTaskPathSuggestions.NormalizeSuggestedPath(path);
+        if (directorySuggestionCache.TryGetValue(normalizedPath, out var cached))
+        {
+            return cached;
+        }
+
+        try
+        {
+            cached = (await LocalFileBrowsingService.ListItemsAsync("/", normalizedPath))
+                .Where(item => item.ItemType == SftpItemType.Folder)
+                .Select(item => ScheduledTaskPathSuggestions.NormalizeSuggestedPath(item.FullPath))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch
+        {
+            cached = [];
+        }
+
+        directorySuggestionCache[normalizedPath] = cached;
+        return cached;
+    }
+
+    private IReadOnlyList<string> GetCachedDirectorySuggestions(string path)
+    {
+        var normalizedPath = ScheduledTaskPathSuggestions.NormalizeSuggestedPath(path);
+        return directorySuggestionCache.TryGetValue(normalizedPath, out var cached)
+            ? cached
+            : [];
+    }
+
+    private Task HandleSelectedRunbookChangedAsync(string value)
+    {
+        selectedRunbookIdText = value;
+        return ApplySelectedRunbookAsync(SelectedRunbookOption, showStatus: true);
+    }
+
+    private Task ApplySelectedRunbookAsync(ScheduledTaskRunbookOption? runbook, bool showStatus)
+    {
+        if (editor is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        editor.TaskKind = ScheduledTaskKind.Runbook;
+
+        if (runbook is null)
+        {
+            editor.RunbookId = null;
+            editor.CommandText = string.Empty;
+            return Task.CompletedTask;
+        }
+
+        editor.RunbookId = runbook.Id;
+        editor.CommandText = runbook.CommandText.Trim();
+
+        if (string.IsNullOrWhiteSpace(editor.Name))
+        {
+            editor.Name = runbook.Name;
+        }
+
+        if (string.IsNullOrWhiteSpace(editor.Description))
+        {
+            editor.Description = runbook.Description;
+        }
+
+        if (runbook.RequiresSudo &&
+            !editor.RunAsUser.Equals(ScheduledTaskCompiler.RootUserName, StringComparison.OrdinalIgnoreCase))
+        {
+            editor.RunAsUser = ScheduledTaskCompiler.RootUserName;
+            if (showStatus)
+            {
+                SetStatus(
+                    $"Loaded runbook '{runbook.Name}' and switched execution user to root because sudo-marked runbooks are safest as root under cron.",
+                    "info");
+            }
+
+            return Task.CompletedTask;
+        }
+
+        if (showStatus)
+        {
+            SetStatus($"Loaded runbook '{runbook.Name}' into the scheduled task.", "info");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private bool IsWeekdaySelected(int value)
+    {
+        if (editor is null)
+        {
+            return false;
+        }
+
+        return ParseWeekdays(editor.DaysOfWeekCsv).Contains(value);
+    }
+
+    private Task HandleWeekdayChangedAsync(int value, bool isSelected)
+    {
+        if (editor is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        var days = ParseWeekdays(editor.DaysOfWeekCsv);
+        if (isSelected)
+        {
+            if (!days.Contains(value))
+            {
+                days.Add(value);
+            }
+        }
+        else
+        {
+            days.Remove(value);
+        }
+
+        editor.DaysOfWeekCsv = string.Join(",", days.OrderBy(day => day));
+        return Task.CompletedTask;
+    }
+
+    private string GetEditorTitle() =>
+        editor?.Id.HasValue == true
+            ? editor.Name
+            : "Create scheduled task";
+
+    private string GetEditorSubtitle() =>
+        editor?.Id.HasValue == true
+            ? "Edit the LMS-managed cron definition"
+            : "Build a new LMS-managed cron definition";
+
+    private string GetLogModalTitle()
+    {
+        if (taskLog is not null)
+        {
+            return $"{taskLog.TaskName} log";
+        }
+
+        if (viewingLogTaskId is Guid taskId)
+        {
+            var taskName = VisibleTasks.FirstOrDefault(task => task.Id == taskId)?.Name;
+            if (!string.IsNullOrWhiteSpace(taskName))
+            {
+                return $"{taskName} log";
+            }
+        }
+
+        return "Task log";
+    }
+
+    private string GetLogModalSubtitle() =>
+        "Latest output captured in the LMS scheduled task log.";
+
+    private static string GetRunbookOptionLabel(ScheduledTaskRunbookOption runbook)
+    {
+        var privilege = runbook.RequiresSudo ? "sudo" : "user";
+        var contentKind = runbook.IsScript ? "script" : "command";
+        return runbook.IsQuickAccess
+            ? $"{runbook.Name} · {contentKind} · {privilege} · favourite"
+            : $"{runbook.Name} · {contentKind} · {privilege}";
+    }
+
+    private static string GetTaskDescription(ScheduledTaskListItem task) =>
+        string.IsNullOrWhiteSpace(task.Description) ? "No description" : task.Description;
+
+    private static string GetTaskLogUpdatedDisplay(ScheduledTaskLogViewModel taskLog) =>
+        taskLog.LastUpdatedAtUtc.HasValue
+            ? $"Updated {taskLog.LastUpdatedAtUtc.Value.ToLocalTime():dd MMM yyyy HH:mm}"
+            : "No log file has been created yet";
+
+    private static bool HasSelectionFilters(ScheduledTaskEditor editor) =>
+        !string.IsNullOrWhiteSpace(editor.MatchPatternsCsv) ||
+        editor.AgeFilterMode != ScheduledTaskAgeFilterMode.Any;
+
+    private static bool UsesSourcePathSuggestions(ScheduledTaskKind taskKind) =>
+        taskKind is ScheduledTaskKind.FileCopy or ScheduledTaskKind.Cleanup;
+
+    private static bool UsesDestinationPathSuggestions(ScheduledTaskKind taskKind) =>
+        taskKind == ScheduledTaskKind.FileCopy;
+
+    private static UiPillTone GetTaskKindTone(ScheduledTaskKind taskKind) => taskKind switch
+    {
+        ScheduledTaskKind.Runbook => UiPillTone.Neutral,
+        ScheduledTaskKind.SystemUpdate => UiPillTone.Warning,
+        ScheduledTaskKind.FileCopy => UiPillTone.Success,
+        ScheduledTaskKind.Cleanup => UiPillTone.Warning,
+        ScheduledTaskKind.ShellScript => UiPillTone.Neutral,
+        _ => UiPillTone.Neutral
+    };
+
+    private static string GetTaskKindLabel(ScheduledTaskKind taskKind) => taskKind switch
+    {
+        ScheduledTaskKind.Runbook => "Runbook",
+        ScheduledTaskKind.ShellCommand => "Command",
+        ScheduledTaskKind.FileCopy => "Copy",
+        ScheduledTaskKind.Cleanup => "Cleanup",
+        ScheduledTaskKind.ShellScript => "Script",
+        ScheduledTaskKind.SystemUpdate => "Updates",
+        _ => "Task"
+    };
+
+    private static UiPillTone GetSchedulerServiceTone(string state) =>
+        state.Equals("active", StringComparison.OrdinalIgnoreCase)
+            ? UiPillTone.Success
+            : string.IsNullOrWhiteSpace(state)
+                ? UiPillTone.Neutral
+                : UiPillTone.Warning;
+
+    private static string GetSchedulerSummary(ScheduledTaskHealthViewModel health)
+    {
+        if (!string.IsNullOrWhiteSpace(health.DetectedServiceName))
+        {
+            return health.ServiceState.Equals("active", StringComparison.OrdinalIgnoreCase)
+                ? "Ready"
+                : health.ServiceState;
+        }
+
+        return health.CronDirectoryAvailable ? "Unknown" : "Missing";
+    }
+
+    private static List<int> ParseWeekdays(string csv) =>
+        csv
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static value => int.TryParse(value, out var parsed) ? parsed : -1)
+            .Where(static value => value is >= 0 and <= 6)
+            .Distinct()
+            .ToList();
+
+    private static bool ScheduleModeUsesHour(ScheduledTaskScheduleMode scheduleMode) =>
+        scheduleMode is ScheduledTaskScheduleMode.Daily or ScheduledTaskScheduleMode.Weekly or ScheduledTaskScheduleMode.Monthly;
+
+    private static bool ScheduleModeUsesMinute(ScheduledTaskScheduleMode scheduleMode) =>
+        scheduleMode is ScheduledTaskScheduleMode.Hourly or ScheduledTaskScheduleMode.Daily or ScheduledTaskScheduleMode.Weekly or ScheduledTaskScheduleMode.Monthly;
+
+    private void SyncSelectedRunbookSelection()
+    {
+        if (workspace is null || editor is null || editor.TaskKind != ScheduledTaskKind.Runbook)
+        {
+            selectedRunbookIdText = string.Empty;
+            return;
+        }
+
+        if (editor.RunbookId.HasValue &&
+            workspace.Runbooks.Any(runbook => runbook.Id == editor.RunbookId.Value))
+        {
+            selectedRunbookIdText = editor.RunbookId.Value.ToString();
+            return;
+        }
+
+        var matchedRunbook = workspace.Runbooks.FirstOrDefault(runbook =>
+            runbook.CommandText.Trim().Equals(editor.CommandText.Trim(), StringComparison.Ordinal));
+
+        selectedRunbookIdText = matchedRunbook?.Id.ToString() ?? string.Empty;
+    }
+
+    private void SetStatus(string message, string tone)
+    {
+        statusMessage = message;
+        statusTone = tone;
+    }
+
+    private void ClearStatus()
+    {
+        statusMessage = string.Empty;
+        statusTone = "info";
+    }
+
+    private sealed record WeekdayOption(
+        int Value,
+        string Label,
+        string FullLabel);
+}

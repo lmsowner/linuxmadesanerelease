@@ -1,0 +1,128 @@
+@page "/services/{ServiceId:guid}"
+@using LinuxMadeSane.Application.Contracts.Services
+@using LinuxMadeSane.Application.Interfaces
+@inject IServiceOperationsService ServiceOperations
+
+<PageTitle>Service Details | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    @if (viewModel is null)
+    {
+        <section class="surface-card">
+            <div class="empty-state">
+                <h3>Service not found</h3>
+                <p>This service is not present on the local machine anymore, or the unit name no longer resolves through systemd.</p>
+            </div>
+        </section>
+    }
+    else
+    {
+        <section class="hero-panel compact">
+            <div>
+                <p class="eyebrow">Service detail</p>
+                <h1>@viewModel.Inspection.UnitName</h1>
+                <p class="hero-copy">See the raw systemd/runtime details, then read the plain-English translation before deciding whether to update, repair, or roll back.</p>
+            </div>
+            <div class="hero-actions">
+                <a class="secondary-link" href="/services/update-wizard">Update wizard</a>
+                <a class="secondary-link" href="/services/issue-fixer">Issue fixer</a>
+                <a class="secondary-link" href="/services/repair">Repair mode</a>
+            </div>
+        </section>
+
+        <div class="dashboard-columns">
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Service metadata</h2>
+                    <span>systemd + runtime view</span>
+                </div>
+
+                <div class="policy-grid">
+                    <div class="stack-tight">
+                        <span class="eyebrow">Unit file</span>
+                        <code>@viewModel.Inspection.UnitFilePath</code>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">ExecStart</span>
+                        <code>@viewModel.Inspection.ExecStart</code>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">Working directory</span>
+                        <code>@viewModel.Inspection.WorkingDirectory</code>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">Environment file</span>
+                        <code>@(viewModel.Inspection.EnvironmentFile ?? "None configured")</code>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">User / group</span>
+                        <strong>@viewModel.Inspection.RunningUser / @viewModel.Inspection.RunningGroup</strong>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">Restart policy</span>
+                        <strong>@viewModel.Inspection.RestartPolicy</strong>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">Dependencies</span>
+                        <span>@string.Join(", ", viewModel.Inspection.Dependencies)</span>
+                    </div>
+                    <div class="stack-tight">
+                        <span class="eyebrow">Last exit code</span>
+                        <strong>@viewModel.Inspection.LastExitCode</strong>
+                    </div>
+                </div>
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Plain English</h2>
+                    <span>This layer is the point</span>
+                </div>
+
+                <div class="decision-list">
+                    @foreach (var line in viewModel.Inspection.PlainEnglishSummary)
+                    {
+                        <InfoPill Text="@line" />
+                    }
+                </div>
+            </section>
+        </div>
+
+        <div class="dashboard-columns">
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Live logs</h2>
+                    <span>Recent journal highlights</span>
+                </div>
+                <code class="block-code service-log-block">@string.Join(Environment.NewLine, viewModel.Inspection.LiveLogLines)</code>
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Current findings</h2>
+                    <span>What needs attention</span>
+                </div>
+                <div class="issue-list">
+                    @foreach (var finding in viewModel.Inspection.Findings)
+                    {
+                        <article class="issue-card warning">
+                            <strong>@finding</strong>
+                        </article>
+                    }
+                </div>
+            </section>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public Guid ServiceId { get; set; }
+
+    private ServiceDetailsViewModel? viewModel;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        viewModel = await ServiceOperations.GetDetailsAsync(ServiceId);
+    }
+}

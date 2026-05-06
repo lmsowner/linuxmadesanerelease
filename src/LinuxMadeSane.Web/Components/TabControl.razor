@@ -1,0 +1,154 @@
+<CascadingValue Value="this" IsFixed="true">
+    @ChildContent
+</CascadingValue>
+
+<div class="tab-control @Class">
+    <div class="tab-control-bar">
+        <div class="tab-list" role="tablist">
+            @if (LeadingHeaderActions is not null)
+            {
+                <div class="tab-leading-actions">
+                    @LeadingHeaderActions
+                </div>
+            }
+
+            @foreach (var tabPage in pages)
+            {
+                var isActive = IsActive(tabPage);
+
+                <button class="tab-trigger @(isActive ? "active" : string.Empty)"
+                        type="button"
+                        id="@tabPage.HeaderElementId"
+                        role="tab"
+                        aria-selected="@isActive"
+                        aria-controls="@tabPage.PanelElementId"
+                        tabindex="@(isActive ? 0 : -1)"
+                        title="@(tabPage.Tooltip)"
+                        disabled="@tabPage.Disabled"
+                        @onclick="(() => SelectPageAsync(tabPage))">
+                    @if (tabPage.Header is not null)
+                    {
+                        @tabPage.Header
+                    }
+                    else
+                    {
+                        <span class="tab-trigger-title">@tabPage.Title</span>
+                    }
+                </button>
+            }
+        </div>
+
+        @if (HeaderActions is not null)
+        {
+            <div class="tab-actions">
+                @HeaderActions
+            </div>
+        }
+    </div>
+
+    @if (RenderActivePageContent)
+    {
+        <div class="tab-panel @PanelClass"
+             id="@(ActivePage?.PanelElementId)"
+             role="tabpanel"
+             aria-labelledby="@(ActivePage?.HeaderElementId)">
+            @if (ActivePage?.ChildContent is not null)
+            {
+                @ActivePage.ChildContent
+            }
+            else if (EmptyState is not null)
+            {
+                @EmptyState
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private readonly List<TabPage> pages = [];
+    private string? uncontrolledActiveValue;
+
+    [Parameter]
+    public string? ActiveValue { get; set; }
+
+    [Parameter]
+    public EventCallback<string?> ActiveValueChanged { get; set; }
+
+    [Parameter]
+    public bool RenderActivePageContent { get; set; } = true;
+
+    [Parameter]
+    public string Class { get; set; } = string.Empty;
+
+    [Parameter]
+    public string PanelClass { get; set; } = string.Empty;
+
+    [Parameter]
+    public RenderFragment? LeadingHeaderActions { get; set; }
+
+    [Parameter]
+    public RenderFragment? HeaderActions { get; set; }
+
+    [Parameter]
+    public RenderFragment? EmptyState { get; set; }
+
+    [Parameter]
+    public RenderFragment? ChildContent { get; set; }
+
+    internal void RegisterPage(TabPage page)
+    {
+        if (!pages.Contains(page))
+        {
+            pages.Add(page);
+            _ = InvokeAsync(StateHasChanged);
+        }
+
+        if (!ActiveValueChanged.HasDelegate && string.IsNullOrWhiteSpace(CurrentActiveValue))
+        {
+            uncontrolledActiveValue = page.EffectiveValue;
+        }
+    }
+
+    internal void UnregisterPage(TabPage page)
+    {
+        if (!pages.Remove(page))
+        {
+            return;
+        }
+
+        if (!ActiveValueChanged.HasDelegate && string.Equals(uncontrolledActiveValue, page.EffectiveValue, StringComparison.Ordinal))
+        {
+            uncontrolledActiveValue = pages.FirstOrDefault(item => !item.Disabled)?.EffectiveValue;
+        }
+
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    private TabPage? ActivePage =>
+        pages.FirstOrDefault(page => string.Equals(page.EffectiveValue, CurrentActiveValue, StringComparison.Ordinal))
+        ?? pages.FirstOrDefault(page => !page.Disabled);
+
+    private string? CurrentActiveValue =>
+        ActiveValueChanged.HasDelegate || !string.IsNullOrWhiteSpace(ActiveValue)
+            ? ActiveValue
+            : uncontrolledActiveValue;
+
+    private bool IsActive(TabPage page) =>
+        string.Equals(page.EffectiveValue, ActivePage?.EffectiveValue, StringComparison.Ordinal);
+
+    private async Task SelectPageAsync(TabPage page)
+    {
+        if (page.Disabled)
+        {
+            return;
+        }
+
+        if (ActiveValueChanged.HasDelegate)
+        {
+            await ActiveValueChanged.InvokeAsync(page.EffectiveValue);
+            return;
+        }
+
+        uncontrolledActiveValue = page.EffectiveValue;
+    }
+}

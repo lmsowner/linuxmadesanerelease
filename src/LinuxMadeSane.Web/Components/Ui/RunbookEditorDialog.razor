@@ -1,0 +1,1380 @@
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Contracts.Ai
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@inject IJSRuntime JSRuntime
+@inject IAiThreadService ThreadService
+@inject IAiChatService ChatService
+@inject IAiPromptSanitizer AiPromptSanitizer
+
+<UiModal IsOpen="@IsOpen"
+         Title="@ResolveDialogTitle()"
+         Subtitle="@ResolveDialogSubtitle()"
+         Class="runbook-editor-modal"
+         Resizable="true"
+         Draggable="true"
+         CloseOnBackdrop="false"
+         OnClose="HandleCloseAsync">
+    <ChildContent>
+        <EditForm id="@formId" Model="@Editor" OnValidSubmit="HandleSaveAsync" class="runbook-editor-form">
+            <DataAnnotationsValidator />
+
+            <div class="runbook-editor-top-grid">
+                <UiTextField Value="@Editor.Name"
+                             ValueChanged="SetNameAsync"
+                             ValueExpression="@(() => Editor.Name)"
+                             Label="Title"
+                             Placeholder="Restart nginx"
+                             Compact="true"
+                             Class="runbook-editor-field-name" />
+
+                <UiField Label="Runbook type"
+                         Compact="true"
+                         Class="runbook-editor-field-host">
+                    <ChildContent>
+                        <div class="runbook-editor-choice-row">
+                            <button type="button"
+                                    class="@GetChoiceButtonClass(!Editor.IsTemplate)"
+                                    @onclick="SetRunnableModeAsync">
+                                Runnable
+                            </button>
+                            <button type="button"
+                                    class="@GetChoiceButtonClass(Editor.IsTemplate)"
+                                    @onclick="SetTemplateModeAsync">
+                                Template
+                            </button>
+                        </div>
+                    </ChildContent>
+                </UiField>
+
+                <UiField Label="Access"
+                         Compact="true"
+                         Class="runbook-editor-field-access">
+                    <ChildContent>
+                        <div class="runbook-editor-choice-row">
+                            <button type="button"
+                                    class="@GetChoiceButtonClass(!Editor.RequiresSudo)"
+                                    @onclick="SetUserModeAsync">
+                                User
+                            </button>
+                            <button type="button"
+                                    class="@GetChoiceButtonClass(Editor.RequiresSudo)"
+                                    @onclick="SetSudoModeAsync">
+                                sudo
+                            </button>
+                        </div>
+                    </ChildContent>
+                </UiField>
+            </div>
+
+            <div class="runbook-editor-secondary-grid">
+                <UiTextField Value="@Editor.Description"
+                             ValueChanged="SetDescriptionAsync"
+                             ValueExpression="@(() => Editor.Description)"
+                             Label="Summary"
+                             Placeholder="Restart the service after a deploy."
+                             Compact="true"
+                             Class="runbook-editor-field-summary" />
+
+                @if (Editor.IsTemplate)
+                {
+                    <UiComboboxField TValue="Guid"
+                                     Value="@Editor.HostId"
+                                     ValueChanged="SetHostIdAsync"
+                                     ValueExpression="@(() => Editor.HostId)"
+                                     Label="Template owner"
+                                     Helper="Templates live in the library and can later be instantiated onto any machine."
+                                     Compact="true"
+                                     Class="runbook-editor-field-favourite">
+                        @foreach (var host in OrderedHosts)
+                        {
+                            <option value="@host.Id">@host.Name</option>
+                        }
+                    </UiComboboxField>
+                }
+                else
+                {
+                    <UiCheckboxField Value="@Editor.IsQuickAccess"
+                                     ValueChanged="SetQuickAccessAsync"
+                                     ValueExpression="@(() => Editor.IsQuickAccess)"
+                                     Label="Terminal favourite"
+                                     Helper="Only concrete runnable runbooks can appear in the terminal Runbooks menu."
+                                     Compact="true"
+                                     Class="runbook-editor-field-favourite" />
+                }
+            </div>
+
+            @if (!Editor.IsTemplate)
+            {
+                <section class="surface-subcard runbook-editor-host-card">
+                    <div class="runbook-editor-section-header">
+                        <div class="stack-tight">
+                            <strong>Target machines</strong>
+                            <span class="helper-text">Pick the machines that should have this runbook available. One edit updates the whole set.</span>
+                        </div>
+                    </div>
+
+                    <div class="runbook-editor-host-grid">
+                        @foreach (var host in OrderedHosts)
+                        {
+                            var isSelected = Editor.SelectedHostIds.Contains(host.Id);
+                            <div class="runbook-editor-host-chip @(isSelected ? "selected" : string.Empty)"
+                                 @key="host.Id"
+                                 @onclick="@(() => ToggleHostSelectedAsync(host.Id))">
+                                <UiCompactCheckbox Label="@($"Select {host.Name}")"
+                                                   Value="@isSelected"
+                                                   ValueChanged="@((bool value) => SetHostSelectedAsync(host.Id, value))" />
+                                <span class="runbook-editor-host-chip-copy">@host.Name</span>
+                            </div>
+                        }
+                    </div>
+                </section>
+            }
+
+            @if (Editor.IsTemplate)
+            {
+                <section class="surface-subcard runbook-editor-parameters-card">
+                    <div class="runbook-editor-section-header">
+                        <div class="stack-tight">
+                            <strong>Template parameters</strong>
+                            <span class="helper-text">Use tokens like <code>{{service_name}}</code> or <code>{{folder_path}}</code> in the script below. LMS will turn the template into a concrete bash runbook later.</span>
+                        </div>
+
+                        <UiCommandButton Label="Add parameter"
+                                         Glyph="UiIconGlyph.Plus"
+                                         Variant="UiButtonVariant.ActionSubtle"
+                                         OnClick="AddParameterAsync" />
+                    </div>
+
+                    @if (Editor.Parameters.Count == 0)
+                    {
+                        <div class="empty-state compact-empty-state">
+                            <p>No parameters yet.</p>
+                            <p class="meta-text">Add a file, folder, service, package, user, group, URL, port, host, or free-text parameter when the runbook should act like a template.</p>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="runbook-editor-parameter-list">
+                            @for (var index = 0; index < Editor.Parameters.Count; index++)
+                            {
+                                var parameter = Editor.Parameters[index];
+                                var parameterIndex = index;
+                                <div class="runbook-editor-parameter-row" @key="@($"param-{parameterIndex}-{parameter.Name}")">
+                                    <UiField Label="Token" Compact="true">
+                                        <ChildContent>
+                                            <input class="ui-control-input"
+                                                   type="text"
+                                                   value="@parameter.Name"
+                                                   placeholder="service_name"
+                                                   @onchange="@((ChangeEventArgs args) => SetParameterNameAsync(parameterIndex, args.Value?.ToString()))" />
+                                        </ChildContent>
+                                    </UiField>
+
+                                    <UiField Label="Prompt" Compact="true">
+                                        <ChildContent>
+                                            <input class="ui-control-input"
+                                                   type="text"
+                                                   value="@parameter.Label"
+                                                   placeholder="Service name"
+                                                   @onchange="@((ChangeEventArgs args) => SetParameterLabelAsync(parameterIndex, args.Value?.ToString()))" />
+                                        </ChildContent>
+                                    </UiField>
+
+                                    <UiField Label="Type" Compact="true">
+                                        <ChildContent>
+                                            <select class="ui-control-combobox ui-control-select"
+                                                    value="@parameter.Kind.ToString()"
+                                                    @onchange="@((ChangeEventArgs args) => SetParameterKindFromStringAsync(parameterIndex, args.Value?.ToString()))">
+                                                @foreach (var parameterKind in SupportedParameterKinds)
+                                                {
+                                                    <option value="@parameterKind.ToString()">@GetParameterKindLabel(parameterKind)</option>
+                                                }
+                                            </select>
+                                        </ChildContent>
+                                    </UiField>
+
+                                    <UiField Label="Placeholder" Compact="true">
+                                        <ChildContent>
+                                            <input class="ui-control-input"
+                                                   type="text"
+                                                   value="@parameter.Placeholder"
+                                                   placeholder="@GetDefaultPlaceholder(parameter.Kind)"
+                                                   @onchange="@((ChangeEventArgs args) => SetParameterPlaceholderAsync(parameterIndex, args.Value?.ToString()))" />
+                                        </ChildContent>
+                                    </UiField>
+
+                                    <div class="runbook-editor-parameter-options">
+                                        <label class="runbook-editor-required-toggle">
+                                            <UiCompactCheckbox Label="@($"Required parameter {parameter.Name}")"
+                                                               Value="@parameter.IsRequired"
+                                                               ValueChanged="@((bool value) => SetParameterRequiredAsync(parameterIndex, value))" />
+                                            <span>Required</span>
+                                        </label>
+                                        <UiCommandButton Label="Remove"
+                                                         Glyph="UiIconGlyph.Delete"
+                                                         Variant="UiButtonVariant.Danger"
+                                                         OnClick="@(() => RemoveParameterAsync(parameterIndex))" />
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    }
+                </section>
+            }
+            else if (IsInstantiatedTemplate)
+            {
+                <section class="surface-subcard runbook-editor-parameters-card">
+                    <div class="runbook-editor-section-header">
+                        <div class="stack-tight">
+                            <strong>Template values</strong>
+                            <span class="helper-text">Fill the template values once, then LMS saves a fully concrete bash runbook that can be favourited and used from the terminal menu.</span>
+                        </div>
+                    </div>
+
+                    <div class="runbook-editor-template-origin">
+                        <strong>@Editor.TemplateSourceName</strong>
+                        <span class="meta-text">Template source</span>
+                    </div>
+
+                    <div class="runbook-editor-instantiation-grid">
+                        @for (var index = 0; index < Editor.Parameters.Count; index++)
+                        {
+                            var parameter = Editor.Parameters[index];
+                            var parameterIndex = index;
+                            <UiField Label="@(string.IsNullOrWhiteSpace(parameter.Label) ? parameter.Name : parameter.Label)"
+                                     Helper="@BuildParameterHelper(parameter)"
+                                     Compact="true">
+                                <ChildContent>
+                                    <input class="ui-control-input"
+                                           type="@ResolveParameterInputType(parameter)"
+                                           value="@parameter.Value"
+                                           placeholder="@ResolveParameterPlaceholder(parameter)"
+                                           @onchange="@((ChangeEventArgs args) => SetParameterValueAsync(parameterIndex, args.Value?.ToString()))" />
+                                </ChildContent>
+                            </UiField>
+                        }
+                    </div>
+
+                    <div class="runbook-editor-template-preview">
+                        <span class="meta-text">Rendered preview</span>
+                        <pre class="runbook-editor-preview-block"><code>@RenderedTemplatePreview</code></pre>
+                    </div>
+                </section>
+            }
+
+            <section class="surface-subcard runbook-editor-content-card">
+                <div class="runbook-editor-section-header">
+                    <div class="stack-tight">
+                        <strong>@(Editor.IsTemplate ? "Template script" : IsInstantiatedTemplate ? "Stored script preview" : "Runbook script")</strong>
+                        <span class="helper-text">@(Editor.IsTemplate
+                            ? "Keep the template source here. LMS resolves the tokens into a concrete bash script when you create a runnable runbook from it."
+                            : IsInstantiatedTemplate
+                                ? "This concrete runbook is rendered from the selected template values."
+                                : "LMS stores the script in its database and materializes a temporary file only when the runbook executes.")</span>
+                    </div>
+                </div>
+
+                <div class="runbook-editor-workspace"
+                     @ref="workspaceElement"
+                    style="@GetWorkspaceStyle()">
+                    <div class="runbook-editor-editor-pane">
+                        @if (IsInstantiatedTemplate)
+                        {
+                            <pre class="runbook-editor-preview-block"><code>@RenderedTemplatePreview</code></pre>
+                        }
+                        else
+                        {
+                            <UiTextAreaField Value="@Editor.CommandText"
+                                             ValueChanged="SetCommandTextAsync"
+                                             ValueExpression="@(() => Editor.CommandText)"
+                                             Label="@(Editor.IsTemplate ? "Bash template" : "Bash script")"
+                                             Placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;systemctl restart nginx"
+                                             Rows="11"
+                                             Compact="true"
+                                             InputClass="runbook-editor-script-input" />
+                        }
+
+                        <div class="runbook-editor-storage-note">
+                            <UiGlyphIcon Glyph="UiIconGlyph.Info" />
+                            <span>LMS stores this script in its database and materializes a temporary file only when the runbook executes.</span>
+                        </div>
+                    </div>
+
+                    <div class="ui-pane-splitter ui-pane-splitter-vertical runbook-editor-ai-splitter"
+                         role="separator"
+                         aria-label="Resize AI helper panel"
+                         aria-orientation="vertical"
+                         title="Drag to resize the AI helper panel"
+                         @onpointerdown="OnAiPaneSplitterPointerDownAsync"
+                         @onpointerdown:preventDefault="true"></div>
+
+                    <section class="runbook-editor-ai-pane">
+                        <div class="runbook-editor-section-header runbook-editor-ai-header">
+                            <div class="stack-tight">
+                                <strong>AI helper</strong>
+                                <span class="helper-text">@ResolveAiHelperSubtitle()</span>
+                            </div>
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(aiStatusMessage))
+                        {
+                            <p class="callout @aiStatusTone">@aiStatusMessage</p>
+                        }
+
+                        @if (isAiAvailabilityLoading || (aiThreadEditorContext is null && !aiAvailabilityRequested))
+                        {
+                            <div class="empty-state compact-empty-state">
+                                <p>Checking AI helper availability...</p>
+                            </div>
+                        }
+                        else if (!HasConfiguredAiProvider)
+                        {
+                            <div class="empty-state compact-empty-state runbook-editor-ai-empty">
+                                <p>No enabled AI provider is configured.</p>
+                                <p class="meta-text">Configure a provider first, then come back here and draft the runbook inline.</p>
+                                <UiCommandButton Label="Configure AI"
+                                                 Glyph="UiIconGlyph.Ai"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Href="/ai/providers" />
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="runbook-editor-ai-shell">
+                                <AiProviderSwitcher Providers="@AvailableAiProviders"
+                                                    Models="@(aiThreadEditorContext?.Models ?? [])"
+                                                    ProviderKey="@(aiThreadEditorContext?.Editor.ProviderKey ?? string.Empty)"
+                                                    ProviderKeyChanged="HandleAiProviderSelectionChangedAsync"
+                                                    ModelId="@(aiThreadEditorContext?.Editor.ModelId ?? string.Empty)"
+                                                    ModelIdChanged="HandleAiModelSelectionChangedAsync"
+                                                    Disabled="@isAiSending"
+                                                    ProviderLabel="AI provider"
+                                                    ModelLabel="Model"
+                                                    Class="runbook-editor-ai-provider-switcher" />
+
+                                @if (LatestAssistantDraft is not null)
+                                {
+                                    <div class="runbook-editor-ai-apply-row">
+                                        <UiCommandButton Label="Use latest draft"
+                                                         Glyph="UiIconGlyph.TextFile"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         OnClick="ApplyLatestDraftAsync" />
+                                        @if (aiThreadId.HasValue)
+                                        {
+                                            <UiCommandButton Label="Clear chat"
+                                                             Glyph="UiIconGlyph.Clear"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             OnClick="ClearAiConversationAsync" />
+                                        }
+                                    </div>
+                                }
+
+                                <div class="runbook-editor-ai-history">
+                                    @if (DisplayedAiMessages.Count == 0)
+                                    {
+                                    <div class="empty-state compact-empty-state runbook-editor-ai-empty">
+                                        <p>No AI messages yet.</p>
+                                        <p class="meta-text">Ask for a bash script and apply the latest draft straight into this runbook.</p>
+                                    </div>
+                                }
+                                    else
+                                    {
+                                        @foreach (var message in DisplayedAiMessages)
+                                        {
+                                            <article class="runbook-editor-ai-message @GetAiMessageClass(message.Role)">
+                                                <div class="runbook-editor-ai-message-header">
+                                                    <strong>@GetAiRoleLabel(message.Role)</strong>
+                                                    <span class="meta-text">@message.CreatedAtUtc.ToLocalTime().ToString("HH:mm")</span>
+                                                </div>
+                                                <pre class="runbook-editor-ai-message-body">@message.Content</pre>
+                                            </article>
+                                        }
+                                    }
+                                </div>
+
+                                @if (LatestRun is not null && !LatestRun.IsTerminal)
+                                {
+                                    <p class="callout info runbook-editor-ai-run-status">@LatestRun.StatusSummary</p>
+                                }
+
+                                <div class="runbook-editor-ai-compose-form">
+                                    <UiTextAreaField Value="@aiComposer.Content"
+                                                     ValueChanged="SetAiPromptAsync"
+                                                     ValueExpression="@(() => aiComposer.Content)"
+                                                     Label="Prompt"
+                                                     Placeholder="@ResolveAiPromptPlaceholder()"
+                                                     Rows="4"
+                                                     Compact="true" />
+
+                                    <div class="runbook-editor-ai-compose-actions">
+                                        <UiCommandButton Label="@(isAiSending ? "Asking..." : "Ask AI")"
+                                                         Glyph="UiIconGlyph.Send"
+                                                         Disabled="@isAiSending"
+                                                         OnClick="HandleAiSendAsync" />
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </section>
+                </div>
+            </section>
+        </EditForm>
+    </ChildContent>
+
+    <Footer>
+        <div class="runbook-editor-footer">
+            @if (!string.IsNullOrWhiteSpace(StatusMessage))
+            {
+                <p class="callout @StatusTone runbook-editor-status">@StatusMessage</p>
+            }
+
+            <div class="runbook-editor-actions">
+                <UiCommandButton Label="Close"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@IsBusy"
+                                 OnClick="HandleCloseAsync" />
+                @if (Editor.Id.HasValue)
+                {
+                    <UiCommandButton Label="Delete"
+                                     Glyph="UiIconGlyph.Delete"
+                                     Variant="UiButtonVariant.Danger"
+                                     Disabled="@IsBusy"
+                                     OnClick="OnDelete" />
+                }
+                <UiCommandButton Label="@(IsBusy ? "Saving..." : "Save runbook")"
+                                 Glyph="UiIconGlyph.Save"
+                                 Disabled="@IsBusy"
+                                 Type="submit"
+                                 form="@formId" />
+            </div>
+        </div>
+    </Footer>
+</UiModal>
+
+@code {
+    private readonly string formId = $"runbook-editor-form-{Guid.NewGuid():N}";
+    private RunbookEditor? trackedEditor;
+    private AiChatThreadEditorContextViewModel? aiThreadEditorContext;
+    private AiChatWorkspaceViewModel? aiWorkspace;
+    private readonly AiChatMessageComposer aiComposer = new();
+    private DotNetObjectReference<RunbookEditorDialog>? aiPaneInteropReference;
+    private ElementReference workspaceElement;
+    private Guid? aiThreadId;
+    private int aiPaneSizePx = 420;
+    private bool isAiAvailabilityLoading;
+    private bool isAiSending;
+    private bool aiAvailabilityRequested;
+    private string aiStatusMessage = string.Empty;
+    private string aiStatusTone = "info";
+
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter, EditorRequired] public RunbookEditor Editor { get; set; } = new();
+    [Parameter] public IReadOnlyList<ManagedHost> Hosts { get; set; } = [];
+    [Parameter] public string? StatusMessage { get; set; }
+    [Parameter] public string StatusTone { get; set; } = "info";
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnSave { get; set; }
+    [Parameter] public EventCallback OnDelete { get; set; }
+
+    private IReadOnlyList<ManagedHost> OrderedHosts =>
+        Hosts
+            .OrderBy(ManagedHostCapabilities.GetSortRank)
+            .ThenBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private static IReadOnlyList<RunbookParameterKind> SupportedParameterKinds =>
+    [
+        RunbookParameterKind.Text,
+        RunbookParameterKind.SecretText,
+        RunbookParameterKind.RawText,
+        RunbookParameterKind.FilePath,
+        RunbookParameterKind.FolderPath,
+        RunbookParameterKind.ServiceName,
+        RunbookParameterKind.PackageName,
+        RunbookParameterKind.UserName,
+        RunbookParameterKind.GroupName,
+        RunbookParameterKind.HostName,
+        RunbookParameterKind.PortNumber,
+        RunbookParameterKind.Url
+    ];
+
+    private bool IsInstantiatedTemplate =>
+        !Editor.IsTemplate &&
+        Editor.TemplateSourceId.HasValue &&
+        Editor.Parameters.Count > 0;
+
+    private string RenderedTemplatePreview =>
+        BuildRenderedTemplatePreview();
+
+    private bool HasConfiguredAiProvider =>
+        AvailableAiProviders.Count > 0;
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> AvailableAiProviders =>
+        aiThreadEditorContext is null
+            ? []
+            : aiThreadEditorContext.ConfiguredProviders
+                .Where(provider =>
+                    (provider.IsEnabled &&
+                     aiThreadEditorContext.SupportedProviders.FirstOrDefault(definition => definition.ProviderType == provider.ProviderType)?.IsRuntimeImplemented != false) ||
+                    provider.ProviderKey.Equals(aiThreadEditorContext.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(provider => provider.IsDefault)
+                .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private IReadOnlyList<AiChatMessage> DisplayedAiMessages =>
+        aiWorkspace?.Messages
+            .Where(message => message.Role is AiChatMessageRole.User or AiChatMessageRole.Assistant or AiChatMessageRole.System)
+            .OrderBy(message => message.SequenceNumber)
+            .TakeLast(8)
+            .ToArray()
+        ?? [];
+
+    private AiChatRun? LatestRun =>
+        aiWorkspace?.ChatRuns
+            .OrderByDescending(run => run.CreatedAtUtc)
+            .FirstOrDefault();
+
+    private AiChatMessage? LatestAssistantMessage =>
+        aiWorkspace?.Messages
+            .Where(message => message.Role == AiChatMessageRole.Assistant)
+            .OrderByDescending(message => message.SequenceNumber)
+            .FirstOrDefault();
+
+    private string? LatestAssistantScriptDraft =>
+        TryExtractScriptDraft(LatestAssistantMessage?.Content, out var script)
+            ? script
+            : null;
+
+    private string? LatestAssistantDraft =>
+        LatestAssistantScriptDraft
+        ?? (TryExtractCommandDraft(LatestAssistantMessage?.Content, out var commandDraft)
+            ? RunbookExecutionCommandBuilder.NormalizeStoredScript(commandDraft)
+            : null);
+
+    protected override void OnParametersSet()
+    {
+        if (!ReferenceEquals(trackedEditor, Editor))
+        {
+            trackedEditor = Editor;
+            EnsureEditorDefaults();
+            ResetAiState();
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!IsOpen || aiThreadEditorContext is not null || isAiAvailabilityLoading || aiAvailabilityRequested)
+        {
+            return;
+        }
+
+        aiAvailabilityRequested = true;
+        await EnsureAiAvailabilityAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private Task SetNameAsync(string? value)
+    {
+        Editor.Name = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetHostIdAsync(Guid value)
+    {
+        if (Editor.HostId != value)
+        {
+            ResetAiState();
+        }
+
+        Editor.HostId = value;
+        if (!Editor.SelectedHostIds.Contains(value))
+        {
+            Editor.SelectedHostIds = [value];
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetDescriptionAsync(string? value)
+    {
+        Editor.Description = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetQuickAccessAsync(bool value)
+    {
+        Editor.IsQuickAccess = !Editor.IsTemplate && value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetCommandTextAsync(string? value)
+    {
+        Editor.CommandText = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetAiPromptAsync(string? value)
+    {
+        aiComposer.Content = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetUserModeAsync()
+    {
+        Editor.RequiresSudo = false;
+        return Task.CompletedTask;
+    }
+
+    private Task SetSudoModeAsync()
+    {
+        Editor.RequiresSudo = true;
+        return Task.CompletedTask;
+    }
+
+    private Task SetRunnableModeAsync()
+    {
+        if (Editor.IsTemplate)
+        {
+            Editor.IsTemplate = false;
+            if (Editor.SelectedHostIds.Count == 0 && Editor.HostId != Guid.Empty)
+            {
+                Editor.SelectedHostIds = [Editor.HostId];
+            }
+        }
+
+        EnsureScriptDraft();
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetTemplateModeAsync()
+    {
+        Editor.IsTemplate = true;
+        Editor.IsQuickAccess = false;
+        Editor.DistributionMode = RunbookDistributionMode.SingleMachine;
+        if (Editor.SelectedHostIds.Count > 0)
+        {
+            Editor.HostId = Editor.SelectedHostIds[0];
+        }
+
+        EnsureScriptDraft();
+        SyncTemplateParametersFromContent();
+        return Task.CompletedTask;
+    }
+
+    private Task SetHostSelectedAsync(Guid hostId, bool value)
+    {
+        if (value)
+        {
+            if (!Editor.SelectedHostIds.Contains(hostId))
+            {
+                Editor.SelectedHostIds.Add(hostId);
+            }
+
+            Editor.HostId = hostId;
+        }
+        else
+        {
+            Editor.SelectedHostIds.Remove(hostId);
+            if (Editor.SelectedHostIds.Count == 0)
+            {
+                Editor.SelectedHostIds.Add(hostId);
+            }
+
+            if (!Editor.SelectedHostIds.Contains(Editor.HostId))
+            {
+                Editor.HostId = Editor.SelectedHostIds[0];
+            }
+        }
+
+        ResetAiState();
+        return Task.CompletedTask;
+    }
+
+    private Task ToggleHostSelectedAsync(Guid hostId) =>
+        SetHostSelectedAsync(hostId, !Editor.SelectedHostIds.Contains(hostId));
+
+    private Task AddParameterAsync()
+    {
+        Editor.Parameters.Add(new RunbookParameterEditor
+        {
+            Name = $"parameter_{Editor.Parameters.Count + 1}",
+            Label = $"Parameter {Editor.Parameters.Count + 1}",
+            Placeholder = string.Empty,
+            HelpText = string.Empty,
+            Kind = RunbookParameterKind.Text,
+            IsRequired = true
+        });
+        return Task.CompletedTask;
+    }
+
+    private Task RemoveParameterAsync(int index)
+    {
+        if (index >= 0 && index < Editor.Parameters.Count)
+        {
+            Editor.Parameters.RemoveAt(index);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetParameterNameAsync(int index, string? value)
+    {
+        if (TryGetParameter(index, out var parameter))
+        {
+            parameter.Name = RunbookTemplateRenderer.NormalizeParameterName(value);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetParameterLabelAsync(int index, string? value)
+    {
+        if (TryGetParameter(index, out var parameter))
+        {
+            parameter.Label = value?.Trim() ?? string.Empty;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetParameterKindAsync(int index, RunbookParameterKind value)
+    {
+        if (TryGetParameter(index, out var parameter))
+        {
+            parameter.Kind = value;
+            if (string.IsNullOrWhiteSpace(parameter.Placeholder))
+            {
+                parameter.Placeholder = GetDefaultPlaceholder(value);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetParameterKindFromStringAsync(int index, string? value) =>
+        Enum.TryParse<RunbookParameterKind>(value, true, out var kind)
+            ? SetParameterKindAsync(index, kind)
+            : Task.CompletedTask;
+
+    private Task SetParameterPlaceholderAsync(int index, string? value)
+    {
+        if (TryGetParameter(index, out var parameter))
+        {
+            parameter.Placeholder = value?.Trim() ?? string.Empty;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetParameterRequiredAsync(int index, bool value)
+    {
+        if (TryGetParameter(index, out var parameter))
+        {
+            parameter.IsRequired = value;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetParameterValueAsync(int index, string? value)
+    {
+        if (TryGetParameter(index, out var parameter))
+        {
+            parameter.Value = value?.Trim() ?? string.Empty;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task EnsureAiAvailabilityAsync()
+    {
+        if (aiThreadEditorContext is not null || isAiAvailabilityLoading)
+        {
+            return;
+        }
+
+        isAiAvailabilityLoading = true;
+        aiStatusMessage = string.Empty;
+
+        try
+        {
+            aiThreadEditorContext = await ThreadService.GetEditorAsync();
+        }
+        catch (Exception exception)
+        {
+            aiStatusMessage = exception.Message;
+            aiStatusTone = "error";
+        }
+        finally
+        {
+            isAiAvailabilityLoading = false;
+        }
+    }
+
+    private async Task HandleAiSendAsync()
+    {
+        await EnsureAiAvailabilityAsync();
+        if (!HasConfiguredAiProvider)
+        {
+            aiStatusMessage = "Configure an enabled AI provider before using the runbook helper.";
+            aiStatusTone = "warning";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(aiComposer.Content))
+        {
+            return;
+        }
+
+        isAiSending = true;
+        aiStatusMessage = string.Empty;
+
+        try
+        {
+            await EnsureAiThreadAsync();
+            if (!aiThreadId.HasValue)
+            {
+                aiStatusMessage = "The AI helper thread could not be created.";
+                aiStatusTone = "error";
+                return;
+            }
+
+            var providerType = ResolveSelectedAiProviderType();
+            var includeSecretValues = AiPromptSanitizer.IsTrustedLocalProvider(providerType);
+            var builtPrompt = RunbookAiHelper.BuildPrompt(
+                Editor,
+                OrderedHosts,
+                aiComposer.Content,
+                includeSecretValues: includeSecretValues);
+            var sanitization = AiPromptSanitizer.Sanitize(
+                builtPrompt,
+                providerType,
+                RunbookAiHelper.CollectSecretValues(Editor.Parameters));
+
+            await ChatService.SendUserMessageAsync(
+                aiThreadId.Value,
+                new AiChatMessageComposer
+                {
+                    Content = sanitization.Content
+                });
+
+            if (sanitization.Summary.Applied)
+            {
+                aiStatusMessage = sanitization.Summary.Message;
+                aiStatusTone = "warning";
+            }
+
+            aiComposer.Content = string.Empty;
+            await WaitForAiCompletionAsync(aiThreadId.Value);
+        }
+        catch (Exception exception)
+        {
+            aiStatusMessage = exception.Message;
+            aiStatusTone = "error";
+            await RefreshAiWorkspaceAsync();
+        }
+        finally
+        {
+            isAiSending = false;
+        }
+    }
+
+    private async Task EnsureAiThreadAsync()
+    {
+        if (aiThreadId.HasValue || aiThreadEditorContext is null)
+        {
+            return;
+        }
+
+        var editor = aiThreadEditorContext.Editor;
+        editor.Id = null;
+        editor.Title = BuildAiThreadTitle();
+        editor.AttachedServerIds.Clear();
+        if (Editor.HostId != Guid.Empty)
+        {
+            editor.AttachedServerIds.Add(Editor.HostId);
+        }
+
+        aiThreadId = await ThreadService.SaveThreadAsync(editor);
+        await RefreshAiWorkspaceAsync();
+    }
+
+    private async Task WaitForAiCompletionAsync(Guid threadId)
+    {
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            await RefreshAiWorkspaceAsync();
+            if (LatestRun is null || LatestRun.IsTerminal)
+            {
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1.2));
+        }
+    }
+
+    private async Task RefreshAiWorkspaceAsync()
+    {
+        if (!aiThreadId.HasValue)
+        {
+            aiWorkspace = null;
+            return;
+        }
+
+        aiWorkspace = await ChatService.GetWorkspaceAsync(aiThreadId.Value);
+    }
+
+    private async Task ApplyLatestDraftAsync()
+    {
+        if (LatestAssistantDraft is null)
+        {
+            return;
+        }
+
+        var script = LatestAssistantDraft.Trim();
+        if (script.StartsWith("sudo ", StringComparison.OrdinalIgnoreCase))
+        {
+            Editor.RequiresSudo = true;
+            script = script[5..].Trim();
+        }
+
+        Editor.CommandText = RunbookExecutionCommandBuilder.NormalizeStoredScript(script);
+        var addedParameterCount = SyncTemplateParametersFromContent();
+        aiStatusMessage = addedParameterCount > 0
+            ? $"Applied the latest script draft and added {addedParameterCount} template parameter{(addedParameterCount == 1 ? string.Empty : "s")} from new LMS tokens."
+            : "Applied the latest script draft to the runbook.";
+        aiStatusTone = "success";
+        await Task.CompletedTask;
+    }
+
+    private async Task ClearAiConversationAsync()
+    {
+        if (!aiThreadId.HasValue)
+        {
+            return;
+        }
+
+        await ChatService.ClearConversationAsync(aiThreadId.Value);
+        await RefreshAiWorkspaceAsync();
+    }
+
+    private async Task HandleAiProviderSelectionChangedAsync(string providerKey)
+    {
+        if (aiThreadEditorContext is null)
+        {
+            return;
+        }
+
+        aiThreadEditorContext.Editor.ProviderKey = providerKey?.Trim() ?? string.Empty;
+        SyncAiModelSelectionForProvider();
+        await ApplyAiProviderSelectionAsync();
+    }
+
+    private async Task HandleAiModelSelectionChangedAsync(string modelId)
+    {
+        if (aiThreadEditorContext is null)
+        {
+            return;
+        }
+
+        aiThreadEditorContext.Editor.ModelId = modelId?.Trim() ?? string.Empty;
+        await ApplyAiProviderSelectionAsync();
+    }
+
+    private void SyncAiModelSelectionForProvider()
+    {
+        if (aiThreadEditorContext is null)
+        {
+            return;
+        }
+
+        var selection = AiProviderSelectionResolver.Resolve(
+            aiThreadEditorContext.Editor.ProviderKey,
+            aiThreadEditorContext.Editor.ModelId,
+            aiThreadEditorContext.Editor.ProviderKey,
+            string.Empty,
+            AvailableAiProviders,
+            aiThreadEditorContext.Models);
+        aiThreadEditorContext.Editor.ProviderKey = selection.ProviderKey;
+        aiThreadEditorContext.Editor.ModelId = selection.ModelId;
+    }
+
+    private async Task ApplyAiProviderSelectionAsync()
+    {
+        if (aiThreadEditorContext is null)
+        {
+            return;
+        }
+
+        aiStatusMessage = string.Empty;
+
+        if (!aiThreadId.HasValue)
+        {
+            return;
+        }
+
+        try
+        {
+            await ThreadService.UpdateProviderSelectionAsync(
+                aiThreadId.Value,
+                aiThreadEditorContext.Editor.ProviderKey,
+                aiThreadEditorContext.Editor.ModelId);
+            await RefreshAiWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            aiStatusMessage = exception.Message;
+            aiStatusTone = "error";
+        }
+    }
+
+    private async Task OnAiPaneSplitterPointerDownAsync(PointerEventArgs args)
+    {
+        aiPaneInteropReference ??= DotNetObjectReference.Create(this);
+
+        await JSRuntime.InvokeVoidAsync(
+            "lmsSplitPane.beginResize",
+            workspaceElement,
+            new
+            {
+                orientation = "right",
+                pointerX = args.ClientX,
+                pointerY = args.ClientY,
+                minSize = 320,
+                maxSize = 760,
+                minPrimarySize = 360,
+                splitterSize = 10,
+                cssVariableName = "--runbook-ai-pane-size",
+                callbackMethod = nameof(OnAiPaneSizeChangedAsync),
+                contextId = "runbook-ai"
+            },
+            aiPaneInteropReference);
+    }
+
+    [JSInvokable]
+    public Task OnAiPaneSizeChangedAsync(string _, int size)
+    {
+        aiPaneSizePx = Math.Clamp(size, 320, 760);
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private Task HandleSaveAsync()
+    {
+        SyncTemplateParametersFromContent();
+        return OnSave.InvokeAsync();
+    }
+
+    private Task HandleCloseAsync() =>
+        OnClose.InvokeAsync();
+
+    private void ResetAiState()
+    {
+        aiThreadEditorContext = null;
+        aiWorkspace = null;
+        aiThreadId = null;
+        aiComposer.Content = string.Empty;
+        aiStatusMessage = string.Empty;
+        aiStatusTone = "info";
+        isAiAvailabilityLoading = false;
+        isAiSending = false;
+        aiAvailabilityRequested = false;
+    }
+
+    private void EnsureEditorDefaults()
+    {
+        if (Editor.SelectedHostIds.Count == 0)
+        {
+            if (Editor.HostId != Guid.Empty)
+            {
+                Editor.SelectedHostIds = [Editor.HostId];
+            }
+            else if (OrderedHosts.Count > 0)
+            {
+                Editor.HostId = OrderedHosts[0].Id;
+                Editor.SelectedHostIds = [Editor.HostId];
+            }
+        }
+
+        if (Editor.IsTemplate)
+        {
+            Editor.IsQuickAccess = false;
+            Editor.DistributionMode = RunbookDistributionMode.SingleMachine;
+            SyncTemplateParametersFromContent();
+        }
+
+        foreach (var parameter in Editor.Parameters)
+        {
+            parameter.Name = RunbookTemplateRenderer.NormalizeParameterName(parameter.Name);
+        }
+
+        EnsureScriptDraft();
+    }
+
+    private string BuildAiThreadTitle()
+    {
+        var name = string.IsNullOrWhiteSpace(Editor.Name)
+            ? "Untitled runbook"
+            : Editor.Name.Trim();
+        return $"Runbook helper · {name}";
+    }
+
+    private string ResolveDialogTitle() =>
+        Editor.IsTemplate
+            ? Editor.Id.HasValue ? $"Edit template {Editor.Name}" : "Add runbook template"
+            : IsInstantiatedTemplate
+                ? $"Create runbook from {Editor.TemplateSourceName}"
+                : Editor.Id.HasValue ? $"Edit {Editor.Name}" : "Add runbook";
+
+    private string ResolveDialogSubtitle() =>
+        Editor.IsTemplate
+            ? "Define parameter tokens once, then spin up concrete bash runbooks from the template when you need them."
+            : IsInstantiatedTemplate
+                ? "Fill the template values, pick the machines, and LMS will save a concrete bash runbook."
+                : "Store the bash runbook in LMS, keep the list compact, and only expand the full script when it matters.";
+
+    private string ResolveAiHelperSubtitle() =>
+        Editor.IsTemplate
+            ? "Build reusable runbook templates interactively. Keep reusable values as LMS tokens like {{service_name}} and the editor will carry those parameters with the draft."
+        : IsInstantiatedTemplate
+            ? "Refine this concrete runbook with AI. Because it came from a template, the helper should keep the final draft fully concrete with no unresolved LMS tokens."
+            : "Build a concrete bash script interactively, then drop the latest draft straight into the runbook.";
+
+    private string ResolveAiPromptPlaceholder() =>
+        Editor.IsTemplate
+            ? "Build a reusable bash template that validates nginx, restarts it, and keeps the service name and config file path as LMS tokens."
+            : IsInstantiatedTemplate
+                ? "Turn this template into a safe concrete bash script for the selected values and add checks before restarting the service."
+                : "Draft a bash script that checks free disk space, rotates old logs, and restarts nginx only if the config validates.";
+
+    private string GetWorkspaceStyle() =>
+        $"--runbook-ai-pane-size:{Math.Clamp(aiPaneSizePx, 320, 760)}px;";
+
+    private string BuildRenderedTemplatePreview()
+    {
+        if (!IsInstantiatedTemplate)
+        {
+            return Editor.CommandText;
+        }
+
+        try
+        {
+            var definitions = RunbookTemplateRenderer.NormalizeDefinitions(Editor.Parameters);
+            var values = RunbookTemplateRenderer.NormalizeValueSnapshot(Editor.Parameters);
+            return RunbookExecutionCommandBuilder.NormalizeStoredScript(
+                RunbookTemplateRenderer.Render(Editor.CommandText, definitions, values));
+        }
+        catch (Exception exception)
+        {
+            return $"[Preview unavailable: {exception.Message}]";
+        }
+    }
+
+    private static string GetParameterKindLabel(RunbookParameterKind kind) => kind switch
+    {
+        RunbookParameterKind.Text => "Text",
+        RunbookParameterKind.SecretText => "Secret",
+        RunbookParameterKind.RawText => "Raw text",
+        RunbookParameterKind.FilePath => "File",
+        RunbookParameterKind.FolderPath => "Folder",
+        RunbookParameterKind.ServiceName => "Service",
+        RunbookParameterKind.PackageName => "Package",
+        RunbookParameterKind.UserName => "User",
+        RunbookParameterKind.GroupName => "Group",
+        RunbookParameterKind.HostName => "Host",
+        RunbookParameterKind.PortNumber => "Port",
+        RunbookParameterKind.Url => "URL",
+        _ => kind.ToString()
+    };
+
+    private static string GetDefaultPlaceholder(RunbookParameterKind kind) =>
+        RunbookAiHelper.GetDefaultPlaceholder(kind);
+
+    private static string ResolveParameterPlaceholder(RunbookParameterEditor parameter) =>
+        string.IsNullOrWhiteSpace(parameter.Placeholder)
+            ? GetDefaultPlaceholder(parameter.Kind)
+            : parameter.Placeholder;
+
+    private static string ResolveParameterInputType(RunbookParameterEditor parameter) =>
+        parameter.Kind == RunbookParameterKind.SecretText ? "password" : "text";
+
+    private static string BuildParameterHelper(RunbookParameterEditor parameter)
+    {
+        var typeLabel = GetParameterKindLabel(parameter.Kind);
+        if (parameter.Kind == RunbookParameterKind.SecretText)
+        {
+            return parameter.IsRequired
+                ? $"{typeLabel} parameter · hidden from external AI providers"
+                : $"{typeLabel} parameter · optional · hidden from external AI providers";
+        }
+
+        return parameter.IsRequired
+            ? $"{typeLabel} parameter"
+            : $"{typeLabel} parameter · optional";
+    }
+
+    private AiProviderType ResolveSelectedAiProviderType() =>
+        aiThreadEditorContext?.ConfiguredProviders
+            .FirstOrDefault(provider => provider.ProviderKey.Equals(aiThreadEditorContext.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase))
+            ?.ProviderType
+        ?? AiProviderType.Unknown;
+
+    private bool TryGetParameter(int index, out RunbookParameterEditor parameter)
+    {
+        if (index >= 0 && index < Editor.Parameters.Count)
+        {
+            parameter = Editor.Parameters[index];
+            return true;
+        }
+
+        parameter = new RunbookParameterEditor();
+        return false;
+    }
+
+    private string GetChoiceButtonClass(bool selected) =>
+        selected
+            ? "runbook-editor-choice-button selected"
+            : "runbook-editor-choice-button";
+
+    private void EnsureScriptDraft()
+    {
+        if (IsInstantiatedTemplate)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(Editor.CommandText))
+        {
+            Editor.CommandText = "#!/usr/bin/env bash\nset -euo pipefail\n";
+            return;
+        }
+
+        Editor.CommandText = RunbookExecutionCommandBuilder.NormalizeStoredScript(Editor.CommandText);
+    }
+
+    private int SyncTemplateParametersFromContent() =>
+        RunbookAiHelper.SyncTemplateParametersFromContent(Editor);
+
+    private static bool TryExtractScriptDraft(string? content, out string script)
+    {
+        script = string.Empty;
+        if (!TryExtractCodeBlock(content, out var language, out var block))
+        {
+            return false;
+        }
+
+        if (!language.Contains("bash", StringComparison.OrdinalIgnoreCase) &&
+            !language.Contains("sh", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        script = RunbookExecutionCommandBuilder.NormalizeStoredScript(block);
+        return script.Length > 0;
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        aiPaneInteropReference?.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static bool TryExtractCommandDraft(string? content, out string command)
+    {
+        command = string.Empty;
+        if (TryExtractCodeBlock(content, out var language, out var block))
+        {
+            var normalizedBlock = block.Trim();
+            if (normalizedBlock.Length > 0 &&
+                normalizedBlock.IndexOf('\n') < 0 &&
+                (language.Length == 0 ||
+                 language.Contains("sh", StringComparison.OrdinalIgnoreCase) ||
+                 language.Contains("shell", StringComparison.OrdinalIgnoreCase) ||
+                 language.Contains("bash", StringComparison.OrdinalIgnoreCase)))
+            {
+                command = normalizedBlock;
+                return true;
+            }
+        }
+
+        var inlineCodeStart = content?.IndexOf('`') ?? -1;
+        if (inlineCodeStart >= 0)
+        {
+            var inlineCodeEnd = content!.IndexOf('`', inlineCodeStart + 1);
+            if (inlineCodeEnd > inlineCodeStart + 1)
+            {
+                var inline = content[(inlineCodeStart + 1)..inlineCodeEnd].Trim();
+                if (inline.Length > 0 && inline.IndexOf('\n') < 0)
+                {
+                    command = inline;
+                    return true;
+                }
+            }
+        }
+
+        var firstLine = content?
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(firstLine) && firstLine!.IndexOf('\n') < 0)
+        {
+            command = firstLine.Trim();
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryExtractCodeBlock(string? content, out string language, out string block)
+    {
+        language = string.Empty;
+        block = string.Empty;
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        var start = content.IndexOf("```", StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return false;
+        }
+
+        var languageStart = start + 3;
+        var languageEnd = content.IndexOf('\n', languageStart);
+        if (languageEnd < 0)
+        {
+            return false;
+        }
+
+        var end = content.IndexOf("```", languageEnd + 1, StringComparison.Ordinal);
+        if (end < 0)
+        {
+            return false;
+        }
+
+        language = content[languageStart..languageEnd].Trim();
+        block = content[(languageEnd + 1)..end];
+        return true;
+    }
+
+    private static string GetAiRoleLabel(AiChatMessageRole role) => role switch
+    {
+        AiChatMessageRole.User => "You",
+        AiChatMessageRole.Assistant => "AI",
+        AiChatMessageRole.System => "System",
+        _ => role.ToString()
+    };
+
+    private static string GetAiMessageClass(AiChatMessageRole role) => role switch
+    {
+        AiChatMessageRole.User => "runbook-editor-ai-message-user",
+        AiChatMessageRole.Assistant => "runbook-editor-ai-message-assistant",
+        _ => "runbook-editor-ai-message-system"
+    };
+}

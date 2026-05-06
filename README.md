@@ -42,6 +42,16 @@ The installer detects the runtime ID from `uname -m`. Override it with `RID=linu
 
 For early distro testing, CE package tarballs may be served directly from this repository under `packages/` until the formal GitHub Releases flow is used.
 
+## Source
+
+This repository also contains the CE source tree needed to build the public app. See [CE source](docs/SOURCE.md).
+
+Build from source:
+
+```bash
+dotnet build src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj
+```
+
 ## Optional Host Tools
 
 The core app installs without these tools, but some workflows need them:
@@ -56,6 +66,7 @@ The installer tries to install those packages when it recognizes the distro pack
 
 - [Install details](docs/INSTALL.md)
 - [Release assets](docs/RELEASES.md)
+- [CE source](docs/SOURCE.md)
 - [Distro and Raspberry Pi testing](docs/TESTING.md)
 
 This public repository intentionally contains installer/docs only. Application source, Pro packages, portal packages, private configuration, and credentials are not part of the public release channel.

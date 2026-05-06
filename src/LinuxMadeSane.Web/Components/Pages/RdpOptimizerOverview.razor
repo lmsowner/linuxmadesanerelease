@@ -1,0 +1,390 @@
+@page "/rdp-optimizer"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts.RdpOptimizer
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.RdpOptimizer
+@inject IRdpOptimizationService RdpOptimizationService
+
+<PageTitle>Desktop Manager | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <UiHeroPanel Title="Desktop Manager" Compact="true" />
+
+    @if (viewModel is null)
+    {
+        <section class="surface-card">
+            <p class="meta-text">Loading desktop manager...</p>
+        </section>
+    }
+    else
+    {
+        <section class="summary-pill-row">
+            <ServiceMetricComponent Eyebrow="Current mode" Value="@viewModel.CurrentModeLabel" Meta="@viewModel.CurrentModeSummary" Tone="UiPillTone.Success" />
+            <ServiceMetricComponent Eyebrow="Desktops installed" Value="@string.Join(", ", viewModel.Inspection.InstalledDesktopEnvironments)" Meta="@($"Display manager: {viewModel.Inspection.DisplayManager ?? "none"}")" />
+            <ServiceMetricComponent Eyebrow="XRDP" Value="@(viewModel.Inspection.XrdpInstalled ? "Installed" : "Missing")" Meta="@($"Service active: {(viewModel.Inspection.XrdpServiceActive ? "yes" : "no")}")" Tone="@(viewModel.Inspection.XrdpInstalled ? UiPillTone.Success : UiPillTone.Warning)" />
+            <ServiceMetricComponent Eyebrow="Latest snapshot" Value="@(viewModel.LatestSnapshot is null ? "None" : viewModel.LatestSnapshot.CreatedAt.ToLocalTime().ToString("g"))" Meta="Created before non-trivial mode switches when enabled" />
+        </section>
+
+        <div class="dashboard-columns desktop-mode-layout">
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Mode options</h2>
+                    <span>@viewModel.Options.Count choices</span>
+                </div>
+
+                <div class="desktop-mode-grid">
+                    @foreach (var option in viewModel.Options)
+                    {
+                        <article class="surface-subcard desktop-mode-card @(editor.Profile == option.Profile ? "selected" : null)">
+                            <div class="desktop-mode-card-header">
+                                <div class="stack-tight">
+                                    <strong>@option.Title</strong>
+                                    <span class="meta-text">@option.Summary</span>
+                                </div>
+                                <div class="token-row">
+                                    @if (option.IsCurrent)
+                                    {
+                                        <UiPill Tone="UiPillTone.Success">Current</UiPill>
+                                    }
+                                    @if (!option.IsReady)
+                                    {
+                                        <UiPill Tone="UiPillTone.Warning">Installs packages</UiPill>
+                                    }
+                                </div>
+                            </div>
+
+                            @if (option.MissingPackages.Count > 0)
+                            {
+                                <p class="meta-text">Missing: @string.Join(", ", option.MissingPackages)</p>
+                            }
+
+                            <ul class="desktop-mode-highlights">
+                                @foreach (var highlight in option.Highlights)
+                                {
+                                    <li>@highlight</li>
+                                }
+                            </ul>
+
+                            <div class="toolbar-row">
+                                <UiCommandButton Label="@(editor.Profile == option.Profile ? "Selected" : "Select mode")"
+                                                 Glyph="@(editor.Profile == option.Profile ? UiIconGlyph.Connect : UiIconGlyph.Connection)"
+                                                 Variant="@(editor.Profile == option.Profile ? UiButtonVariant.Primary : UiButtonVariant.Ghost)"
+                                                 OnClick="@(() => SelectMode(option.Profile))" />
+                            </div>
+                        </article>
+                    }
+                </div>
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Apply selected mode</h2>
+                    <span>@GetSelectedOption().Title</span>
+                </div>
+
+                <p class="meta-text">@GetSelectedOption().Summary</p>
+
+                <div class="dashboard-grid option-grid">
+                    <UiCheckboxField @bind-Value="editor.CreateSnapshotBeforeChanges"
+                                     Label="Create snapshot first"
+                                     Helper="Recommended before changing login managers or XRDP session files."
+                                     Card="true" />
+
+                    <UiCheckboxField @bind-Value="editor.DryRun"
+                                     Label="Dry-run"
+                                     Helper="Preview the exact commands and file writes without applying anything."
+                                     Card="true" />
+                </div>
+
+                @if (viewModel.Recommendations.Count > 0)
+                {
+                    <div class="decision-list">
+                        @foreach (var recommendation in viewModel.Recommendations.Take(4))
+                        {
+                            <InfoPill Text="@recommendation" />
+                        }
+                    </div>
+                }
+
+                <div class="toolbar-row">
+                    <UiCommandButton Label="Preview changes" Glyph="UiIconGlyph.Analyze" OnClick="PreviewAsync" />
+                    <UiCommandButton Label="Apply mode" Glyph="UiIconGlyph.Connect" Variant="UiButtonVariant.Ghost" OnClick="ExecuteAsync" />
+                </div>
+            </section>
+        </div>
+
+        @if (plan is not null)
+        {
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Planned changes</h2>
+                    <span>@GetProfileTitle(plan.Profile)</span>
+                </div>
+
+                @if (plan.Warnings.Count > 0)
+                {
+                    <div class="decision-list">
+                        @foreach (var warning in plan.Warnings)
+                        {
+                            <InfoPill Text="@warning" />
+                        }
+                    </div>
+                }
+
+                <div class="dashboard-columns">
+                    <section class="surface-subcard">
+                        <div class="table-header">
+                            <h3>Package actions</h3>
+                            <span>@plan.PackageActions.Count</span>
+                        </div>
+                        <div class="stack-list">
+                            @if (plan.PackageActions.Count == 0)
+                            {
+                                <p class="meta-text">No package changes.</p>
+                            }
+                            else
+                            {
+                                @foreach (var action in plan.PackageActions)
+                                {
+                                    <InfoPill TagName="div" Title="@($"{action.Action} {action.PackageName}")" Text="@action.Reason">
+                                        <code>@action.PlannedCommand</code>
+                                    </InfoPill>
+                                }
+                            }
+                        </div>
+                    </section>
+
+                    <section class="surface-subcard">
+                        <div class="table-header">
+                            <h3>Service actions</h3>
+                            <span>@plan.ServiceActions.Count</span>
+                        </div>
+                        <div class="stack-list">
+                            @if (plan.ServiceActions.Count == 0)
+                            {
+                                <p class="meta-text">No service changes.</p>
+                            }
+                            else
+                            {
+                                @foreach (var action in plan.ServiceActions)
+                                {
+                                    <InfoPill TagName="div" Title="@($"{action.Action} {action.ServiceName}")" Text="@action.Reason">
+                                        <code>@action.PlannedCommand</code>
+                                    </InfoPill>
+                                }
+                            }
+                        </div>
+                    </section>
+                </div>
+
+                <section class="surface-subcard">
+                    <div class="table-header">
+                        <h3>Session and file changes</h3>
+                        <span>@plan.SessionChanges.Count</span>
+                    </div>
+                    <div class="stack-list">
+                        @if (plan.SessionChanges.Count == 0)
+                        {
+                            <p class="meta-text">No session-file changes.</p>
+                        }
+                        else
+                        {
+                            @foreach (var change in plan.SessionChanges)
+                            {
+                                <InfoPill TagName="div" Title="@change.FilePath" Text="@change.Description">
+                                    <code>@change.ContentPreview</code>
+                                </InfoPill>
+                            }
+                        }
+                    </div>
+                </section>
+            </section>
+        }
+
+        <div class="dashboard-columns">
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Recent snapshots</h2>
+                    <span>@viewModel.Snapshots.Count</span>
+                </div>
+                <div class="stack-list">
+                    @if (viewModel.Snapshots.Count == 0)
+                    {
+                        <p class="meta-text">No snapshots captured yet.</p>
+                    }
+                    else
+                    {
+                        @foreach (var snapshot in viewModel.Snapshots.Take(4))
+                        {
+                            <article class="surface-subcard">
+                                <div class="desktop-mode-card-header">
+                                    <div class="stack-tight">
+                                        <strong>@GetProfileTitle(snapshot.ProfileApplied)</strong>
+                                        <span class="meta-text">@snapshot.CreatedAt.ToLocalTime():g</span>
+                                    </div>
+                                    <div class="toolbar-row">
+                                        <UiCommandButton Label="Dry-run restore" Glyph="UiIconGlyph.Analyze" Variant="UiButtonVariant.Action" OnClick="@(() => RestoreAsync(snapshot.SnapshotId, true))" />
+                                        <UiCommandButton Label="Restore now" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Toolbar" OnClick="@(() => RestoreAsync(snapshot.SnapshotId, false))" />
+                                    </div>
+                                </div>
+                                <p class="meta-text">@snapshot.SnapshotId</p>
+                            </article>
+                        }
+                    }
+                </div>
+            </section>
+
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Recent runs</h2>
+                    <span>@viewModel.Runs.Count</span>
+                </div>
+                <div class="stack-list">
+                    @if (viewModel.Runs.Count == 0)
+                    {
+                        <p class="meta-text">No desktop mode runs recorded yet.</p>
+                    }
+                    else
+                    {
+                        @foreach (var run in viewModel.Runs.Take(6))
+                        {
+                            <article class="surface-subcard">
+                                <div class="desktop-mode-card-header">
+                                    <div class="stack-tight">
+                                        <strong>@GetProfileTitle(run.Profile)</strong>
+                                        <span class="meta-text">@run.StartedAt.ToLocalTime():g</span>
+                                    </div>
+                                    <div class="token-row">
+                                        <UiPill Tone="@(run.Success ? UiPillTone.Success : UiPillTone.Warning)">@(run.Success ? "Success" : "Review")</UiPill>
+                                        <UiPill Tone="@(run.DryRun ? UiPillTone.Warning : UiPillTone.Neutral)">@(run.DryRun ? "Dry-run" : "Applied")</UiPill>
+                                    </div>
+                                </div>
+                                <p class="meta-text">@string.Join("; ", run.Warnings.DefaultIfEmpty("No warnings recorded."))</p>
+                            </article>
+                        }
+                    }
+                </div>
+            </section>
+        </div>
+
+        @if (result is not null || restoreResult is not null)
+        {
+            var activeResult = restoreResult ?? result!;
+            <section class="surface-card">
+                <div class="table-header">
+                    <h2>Latest result</h2>
+                    <span>@(activeResult.Success ? "Success" : "Needs review")</span>
+                </div>
+
+                <div class="summary-pill-row">
+                    <ServiceMetricComponent Eyebrow="Mode" Value="@GetProfileTitle(activeResult.Profile)" Meta="@($"Dry-run: {(activeResult.DryRun ? "yes" : "no")}")" Tone="@(activeResult.Success ? UiPillTone.Success : UiPillTone.Warning)" />
+                    <ServiceMetricComponent Eyebrow="Snapshot" Value="@(activeResult.SnapshotId?.ToString("N")[..8] ?? "none")" Meta="Restore snapshot captured before changes when enabled" />
+                </div>
+
+                <section class="surface-subcard">
+                    <div class="table-header">
+                        <h3>Operation log</h3>
+                        <span>@activeResult.OperationLogs.Count entries</span>
+                    </div>
+                    <code class="block-code log-panel">@string.Join(Environment.NewLine + Environment.NewLine, activeResult.OperationLogs.Select(FormatLog))</code>
+                </section>
+            </section>
+        }
+    }
+</div>
+
+@code {
+    private RdpOptimizerWorkspaceViewModel? viewModel;
+    private RdpOptimizationRequestEditor editor = new();
+    private RdpOptimizationPlan? plan;
+    private RdpOptimizationResult? result;
+    private RdpOptimizationResult? restoreResult;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        viewModel = await RdpOptimizationService.GetWorkspaceAsync();
+        editor = viewModel.Editor;
+    }
+
+    private void SelectMode(RdpOptimizationProfile profile)
+    {
+        editor.Profile = profile;
+        plan = null;
+        restoreResult = null;
+    }
+
+    private async Task PreviewAsync()
+    {
+        restoreResult = null;
+        plan = await RdpOptimizationService.BuildPlanAsync(editor);
+    }
+
+    private async Task ExecuteAsync()
+    {
+        restoreResult = null;
+        result = await RdpOptimizationService.ExecuteAsync(editor);
+        plan = result.Plan;
+        await RefreshWorkspaceAsync();
+    }
+
+    private async Task RestoreAsync(Guid snapshotId, bool dryRun)
+    {
+        restoreResult = await RdpOptimizationService.RestoreAsync(snapshotId, reinstallRemovedPackages: true, dryRun);
+        await RefreshWorkspaceAsync();
+    }
+
+    private async Task RefreshWorkspaceAsync()
+    {
+        if (viewModel is null)
+        {
+            return;
+        }
+
+        var selectedProfile = editor.Profile;
+        viewModel = await RdpOptimizationService.GetWorkspaceAsync();
+        editor = viewModel.Editor;
+        editor.Profile = selectedProfile;
+    }
+
+    private RdpDesktopModeOptionViewModel GetSelectedOption() =>
+        viewModel?.Options.FirstOrDefault(option => option.Profile == editor.Profile) ??
+        viewModel?.Options.First() ??
+        new RdpDesktopModeOptionViewModel(RdpOptimizationProfile.Default, "Inspect", string.Empty, false, true, [], []);
+
+    private static string GetProfileTitle(RdpOptimizationProfile profile) => profile switch
+    {
+        RdpOptimizationProfile.HeadlessConsole => "Headless / console",
+        RdpOptimizationProfile.RdpOptimizedXfce => "XFCE RDP Optimized",
+        RdpOptimizationProfile.GnomeDesktop => "GNOME",
+        RdpOptimizationProfile.KdePlasmaDesktop => "KDE Plasma",
+        RdpOptimizationProfile.RestoreFullDesktop => "Restore snapshot",
+        _ => "Inspect"
+    };
+
+    private static string FormatLog(OperationLogEntry log)
+    {
+        var parts = new List<string> { $"[{log.Timestamp.ToLocalTime():u}] {log.Level}: {log.Message}" };
+        if (!string.IsNullOrWhiteSpace(log.CommandText))
+        {
+            parts.Add($"$ {log.CommandText}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(log.StandardOutput))
+        {
+            parts.Add(log.StandardOutput.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(log.StandardError))
+        {
+            parts.Add(log.StandardError.Trim());
+        }
+
+        return string.Join(Environment.NewLine, parts);
+    }
+}

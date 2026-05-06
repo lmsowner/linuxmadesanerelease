@@ -1,0 +1,116 @@
+@using Microsoft.AspNetCore.Components.Authorization
+@using LinuxMadeSane.Application.Interfaces
+@inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject IJSRuntime JSRuntime
+
+<div class="display-preference-toolbar">
+    <UiFontScalePicker Value="@fontScalePercent" ValueChanged="@HandleFontScaleChangedAsync" />
+    <UiThemePalettePicker Value="@paletteId" ValueChanged="@HandlePaletteChangedAsync" />
+    <UiThemeModeToggle Value="@darkModeEnabled" ValueChanged="@HandleDarkModeChangedAsync" />
+</div>
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private Guid? userId;
+    private bool initialized;
+    private string? storedThemeMode;
+    private string paletteId = "smooth-grey";
+    private int fontScalePercent = 100;
+    private bool darkModeEnabled;
+
+    protected override async Task OnInitializedAsync()
+    {
+        userId = await ResolveUserIdAsync();
+        if (!userId.HasValue)
+        {
+            return;
+        }
+
+        var preference = await UserDisplayPreferenceService.GetAsync(userId.Value);
+        if (preference is null)
+        {
+            return;
+        }
+
+        paletteId = preference.ThemePaletteId;
+        fontScalePercent = preference.FontScalePercent;
+        storedThemeMode = preference.ThemeMode;
+        darkModeEnabled = string.Equals(preference.ThemeMode, "dark", StringComparison.OrdinalIgnoreCase);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || initialized)
+        {
+            return;
+        }
+
+        initialized = true;
+
+        var settings = await JSRuntime.InvokeAsync<ThemePreferenceState>("lmsTheme.getThemeSettings");
+        if (string.IsNullOrWhiteSpace(storedThemeMode))
+        {
+            paletteId = settings.PaletteId;
+            fontScalePercent = settings.FontScalePercent;
+        }
+
+        if (string.Equals(storedThemeMode, "auto", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(storedThemeMode))
+        {
+            darkModeEnabled = string.Equals(settings.Scheme, "dark", StringComparison.OrdinalIgnoreCase);
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task HandlePaletteChangedAsync(string value)
+    {
+        paletteId = value;
+        await ApplyAndSaveAsync();
+    }
+
+    private async Task HandleFontScaleChangedAsync(int value)
+    {
+        fontScalePercent = value;
+        await ApplyAndSaveAsync();
+    }
+
+    private async Task HandleDarkModeChangedAsync(bool value)
+    {
+        darkModeEnabled = value;
+        await ApplyAndSaveAsync();
+    }
+
+    private async Task<Guid?> ResolveUserIdAsync()
+    {
+        var authenticationState = AuthenticationStateTask is null
+            ? null
+            : await AuthenticationStateTask;
+        var userIdValue = authenticationState?.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+        return Guid.TryParse(userIdValue, out var parsedUserId)
+            ? parsedUserId
+            : null;
+    }
+
+    private async Task ApplyAndSaveAsync()
+    {
+        var themeMode = darkModeEnabled ? "dark" : "light";
+
+        await JSRuntime.InvokeVoidAsync("lmsTheme.setTheme", paletteId, themeMode, fontScalePercent);
+
+        if (userId.HasValue)
+        {
+            await UserDisplayPreferenceService.SaveAsync(userId.Value, paletteId, themeMode, fontScalePercent);
+        }
+    }
+
+    public sealed class ThemePreferenceState
+    {
+        public string PaletteId { get; set; } = string.Empty;
+        public string Mode { get; set; } = string.Empty;
+        public string Scheme { get; set; } = string.Empty;
+        public int FontScalePercent { get; set; }
+    }
+}

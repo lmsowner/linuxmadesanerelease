@@ -1,0 +1,306 @@
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@inject IRunbookService RunbookService
+
+<div class="terminal-runbooks-context-submenu @(isSelectorOpen ? "selector-open" : string.Empty)">
+    <button type="button"
+            class="ui-context-menu-button terminal-runbooks-context-trigger"
+            title="Run favourite runbooks"
+            disabled="@(!HasHost)"
+            @onclick="HandleTriggerClick"
+            @onclick:preventDefault="true">
+        <span class="ui-context-menu-button-icon" aria-hidden="true">
+            <UiGlyphIcon Glyph="UiIconGlyph.Run" />
+        </span>
+        <span class="ui-context-menu-button-label">Runbooks</span>
+        <span class="terminal-runbooks-context-arrow" aria-hidden="true">›</span>
+    </button>
+
+    <div class="terminal-runbooks-context-panel">
+        @if (!HasHost)
+        {
+            <button type="button" class="ui-context-menu-button terminal-runbooks-context-item terminal-runbooks-context-item-empty" disabled>
+                <span class="ui-context-menu-button-label">No host selected</span>
+            </button>
+        }
+        else
+        {
+            <button type="button"
+                    class="ui-context-menu-button terminal-runbooks-context-item terminal-runbooks-context-selector"
+                    @onclick="OpenSelectorAsync">
+                <span class="ui-context-menu-button-icon" aria-hidden="true">
+                    <UiGlyphIcon Glyph="UiIconGlyph.Search" />
+                </span>
+                <span class="ui-context-menu-button-label">Select Runbook</span>
+            </button>
+
+            @if (!string.IsNullOrWhiteSpace(statusMessage))
+            {
+                <div class="terminal-runbooks-context-divider"></div>
+                <button type="button" class="ui-context-menu-button terminal-runbooks-context-item terminal-runbooks-context-item-empty" disabled title="@statusMessage">
+                    <span class="ui-context-menu-button-label">Runbooks unavailable</span>
+                </button>
+            }
+            else if (QuickAccessCommands.Count > 0)
+            {
+                <div class="terminal-runbooks-context-divider"></div>
+
+	                @foreach (var command in QuickAccessCommands)
+	                {
+	                    <button type="button"
+	                            class="ui-context-menu-button terminal-runbooks-context-item"
+	                            title="@command.CommandText"
+                            @onclick="@(() => PasteRunbookAsync(command, closeSelector: false))">
+                        <span class="ui-context-menu-button-icon" aria-hidden="true">
+                            <UiGlyphIcon Glyph="UiIconGlyph.Run" />
+	                        </span>
+	                        <span class="ui-context-menu-button-label">@command.Name</span>
+	                        @if (command.RequiresSudo)
+	                        {
+	                            <span class="terminal-runbooks-context-tag">sudo</span>
+	                        }
+                    </button>
+                }
+            }
+            else
+            {
+                <div class="terminal-runbooks-context-divider"></div>
+                <button type="button" class="ui-context-menu-button terminal-runbooks-context-item terminal-runbooks-context-item-empty" disabled>
+                    <span class="ui-context-menu-button-label">No favourites yet</span>
+                </button>
+            }
+        }
+    </div>
+</div>
+
+<UiModal IsOpen="@isSelectorOpen"
+         Title="Select Runbook"
+         Subtitle="Pick a saved runbook for this terminal host."
+         Class="terminal-runbooks-selector-modal"
+         OnClose="CloseSelectorAsync">
+    <div class="terminal-runbooks-selector-layout">
+        <UiFilterInput Value="@filterText"
+                       ValueChanged="OnFilterChangedAsync"
+                       Placeholder="Filter runbooks"
+                       AriaLabel="Filter runbooks" />
+
+        @if (!string.IsNullOrWhiteSpace(statusMessage))
+        {
+            <div class="callout warning">@statusMessage</div>
+        }
+
+        @if (!HasHost)
+        {
+            <div class="empty-state compact-empty-state">
+                <p>No host selected.</p>
+            </div>
+        }
+        else if (FilteredCommands.Count == 0)
+        {
+            <div class="empty-state compact-empty-state">
+                <p>No matching runbooks.</p>
+                <p class="meta-text">Adjust the filter or add runbooks in the library first.</p>
+            </div>
+        }
+        else
+        {
+            <div class="terminal-runbooks-selector-list">
+                @foreach (var command in FilteredCommands)
+                {
+                    <article class="terminal-runbooks-selector-item @(IsExpanded(command.Id) ? "expanded" : string.Empty)">
+                        <div class="terminal-runbooks-selector-item-head">
+                            <button type="button"
+                                    class="terminal-runbooks-selector-item-pick"
+                                    title="@command.CommandText"
+                                    @onclick="@(() => PasteRunbookAsync(command, closeSelector: true))">
+                                <span class="terminal-runbooks-selector-item-name">@command.Name</span>
+	                                @if (!string.IsNullOrWhiteSpace(command.Description))
+	                                {
+	                                    <span class="terminal-runbooks-selector-item-description">@command.Description</span>
+	                                }
+	                                @if (command.RequiresSudo)
+	                                {
+	                                    <span class="terminal-runbooks-context-tag">sudo</span>
+	                                }
+                                @if (command.IsQuickAccess)
+                                {
+                                    <span class="terminal-runbooks-selector-item-favourite">Favourite</span>
+                                }
+                            </button>
+
+	                            <button type="button"
+	                                    class="terminal-runbooks-selector-favourite-toggle @(command.IsQuickAccess ? "is-active" : string.Empty)"
+	                                    title="@(command.IsQuickAccess ? "Remove favourite" : "Set favourite")"
+	                                    aria-label="@(command.IsQuickAccess ? "Remove favourite" : "Set favourite")"
+	                                    disabled="@IsTogglingQuickAccess(command.Id)"
+	                                    @onclick="@(() => ToggleQuickAccessAsync(command))"
+	                                    @onclick:stopPropagation="true">
+	                                @(IsTogglingQuickAccess(command.Id) ? "Saving..." : command.IsQuickAccess ? "Favourite" : "Set favourite")
+	                            </button>
+
+	                            <button type="button"
+	                                    class="terminal-runbooks-selector-expand"
+	                                    title="@(IsExpanded(command.Id) ? "Hide script" : "Show script")"
+	                                    aria-label="@(IsExpanded(command.Id) ? "Hide script" : "Show script")"
+	                                    @onclick="@(() => ToggleExpandedAsync(command.Id))"
+	                                    @onclick:stopPropagation="true">
+	                                <UiGlyphIcon Glyph="UiIconGlyph.Plus" />
+	                            </button>
+                        </div>
+
+                        @if (IsExpanded(command.Id))
+                        {
+                            <pre class="terminal-runbooks-selector-item-command"><code>@command.CommandText</code></pre>
+                        }
+                    </article>
+                }
+            </div>
+        }
+    </div>
+</UiModal>
+
+@code {
+    [Parameter] public Guid? HostId { get; set; }
+    [Parameter] public EventCallback<string> PasteCommand { get; set; }
+
+    private bool isSelectorOpen;
+    private string filterText = string.Empty;
+    private string statusMessage = string.Empty;
+    private IReadOnlyList<CommandLibraryItem> commands = [];
+    private readonly HashSet<Guid> expandedCommandIds = [];
+    private Guid? loadedHostId;
+    private Guid? togglingQuickAccessCommandId;
+
+    private bool HasHost => HostId.HasValue && HostId.Value != Guid.Empty;
+
+    private IReadOnlyList<CommandLibraryItem> HostCommands =>
+        !HasHost
+            ? []
+            : commands
+                .Where(command =>
+                    !command.IsTemplate &&
+                    command.HostIds.Contains(HostId!.Value))
+                .OrderBy(command => command.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private IReadOnlyList<CommandLibraryItem> QuickAccessCommands =>
+        HostCommands
+            .Where(command => command.IsQuickAccess)
+            .ToArray();
+
+    private IReadOnlyList<CommandLibraryItem> FilteredCommands =>
+        HostCommands
+            .Where(command =>
+                string.IsNullOrWhiteSpace(filterText) ||
+                command.Name.Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
+                command.Description.Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
+                command.CommandText.Contains(filterText, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (HostId == loadedHostId)
+        {
+            return;
+        }
+
+        await ReloadCommandsAsync();
+    }
+
+    private async Task ReloadCommandsAsync()
+    {
+        loadedHostId = HostId;
+        statusMessage = string.Empty;
+
+        if (!HasHost)
+        {
+            commands = [];
+            return;
+        }
+
+        try
+        {
+            commands = await RunbookService.ListCommandsAsync();
+        }
+        catch (Exception exception)
+        {
+            commands = [];
+            statusMessage = exception.Message;
+        }
+    }
+
+    private async Task OpenSelectorAsync()
+    {
+        filterText = string.Empty;
+        expandedCommandIds.Clear();
+        await ReloadCommandsAsync();
+        isSelectorOpen = true;
+    }
+
+    private Task CloseSelectorAsync()
+    {
+        isSelectorOpen = false;
+        return Task.CompletedTask;
+    }
+
+    private Task OnFilterChangedAsync(string? value)
+    {
+        filterText = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task ToggleExpandedAsync(Guid commandId)
+    {
+        if (!expandedCommandIds.Add(commandId))
+        {
+            expandedCommandIds.Remove(commandId);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ToggleQuickAccessAsync(CommandLibraryItem command)
+    {
+        statusMessage = string.Empty;
+        togglingQuickAccessCommandId = command.Id;
+
+        try
+        {
+            await RunbookService.SetCommandQuickAccessAsync(command.Id, !command.IsQuickAccess);
+            await ReloadCommandsAsync();
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+        }
+        finally
+        {
+            togglingQuickAccessCommandId = null;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task PasteRunbookAsync(CommandLibraryItem command, bool closeSelector)
+    {
+        statusMessage = string.Empty;
+        if (closeSelector)
+        {
+            isSelectorOpen = false;
+        }
+
+        await PasteCommand.InvokeAsync(BuildTerminalCommand(command));
+    }
+
+    private static string BuildTerminalCommand(CommandLibraryItem command)
+        => "\u0015" + RunbookExecutionCommandBuilder.BuildInteractiveTerminalCommand(command.CommandText, command.RequiresSudo);
+
+    private bool IsExpanded(Guid commandId) =>
+        expandedCommandIds.Contains(commandId);
+
+    private bool IsTogglingQuickAccess(Guid commandId) =>
+        togglingQuickAccessCommandId == commandId;
+
+    private static void HandleTriggerClick()
+    {
+    }
+}

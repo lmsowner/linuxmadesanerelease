@@ -1,0 +1,141 @@
+@using System.Collections.Generic
+@using System.Linq
+
+<section class="@CssClass">
+    <div class="ui-identity-token-picker-header">
+        <div class="stack-tight ui-identity-token-picker-copy">
+            <div class="ui-identity-token-picker-heading">
+                <strong>@Title</strong>
+                <span>@SelectedKeys.Count selected</span>
+            </div>
+            @if (!string.IsNullOrWhiteSpace(Helper))
+            {
+                <span class="helper-text">@Helper</span>
+            }
+        </div>
+
+        <UiFilterInput Value="@filterValue"
+                       ValueChanged="SetFilterValueAsync"
+                       Placeholder="@SearchPlaceholder"
+                       Class="ui-identity-token-picker-filter" />
+    </div>
+
+    <div class="ui-identity-token-picker-selected">
+        @if (SelectedKeys.Count == 0)
+        {
+            <span class="ui-identity-token-picker-placeholder">@EmptySelectionText</span>
+        }
+        else
+        {
+            @foreach (var selectedKey in SelectedKeys.OrderBy(static item => item, StringComparer.OrdinalIgnoreCase))
+            {
+                <button class="ui-identity-token-pill"
+                        type="button"
+                        title="Remove @selectedKey"
+                        @onclick="@(() => RemoveAsync(selectedKey))">
+                    <span class="ui-identity-token-pill-copy">
+                        <UiGlyphIcon Glyph="@Glyph" />
+                        <span>@selectedKey</span>
+                    </span>
+                    <span class="ui-identity-token-pill-remove" aria-hidden="true">x</span>
+                </button>
+            }
+        }
+    </div>
+
+    @if (VisibleItems.Count == 0)
+    {
+        <div class="empty-state ui-identity-token-picker-empty">
+            <p>@EmptyResultsText</p>
+        </div>
+    }
+    else
+    {
+        <div class="ui-identity-token-picker-grid">
+            @foreach (var item in VisibleItems)
+            {
+                var isSelected = IsSelected(item.Key);
+                <button class="ui-identity-token-option @(isSelected ? "selected" : null)"
+                        type="button"
+                        title="@(isSelected ? $"Remove {item.Title}" : $"Add {item.Title}")"
+                        @onclick="@(() => ToggleAsync(item.Key))">
+                    <span class="ui-identity-token-option-icon" aria-hidden="true">
+                        <UiGlyphIcon Glyph="@Glyph" />
+                    </span>
+                    <span class="ui-identity-token-option-copy">
+                        <strong>@item.Title</strong>
+                        @if (!string.IsNullOrWhiteSpace(item.Subtitle))
+                        {
+                            <span>@item.Subtitle</span>
+                        }
+                    </span>
+                    <span class="ui-identity-token-option-state">
+                        @(isSelected ? "Added" : "Add")
+                    </span>
+                </button>
+            }
+        </div>
+    }
+</section>
+
+@code {
+    private string filterValue = string.Empty;
+
+    [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
+    [Parameter] public string? Helper { get; set; }
+    [Parameter] public string SearchPlaceholder { get; set; } = "Filter";
+    [Parameter] public string EmptySelectionText { get; set; } = "Nothing selected";
+    [Parameter] public string EmptyResultsText { get; set; } = "Nothing matches that search.";
+    [Parameter] public UiIconGlyph Glyph { get; set; } = UiIconGlyph.Info;
+    [Parameter] public IReadOnlyList<UiIdentityTokenPickerItem> Items { get; set; } = [];
+    [Parameter] public IReadOnlyList<string> SelectedValues { get; set; } = [];
+    [Parameter] public EventCallback<string> OnToggle { get; set; }
+    [Parameter] public EventCallback<string> OnRemove { get; set; }
+    [Parameter] public string? Class { get; set; }
+
+    private string CssClass => string.IsNullOrWhiteSpace(Class)
+        ? "ui-identity-token-picker"
+        : $"ui-identity-token-picker {Class}";
+
+    private IReadOnlyList<string> SelectedKeys =>
+        SelectedValues
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private IReadOnlyList<UiIdentityTokenPickerItem> VisibleItems =>
+        Items
+            .Where(item => MatchesFilter(item, filterValue))
+            .OrderBy(item => IsSelected(item.Key) ? 0 : 1)
+            .ToArray();
+
+    private bool IsSelected(string key) =>
+        SelectedKeys.Contains(key, StringComparer.OrdinalIgnoreCase);
+
+    private static bool MatchesFilter(UiIdentityTokenPickerItem item, string filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter))
+        {
+            return true;
+        }
+
+        return item.Key.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+               item.Title.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+               (!string.IsNullOrWhiteSpace(item.Subtitle) && item.Subtitle.Contains(filter, StringComparison.OrdinalIgnoreCase)) ||
+               (!string.IsNullOrWhiteSpace(item.SearchText) && item.SearchText.Contains(filter, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private Task SetFilterValueAsync(string? value)
+    {
+        filterValue = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task ToggleAsync(string key) =>
+        OnToggle.InvokeAsync(key);
+
+    private Task RemoveAsync(string key) =>
+        OnRemove.HasDelegate
+            ? OnRemove.InvokeAsync(key)
+            : OnToggle.InvokeAsync(key);
+}

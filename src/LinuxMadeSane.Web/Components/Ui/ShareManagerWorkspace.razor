@@ -1,0 +1,613 @@
+@using LinuxMadeSane.Application.Contracts.Shares
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.Shares
+@inject IShareManagementService ShareService
+@inject IJSRuntime JSRuntime
+
+<section class="@RootClass">
+    <div class="share-manager-list-header">
+        <div class="stack-tight">
+            <h2>@(Embedded ? "Current LMS network shares" : "Current shares")</h2>
+            <span>@GetShareCountSummary()</span>
+        </div>
+        <div class="share-manager-list-actions">
+            <UiFilterInput Value="@shareSearchTerm"
+                           ValueChanged="SetShareSearchTermAsync"
+                           Placeholder="Find a share by name, path, or access"
+                           Class="share-manager-filter" />
+            <UiCommandButton Label="Add share" Glyph="UiIconGlyph.Plus" OnClick="CreateNewAsync" />
+        </div>
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(statusMessage) && !showEditorDialog)
+    {
+        <p class="callout @statusTone share-manager-page-status">@statusMessage</p>
+    }
+
+    @if (viewModel?.SystemCheck is { } systemCheck)
+    {
+        <section class="surface-subcard share-manager-health">
+            <div class="share-manager-health-header">
+                <div class="stack-tight">
+                    <strong>Live Samba system check</strong>
+                    <span>@systemCheck.Summary</span>
+                </div>
+                <div class="share-manager-health-actions">
+                    <UiCommandButton Label="Start"
+                                     Glyph="UiIconGlyph.Run"
+                                     Variant="UiButtonVariant.Toolbar"
+                                     Disabled="@(!CanStartSamba())"
+                                     OnClick="@(() => RunSambaActionAsync(SambaSystemAction.Start))" />
+                    <UiCommandButton Label="Stop"
+                                     Glyph="UiIconGlyph.Stop"
+                                     Variant="UiButtonVariant.Toolbar"
+                                     Disabled="@(!CanStopSamba())"
+                                     OnClick="@(() => RunSambaActionAsync(SambaSystemAction.Stop))" />
+                    <UiCommandButton Label="Restart"
+                                     Glyph="UiIconGlyph.Restart"
+                                     Variant="UiButtonVariant.Toolbar"
+                                     Disabled="@(!CanRestartSamba())"
+                                     OnClick="@(() => RunSambaActionAsync(SambaSystemAction.Restart))" />
+                    <UiCommandButton Label="Fix"
+                                     Glyph="UiIconGlyph.Repair"
+                                     Variant="UiButtonVariant.Toolbar"
+                                     Disabled="@(!CanFixSamba())"
+                                     OnClick="@(() => RunSambaActionAsync(SambaSystemAction.Fix))" />
+                    <UiCommandButton Label="Refresh"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     Variant="UiButtonVariant.Toolbar"
+                                     Disabled="@(isSaving || isDeleting || isRunningSystemAction)"
+                                     OnClick="RefreshSystemCheckAsync" />
+                </div>
+            </div>
+
+            <div class="share-manager-health-grid">
+                @foreach (var check in systemCheck.Checks)
+                {
+                    <ServiceMetricComponent TagName="div"
+                                            Label="@check.Label"
+                                            Value="@check.Status"
+                                            Meta="@check.Detail"
+                                            Tone="@GetCheckTone(check)"
+                                            Class="share-manager-health-metric" />
+                }
+            </div>
+
+            @if (systemCheck.Findings.Count == 0)
+            {
+                <p class="callout success share-manager-health-callout">The host checks look clean and LMS found no obvious blockers for Windows SMB access.</p>
+            }
+            else
+            {
+                <div class="share-manager-health-findings">
+                    @foreach (var finding in systemCheck.Findings.Take(4))
+                    {
+                        <article class="share-manager-health-finding">
+                            <span class="status-pill @GetSeverityPillClass(finding.Severity)">@finding.Severity</span>
+                            <div class="stack-tight">
+                                <strong>@finding.Title</strong>
+                                <span>@finding.Detail</span>
+                                <span class="meta-text">@finding.Recommendation</span>
+                            </div>
+                        </article>
+                    }
+                </div>
+            }
+        </section>
+    }
+
+    @if (viewModel is null)
+    {
+        <p class="meta-text">Loading shares...</p>
+    }
+    else if (viewModel.Shares.Count == 0)
+    {
+        <div class="empty-state">
+            <p>No shares were discovered or saved yet.</p>
+            <p class="meta-text">Create one with the LMS editor dialog, or make sure Samba is configured on this machine.</p>
+        </div>
+    }
+    else if (GetVisibleShares().Count == 0)
+    {
+        <div class="empty-state">
+            <p>No shares match that filter.</p>
+        </div>
+    }
+    else
+    {
+        <div class="share-manager-card-list">
+            @foreach (var share in GetVisibleShares())
+            {
+                var runtimeStatus = GetRuntimeStatus(share.Id);
+                <article class="share-manager-card @(IsShareSelected(share.Id) ? "selected" : null)">
+                    <div class="share-manager-card-main">
+                        <div class="share-manager-card-title">
+                            <span class="entry-name">
+                                <UiIcon Name="UiIconName.Shares" />
+                                <strong>@share.Name</strong>
+                            </span>
+                            <code>@share.SharePath</code>
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(share.Description))
+                        {
+                            <p class="share-manager-card-description">@share.Description</p>
+                        }
+
+                        <p class="share-manager-card-summary">@GetShareAccessSummary(share)</p>
+
+                        @if (runtimeStatus is not null)
+                        {
+                            <p class="share-manager-card-runtime">@runtimeStatus.Detail</p>
+                        }
+
+                        <div class="share-manager-card-pills">
+                            @if (runtimeStatus is not null)
+                            {
+                                <UiPill Tone="@GetRuntimeTone(runtimeStatus)">@runtimeStatus.Status</UiPill>
+                            }
+                            <UiPill Tone="@(share.Browseable ? UiPillTone.Success : UiPillTone.Warning)">@(share.Browseable ? "Browseable" : "Hidden")</UiPill>
+                            <UiPill Tone="@(share.GuestAccess ? UiPillTone.Warning : UiPillTone.Neutral)">@(share.GuestAccess ? "Guest on" : "Guest off")</UiPill>
+                            <UiPill Tone="@(share.ReadOnly ? UiPillTone.Neutral : UiPillTone.Success)">@(share.ReadOnly ? "Read-only" : "Writable")</UiPill>
+                        </div>
+                    </div>
+
+                    <div class="share-manager-card-actions">
+                        @if (CanRepairShare(runtimeStatus))
+                        {
+                            <UiCommandButton Label="Repair share"
+                                             Glyph="UiIconGlyph.Repair"
+                                             Variant="UiButtonVariant.Action"
+                                             Disabled="@(isSaving || isDeleting || isRunningSystemAction || repairingShareId == share.Id)"
+                                             OnClick="@(() => RepairShareAsync(share.Id))" />
+                        }
+                        <UiCommandButton Label="Edit share"
+                                         Glyph="UiIconGlyph.Edit"
+                                         Variant="UiButtonVariant.Action"
+                                         Disabled="@(isSaving || isDeleting || isRunningSystemAction || repairingShareId.HasValue)"
+                                         OnClick="@(() => EditAsync(share.Id))" />
+                        <UiCommandButton Label="Delete share"
+                                         Glyph="UiIconGlyph.Delete"
+                                         Variant="UiButtonVariant.Danger"
+                                         Disabled="@(isSaving || isDeleting || isRunningSystemAction || repairingShareId.HasValue)"
+                                         OnClick="@(() => DeleteShareCardAsync(share.Id))" />
+                    </div>
+                </article>
+            }
+        </div>
+    }
+</section>
+
+<ShareEditorDialog IsOpen="@showEditorDialog"
+                   Editor="@editor"
+                   Identities="@identities"
+                   StatusMessage="@statusMessage"
+                   StatusTone="@statusTone"
+                   IsBusy="@(isSaving || isDeleting)"
+                   OnClose="CloseDialogAsync"
+                   OnSave="SaveAsync"
+                   OnDelete="DeleteAsync"
+                   OnCreateAnother="CreateAnotherAsync" />
+
+@code {
+    [Parameter] public Guid? InitialShareId { get; set; }
+    [Parameter] public bool Embedded { get; set; }
+    [Parameter] public EventCallback<int> OnShareCountChanged { get; set; }
+
+    private ShareManagerViewModel? viewModel;
+    private UsersGroupsManagerViewModel? identities;
+    private ShareEditor editor = new();
+    private string statusMessage = string.Empty;
+    private string statusTone = "info";
+    private string shareSearchTerm = string.Empty;
+    private bool showEditorDialog;
+    private bool isSaving;
+    private bool isDeleting;
+    private bool isRunningSystemAction;
+    private Guid? repairingShareId;
+    private Guid? lastObservedInitialShareId;
+
+    private string RootClass => Embedded
+        ? "surface-card share-manager-list-shell share-manager-list-shell-embedded"
+        : "surface-card share-manager-list-shell";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (viewModel is null || identities is null || lastObservedInitialShareId != InitialShareId)
+        {
+            lastObservedInitialShareId = InitialShareId;
+            await LoadAsync(InitialShareId, InitialShareId.HasValue, resetStatus: true);
+        }
+    }
+
+    private async Task LoadAsync(Guid? shareIdToOpen = null, bool openEditor = false, bool resetStatus = true)
+    {
+        viewModel = await ShareService.GetShareManagerAsync();
+        identities = await ShareService.GetUsersGroupsManagerAsync();
+        await NotifyShareCountChangedAsync();
+
+        if (openEditor && shareIdToOpen.HasValue && viewModel.Shares.Any(share => share.Id == shareIdToOpen.Value))
+        {
+            editor = await ShareService.GetEditorAsync(shareIdToOpen.Value);
+            showEditorDialog = true;
+        }
+        else if (!showEditorDialog)
+        {
+            editor = await ShareService.GetEditorAsync(null);
+        }
+
+        if (resetStatus)
+        {
+            statusMessage = string.Empty;
+            statusTone = "info";
+        }
+    }
+
+    private async Task CreateNewAsync()
+    {
+        editor = await ShareService.GetEditorAsync(null);
+        showEditorDialog = true;
+        SetStatus("Ready to create a new share.");
+    }
+
+    private async Task CreateAnotherAsync()
+    {
+        if (isSaving || isDeleting)
+        {
+            return;
+        }
+
+        await CreateNewAsync();
+    }
+
+    private async Task EditAsync(Guid id)
+    {
+        editor = await ShareService.GetEditorAsync(id);
+        showEditorDialog = true;
+        SetStatus($"Loaded {editor.Name} for editing.");
+    }
+
+    private async Task SaveAsync()
+    {
+        isSaving = true;
+
+        try
+        {
+            var id = await ShareService.SaveShareAsync(editor);
+            await LoadAsync(id, openEditor: true, resetStatus: false);
+            var runtimeStatus = GetRuntimeStatus(id);
+            if (runtimeStatus is null || runtimeStatus.Severity == LinuxMadeSane.Core.Enums.PermissionIssueSeverity.Info)
+            {
+                SetStatus($"Saved {editor.Name}.", "success");
+            }
+            else
+            {
+                SetStatus(
+                    $"Saved {editor.Name}. {runtimeStatus.Detail}",
+                    runtimeStatus.Severity == LinuxMadeSane.Core.Enums.PermissionIssueSeverity.Critical ? "error" : "warning");
+            }
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isSaving = false;
+        }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (!editor.Id.HasValue)
+        {
+            return;
+        }
+
+        isDeleting = true;
+
+        try
+        {
+            await ShareService.DeleteShareAsync(editor.Id.Value);
+            showEditorDialog = false;
+            await LoadAsync(resetStatus: false);
+            SetStatus("Share deleted.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isDeleting = false;
+        }
+    }
+
+    private async Task DeleteShareCardAsync(Guid shareId)
+    {
+        if (isSaving || isDeleting || isRunningSystemAction || repairingShareId.HasValue)
+        {
+            return;
+        }
+
+        var share = viewModel?.Shares.FirstOrDefault(item => item.Id == shareId);
+        if (share is null)
+        {
+            return;
+        }
+
+        var confirmed = await JSRuntime.InvokeAsync<bool>(
+            "confirm",
+            $"Delete share {share.Name}? This removes the Samba export but leaves {share.SharePath} untouched.");
+        if (!confirmed)
+        {
+            return;
+        }
+
+        isDeleting = true;
+
+        try
+        {
+            await ShareService.DeleteShareAsync(shareId);
+            if (showEditorDialog && editor.Id == shareId)
+            {
+                showEditorDialog = false;
+            }
+
+            await LoadAsync(resetStatus: false);
+            SetStatus($"Deleted {share.Name}.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isDeleting = false;
+        }
+    }
+
+    private Task CloseDialogAsync()
+    {
+        if (isSaving || isDeleting)
+        {
+            return Task.CompletedTask;
+        }
+
+        showEditorDialog = false;
+        return Task.CompletedTask;
+    }
+
+    private Task SetShareSearchTermAsync(string? value)
+    {
+        shareSearchTerm = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private async Task RefreshSystemCheckAsync()
+    {
+        await LoadAsync(
+            showEditorDialog && editor.Id.HasValue ? editor.Id : null,
+            showEditorDialog && editor.Id.HasValue,
+            resetStatus: false);
+
+        if (!showEditorDialog)
+        {
+            SetStatus("Refreshed live Samba system check.", "info");
+        }
+    }
+
+    private async Task RunSambaActionAsync(SambaSystemAction action)
+    {
+        if (isRunningSystemAction || isSaving || isDeleting || repairingShareId.HasValue)
+        {
+            return;
+        }
+
+        isRunningSystemAction = true;
+
+        try
+        {
+            var result = await ShareService.RunSambaSystemActionAsync(action);
+            if (viewModel is not null)
+            {
+                viewModel = viewModel with { SystemCheck = result.SystemCheck };
+            }
+
+            SetStatus(result.StatusMessage, result.StatusTone);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isRunningSystemAction = false;
+        }
+    }
+
+    private async Task RepairShareAsync(Guid shareId)
+    {
+        if (isRunningSystemAction || isSaving || isDeleting || repairingShareId.HasValue)
+        {
+            return;
+        }
+
+        repairingShareId = shareId;
+
+        try
+        {
+            var share = viewModel?.Shares.FirstOrDefault(item => item.Id == shareId);
+            await ShareService.RepairShareAsync(shareId);
+            await LoadAsync(
+                showEditorDialog && editor.Id.HasValue ? editor.Id : null,
+                showEditorDialog && editor.Id.HasValue,
+                resetStatus: false);
+
+            var runtimeStatus = GetRuntimeStatus(shareId);
+            if (runtimeStatus is null || runtimeStatus.IsHealthy)
+            {
+                SetStatus(
+                    HostRuntimeNeedsFix()
+                        ? $"Repaired {share?.Name ?? "share"}. The share is live in Samba, but the host still needs Samba Fix before Windows can connect."
+                        : $"Repaired {share?.Name ?? "share"}. The share is live in Samba.",
+                    HostRuntimeNeedsFix() ? "warning" : "success");
+            }
+            else
+            {
+                SetStatus(
+                    $"Tried to repair {share?.Name ?? "share"}. {runtimeStatus.Detail}",
+                    runtimeStatus.Severity == LinuxMadeSane.Core.Enums.PermissionIssueSeverity.Critical ? "error" : "warning");
+            }
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            repairingShareId = null;
+        }
+    }
+
+    private async Task NotifyShareCountChangedAsync()
+    {
+        if (OnShareCountChanged.HasDelegate)
+        {
+            await OnShareCountChanged.InvokeAsync(viewModel?.Shares.Count ?? 0);
+        }
+    }
+
+    private IReadOnlyList<SambaShareDefinition> GetVisibleShares()
+    {
+        if (viewModel is null)
+        {
+            return [];
+        }
+
+        return viewModel.Shares
+            .Where(MatchesShareFilter)
+            .OrderBy(share => share.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private bool MatchesShareFilter(SambaShareDefinition share)
+    {
+        if (string.IsNullOrWhiteSpace(shareSearchTerm))
+        {
+            return true;
+        }
+
+        return share.Name.Contains(shareSearchTerm, StringComparison.OrdinalIgnoreCase) ||
+               share.SharePath.Contains(shareSearchTerm, StringComparison.OrdinalIgnoreCase) ||
+               (share.Description ?? string.Empty).Contains(shareSearchTerm, StringComparison.OrdinalIgnoreCase) ||
+               share.ValidUsers.Any(user => user.Contains(shareSearchTerm, StringComparison.OrdinalIgnoreCase)) ||
+               share.ValidGroups.Any(group => group.Contains(shareSearchTerm, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool IsShareSelected(Guid shareId) =>
+        editor.Id.HasValue && editor.Id.Value == shareId && showEditorDialog;
+
+    private string GetShareCountSummary()
+    {
+        if (viewModel is null)
+        {
+            return "Loading share list";
+        }
+
+        if (string.IsNullOrWhiteSpace(shareSearchTerm))
+        {
+            return $"{viewModel.Shares.Count} share(s)";
+        }
+
+        return $"{GetVisibleShares().Count} of {viewModel.Shares.Count} share(s)";
+    }
+
+    private static string GetShareAccessSummary(SambaShareDefinition share)
+    {
+        var usersSummary = share.ValidUsers.Count == 0 ? "No named users" : $"{share.ValidUsers.Count} user(s)";
+        var groupsSummary = share.ValidGroups.Count == 0 ? "No named groups" : $"{share.ValidGroups.Count} group(s)";
+        return $"{usersSummary} • {groupsSummary}";
+    }
+
+    private SambaShareRuntimeStatus? GetRuntimeStatus(Guid shareId) =>
+        viewModel?.SystemCheck?.ShareStatuses.FirstOrDefault(status => status.ShareId == shareId);
+
+    private bool CanRepairShare(SambaShareRuntimeStatus? runtimeStatus) =>
+        runtimeStatus?.Status.Equals("Not live", StringComparison.OrdinalIgnoreCase) == true;
+
+    private SambaShareServiceCheck? GetSmbdCheck() =>
+        viewModel?.SystemCheck?.Checks.FirstOrDefault(check => check.Key == "smbd");
+
+    private bool HostRuntimeNeedsFix() =>
+        viewModel?.SystemCheck?.Checks.Any(check =>
+            !check.IsHealthy &&
+            check.Severity == LinuxMadeSane.Core.Enums.PermissionIssueSeverity.Critical) == true;
+
+    private bool CanStartSamba()
+    {
+        if (isRunningSystemAction || isSaving || isDeleting)
+        {
+            return false;
+        }
+
+        var smbdCheck = GetSmbdCheck();
+        return !IsSmbdUnitMissing(smbdCheck) && !IsSmbdRunning(smbdCheck);
+    }
+
+    private bool CanStopSamba()
+    {
+        if (isRunningSystemAction || isSaving || isDeleting)
+        {
+            return false;
+        }
+
+        return IsSmbdRunning(GetSmbdCheck());
+    }
+
+    private bool CanRestartSamba()
+    {
+        if (isRunningSystemAction || isSaving || isDeleting)
+        {
+            return false;
+        }
+
+        return !IsSmbdUnitMissing(GetSmbdCheck());
+    }
+
+    private bool CanFixSamba() =>
+        !isRunningSystemAction && !isSaving && !isDeleting;
+
+    private UiPillTone GetCheckTone(SambaShareServiceCheck check) =>
+        check.IsHealthy
+            ? UiPillTone.Success
+            : check.Severity == LinuxMadeSane.Core.Enums.PermissionIssueSeverity.Critical
+                ? UiPillTone.Failure
+                : UiPillTone.Warning;
+
+    private UiPillTone GetRuntimeTone(SambaShareRuntimeStatus runtimeStatus) =>
+        runtimeStatus.IsHealthy
+            ? UiPillTone.Success
+            : runtimeStatus.Severity == LinuxMadeSane.Core.Enums.PermissionIssueSeverity.Critical
+                ? UiPillTone.Failure
+                : UiPillTone.Warning;
+
+    private static string GetSeverityPillClass(LinuxMadeSane.Core.Enums.PermissionIssueSeverity severity) => severity switch
+    {
+        LinuxMadeSane.Core.Enums.PermissionIssueSeverity.Critical => "failure",
+        LinuxMadeSane.Core.Enums.PermissionIssueSeverity.Warning => "warning",
+        _ => "neutral"
+    };
+
+    private static bool IsSmbdRunning(SambaShareServiceCheck? check) =>
+        check?.IsHealthy == true;
+
+    private static bool IsSmbdUnitMissing(SambaShareServiceCheck? check) =>
+        check?.Status.Equals("Not installed", StringComparison.OrdinalIgnoreCase) == true;
+
+    private void SetStatus(string message, string tone = "info")
+    {
+        statusMessage = message;
+        statusTone = tone;
+    }
+}

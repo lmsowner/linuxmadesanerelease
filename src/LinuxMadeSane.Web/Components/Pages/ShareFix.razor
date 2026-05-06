@@ -1,0 +1,90 @@
+@page "/shares/fix"
+@using LinuxMadeSane.Application.Contracts.Shares
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@inject IShareManagementService ShareService
+
+<PageTitle>Fix Permissions | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <section class="hero-panel compact">
+        <div>
+            <p class="eyebrow">Fix my permissions</p>
+            <h1>Scan a path for the problems that make shares feel random</h1>
+            <p class="hero-copy">This is the operational safety net: detect mixed ownership, missing execute bits, Samba/filesystem mismatches, and other drift before applying a controlled fix.</p>
+        </div>
+    </section>
+
+    <section class="surface-card">
+        <div class="table-header">
+            <h2>Scan target</h2>
+            <span>Preview before change</span>
+        </div>
+
+        <div class="field-row">
+            <label>
+                <span>Path</span>
+                <InputText @bind-Value="path" />
+            </label>
+            <div class="checkbox-row action-row">
+                <UiCommandButton Label="Scan for issues" Glyph="UiIconGlyph.Analyze" OnClick="ReloadAsync" />
+            </div>
+        </div>
+    </section>
+
+    @if (viewModel is not null)
+    {
+        <section class="surface-card">
+            <div class="table-header">
+                <h2>Detected issues</h2>
+                <span>@viewModel.Path</span>
+            </div>
+
+            <div class="issue-list">
+                @foreach (var issue in viewModel.Issues)
+                {
+                    <article class="issue-card @GetSeverityClass(issue.Severity)">
+                        <div class="stack-tight">
+                            <div class="share-card-header">
+                                <strong>@issue.Title</strong>
+                                <span class="status-pill @GetStatusPillClass(issue.Severity)">@issue.Severity</span>
+                            </div>
+                            <span class="meta-text">@issue.Detail</span>
+                        </div>
+                        <p>@issue.SuggestedFix</p>
+                        <p class="meta-text">@issue.RiskNote</p>
+                    </article>
+                }
+            </div>
+        </section>
+    }
+</div>
+
+@code {
+    private string path = "/srv/shares/team";
+    private PermissionFixViewModel? viewModel;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        viewModel = await ShareService.GetFixPlanAsync(path);
+    }
+
+    private static string GetSeverityClass(PermissionIssueSeverity severity) => severity switch
+    {
+        PermissionIssueSeverity.Critical => "critical",
+        PermissionIssueSeverity.Warning => "warning",
+        _ => "info"
+    };
+
+    private static string GetStatusPillClass(PermissionIssueSeverity severity) => severity switch
+    {
+        PermissionIssueSeverity.Critical => "failure",
+        PermissionIssueSeverity.Warning => "warning",
+        _ => "neutral"
+    };
+}

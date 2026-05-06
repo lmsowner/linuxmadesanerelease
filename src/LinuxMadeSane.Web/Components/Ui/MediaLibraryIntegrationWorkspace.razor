@@ -1,0 +1,1261 @@
+@using System.Text
+@using LinuxMadeSane.Application.Contracts.MediaLibrary
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.MediaLibrary
+@using LinuxMadeSane.Core.Models.RdpOptimizer
+@using LinuxMadeSane.Web.Components.Pages
+@using Microsoft.AspNetCore.Hosting
+@using Microsoft.AspNetCore.WebUtilities
+@using Microsoft.Extensions.Configuration
+@inject IMediaLibraryIntegrationService MediaLibraryService
+@inject ILocalFileBrowsingService LocalFileBrowsingService
+@inject MediaLibrarySignedUrlService SignedUrls
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+@inject IConfiguration Configuration
+@inject IWebHostEnvironment HostEnvironment
+
+@if (!isLoaded || dashboard is null)
+{
+    <section class="surface-card media-library-loading-card">
+        <p class="meta-text">Loading media library integration...</p>
+    </section>
+}
+else
+{
+    <div class="media-library-shell">
+        @if (!string.IsNullOrWhiteSpace(statusMessage))
+        {
+            <p class="callout @(statusIsError ? "error" : "success")">@statusMessage</p>
+        }
+
+        <TabControl ActiveValue="@activeTab"
+                    ActiveValueChanged="SetActiveTabAsync"
+                    Class="media-library-tab-control"
+                    PanelClass="media-library-tab-panel">
+            <HeaderActions>
+                <div class="media-library-tab-header-actions">
+                    <div class="media-library-quick-status" aria-label="Media library status">
+                        <span class="media-library-status-chip">
+                            <span>State</span>
+                            <strong>@(dashboard.Settings.IsEnabled ? "Enabled" : "Disabled")</strong>
+                            <UiPill Tone="@GetHealthTone(dashboard.HealthState)">@GetHealthTitle()</UiPill>
+                        </span>
+                        <span class="media-library-status-chip">
+                            <span>Folders</span>
+                            <strong>@dashboard.EnabledRootCount/@dashboard.Roots.Count</strong>
+                        </span>
+                        <span class="media-library-status-chip">
+                            <span>Media</span>
+                            <strong>@dashboard.MediaItemCount</strong>
+                            <small>@dashboard.VideoItemCount video, @dashboard.AudioItemCount audio</small>
+                        </span>
+                        <span class="media-library-status-chip">
+                            <span>FFmpeg</span>
+                            <strong>@(dashboard.FfmpegStatus.FfmpegAvailable ? "Ready" : "Missing")</strong>
+                            <small>@(dashboard.FfmpegStatus.FfprobeAvailable ? "probe OK" : "probe missing")</small>
+                        </span>
+                    </div>
+                    <div class="media-library-header-actions">
+                        <UiCommandButton Label="Refresh"
+                                         Glyph="UiIconGlyph.Refresh"
+                                         Variant="UiButtonVariant.Ghost"
+                                         Disabled="@isBusy"
+                                         OnClick="RefreshAsync" />
+                        <UiCommandButton Label="Scan all"
+                                         Glyph="UiIconGlyph.Analyze"
+                                         Disabled="@isBusy"
+                                         OnClick="@(() => QueueScanAsync(null))" />
+                        @if (ShouldOfferFfmpegInstall)
+                        {
+                            <UiCommandButton Label="@(isInstallingFfmpeg ? "Installing FFmpeg..." : "Install FFmpeg")"
+                                             Glyph="UiIconGlyph.Download"
+                                             Disabled="@(isBusy || isInstallingFfmpeg)"
+                                             OnClick="ShowFfmpegInstallPrompt" />
+                        }
+                    </div>
+                </div>
+            </HeaderActions>
+            <ChildContent>
+                <TabPage Value="folders" Title="Library Folders">
+                    <ChildContent>
+                        <section class="surface-card media-library-card">
+                            <div class="table-header">
+                                <div>
+                                    <p class="eyebrow">Folders</p>
+                                    <h3>Library roots</h3>
+                                </div>
+                                <UiCommandButton Label="Add folder"
+                                                 Glyph="UiIconGlyph.Plus"
+                                                 Disabled="@isBusy"
+                                                 OnClick="OpenCreateRootAsync" />
+                            </div>
+
+                            @if (dashboard.Roots.Count == 0)
+                            {
+                                <div class="empty-state media-library-empty-state">
+                                    <p>No media folders have been added.</p>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="media-library-table-shell">
+                                    <table class="media-library-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Name</th>
+                                                <th>Path</th>
+                                                <th>Category</th>
+                                                <th>Status</th>
+                                                <th>Last scan</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var root in dashboard.Roots)
+                                            {
+                                                <tr>
+                                                    <td><strong>@root.Name</strong></td>
+                                                    <td><code>@root.Path</code></td>
+                                                    <td>@GetRootCategoryLabel(root)</td>
+                                                    <td>
+                                                        <UiPill Tone="@GetScanTone(root.LastScanStatus)">
+                                                            @(root.Enabled ? root.LastScanStatus : "Disabled")
+                                                        </UiPill>
+                                                    </td>
+                                                    <td>@(root.LastScanUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "Never")</td>
+                                                    <td>
+                                                        <div class="media-library-row-actions">
+                                                            <UiCommandButton Label="Scan"
+                                                                             Glyph="UiIconGlyph.Analyze"
+                                                                             Variant="UiButtonVariant.Ghost"
+                                                                             Disabled="@isBusy"
+                                                                             OnClick="@(() => QueueScanAsync(root.Id))" />
+                                                            <UiCommandButton Label="Edit"
+                                                                             Glyph="UiIconGlyph.Edit"
+                                                                             Variant="UiButtonVariant.Ghost"
+                                                                             Disabled="@isBusy"
+                                                                             OnClick="@(() => OpenEditRootAsync(root.Id))" />
+                                                            <UiCommandButton Label="Delete"
+                                                                             Glyph="UiIconGlyph.Delete"
+                                                                             Variant="UiButtonVariant.Ghost"
+                                                                             Disabled="@isBusy"
+                                                                             OnClick="@(() => DeleteRootAsync(root.Id))" />
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                                @if (!string.IsNullOrWhiteSpace(root.LastScanMessage))
+                                                {
+                                                    <tr class="media-library-detail-row">
+                                                        <td colspan="6">@root.LastScanMessage</td>
+                                                    </tr>
+                                                }
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            }
+                        </section>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="items" Title="Media Items">
+                    <ChildContent>
+                        <section class="surface-card media-library-card media-library-items-card">
+                            <div class="table-header">
+                                <div>
+                                    <p class="eyebrow">Index</p>
+                                    <h3>Media items</h3>
+                                </div>
+                                <UiCommandButton Label="Refresh"
+                                                 Glyph="UiIconGlyph.Refresh"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Disabled="@isBusy"
+                                                 OnClick="LoadItemsAsync" />
+                            </div>
+
+                            <div class="media-library-filter-grid">
+                                <UiTextField @bind-Value="itemSearch"
+                                             Label="Search"
+                                             Placeholder="Title or path"
+                                             Compact="true" />
+                                <UiComboboxField TValue="string"
+                                                 Label="Folder"
+                                                 Value="@rootFilter"
+                                                 ValueChanged="SetRootFilterAsync"
+                                                 ValueExpression="@(() => rootFilter)"
+                                                 Compact="true">
+                                    <option value="">All folders</option>
+                                    @foreach (var root in dashboard.Roots)
+                                    {
+                                        <option value="@root.Id">@root.Name</option>
+                                    }
+                                </UiComboboxField>
+                                <UiComboboxField TValue="string"
+                                                 Label="Type"
+                                                 Value="@kindFilter"
+                                                 ValueChanged="SetKindFilterAsync"
+                                                 ValueExpression="@(() => kindFilter)"
+                                                 Compact="true">
+                                    <option value="">All playable</option>
+                                    <option value="@MediaKind.Video">Video</option>
+                                    <option value="@MediaKind.Audio">Audio</option>
+                                    <option value="@MediaKind.Playlist">Playlist</option>
+                                    <option value="@MediaKind.Other">Other</option>
+                                </UiComboboxField>
+                                <UiCommandButton Label="Search"
+                                                 Glyph="UiIconGlyph.Search"
+                                                 Disabled="@isBusy"
+                                                 OnClick="LoadItemsAsync" />
+                            </div>
+
+                            <div class="media-library-table-shell media-library-items-table-shell">
+                                <table class="media-library-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Name</th>
+                                            <th>Folder</th>
+                                            <th>Type</th>
+                                            <th>Size</th>
+                                            <th>Modified</th>
+                                            <th>Compatibility</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var item in mediaItems)
+                                        {
+                                            <tr>
+                                                <td>
+                                                    <strong>@item.FileName</strong>
+                                                    <span>@item.RelativePath</span>
+                                                </td>
+                                                <td>@item.LibraryRootName</td>
+                                                <td>@item.MediaKind</td>
+                                                <td>@FormatBytes(item.SizeBytes)</td>
+                                                <td>@(item.LastModifiedUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "n/a")</td>
+                                                <td>
+                                                    <UiPill Tone="@GetCompatibilityTone(item)">@GetCompatibilityLabel(item)</UiPill>
+                                                </td>
+                                                <td>
+                                                    <div class="media-library-row-actions">
+                                                        <UiCommandButton Label="Copy stream URL"
+                                                                         Glyph="UiIconGlyph.Copy"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         Disabled="@isBusy"
+                                                                         OnClick="@(() => CopyTextAsync(BuildStreamUrl(item.Id), "Stream URL copied."))" />
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="playlists" Title="Playlists">
+                    <ChildContent>
+                        <section class="surface-card media-library-card">
+                            <div class="table-header">
+                                <div>
+                                    <p class="eyebrow">M3U8</p>
+                                    <h3>VLC playlists</h3>
+                                    <p class="meta-text">Copy the VLC playlist URL, or download the playlist file and open it locally.</p>
+                                </div>
+                            </div>
+
+                            <div class="media-library-table-shell media-library-playlist-table-shell">
+                                <table class="media-library-table media-library-playlist-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Name</th>
+                                            <th>Type</th>
+                                            <th>Playlist URL</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @{
+                                            var allPath = "/api/integrations/media-library/playlists/all-media.m3u8";
+                                            var allUrl = BuildPlaylistUrl("all", allPath);
+                                        }
+                                        <tr>
+                                            <td><strong>All media</strong></td>
+                                            <td>All</td>
+                                            <td><code class="media-library-playlist-url">@allUrl</code></td>
+                                            <td>
+                                                <div class="media-library-row-actions">
+                                                    <UiCommandButton Label="Copy URL" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Ghost" OnClick="@(() => CopyTextAsync(allUrl, "Playlist URL copied."))" />
+                                                    <UiCommandButton Label="Download" Glyph="UiIconGlyph.Download" Href="@BuildPlaylistUrl("all", allPath, true)" Target="_blank" Rel="noreferrer" />
+                                                </div>
+                                            </td>
+                                        </tr>
+
+                                        @foreach (var root in dashboard.Roots)
+                                        {
+                                            var rootPath = BuildRootPlaylistPath(root);
+                                            var rootScope = $"root:{root.Id:N}";
+                                            var rootUrl = BuildPlaylistUrl(rootScope, rootPath);
+                                            <tr>
+                                                <td><strong>@root.Name</strong></td>
+                                                <td>Folder</td>
+                                                <td><code class="media-library-playlist-url">@rootUrl</code></td>
+                                                <td>
+                                                    <div class="media-library-row-actions">
+                                                        <UiCommandButton Label="Copy URL" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Ghost" OnClick="@(() => CopyTextAsync(rootUrl, "Playlist URL copied."))" />
+                                                        <UiCommandButton Label="Download" Glyph="UiIconGlyph.Download" Href="@BuildPlaylistUrl(rootScope, rootPath, true)" Target="_blank" Rel="noreferrer" />
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        }
+
+                                        @foreach (var category in Enum.GetValues<MediaLibraryCategory>())
+                                        {
+                                            var categoryPath = $"/api/integrations/media-library/playlists/category/{category}.m3u8";
+                                            var categoryScope = $"category:{category}";
+                                            var categoryUrl = BuildPlaylistUrl(categoryScope, categoryPath);
+                                            <tr>
+                                                <td><strong>@category</strong></td>
+                                                <td>Category</td>
+                                                <td><code class="media-library-playlist-url">@categoryUrl</code></td>
+                                                <td>
+                                                    <div class="media-library-row-actions">
+                                                        <UiCommandButton Label="Copy URL" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Ghost" OnClick="@(() => CopyTextAsync(categoryUrl, "Playlist URL copied."))" />
+                                                        <UiCommandButton Label="Download" Glyph="UiIconGlyph.Download" Href="@BuildPlaylistUrl(categoryScope, categoryPath, true)" Target="_blank" Rel="noreferrer" />
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="settings" Title="FFmpeg / Playback Settings">
+                    <ChildContent>
+                        @if (showFfmpegInstallPrompt)
+                        {
+                            <section class="surface-card media-library-card media-library-ffmpeg-install-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Dependency install</p>
+                                        <h3>Install FFmpeg on this LMS host?</h3>
+                                    </div>
+                                    <UiPill Tone="UiPillTone.Warning">Requires sudo</UiPill>
+                                </div>
+                                <p class="callout warning">This will run the existing LMS package install flow for `ffmpeg`. It uses non-interactive sudo, so the LMS service account must already have permission to install packages.</p>
+                                <code class="block-code">apt-get update && apt-get install -y ffmpeg</code>
+                                <div class="toolbar-row">
+                                    <UiCommandButton Label="@(isInstallingFfmpeg ? "Installing..." : "Confirm install")"
+                                                     Glyph="UiIconGlyph.Download"
+                                                     Disabled="@(isBusy || isInstallingFfmpeg)"
+                                                     OnClick="InstallFfmpegAsync" />
+                                    <UiCommandButton Label="Cancel"
+                                                     Glyph="UiIconGlyph.Clear"
+                                                     Variant="UiButtonVariant.Ghost"
+                                                     Disabled="@isInstallingFfmpeg"
+                                                     OnClick="HideFfmpegInstallPrompt" />
+                                </div>
+                            </section>
+                        }
+
+                        @if (ffmpegInstallResult is not null)
+                        {
+                            <section class="surface-card media-library-card media-library-ffmpeg-install-card">
+                                <p class="callout @(ffmpegInstallResult.Success ? "success" : "warning")">@ffmpegInstallResult.StatusMessage</p>
+                                @if (ffmpegInstallResult.OperationLogs.Count > 0)
+                                {
+                                    <code class="block-code log-panel">@string.Join(Environment.NewLine + Environment.NewLine, ffmpegInstallResult.OperationLogs.Select(FormatLog))</code>
+                                }
+                            </section>
+                        }
+
+                        <section class="surface-card media-library-card media-library-settings-card">
+                            <div class="table-header">
+                                <div>
+                                    <p class="eyebrow">Settings</p>
+                                    <h3>Playback and security</h3>
+                                </div>
+                                <UiCommandButton Label="Save settings"
+                                                 Glyph="UiIconGlyph.Save"
+                                                 Disabled="@isBusy"
+                                                 OnClick="SaveSettingsAsync" />
+                            </div>
+
+                            <div class="media-library-settings-columns">
+                                <section class="surface-subcard media-library-setting-group">
+                                    <div class="media-library-setting-group-head">
+                                        <strong>Playback</strong>
+                                        <UiCommandButton Label="Allow all"
+                                                         Glyph="UiIconGlyph.Plus"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@isBusy"
+                                                         OnClick="AllowAllPlaybackAsync" />
+                                    </div>
+                                    <div class="media-library-toggle-grid">
+                                        <UiCheckboxField @bind-Value="settingsEditor.IsEnabled"
+                                                         Label="Integration enabled"
+                                                         Compact="true" />
+                                        <UiCheckboxField Value="@settingsEditor.EnableDirectStreaming"
+                                                         ValueChanged="SetDirectStreamingAsync"
+                                                         ValueExpression="@(() => settingsEditor.EnableDirectStreaming)"
+                                                         Label="Direct streams"
+                                                         Compact="true" />
+                                        <UiCheckboxField Value="@settingsEditor.EnableRemux"
+                                                         ValueChanged="SetEnableRemuxAsync"
+                                                         ValueExpression="@(() => settingsEditor.EnableRemux)"
+                                                         Label="Remux when needed"
+                                                         Compact="true" />
+                                        <UiCheckboxField Value="@settingsEditor.EnableTranscoding"
+                                                         ValueChanged="SetEnableTranscodingAsync"
+                                                         ValueExpression="@(() => settingsEditor.EnableTranscoding)"
+                                                         Label="Transcode fallback"
+                                                         Compact="true" />
+                                        <UiCheckboxField @bind-Value="settingsEditor.EnableMetadataProbing"
+                                                         Label="Metadata probing"
+                                                         Compact="true" />
+                                        <UiCheckboxField @bind-Value="settingsEditor.AllowUnknownBrowserPlayback"
+                                                         Label="Unknown codec browser playback"
+                                                         Compact="true" />
+                                    </div>
+                                </section>
+
+                                <section class="surface-subcard media-library-setting-group">
+                                    <strong>Security</strong>
+                                    <div class="media-library-toggle-grid">
+                                        <UiCheckboxField @bind-Value="settingsEditor.RequireLoginForPlaylists" Label="Login for playlists" Compact="true" />
+                                        <UiCheckboxField @bind-Value="settingsEditor.RequireLoginForStreams" Label="Login for streams" Compact="true" />
+                                        <UiCheckboxField @bind-Value="settingsEditor.AllowLanAnonymousAccess" Label="LAN anonymous access" Compact="true" />
+                                        <UiCheckboxField @bind-Value="settingsEditor.GenerateTemporarySignedStreamUrls" Label="Signed stream URLs" Compact="true" />
+                                        <UiCheckboxField @bind-Value="settingsEditor.ShowUnsupportedFiles" Label="Show unsupported files" Compact="true" />
+                                    </div>
+                                    <div class="media-library-field-pair">
+                                        <UiTextField @bind-Value="settingsEditor.SignedUrlExpiryMinutesText" Label="Signed URL expiry minutes" Compact="true" />
+                                        <UiTextField @bind-Value="settingsEditor.IpAllowlistCsv" Label="IP allowlist" Compact="true" />
+                                    </div>
+                                </section>
+
+                                <section class="surface-subcard media-library-setting-group">
+                                    <strong>FFmpeg and cache</strong>
+                                    <div class="media-library-settings-grid media-library-settings-grid-tight">
+                                        <UiTextField @bind-Value="settingsEditor.FfmpegPath" Label="FFmpeg path" Placeholder="ffmpeg" Compact="true" />
+                                        <UiTextField @bind-Value="settingsEditor.FfprobePath" Label="FFprobe path" Placeholder="ffprobe" Compact="true" />
+                                        <UiComboboxField TValue="MediaHardwareAcceleration"
+                                                         Label="Hardware acceleration"
+                                                         Value="@settingsEditor.HardwareAcceleration"
+                                                         ValueChanged="SetHardwareAccelerationAsync"
+                                                         ValueExpression="@(() => settingsEditor.HardwareAcceleration)"
+                                                         Compact="true">
+                                            @foreach (var acceleration in Enum.GetValues<MediaHardwareAcceleration>())
+                                            {
+                                                <option value="@acceleration">@acceleration</option>
+                                            }
+                                        </UiComboboxField>
+                                        <UiTextField @bind-Value="settingsEditor.TempCacheFolder" Label="Temp/cache folder" Compact="true" />
+                                        <UiTextField @bind-Value="settingsEditor.CacheExpiryMinutesText" Label="Cache expiry minutes" Compact="true" />
+                                        <UiTextField @bind-Value="settingsEditor.MaxCacheSizeBytesText" Label="Max cache size bytes" Compact="true" />
+                                        <UiTextField @bind-Value="settingsEditor.MaxConcurrentFfmpegJobsText" Label="Max FFmpeg jobs" Compact="true" />
+                                    </div>
+                                </section>
+                            </div>
+                        </section>
+                    </ChildContent>
+                </TabPage>
+            </ChildContent>
+        </TabControl>
+    </div>
+}
+
+<UiModal IsOpen="@showRootEditor"
+         Title="@(rootEditor.Id.HasValue ? "Edit media folder" : "Add media folder")"
+         Subtitle="Register a physical media folder for scanning and playlist generation."
+         Resizable="true"
+         OnClose="CloseRootEditorAsync">
+    <ChildContent>
+        <EditForm id="@rootEditorFormId"
+                  Model="@rootEditor"
+                  OnValidSubmit="SaveRootAsync"
+                  class="stack-form media-library-root-form">
+            <DataAnnotationsValidator />
+            <ValidationSummary />
+
+            <div class="media-library-root-name-row">
+                <UiTextField @bind-Value="rootEditor.Name" Label="Display name" Compact="true" />
+            </div>
+            <UiPathAutocompleteField Label="Physical path"
+                                     Helper="@(isRootPathSuggestionsLoading ? "Looking up local folders..." : "Start typing to pick an existing local folder.")"
+                                     Value="@rootEditor.Path"
+                                     ValueChanged="SetRootPathAsync"
+                                     ValueExpression="@(() => rootEditor.Path)"
+                                     CommitRequested="SetRootPathAsync"
+                                     SuggestionSelected="SelectRootPathSuggestionAsync"
+                                     Placeholder="/mnt/media/movies"
+                                     Suggestions="@rootPathSuggestions"
+                                     IsLoadingSuggestions="@isRootPathSuggestionsLoading"
+                                     KeepSuggestionsOpenOnSelect="true"
+                                     Class="media-library-root-path-field"
+                                     Compact="true" />
+            <div class="field-row">
+                <UiComboboxField TValue="MediaLibraryCategory"
+                                 Label="Category"
+                                 Value="@rootEditor.Category"
+                                 ValueChanged="SetRootCategoryAsync"
+                                 ValueExpression="@(() => rootEditor.Category)"
+                                 Compact="true">
+                    @foreach (var category in Enum.GetValues<MediaLibraryCategory>())
+                    {
+                        <option value="@category">@category</option>
+                    }
+                </UiComboboxField>
+                <UiTextField @bind-Value="rootEditor.CustomCategoryName" Label="Custom category" Compact="true" />
+            </div>
+            <div class="field-row">
+                <UiCheckboxField @bind-Value="rootEditor.Enabled" Label="Enabled" Compact="true" />
+                <UiCheckboxField @bind-Value="rootEditor.Recursive" Label="Recursive scan" Compact="true" />
+            </div>
+            <UiTextField @bind-Value="rootEditor.IncludeExtensions" Label="Include extensions" Helper="Leave empty for known media extensions." Compact="true" />
+            <UiTextField @bind-Value="rootEditor.ExcludeExtensions" Label="Exclude extensions" Compact="true" />
+            <UiTextField @bind-Value="rootEditor.ExcludeFolders" Label="Exclude folders" Helper="Folder names or relative paths, separated by commas." Compact="true" />
+            <UiTextAreaField @bind-Value="rootEditor.Notes" Label="Notes" Compact="true" />
+        </EditForm>
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@isBusy" OnClick="CloseRootEditorAsync" />
+        <UiCommandButton Label="Save folder" Glyph="UiIconGlyph.Save" Disabled="@isBusy" Type="submit" form="@rootEditorFormId" />
+    </Footer>
+</UiModal>
+
+@code {
+    private readonly string rootEditorFormId = $"media-library-root-{Guid.NewGuid():N}";
+    private MediaLibraryDashboardSnapshot? dashboard;
+    private MediaLibrarySettingsEditorAdapter settingsEditor = new(new MediaLibrarySettingsEditor());
+    private MediaLibraryRootEditor rootEditor = new();
+    private IReadOnlyList<MediaItem> mediaItems = [];
+    private string activeTab = "folders";
+    private string itemSearch = string.Empty;
+    private string rootFilter = string.Empty;
+    private string kindFilter = string.Empty;
+    private string statusMessage = string.Empty;
+    private IReadOnlyList<string> rootPathSuggestions = [];
+    private readonly Dictionary<string, IReadOnlyList<string>> rootDirectorySuggestionCache = new(StringComparer.OrdinalIgnoreCase);
+    private MediaLibraryToolInstallResult? ffmpegInstallResult;
+    private int rootPathSuggestionRequestVersion;
+    private bool statusIsError;
+    private bool isLoaded;
+    private bool isBusy;
+    private bool showFfmpegInstallPrompt;
+    private bool isInstallingFfmpeg;
+    private bool isRootPathSuggestionsLoading;
+    private bool showRootEditor;
+
+    protected override async Task OnInitializedAsync()
+    {
+        activeTab = ResolveInitialTab();
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        isLoaded = false;
+        dashboard = await MediaLibraryService.GetDashboardAsync();
+        settingsEditor = new MediaLibrarySettingsEditorAdapter(await MediaLibraryService.GetSettingsEditorAsync());
+        await LoadItemsAsync();
+        isLoaded = true;
+    }
+
+    private async Task RefreshAsync()
+    {
+        await RunOperationAsync("Refreshed media library integration.", async () => await LoadAsync());
+    }
+
+    private Task SetActiveTabAsync(string? value)
+    {
+        activeTab = IsValidTab(value) ? value! : "folders";
+        return Task.CompletedTask;
+    }
+
+    private string ResolveInitialTab()
+    {
+        var query = QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(Navigation.Uri).Query);
+        return query.TryGetValue("tab", out var tab) && IsValidTab(tab.ToString())
+            ? tab.ToString()
+            : "folders";
+    }
+
+    private static bool IsValidTab(string? value) =>
+        value is "folders" or "items" or "playlists" or "settings";
+
+    private async Task OpenCreateRootAsync()
+    {
+        rootEditor = await MediaLibraryService.GetRootEditorAsync(null);
+        showRootEditor = true;
+        PrimeRootPathSuggestions();
+    }
+
+    private async Task OpenEditRootAsync(Guid rootId)
+    {
+        rootEditor = await MediaLibraryService.GetRootEditorAsync(rootId);
+        showRootEditor = true;
+        PrimeRootPathSuggestions();
+    }
+
+    private Task CloseRootEditorAsync()
+    {
+        showRootEditor = false;
+        rootPathSuggestionRequestVersion++;
+        rootPathSuggestions = [];
+        isRootPathSuggestionsLoading = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveRootAsync()
+    {
+        await RunOperationAsync("Saved media folder.", async () =>
+        {
+            await MediaLibraryService.SaveRootAsync(rootEditor);
+            showRootEditor = false;
+            await LoadAsync();
+        });
+    }
+
+    private async Task DeleteRootAsync(Guid rootId)
+    {
+        await RunOperationAsync("Deleted media folder.", async () =>
+        {
+            await MediaLibraryService.DeleteRootAsync(rootId);
+            await LoadAsync();
+        });
+    }
+
+    private async Task QueueScanAsync(Guid? rootId)
+    {
+        await RunOperationAsync("Media scan queued.", async () =>
+        {
+            await MediaLibraryService.QueueScanAsync(rootId);
+            await LoadAsync();
+        });
+    }
+
+    private async Task SaveSettingsAsync()
+    {
+        await RunOperationAsync("Saved media library settings.", async () =>
+        {
+            await MediaLibraryService.SaveSettingsAsync(settingsEditor.ToEditor());
+            await LoadAsync();
+        });
+    }
+
+    private void ShowFfmpegInstallPrompt()
+    {
+        ffmpegInstallResult = null;
+        showFfmpegInstallPrompt = true;
+        activeTab = "settings";
+    }
+
+    private void HideFfmpegInstallPrompt()
+    {
+        showFfmpegInstallPrompt = false;
+    }
+
+    private async Task InstallFfmpegAsync()
+    {
+        isInstallingFfmpeg = true;
+        statusMessage = string.Empty;
+        statusIsError = false;
+
+        try
+        {
+            ffmpegInstallResult = await MediaLibraryService.InstallFfmpegAsync();
+            showFfmpegInstallPrompt = false;
+            await LoadAsync();
+            statusMessage = ffmpegInstallResult.StatusMessage;
+            statusIsError = !ffmpegInstallResult.Success;
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusIsError = true;
+        }
+        finally
+        {
+            isInstallingFfmpeg = false;
+        }
+    }
+
+    private async Task LoadItemsAsync()
+    {
+        mediaItems = await MediaLibraryService.ListItemsAsync(new MediaItemQuery(
+            RootId: Guid.TryParse(rootFilter, out var rootId) ? rootId : null,
+            MediaKind: Enum.TryParse<MediaKind>(kindFilter, out var kind) ? kind : null,
+            Search: itemSearch,
+            IncludeUnsupported: dashboard?.Settings.ShowUnsupportedFiles == true,
+            SortMode: MediaSortMode.Path,
+            MaxItems: 1000));
+    }
+
+    private async Task SetRootFilterAsync(string? value)
+    {
+        rootFilter = value ?? string.Empty;
+        await LoadItemsAsync();
+    }
+
+    private async Task SetKindFilterAsync(string? value)
+    {
+        kindFilter = value ?? string.Empty;
+        await LoadItemsAsync();
+    }
+
+    private Task SetRootCategoryAsync(MediaLibraryCategory category)
+    {
+        rootEditor.Category = category;
+        return Task.CompletedTask;
+    }
+
+    private Task SetRootPathAsync(string? value)
+    {
+        rootEditor.Path = value?.Trim() ?? string.Empty;
+        QueueRootPathSuggestionsRefresh();
+        return Task.CompletedTask;
+    }
+
+    private Task SelectRootPathSuggestionAsync(string value)
+    {
+        rootEditor.Path = ScheduledTaskPathSuggestions.NormalizeSuggestedPath(value);
+        QueueRootPathSuggestionsRefresh();
+        return Task.CompletedTask;
+    }
+
+    private Task SetDirectStreamingAsync(bool value)
+    {
+        settingsEditor.EnableDirectStreaming = value;
+        if (!value)
+        {
+            settingsEditor.EnableRemux = false;
+            settingsEditor.EnableTranscoding = false;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetEnableRemuxAsync(bool value)
+    {
+        settingsEditor.EnableRemux = value;
+        if (value)
+        {
+            settingsEditor.EnableDirectStreaming = true;
+        }
+        else if (settingsEditor.EnableTranscoding)
+        {
+            settingsEditor.EnableTranscoding = false;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetEnableTranscodingAsync(bool value)
+    {
+        settingsEditor.EnableTranscoding = value;
+        if (value)
+        {
+            settingsEditor.EnableDirectStreaming = true;
+            settingsEditor.EnableRemux = true;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task AllowAllPlaybackAsync()
+    {
+        settingsEditor.IsEnabled = true;
+        settingsEditor.EnableDirectStreaming = true;
+        settingsEditor.EnableRemux = true;
+        settingsEditor.EnableTranscoding = true;
+        settingsEditor.EnableMetadataProbing = true;
+        settingsEditor.AllowUnknownBrowserPlayback = true;
+        return Task.CompletedTask;
+    }
+
+    private Task SetHardwareAccelerationAsync(MediaHardwareAcceleration acceleration)
+    {
+        settingsEditor.HardwareAcceleration = acceleration;
+        return Task.CompletedTask;
+    }
+
+    private async Task RunOperationAsync(string successMessage, Func<Task> operation)
+    {
+        isBusy = true;
+        statusMessage = string.Empty;
+        statusIsError = false;
+
+        try
+        {
+            await operation();
+            statusMessage = successMessage;
+            statusIsError = false;
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusIsError = true;
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private void PrimeRootPathSuggestions()
+    {
+        rootPathSuggestionRequestVersion++;
+        rootPathSuggestions = BuildCachedRootPathSuggestions(rootEditor.Path);
+        isRootPathSuggestionsLoading = false;
+    }
+
+    private void QueueRootPathSuggestionsRefresh()
+    {
+        if (!showRootEditor)
+        {
+            rootPathSuggestions = [];
+            isRootPathSuggestionsLoading = false;
+            return;
+        }
+
+        var requestVersion = ++rootPathSuggestionRequestVersion;
+        var query = rootEditor.Path;
+        rootPathSuggestions = BuildCachedRootPathSuggestions(query);
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            isRootPathSuggestionsLoading = false;
+            _ = InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        isRootPathSuggestionsLoading = true;
+        _ = InvokeAsync(StateHasChanged);
+        _ = RefreshRootPathSuggestionsAsync(requestVersion, query);
+    }
+
+    private async Task RefreshRootPathSuggestionsAsync(int requestVersion, string? query)
+    {
+        try
+        {
+            var suggestions = await BuildRootPathSuggestionsAsync(query);
+            if (requestVersion != rootPathSuggestionRequestVersion)
+            {
+                return;
+            }
+
+            rootPathSuggestions = suggestions;
+        }
+        finally
+        {
+            if (requestVersion == rootPathSuggestionRequestVersion)
+            {
+                isRootPathSuggestionsLoading = false;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private async Task<IReadOnlyList<string>> BuildRootPathSuggestionsAsync(string? query)
+    {
+        var normalizedQuery = NormalizeRootPathSuggestionQuery(query);
+        var suggestions = BuildRootPathSuggestionSeed(query);
+
+        foreach (var path in ScheduledTaskPathSuggestions.BuildInspectionPaths(normalizedQuery, null))
+        {
+            var directorySuggestions = await GetRootDirectorySuggestionsAsync(path);
+            foreach (var suggestion in directorySuggestions)
+            {
+                suggestions.Add(ScheduledTaskPathSuggestions.NormalizeSuggestedPath(suggestion));
+            }
+        }
+
+        return ScheduledTaskPathSuggestions.FilterAndOrderSuggestions(suggestions, normalizedQuery, query);
+    }
+
+    private IReadOnlyList<string> BuildCachedRootPathSuggestions(string? query)
+    {
+        var normalizedQuery = NormalizeRootPathSuggestionQuery(query);
+        var suggestions = BuildRootPathSuggestionSeed(query);
+
+        foreach (var path in ScheduledTaskPathSuggestions.BuildInspectionPaths(normalizedQuery, null))
+        {
+            foreach (var suggestion in GetCachedRootDirectorySuggestions(path))
+            {
+                suggestions.Add(ScheduledTaskPathSuggestions.NormalizeSuggestedPath(suggestion));
+            }
+        }
+
+        return ScheduledTaskPathSuggestions.FilterAndOrderSuggestions(suggestions, normalizedQuery, query);
+    }
+
+    private SortedSet<string> BuildRootPathSuggestionSeed(string? query)
+    {
+        var suggestions = new SortedSet<string>(
+            ScheduledTaskPathSuggestions.BuildBaseSuggestions(query, null),
+            StringComparer.OrdinalIgnoreCase);
+        suggestions.Add("/mnt/media");
+        suggestions.Add("/media");
+
+        if (dashboard is not null)
+        {
+            foreach (var root in dashboard.Roots)
+            {
+                suggestions.Add(ScheduledTaskPathSuggestions.NormalizeSuggestedPath(root.Path));
+                suggestions.Add(ScheduledTaskPathSuggestions.GetParentDirectory(root.Path));
+            }
+        }
+
+        return suggestions;
+    }
+
+    private async Task<IReadOnlyList<string>> GetRootDirectorySuggestionsAsync(string path)
+    {
+        var normalizedPath = ScheduledTaskPathSuggestions.NormalizeSuggestedPath(path);
+        if (rootDirectorySuggestionCache.TryGetValue(normalizedPath, out var cached))
+        {
+            return cached;
+        }
+
+        try
+        {
+            cached = (await LocalFileBrowsingService.ListItemsAsync("/", normalizedPath))
+                .Where(item => item.ItemType == SftpItemType.Folder)
+                .Select(item => ScheduledTaskPathSuggestions.NormalizeSuggestedPath(item.FullPath))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch
+        {
+            cached = [];
+        }
+
+        rootDirectorySuggestionCache[normalizedPath] = cached;
+        return cached;
+    }
+
+    private IReadOnlyList<string> GetCachedRootDirectorySuggestions(string path)
+    {
+        var normalizedPath = ScheduledTaskPathSuggestions.NormalizeSuggestedPath(path);
+        return rootDirectorySuggestionCache.TryGetValue(normalizedPath, out var cached)
+            ? cached
+            : [];
+    }
+
+    private static string NormalizeRootPathSuggestionQuery(string? query)
+    {
+        var trimmedQuery = query?.Trim() ?? string.Empty;
+        return string.IsNullOrWhiteSpace(trimmedQuery)
+            ? string.Empty
+            : ScheduledTaskPathSuggestions.NormalizeSuggestedPath(trimmedQuery);
+    }
+
+    private async Task CopyTextAsync(string text, string successMessage)
+    {
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", text);
+        statusMessage = copied ? successMessage : "Clipboard copy was blocked by the browser.";
+        statusIsError = !copied;
+    }
+
+    private string BuildPlaylistUrl(string scope, string path, bool download = false)
+    {
+        var absolute = BuildMediaExternalUrl(path, preferHttpForExternalPlayer: !download);
+        var parts = new List<string>();
+        if (dashboard?.Settings.GenerateTemporarySignedStreamUrls == true)
+        {
+            var token = SignedUrls.CreatePlaylistToken(scope, TimeSpan.FromMinutes(dashboard.Settings.SignedUrlExpiryMinutes));
+            parts.Add($"token={Uri.EscapeDataString(token)}");
+        }
+
+        if (download)
+        {
+            parts.Add("download=1");
+        }
+
+        return parts.Count == 0 ? absolute : $"{absolute}?{string.Join("&", parts)}";
+    }
+
+    private static string BuildRootPlaylistPath(MediaLibraryRoot root) =>
+        $"/api/integrations/media-library/playlists/root/{root.Id:N}/{BuildPlaylistFileSlug(root.Name)}.m3u8";
+
+    private static string BuildPlaylistFileSlug(string value)
+    {
+        var normalized = value.Trim().ToLowerInvariant();
+        var builder = new StringBuilder();
+        var lastWasDash = false;
+
+        foreach (var character in normalized)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                builder.Append(character);
+                lastWasDash = false;
+                continue;
+            }
+
+            if (lastWasDash)
+            {
+                continue;
+            }
+
+            builder.Append('-');
+            lastWasDash = true;
+        }
+
+        var slug = builder.ToString().Trim('-');
+        return string.IsNullOrWhiteSpace(slug)
+            ? "media-folder"
+            : slug;
+    }
+
+    private string BuildStreamUrl(Guid itemId)
+    {
+        var absolute = BuildMediaExternalUrl(
+            $"/api/integrations/media-library/items/{itemId:N}/stream",
+            preferHttpForExternalPlayer: true);
+        if (dashboard?.Settings.GenerateTemporarySignedStreamUrls != true)
+        {
+            return absolute;
+        }
+
+        var token = SignedUrls.CreateStreamToken(itemId, TimeSpan.FromMinutes(dashboard.Settings.SignedUrlExpiryMinutes));
+        return $"{absolute}?token={Uri.EscapeDataString(token)}";
+    }
+
+    private string BuildMediaExternalUrl(string path, bool preferHttpForExternalPlayer)
+    {
+        var current = Navigation.ToAbsoluteUri(path);
+        var httpUrl = TryBuildDevelopmentHttpMediaUrl(path, current.Host);
+        if (!preferHttpForExternalPlayer ||
+            !ShouldUseDevelopmentHttpMediaUrl(current) ||
+            string.IsNullOrWhiteSpace(httpUrl))
+        {
+            return current.ToString();
+        }
+
+        return httpUrl;
+    }
+
+    private bool ShouldUseDevelopmentHttpMediaUrl(Uri current) =>
+        HostEnvironment.IsDevelopment() &&
+        string.Equals(current.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
+
+    private string? TryBuildDevelopmentHttpMediaUrl(string path, string currentHost)
+    {
+        foreach (var configuredUrl in EnumerateConfiguredServerUrls())
+        {
+            if (!Uri.TryCreate(configuredUrl, UriKind.Absolute, out var uri) ||
+                !string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var builder = new UriBuilder(uri)
+            {
+                Host = IsLoopbackOrWildcardHost(uri.Host) ? currentHost : uri.Host,
+                Path = path.StartsWith("/", StringComparison.Ordinal) ? path : $"/{path}",
+                Query = string.Empty
+            };
+
+            return builder.Uri.ToString();
+        }
+
+        return null;
+    }
+
+    private IEnumerable<string> EnumerateConfiguredServerUrls()
+    {
+        foreach (var key in new[] { "URLS", "ASPNETCORE_URLS", "DOTNET_URLS" })
+        {
+            var value = Configuration[key];
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
+
+            foreach (var part in value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                yield return part;
+            }
+        }
+
+        foreach (var child in Configuration.GetSection("Server:Urls").GetChildren())
+        {
+            if (!string.IsNullOrWhiteSpace(child.Value))
+            {
+                yield return child.Value;
+            }
+        }
+    }
+
+    private static bool IsLoopbackOrWildcardHost(string host) =>
+        host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("::1", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("::", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("*", StringComparison.Ordinal);
+
+    private string GetHealthTitle() => dashboard?.HealthState switch
+    {
+        MediaLibraryHealthState.Ready => "Ready",
+        MediaLibraryHealthState.Disabled => "Disabled",
+        MediaLibraryHealthState.NotConfigured => "Not configured",
+        MediaLibraryHealthState.FfmpegMissing => "FFmpeg missing",
+        MediaLibraryHealthState.PermissionIssue => "Permission issue",
+        MediaLibraryHealthState.ScanFailed => "Scan failed",
+        _ => "Media library"
+    };
+
+    private bool ShouldOfferFfmpegInstall =>
+        dashboard?.FfmpegStatus.FfmpegAvailable == false ||
+        dashboard?.FfmpegStatus.FfprobeAvailable == false;
+
+    private static UiPillTone GetHealthTone(MediaLibraryHealthState state) => state switch
+    {
+        MediaLibraryHealthState.Ready => UiPillTone.Success,
+        MediaLibraryHealthState.Disabled or MediaLibraryHealthState.NotConfigured => UiPillTone.Warning,
+        _ => UiPillTone.Failure
+    };
+
+    private static UiPillTone GetScanTone(MediaScanStatus status) => status switch
+    {
+        MediaScanStatus.Completed => UiPillTone.Success,
+        MediaScanStatus.Queued or MediaScanStatus.Running or MediaScanStatus.NotScanned => UiPillTone.Warning,
+        _ => UiPillTone.Failure
+    };
+
+    private static UiPillTone GetCompatibilityTone(MediaItem item) =>
+        item.IsBrowserCompatible == true ? UiPillTone.Success :
+        item.IsVlcCompatible == true ? UiPillTone.Neutral :
+        UiPillTone.Warning;
+
+    private static string GetCompatibilityLabel(MediaItem item)
+    {
+        if (item.IsBrowserCompatible == true)
+        {
+            return "Browser";
+        }
+
+        if (item.RequiresRemux == true)
+        {
+            return "VLC / remux";
+        }
+
+        return item.IsVlcCompatible == true ? "VLC" : "Unknown";
+    }
+
+    private static string GetRootCategoryLabel(MediaLibraryRoot root) =>
+        root.Category == MediaLibraryCategory.Custom && !string.IsNullOrWhiteSpace(root.CustomCategoryName)
+            ? root.CustomCategoryName
+            : root.Category.ToString();
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var value = (double)Math.Max(0, bytes);
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+
+        return $"{value:0.#} {units[unit]}";
+    }
+
+    private static string FormatLog(OperationLogEntry log)
+    {
+        var parts = new List<string> { $"[{log.Timestamp.ToLocalTime():u}] {log.Level}: {log.Message}" };
+        if (!string.IsNullOrWhiteSpace(log.CommandText))
+        {
+            parts.Add($"$ {log.CommandText}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(log.StandardOutput))
+        {
+            parts.Add(log.StandardOutput.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(log.StandardError))
+        {
+            parts.Add(log.StandardError.Trim());
+        }
+
+        return string.Join(Environment.NewLine, parts);
+    }
+
+    private sealed class MediaLibrarySettingsEditorAdapter(MediaLibrarySettingsEditor editor)
+    {
+        public bool IsEnabled { get; set; } = editor.IsEnabled;
+        public MediaStreamingMode StreamingMode { get; set; } = editor.StreamingMode;
+        public bool EnableDirectStreaming { get; set; } = editor.StreamingMode != MediaStreamingMode.PlaylistOnly;
+        public string FfmpegPath { get; set; } = editor.FfmpegPath;
+        public string FfprobePath { get; set; } = editor.FfprobePath;
+        public bool EnableMetadataProbing { get; set; } = editor.EnableMetadataProbing;
+        public bool EnableRemux { get; set; } = editor.EnableRemux || editor.StreamingMode is MediaStreamingMode.RemuxWhenNeeded or MediaStreamingMode.TranscodeFallback;
+        public bool EnableTranscoding { get; set; } = editor.EnableTranscoding || editor.StreamingMode == MediaStreamingMode.TranscodeFallback;
+        public string MaxConcurrentFfmpegJobsText { get; set; } = editor.MaxConcurrentFfmpegJobs.ToString();
+        public string TempCacheFolder { get; set; } = editor.TempCacheFolder;
+        public string CacheExpiryMinutesText { get; set; } = editor.CacheExpiryMinutes.ToString();
+        public string MaxCacheSizeBytesText { get; set; } = editor.MaxCacheSizeBytes.ToString();
+        public MediaHardwareAcceleration HardwareAcceleration { get; set; } = editor.HardwareAcceleration;
+        public bool RequireLoginForPlaylists { get; set; } = editor.RequireLoginForPlaylists;
+        public bool RequireLoginForStreams { get; set; } = editor.RequireLoginForStreams;
+        public bool AllowLanAnonymousAccess { get; set; } = editor.AllowLanAnonymousAccess;
+        public bool GenerateTemporarySignedStreamUrls { get; set; } = editor.GenerateTemporarySignedStreamUrls;
+        public string SignedUrlExpiryMinutesText { get; set; } = editor.SignedUrlExpiryMinutes.ToString();
+        public string IpAllowlistCsv { get; set; } = editor.IpAllowlistCsv;
+        public bool ShowUnsupportedFiles { get; set; } = editor.ShowUnsupportedFiles;
+        public bool AllowUnknownBrowserPlayback { get; set; } = editor.AllowUnknownBrowserPlayback;
+
+        public MediaLibrarySettingsEditor ToEditor() =>
+            new()
+            {
+                IsEnabled = IsEnabled,
+                StreamingMode = ResolveStreamingMode(),
+                FfmpegPath = FfmpegPath,
+                FfprobePath = FfprobePath,
+                EnableMetadataProbing = EnableMetadataProbing,
+                EnableRemux = EnableRemux,
+                EnableTranscoding = EnableTranscoding,
+                MaxConcurrentFfmpegJobs = int.TryParse(MaxConcurrentFfmpegJobsText, out var maxJobs) ? maxJobs : 1,
+                TempCacheFolder = TempCacheFolder,
+                CacheExpiryMinutes = int.TryParse(CacheExpiryMinutesText, out var cacheExpiry) ? cacheExpiry : 240,
+                MaxCacheSizeBytes = long.TryParse(MaxCacheSizeBytesText, out var cacheSize) ? cacheSize : 10L * 1024L * 1024L * 1024L,
+                HardwareAcceleration = HardwareAcceleration,
+                RequireLoginForPlaylists = RequireLoginForPlaylists,
+                RequireLoginForStreams = RequireLoginForStreams,
+                AllowLanAnonymousAccess = AllowLanAnonymousAccess,
+                GenerateTemporarySignedStreamUrls = GenerateTemporarySignedStreamUrls,
+                SignedUrlExpiryMinutes = int.TryParse(SignedUrlExpiryMinutesText, out var expiry) ? expiry : 120,
+                IpAllowlistCsv = IpAllowlistCsv,
+                ShowUnsupportedFiles = ShowUnsupportedFiles,
+                AllowUnknownBrowserPlayback = AllowUnknownBrowserPlayback
+            };
+
+        private MediaStreamingMode ResolveStreamingMode()
+        {
+            if (EnableTranscoding)
+            {
+                return MediaStreamingMode.TranscodeFallback;
+            }
+
+            if (EnableRemux)
+            {
+                return MediaStreamingMode.RemuxWhenNeeded;
+            }
+
+            return EnableDirectStreaming
+                ? MediaStreamingMode.DirectStream
+                : MediaStreamingMode.PlaylistOnly;
+        }
+    }
+}

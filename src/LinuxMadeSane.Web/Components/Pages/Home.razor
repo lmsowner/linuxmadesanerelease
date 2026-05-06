@@ -1,0 +1,498 @@
+@page "/"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Web.Services
+@inject IManagedHostService HostService
+@inject IServiceScopeFactory ServiceScopeFactory
+@inject IJSRuntime JSRuntime
+@inject NavigationManager NavigationManager
+@inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+@inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
+@inject FileBrowserWorkspaceRegistry FileBrowserWorkspaceRegistry
+
+<PageTitle>Overview | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <UiHeroPanel Title="Overview" Compact="true">
+        <Actions>
+            <UiDisplayPreferenceToolbar />
+        </Actions>
+    </UiHeroPanel>
+
+    <div class="dashboard-columns">
+        <UiPanel>
+            <div class="table-header">
+                <h2>Hosts</h2>
+                <span>@hostRows.Count item(s)</span>
+            </div>
+            <div class="stack-list">
+                @foreach (var details in hostRows)
+                {
+                    <div class="list-row list-row-actions dashboard-host-row">
+                            <div class="stack-tight dashboard-host-copy">
+                                <div class="dashboard-host-title">
+                                    <strong>@details.Host.Name</strong>
+                                    <ManagedHostKindIndicator Host="@details.Host" />
+                                </div>
+                                <span class="meta-text">@details.Host.Hostname:@details.Host.Port</span>
+                            @if (HasVisibleHealth(details.HealthSnapshot))
+                            {
+                                <div class="dashboard-host-metrics">
+                                    <span>CPU <strong>@FormatPercent(details.HealthSnapshot.CpuUsagePercent)</strong></span>
+                                    <span>Disk free <strong>@FormatDiskAvailable(details.HealthSnapshot.RootDiskAvailable)</strong></span>
+                                    <span>Memory free <strong>@FormatMemorySummary(details.HealthSnapshot)</strong></span>
+                                    <span>Uptime <strong>@details.HealthSnapshot.Uptime</strong></span>
+                                </div>
+                            }
+                            else if (details.IsHealthLoading)
+                            {
+                                <span class="meta-text">Loading live health...</span>
+                            }
+                            else
+                            {
+                                <span class="meta-text">@BuildConnectionSummary(details.ConnectionTest)</span>
+                            }
+                        </div>
+                        <div class="row-action-cluster">
+                            @if (TryGetIntegrationsHref(details.Host) is { } integrationsHref)
+                            {
+                                <UiCommandButton Label="Integrations" Glyph="UiIconGlyph.Connection" Href="@integrationsHref" Variant="UiButtonVariant.Action" />
+                            }
+                            <UiCommandButton Label="Terminal" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.Action" OnClick="@(() => OpenTerminalPopupAsync(details.Host.Id))" />
+                            <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Variant="UiButtonVariant.Action" OnClick="@(() => OpenFilesPopupAsync(details.Host))" />
+                        </div>
+                    </div>
+                }
+            </div>
+        </UiPanel>
+
+        <UiPanel>
+            <div class="table-header">
+                <h2>Local Quick Links</h2>
+                <span>@quickLinks.Length link(s)</span>
+            </div>
+            <div class="dashboard-quick-links">
+                @foreach (var quickLink in quickLinks)
+                {
+                    <a class="dashboard-quick-link" href="@quickLink.Href" title="@quickLink.Label">
+                        <span class="dashboard-quick-link-icon" aria-hidden="true">
+                            <UiIcon Name="@quickLink.Icon" />
+                        </span>
+                        <span class="dashboard-quick-link-label">@quickLink.Label</span>
+                    </a>
+                }
+            </div>
+        </UiPanel>
+
+    </div>
+
+    <FileActionCenter />
+</div>
+
+@code {
+    private static readonly DashboardQuickLink[] quickLinks =
+    [
+        new("Hosts", "/hosts", UiIconName.Hosts),
+        new("Add Machine", "/hosts/new", UiIconName.AddMachine),
+        new("Integrations", "/integrations", UiIconName.Integrations),
+        new("Scheduling", "/scheduling", UiIconName.Scheduling),
+        new("Runbooks", "/commands", UiIconName.Runbooks),
+        new("Desktop Manager", "/rdp-optimizer", UiIconName.RdpOptimizer),
+        new("Security", "/settings", UiIconName.RemoteSection),
+        new("Users and Groups", "/shares/identities", UiIconName.UsersGroups),
+        new("SFTP Server", "/sftp-server", UiIconName.SftpServer),
+        new("Network Shares", "/shares", UiIconName.Shares),
+        new("Services", "/services", UiIconName.Services),
+        new("AI Services", "/ai", UiIconName.AiOverview),
+        new("Local AI Engine", "/ai/engine", UiIconName.AiEngine),
+        new("Providers", "/ai/providers", UiIconName.Providers)
+    ];
+
+    private IReadOnlyList<DashboardHostRow> hostRows = [];
+    private CancellationTokenSource? healthLoadCancellationTokenSource;
+    private Task? healthLoadTask;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var hosts = await HostService.ListHostsAsync();
+        hostRows = hosts
+            .OrderBy(ManagedHostCapabilities.GetSortRank)
+            .ThenBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(BuildHostRow)
+            .ToArray();
+
+        await HydrateLocalHostHealthAsync();
+
+        healthLoadCancellationTokenSource = new CancellationTokenSource();
+        healthLoadTask = LoadHealthSnapshotsAsync(healthLoadCancellationTokenSource.Token);
+    }
+
+    private static string BuildConnectionSummary(HostConnectionTestResult connection) =>
+        connection.Status == ConnectionTestStatus.Succeeded
+            ? "Connected, but live health metrics were unavailable."
+            : connection.Summary;
+
+    private static DashboardHostRow BuildHostRow(ManagedHost host) =>
+        new()
+        {
+            Host = host,
+            ConnectionTest = BuildStoredConnectionResult(host),
+            HealthSnapshot = BuildUnavailableHealthSnapshot(DateTimeOffset.UtcNow),
+            IsHealthLoading = ShouldLoadHealth(host)
+        };
+
+    private static string? TryGetIntegrationsHref(ManagedHost host)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(host);
+        if (!capabilities.IsLmsHost)
+        {
+            return null;
+        }
+
+        return capabilities.IsLocalLmsHost
+            ? "/integrations?tab=caddy"
+            : $"/integrations?tab=cloudflare&hostId={host.Id}";
+    }
+
+    private Task OpenTerminalPopupAsync(Guid hostId)
+    {
+        var host = hostRows
+            .Select(row => row.Host)
+            .FirstOrDefault(item => item.Id == hostId);
+        if (host is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        var workspace = TerminalWorkspaceRegistry.GetOrCreate(TerminalWorkspaceAccessor.GetWorkspaceId());
+        var tab = workspace.EnsureHostTab(host, activate: false);
+        var connection = TerminalWorkspaceRegistry.FindConnectionSnapshot(hostId);
+
+        if (connection is not null && !tab.SessionId.HasValue)
+        {
+            if (!string.IsNullOrWhiteSpace(connection.Username))
+            {
+                tab.Username = connection.Username;
+            }
+
+            tab.SecretHandle = connection.SecretHandle;
+            tab.PreferStoredCredentials = connection.PreferStoredCredentials;
+        }
+
+        workspace.SetDetached(tab.Id, true);
+
+        return OpenPopupOrNavigateAsync(
+            $"/terminal-window/{tab.Id}?autoconnect=true",
+            $"lms-dashboard-terminal-{hostId:N}");
+    }
+
+    private Task OpenFilesPopupAsync(ManagedHost host)
+    {
+        var connection = TerminalWorkspaceRegistry.FindConnectionSnapshot(host.Id);
+        var workspaceState = FileBrowserWorkspaceRegistry.GetOrCreate(TerminalWorkspaceAccessor.GetWorkspaceId());
+        var detachedBrowser = workspaceState.CreateDetachedBrowser(
+            new DetachedFileBrowserSnapshot(
+                host.Id,
+                host.DefaultWorkingDirectory,
+                string.Empty,
+                connection?.Username ?? host.Username,
+                connection?.SecretHandle,
+                connection?.PreferStoredCredentials ??
+                (!string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+                 !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference)),
+                false,
+                false,
+                FileBrowserPreviewDock.Right,
+                520,
+                false));
+
+        return OpenPopupOrNavigateAsync(
+            $"/file-browser-window/{detachedBrowser.BrowserId}",
+            $"lms-dashboard-files-{host.Id:N}");
+    }
+
+    private async Task OpenPopupOrNavigateAsync(string url, string popupName)
+    {
+        var opened = await JSRuntime.InvokeAsync<bool>(
+            "lmsTerminalWindow.openPopup",
+            url,
+            popupName);
+
+        if (!opened)
+        {
+            NavigationManager.NavigateTo(url);
+        }
+    }
+
+    private async Task HydrateLocalHostHealthAsync()
+    {
+        var localRows = hostRows
+            .Where(row => AiLocalMachine.IsLocalMachine(row.Host.Id))
+            .ToArray();
+
+        foreach (var row in localRows)
+        {
+            try
+            {
+                row.HealthSnapshot = await HostService.GetHealthSnapshotAsync(row.Host.Id);
+            }
+            catch
+            {
+                row.HealthSnapshot = BuildUnavailableHealthSnapshot(DateTimeOffset.UtcNow);
+            }
+            finally
+            {
+                row.IsHealthLoading = false;
+            }
+        }
+    }
+
+    private static HostConnectionTestResult BuildStoredConnectionResult(ManagedHost host)
+    {
+        var checkedAt = host.LastSeenUtc ?? DateTimeOffset.UtcNow;
+
+        if (AiLocalMachine.IsLocalMachine(host.Id))
+        {
+            return new HostConnectionTestResult(
+                ConnectionTestStatus.Succeeded,
+                "Local Linux Made Sane host.",
+                "Live health is collected directly from this machine.",
+                checkedAt);
+        }
+
+        return host.LastConnectionTestStatus switch
+        {
+            ConnectionTestStatus.Succeeded => new HostConnectionTestResult(
+                ConnectionTestStatus.Succeeded,
+                "Connected.",
+                "Live health loads in the background on the dashboard.",
+                checkedAt),
+            ConnectionTestStatus.Failed => new HostConnectionTestResult(
+                ConnectionTestStatus.Failed,
+                "The last SSH connection test failed.",
+                null,
+                checkedAt),
+            _ => new HostConnectionTestResult(
+                ConnectionTestStatus.NotRun,
+                "Connection has not been tested yet.",
+                null,
+                checkedAt)
+        };
+    }
+
+    private async Task LoadHealthSnapshotsAsync(CancellationToken cancellationToken)
+    {
+        var hostsToRefresh = hostRows
+            .Where(row => ShouldLoadHealth(row.Host) &&
+                          !AiLocalMachine.IsLocalMachine(row.Host.Id) &&
+                          !HasVisibleHealth(row.HealthSnapshot))
+            .Select(row => row.Host)
+            .ToArray();
+
+        if (hostsToRefresh.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var work = hostsToRefresh
+                .Select(host => RefreshHostHealthAsync(host, cancellationToken))
+                .ToArray();
+
+            await Task.WhenAll(work);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            await TryRefreshAsync();
+        }
+    }
+
+    private async Task<HostHealthProbeResult> LoadHealthSnapshotAsync(
+        ManagedHost host,
+        CancellationToken cancellationToken)
+    {
+        return await Task.Run(
+            () => LoadHealthSnapshotCoreAsync(host, cancellationToken),
+            cancellationToken);
+    }
+
+    private async Task RefreshHostHealthAsync(
+        ManagedHost host,
+        CancellationToken cancellationToken)
+    {
+        var result = await LoadHealthSnapshotAsync(host, cancellationToken);
+
+        await InvokeAsync(() =>
+        {
+            var row = hostRows.FirstOrDefault(item => item.Host.Id == result.HostId);
+            if (row is null)
+            {
+                return;
+            }
+
+            row.HealthSnapshot = result.Snapshot;
+            row.IsHealthLoading = false;
+            StateHasChanged();
+        });
+    }
+
+    private async Task<HostHealthProbeResult> LoadHealthSnapshotCoreAsync(
+        ManagedHost host,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var scope = ServiceScopeFactory.CreateAsyncScope();
+            var hostService = scope.ServiceProvider.GetRequiredService<IManagedHostService>();
+            var snapshot = await hostService.GetHealthSnapshotAsync(host, cancellationToken);
+            return new HostHealthProbeResult(host.Id, snapshot);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new HostHealthProbeResult(host.Id, BuildUnavailableHealthSnapshot(DateTimeOffset.UtcNow));
+        }
+    }
+
+    private static bool ShouldLoadHealth(ManagedHost host) =>
+        AiLocalMachine.IsLocalMachine(host.Id) ||
+        (!string.IsNullOrWhiteSpace(host.Hostname) &&
+         !string.IsNullOrWhiteSpace(host.Username) &&
+         (!string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+          !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference)));
+
+    private static ServerHealthSnapshot BuildUnavailableHealthSnapshot(DateTimeOffset capturedAtUtc) =>
+        new(
+            null,
+            null,
+            null,
+            null,
+            null,
+            string.Empty,
+            "Unavailable",
+            "Unavailable",
+            capturedAtUtc);
+
+    private static string FormatPercent(double? value) =>
+        value.HasValue ? $"{value.Value:0.#}%" : "Unavailable";
+
+    private static string FormatDiskAvailable(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "Unavailable" : value;
+
+    private static string FormatMemorySummary(ServerHealthSnapshot snapshot)
+    {
+        var memory = FormatCompactBytes(snapshot.MemoryAvailableBytes);
+        var swap = FormatCompactBytes(snapshot.SwapFreeBytes);
+        var percent = snapshot.MemoryFreePercent.HasValue
+            ? $" ({snapshot.MemoryFreePercent.Value:0.#}% free)"
+            : string.Empty;
+
+        if (string.IsNullOrWhiteSpace(memory))
+        {
+            if (string.IsNullOrWhiteSpace(swap))
+            {
+                return "Unavailable";
+            }
+
+            return $"{swap} swap{percent}";
+        }
+
+        return string.IsNullOrWhiteSpace(swap)
+            ? $"{memory}{percent}"
+            : $"{memory} + {swap} swap{percent}";
+    }
+
+    private static bool HasVisibleHealth(ServerHealthSnapshot snapshot) =>
+        snapshot.CpuUsagePercent.HasValue ||
+        snapshot.MemoryFreePercent.HasValue ||
+        snapshot.MemoryAvailableBytes.HasValue ||
+        snapshot.SwapFreeBytes.HasValue ||
+        snapshot.DiskUsagePercent.HasValue ||
+        !string.IsNullOrWhiteSpace(snapshot.RootDiskAvailable) ||
+        !string.Equals(snapshot.Uptime, "Unavailable", StringComparison.OrdinalIgnoreCase);
+
+    private static string? FormatCompactBytes(long? bytes)
+    {
+        if (!bytes.HasValue)
+        {
+            return null;
+        }
+
+        string[] units = ["B", "K", "M", "G", "T", "P"];
+        double value = bytes.Value;
+        var unitIndex = 0;
+
+        while (value >= 1024 && unitIndex < units.Length - 1)
+        {
+            value /= 1024;
+            unitIndex++;
+        }
+
+        var format = value >= 10 || unitIndex == 0 ? "0" : "0.#";
+        return $"{value.ToString(format, System.Globalization.CultureInfo.InvariantCulture)}{units[unitIndex]}";
+    }
+
+    private async Task TryRefreshAsync()
+    {
+        try
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (InvalidOperationException) when (healthLoadCancellationTokenSource?.IsCancellationRequested == true)
+        {
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (healthLoadCancellationTokenSource is null)
+        {
+            return;
+        }
+
+        healthLoadCancellationTokenSource.Cancel();
+
+        if (healthLoadTask is not null)
+        {
+            try
+            {
+                await healthLoadTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        healthLoadCancellationTokenSource.Dispose();
+    }
+
+    private sealed class DashboardHostRow
+    {
+        public required ManagedHost Host { get; init; }
+
+        public required HostConnectionTestResult ConnectionTest { get; init; }
+
+        public required ServerHealthSnapshot HealthSnapshot { get; set; }
+
+        public bool IsHealthLoading { get; set; }
+    }
+
+    private sealed record HostHealthProbeResult(
+        Guid HostId,
+        ServerHealthSnapshot Snapshot);
+
+    private sealed record DashboardQuickLink(string Label, string Href, UiIconName Icon);
+}

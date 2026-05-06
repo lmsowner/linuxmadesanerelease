@@ -1,0 +1,13 @@
+namespace LinuxMadeSane.Core.Models;
+
+public sealed record TrustedNetworkEntry(
+    Guid Id,
+    string Label,
+    string AddressOrCidr,
+    string Description,
+    bool IsEnabled,
+    bool IsTrustedAccessEnabled,
+    bool IsAuthenticationEnabled,
+    bool IsBuiltIn,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc);

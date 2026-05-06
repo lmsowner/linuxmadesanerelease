@@ -1,0 +1,248 @@
+@page "/hosts/{HostId:guid}"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models
+@inject IManagedHostService HostService
+@inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+
+<PageTitle>Host Details | Linux Made Sane</PageTitle>
+
+@if (details is null)
+{
+    <div class="page-shell">
+        <section class="surface-card">
+            <h1>Host not found</h1>
+            <UiCommandButton Label="Return to inventory" Glyph="UiIconGlyph.FolderOpen" Href="/hosts" />
+        </section>
+    </div>
+}
+else
+{
+    <div class="page-shell host-details-shell">
+        <section class="hero-panel compact">
+            <div>
+                <p class="eyebrow">Host details</p>
+                <h1 class="page-title-compact">@details.Host.Name</h1>
+                <p class="hero-copy">@details.Host.Description</p>
+                <ManagedHostKindIndicator Profile="@details.Capabilities" />
+            </div>
+            <div class="hero-actions">
+                <UiCommandButton Label="Open terminal"
+                                 Glyph="UiIconGlyph.Run"
+                                 Href="@($"/hosts/{details.Host.Id}/terminal")"
+                                 SuperscriptText="@GetTerminalSessionBadge(details.Host.Id)" />
+                <UiCommandButton Label="Browse files" Glyph="UiIconGlyph.FolderOpen" Variant="UiButtonVariant.PrimaryMuted" Href="@($"/hosts/{details.Host.Id}/files")" />
+                <UiCommandButton Label="Edit host" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.Ghost" Href="@($"/hosts/{details.Host.Id}/edit")" />
+            </div>
+        </section>
+
+        <TabControl ActiveValue="@activeTab"
+                    ActiveValueChanged="HandleTabChangedAsync"
+                    Class="page-tab-control host-details-tab-control"
+                    PanelClass="page-tab-panel host-details-tab-panel">
+            <ChildContent>
+                <TabPage Value="@OverviewTabValue" Title="Overview">
+                    <ChildContent>
+                        <div class="overview-grid">
+                            <section class="surface-card">
+                                <p class="eyebrow">Connectivity</p>
+                                <h2>@details.ConnectionTest.Summary</h2>
+                                <p class="meta-text">@details.ConnectionTest.Detail</p>
+                                <p class="meta-text">Current live checks use the stored SSH credentials and verify that Linux Made Sane can open a real shell session.</p>
+                                <p class="meta-text">Checked @details.ConnectionTest.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</p>
+                            </section>
+
+                            <section class="surface-card">
+                                <p class="eyebrow">Server health</p>
+                                <div class="stack-tight">
+                                    <span>CPU: <strong>@FormatPercent(details.HealthSnapshot.CpuUsagePercent)</strong></span>
+                                    <span>Memory free: <strong>@FormatMemorySummary(details.HealthSnapshot)</strong></span>
+                                    <span>Disk used: <strong>@FormatPercent(details.HealthSnapshot.DiskUsagePercent)</strong></span>
+                                    <span>Disk free: <strong>@FormatDiskAvailable(details.HealthSnapshot.RootDiskAvailable)</strong></span>
+                                    <span>Load: <strong>@details.HealthSnapshot.LoadAverage</strong></span>
+                                    <span>Uptime: <strong>@details.HealthSnapshot.Uptime</strong></span>
+                                </div>
+                            </section>
+                        </div>
+
+                        <section class="surface-card">
+                            <div class="table-header">
+                                <h2>Host profile</h2>
+                                <span>@FormatPlatform(details.Host.Platform)</span>
+                            </div>
+                            <div class="details-grid">
+                                <ServiceMetricComponent TagName="div" Label="Host type" Value="@details.Capabilities.KindLabel" />
+                                <ServiceMetricComponent TagName="div" Label="Endpoint" Value="@($"{details.Host.Hostname}:{details.Host.Port}")" />
+                                <ServiceMetricComponent TagName="div" Label="Environment" Value="@FormatEnvironment(details.Host.Environment)" />
+                                <ServiceMetricComponent TagName="div" Label="Primary auth" Value="@ManagedHostAuthenticationPolicy.GetDisplayLabel(details.Host.PrimaryAuthenticationType)" />
+                                <ServiceMetricComponent TagName="div" Label="Working directory" Value="@details.Host.DefaultWorkingDirectory" />
+                            </div>
+                            <div class="details-grid details-grid-secondary">
+                                <ServiceMetricComponent TagName="div" Label="Fallback auth" Value="@(details.Host.FallbackAuthenticationType.HasValue ? ManagedHostAuthenticationPolicy.GetDisplayLabel(details.Host.FallbackAuthenticationType.Value) : "None")" />
+                                <ServiceMetricComponent TagName="div" Label="Stored credentials" Value="@(HasStoredCredentials(details.Host) ? "Yes" : "No")" />
+                                <ServiceMetricComponent TagName="div" Label="Protected storage" Value="Encrypted secret storage" />
+                            </div>
+                            @if (HasLegacyAuthentication(details.Host))
+                            {
+                                <p class="callout warning">This host is still using a legacy SSH auth mode. Edit it and move it to `Password`, `Password + public key`, or `Public key`.</p>
+                            }
+                        </section>
+
+                    </ChildContent>
+                </TabPage>
+                <TabPage Value="@IntegrationsTabValue" Title="Integrations">
+                    <ChildContent>
+                        <section class="surface-card integrations-shell">
+                            <div class="table-header">
+                                <div>
+                                    <p class="eyebrow">Integrations</p>
+                                    <h2>External access and service publishing</h2>
+                                </div>
+                            </div>
+
+                            <TabControl ActiveValue="@activeIntegrationTab"
+                                        ActiveValueChanged="HandleIntegrationTabChangedAsync"
+                                        Class="integration-tab-control"
+                                        PanelClass="integration-tab-panel">
+                                <ChildContent>
+                                    @if (details.Capabilities.SupportsCaddyIntegration)
+                                    {
+                                        <TabPage Value="@CaddyTabValue" Title="Caddy">
+                                            <ChildContent>
+                                                <CaddyIntegrationWorkspace HostId="@HostId" @key="HostId" />
+                                            </ChildContent>
+                                        </TabPage>
+                                    }
+
+                                    @if (details.Capabilities.SupportsCloudflarePublishing)
+                                    {
+                                        <TabPage Value="@CloudflareTabValue" Title="Cloudflare">
+                                            <ChildContent>
+                                                <CloudflareExposeServicePage HostId="@HostId" />
+                                            </ChildContent>
+                                        </TabPage>
+                                    }
+                                </ChildContent>
+                            </TabControl>
+                        </section>
+                    </ChildContent>
+                </TabPage>
+            </ChildContent>
+        </TabControl>
+    </div>
+}
+
+@code {
+    private const string OverviewTabValue = "overview";
+    private const string IntegrationsTabValue = "integrations";
+    private const string CaddyTabValue = "caddy";
+    private const string CloudflareTabValue = "cloudflare";
+
+    [Parameter]
+    public Guid HostId { get; set; }
+
+    private ManagedHostDetailsViewModel? details;
+    private string activeTab = OverviewTabValue;
+    private string activeIntegrationTab = CaddyTabValue;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        details = await HostService.GetDetailsAsync(HostId);
+        if (details is null)
+        {
+            return;
+        }
+
+        if (!details.Capabilities.SupportsCaddyIntegration &&
+            string.Equals(activeIntegrationTab, CaddyTabValue, StringComparison.Ordinal))
+        {
+            activeIntegrationTab = CloudflareTabValue;
+        }
+    }
+
+    private string? GetTerminalSessionBadge(Guid hostId)
+    {
+        var count = TerminalWorkspaceRegistry.GetOpenSessionCount(hostId);
+        return count > 0 ? count.ToString() : null;
+    }
+
+    private Task HandleTabChangedAsync(string? value)
+    {
+        activeTab = string.IsNullOrWhiteSpace(value) ? OverviewTabValue : value;
+        return Task.CompletedTask;
+    }
+
+    private Task HandleIntegrationTabChangedAsync(string? value)
+    {
+        activeIntegrationTab = string.IsNullOrWhiteSpace(value)
+            ? details?.Capabilities.SupportsCaddyIntegration == true
+                ? CaddyTabValue
+                : CloudflareTabValue
+            : value;
+        return Task.CompletedTask;
+    }
+
+    private static string FormatEnvironment(string? environment) =>
+        string.IsNullOrWhiteSpace(environment) ? "Unlabeled" : environment;
+
+    private static string FormatPlatform(string? platform) =>
+        string.IsNullOrWhiteSpace(platform) ? "Platform not set" : platform;
+
+    private static string FormatPercent(double? value) =>
+        value.HasValue ? $"{value.Value:0.#}%" : "Unavailable";
+
+    private static string FormatDiskAvailable(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "Unavailable" : value;
+
+    private static bool HasStoredCredentials(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private static bool HasLegacyAuthentication(ManagedHost host) =>
+        !ManagedHostAuthenticationPolicy.IsOperatorSelectable(host.PrimaryAuthenticationType) ||
+        (host.FallbackAuthenticationType.HasValue && !ManagedHostAuthenticationPolicy.IsOperatorSelectable(host.FallbackAuthenticationType.Value));
+
+    private static string FormatMemorySummary(ServerHealthSnapshot snapshot)
+    {
+        var memory = FormatCompactBytes(snapshot.MemoryAvailableBytes);
+        var swap = FormatCompactBytes(snapshot.SwapFreeBytes);
+        var percent = snapshot.MemoryFreePercent.HasValue
+            ? $" ({snapshot.MemoryFreePercent.Value:0.#}% free)"
+            : string.Empty;
+
+        if (string.IsNullOrWhiteSpace(memory))
+        {
+            if (string.IsNullOrWhiteSpace(swap))
+            {
+                return "Unavailable";
+            }
+
+            return $"{swap} swap{percent}";
+        }
+
+        return string.IsNullOrWhiteSpace(swap)
+            ? $"{memory}{percent}"
+            : $"{memory} + {swap} swap{percent}";
+    }
+
+    private static string? FormatCompactBytes(long? bytes)
+    {
+        if (!bytes.HasValue)
+        {
+            return null;
+        }
+
+        string[] units = ["B", "K", "M", "G", "T", "P"];
+        double value = bytes.Value;
+        var unitIndex = 0;
+
+        while (value >= 1024 && unitIndex < units.Length - 1)
+        {
+            value /= 1024;
+            unitIndex++;
+        }
+
+        var format = value >= 10 || unitIndex == 0 ? "0" : "0.#";
+        return $"{value.ToString(format, System.Globalization.CultureInfo.InvariantCulture)}{units[unitIndex]}";
+    }
+}
