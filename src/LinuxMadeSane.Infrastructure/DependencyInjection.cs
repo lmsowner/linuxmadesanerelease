@@ -9,6 +9,7 @@ using LinuxMadeSane.Infrastructure.Stores;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -37,7 +38,9 @@ public static class DependencyInjection
             .ValidateDataAnnotations();
         services.AddSingleton(serviceProvider => serviceProvider.GetRequiredService<IOptions<CloudflareIntegrationOptions>>().Value);
         services.AddHttpClient<ICloudflareClient, CloudflareClient>();
-        services.AddDbContext<LinuxMadeSaneDbContext>(options => options.UseSqlite(connectionString));
+        services.AddDbContext<LinuxMadeSaneDbContext>(options => options
+            .UseSqlite(connectionString)
+            .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.CommandExecuted)));
         services.AddSingleton<AiChatRunQueue>();
         services.AddSingleton<IAiChatRunQueue>(serviceProvider => serviceProvider.GetRequiredService<AiChatRunQueue>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<AiChatRunQueue>());
