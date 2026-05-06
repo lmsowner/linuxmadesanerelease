@@ -15,6 +15,7 @@ SERVICE_GROUP="${SERVICE_GROUP:-linuxmadesane}"
 SERVICE_UNIT="${SERVICE_UNIT:-linux-made-sane.service}"
 START_SERVICE="${START_SERVICE:-true}"
 INSTALL_HOST_PACKAGES="${INSTALL_HOST_PACKAGES:-true}"
+RAW_BASE_URL="${RAW_BASE_URL:-https://raw.githubusercontent.com/$REPO/main}"
 
 log() {
   printf '[lms-release] %s\n' "$*"
@@ -128,6 +129,20 @@ resolve_latest_checksums_url() {
     head -n 1
 }
 
+resolve_repo_latest_version() {
+  curl -fsSL "$RAW_BASE_URL/packages/latest.txt" | tr -d '\r\n[:space:]'
+}
+
+resolve_repo_asset_url() {
+  local version="$1"
+  printf '%s/packages/%s/linux-made-sane-%s-%s-%s.tar.gz\n' "$RAW_BASE_URL" "$version" "$EDITION" "$version" "$RID"
+}
+
+resolve_repo_checksums_url() {
+  local version="$1"
+  printf '%s/packages/%s/SHA256SUMS\n' "$RAW_BASE_URL" "$version"
+}
+
 TMP_DIR="$(mktemp -d)"
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -135,8 +150,15 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "$VERSION" == "latest" ]]; then
-  PACKAGE_URL="$(resolve_latest_asset_url)"
+  PACKAGE_URL="$(resolve_latest_asset_url || true)"
   CHECKSUM_URL="$(resolve_latest_checksums_url || true)"
+  if [[ -z "${PACKAGE_URL:-}" ]]; then
+    RESOLVED_VERSION="$(resolve_repo_latest_version || true)"
+    [[ -n "$RESOLVED_VERSION" ]] || die "could not resolve latest GitHub Release or repo-hosted package version"
+    VERSION="$RESOLVED_VERSION"
+    PACKAGE_URL="$(resolve_repo_asset_url "$VERSION")"
+    CHECKSUM_URL="$(resolve_repo_checksums_url "$VERSION")"
+  fi
 else
   PACKAGE_URL="https://github.com/$REPO/releases/download/$VERSION/linux-made-sane-${EDITION}-${VERSION}-${RID}.tar.gz"
   CHECKSUM_URL="https://github.com/$REPO/releases/download/$VERSION/SHA256SUMS"
@@ -148,7 +170,20 @@ PACKAGE_PATH="$TMP_DIR/package.tar.gz"
 CHECKSUM_PATH="$TMP_DIR/SHA256SUMS"
 
 log "Downloading $PACKAGE_URL"
-curl -fL "$PACKAGE_URL" -o "$PACKAGE_PATH"
+if ! curl -fL "$PACKAGE_URL" -o "$PACKAGE_PATH"; then
+  if [[ "$VERSION" == "latest" ]]; then
+    RESOLVED_VERSION="$(resolve_repo_latest_version || true)"
+  else
+    RESOLVED_VERSION="$VERSION"
+  fi
+
+  [[ -n "${RESOLVED_VERSION:-}" ]] || die "release package download failed and no repo-hosted version could be resolved"
+  PACKAGE_URL="$(resolve_repo_asset_url "$RESOLVED_VERSION")"
+  CHECKSUM_URL="$(resolve_repo_checksums_url "$RESOLVED_VERSION")"
+  log "GitHub Release asset unavailable; trying repo-hosted package $PACKAGE_URL"
+  curl -fL "$PACKAGE_URL" -o "$PACKAGE_PATH"
+  VERSION="$RESOLVED_VERSION"
+fi
 
 if [[ -n "${CHECKSUM_URL:-}" ]] && curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_PATH"; then
   if command -v sha256sum >/dev/null 2>&1; then

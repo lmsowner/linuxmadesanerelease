@@ -40,6 +40,8 @@ Release assets are published as self-contained tarballs for:
 
 The installer detects the runtime ID from `uname -m`. Override it with `RID=linux-arm64` or `RID=linux-arm` when testing unusual Raspberry Pi or distro images.
 
+For early distro testing, CE package tarballs may be served directly from this repository under `packages/` until the formal GitHub Releases flow is used.
+
 ## Optional Host Tools
 
 The core app installs without these tools, but some workflows need them:

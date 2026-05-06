@@ -9,7 +9,7 @@ curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/
 The public installer:
 
 - detects `linux-x64`, `linux-arm64`, or `linux-arm`
-- downloads the matching CE release tarball from GitHub Releases
+- downloads the matching CE tarball from GitHub Releases, or from the repo-hosted `packages/` fallback used for early distro testing
 - verifies `SHA256SUMS` when available
 - installs to `/opt/linuxmadesane/ce`
 - stores data in `/var/lib/linuxmadesane/ce`
@@ -33,6 +33,7 @@ Supported environment variables:
 - `CONFIG_ROOT`: default `/etc/linuxmadesane/ce`
 - `SERVICE_UNIT`: default `linux-made-sane.service`
 - `INSTALL_HOST_PACKAGES`: set `false` to skip optional host packages
+- `RAW_BASE_URL`: override the raw GitHub content base URL for repo-hosted package testing
 
 Supported flags:
 
