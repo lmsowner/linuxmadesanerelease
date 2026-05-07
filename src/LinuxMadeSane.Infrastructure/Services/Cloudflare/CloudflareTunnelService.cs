@@ -83,7 +83,7 @@ public sealed class CloudflareTunnelService(
                 {
                     ["hostname"] = route.Hostname,
                     ["service"] = route.Service,
-                    ["originRequest"] = new { }
+                    ["originRequest"] = BuildOriginRequest(route.OriginRequest)
                 })
             .ToArray();
 
@@ -98,6 +98,45 @@ public sealed class CloudflareTunnelService(
                 }
             },
             cancellationToken);
+    }
+
+    private static Dictionary<string, object?> BuildOriginRequest(CloudflareOriginRequestSettings settings)
+    {
+        var originRequest = new Dictionary<string, object?>
+        {
+            ["noTLSVerify"] = settings.NoTlsVerify,
+            ["tlsTimeout"] = Math.Max(1, settings.TlsTimeoutSeconds),
+            ["http2Origin"] = settings.Http2Origin,
+            ["matchSNItoHost"] = settings.MatchSniToHost,
+            ["disableChunkedEncoding"] = settings.DisableChunkedEncoding,
+            ["connectTimeout"] = Math.Max(1, settings.ConnectTimeoutSeconds),
+            ["noHappyEyeballs"] = settings.NoHappyEyeballs,
+            ["keepAliveTimeout"] = Math.Max(1, settings.KeepAliveTimeoutSeconds),
+            ["keepAliveConnections"] = Math.Max(0, settings.KeepAliveConnections),
+            ["tcpKeepAlive"] = Math.Max(1, settings.TcpKeepAliveSeconds)
+        };
+
+        if (!string.IsNullOrWhiteSpace(settings.OriginServerName))
+        {
+            originRequest["originServerName"] = settings.OriginServerName.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.CertificateAuthorityPool))
+        {
+            originRequest["caPool"] = settings.CertificateAuthorityPool.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.HttpHostHeader))
+        {
+            originRequest["httpHostHeader"] = settings.HttpHostHeader.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.ProxyType))
+        {
+            originRequest["proxyType"] = settings.ProxyType.Trim();
+        }
+
+        return originRequest;
     }
 
     public Task<string> GetTunnelTokenAsync(

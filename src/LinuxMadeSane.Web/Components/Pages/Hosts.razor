@@ -81,7 +81,7 @@
                                         </div>
                                     </td>
                                     <td><span class="hosts-row-value">@FormatAuthentication(row.Host.PrimaryAuthenticationType)</span></td>
-                                    <td><span class="hosts-row-value">@(row.Host.LastSeenUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "Never")</span></td>
+                                    <td><span class="hosts-row-value">@FormatLastSeen(row)</span></td>
                                     <td class="actions-cell">
                                         <div class="row-action-cluster">
                                             <UiCommandButton Label="Details" Glyph="UiIconGlyph.Info" Href="@($"/hosts/{row.Host.Id}")" Variant="UiButtonVariant.Action" />
@@ -147,7 +147,7 @@
                                         </div>
                                     </td>
                                     <td><span class="hosts-row-value">@FormatAuthentication(row.Host.PrimaryAuthenticationType)</span></td>
-                                    <td><span class="hosts-row-value">@(row.Host.LastSeenUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "Never")</span></td>
+                                    <td><span class="hosts-row-value">@FormatLastSeen(row)</span></td>
                                     <td class="actions-cell">
                                         <div class="row-action-cluster">
                                             <UiCommandButton Label="Details" Glyph="UiIconGlyph.Info" Href="@($"/hosts/{row.Host.Id}")" Variant="UiButtonVariant.Action" />
@@ -272,7 +272,7 @@
                 .Select(host => ProbeHostStatusAsync(host, cancellationToken))
                 .ToArray();
             var results = await Task.WhenAll(work);
-            var resultMap = results.ToDictionary(result => result.HostId, result => result.Connection);
+            var resultMap = results.ToDictionary(result => result.HostId);
 
             hostRows = hostRows
                 .Select(row =>
@@ -289,8 +289,10 @@
 
                     return new HostRowState
                     {
-                        Host = row.Host,
-                        ConnectionTest = resultMap.GetValueOrDefault(row.Host.Id) ?? row.ConnectionTest,
+                        Host = resultMap.TryGetValue(row.Host.Id, out var result)
+                            ? ApplyConnectionResult(row.Host, result.Connection)
+                            : row.Host,
+                        ConnectionTest = resultMap.GetValueOrDefault(row.Host.Id)?.Connection ?? row.ConnectionTest,
                         IsStatusLoading = false
                     };
                 })
@@ -421,6 +423,19 @@
         return row.ConnectionTest?.Status ?? ConnectionTestStatus.NotRun;
     }
 
+    private static string FormatLastSeen(HostRowState row) =>
+        ResolveLastSeenUtc(row)?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "Never";
+
+    private static DateTimeOffset? ResolveLastSeenUtc(HostRowState row)
+    {
+        if (row.ConnectionTest?.Status == ConnectionTestStatus.Succeeded)
+        {
+            return row.ConnectionTest.CheckedAtUtc;
+        }
+
+        return row.Host.LastSeenUtc;
+    }
+
     private bool ShouldShowStatusSummary(HostRowState row) =>
         ResolveConnectionStatus(row) != ConnectionTestStatus.Succeeded;
 
@@ -467,6 +482,21 @@
                 "Linux Made Sane has not recorded a completed SSH connection result for this host yet.",
                 host.LastSeenUtc ?? DateTimeOffset.UtcNow)
         };
+
+    private static ManagedHost ApplyConnectionResult(
+        ManagedHost host,
+        HostConnectionTestResult connection)
+    {
+        var lastSeenUtc = connection.Status == ConnectionTestStatus.Succeeded
+            ? connection.CheckedAtUtc
+            : host.LastSeenUtc;
+
+        return host with
+        {
+            LastSeenUtc = lastSeenUtc,
+            LastConnectionTestStatus = connection.Status
+        };
+    }
 
     private bool HasActiveTerminalSession(Guid hostId) =>
         TerminalWorkspaceRegistry.HasActiveSession(hostId);

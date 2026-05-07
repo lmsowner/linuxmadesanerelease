@@ -24,12 +24,6 @@
                 {
 	                    <TabPage Value="@PortalTabValue" Title="Portal">
 	                        <ChildContent>
-	                            <div style="display:flex; justify-content:flex-end; margin-bottom:0.75rem;">
-	                                <UiCommandButton Label="Help"
-	                                                 Glyph="UiIconGlyph.Info"
-	                                                 Variant="UiButtonVariant.Ghost"
-	                                                 OnClick="OpenPortalSetupGuide" />
-	                            </div>
                             <DynamicComponent Type="@ConnectClientFeature.IntegrationPageComponentType"
                                               Parameters="@portalIntegrationParameters"
                                               @key="portalComponentVersion" />
@@ -120,7 +114,7 @@
                         <li>Open <a href="@CloudflareUserTokenUrl" target="_blank" rel="noreferrer">Cloudflare My Profile -> API Tokens</a>. If you specifically need an account-owned token instead, use the <a href="@CloudflareAccountTokenDocsUrl" target="_blank" rel="noreferrer">Cloudflare account-owned token guide</a>.</li>
                         <li>Choose <strong>Create Token</strong>, then <strong>Create Custom Token</strong>.</li>
                         <li>Name it something obvious, for example <strong>Linux Made Sane</strong>.</li>
-                        <li>Add the required permissions shown below. Cloudflare may label the write-capable option as <strong>Edit</strong> or <strong>Write</strong> depending on the screen.</li>
+                        <li>Add the permissions shown below. For normal LMS-auth publishing, only the tunnel and DNS permissions are required. In the current Cloudflare token screen, the write-capable permission is labelled <strong>Edit</strong>.</li>
                         <li>In <strong>Account Resources</strong>, include the specific Cloudflare account that owns the Zero Trust tunnel.</li>
                         <li>In <strong>Zone Resources</strong>, include the specific public zone/domain that will hold the hostname, for example <strong>example.com</strong>.</li>
                         <li>Leave <strong>TTL</strong> and <strong>Client IP Address Filtering</strong> empty the first time unless you have a specific reason to restrict them. Over-restricting the token is a common cause of confusing failures.</li>
@@ -130,15 +124,15 @@
                     <div class="integrations-cloudflare-guide-points">
                         <div class="integrations-cloudflare-guide-point">
                             <strong>Always required</strong>
-                            <span><code>Account -> Cloudflare Tunnel -> Edit/Write</code></span>
+                            <span><code>Account -> Cloudflare Tunnel -> Edit</code></span>
                         </div>
                         <div class="integrations-cloudflare-guide-point">
                             <strong>Always required</strong>
-                            <span><code>Zone -> DNS -> Edit/Write</code></span>
+                            <span><code>Zone -> DNS -> Edit</code></span>
                         </div>
                         <div class="integrations-cloudflare-guide-point">
-                            <strong>Required for protected modes</strong>
-                            <span><code>Account -> Access: Apps and Policies -> Edit/Write</code></span>
+                            <strong>Optional Cloudflare Access modes</strong>
+                            <span><code>Account -> Access: Apps and Policies -> Edit</code></span>
                         </div>
                     </div>
 
@@ -173,6 +167,7 @@
                     <p class="meta-text">LMS is reducing the friction around wiring the tunnel, DNS, Access policy, and host-side connector together. Cloudflare still remains the source of truth for the connector install token.</p>
                     <p class="meta-text">Cloudflare docs: <a href="@CloudflareTunnelDashboardDocsUrl" target="_blank" rel="noreferrer">Create a tunnel in the dashboard</a> and <a href="@CloudflareTunnelTokenDocsUrl" target="_blank" rel="noreferrer">Tunnel tokens</a>.</p>
                 </section>
+
             </div>
         </ChildContent>
         <Footer>
@@ -292,16 +287,33 @@
     private bool PortalTabAvailable =>
         ConnectClientFeature.IsAvailable &&
         ConnectClientFeature.IntegrationPageComponentType is not null;
+
     private IDictionary<string, object> portalIntegrationParameters =>
         new Dictionary<string, object>
         {
-            ["Actions"] = PortalIntegrationActions
+            ["Actions"] = PortalIntegrationActions,
+            ["PairingActions"] = PortalPairingActions
         };
-    private RenderFragment PortalIntegrationActions => @<UiCommandButton Label="@(isRotatingPortalPairingCode ? "Rotating..." : "Rotate pairing code")"
-                                                                         Glyph="UiIconGlyph.Refresh"
-                                                                         Variant="UiButtonVariant.Ghost"
-                                                                         Disabled="@isRotatingPortalPairingCode"
-                                                                         OnClick="RotatePortalPairingCodeAsync" />;
+    private RenderFragment PortalIntegrationActions => builder =>
+    {
+        builder.OpenComponent<UiCommandButton>(0);
+        builder.AddAttribute(1, nameof(UiCommandButton.Label), "Help");
+        builder.AddAttribute(2, nameof(UiCommandButton.Glyph), UiIconGlyph.Info);
+        builder.AddAttribute(3, nameof(UiCommandButton.Variant), UiButtonVariant.Ghost);
+        builder.AddAttribute(4, nameof(UiCommandButton.OnClick), EventCallback.Factory.Create(this, OpenPortalSetupGuide));
+        builder.CloseComponent();
+    };
+
+    private RenderFragment PortalPairingActions => builder =>
+    {
+        builder.OpenComponent<UiCommandButton>(0);
+        builder.AddAttribute(1, nameof(UiCommandButton.Label), isRotatingPortalPairingCode ? "Rotating..." : "Rotate pairing code");
+        builder.AddAttribute(2, nameof(UiCommandButton.Glyph), UiIconGlyph.Refresh);
+        builder.AddAttribute(3, nameof(UiCommandButton.Variant), UiButtonVariant.Ghost);
+        builder.AddAttribute(4, nameof(UiCommandButton.Disabled), isRotatingPortalPairingCode);
+        builder.AddAttribute(5, nameof(UiCommandButton.OnClick), EventCallback.Factory.Create(this, RotatePortalPairingCodeAsync));
+        builder.CloseComponent();
+    };
 
     protected override async Task OnParametersSetAsync()
     {

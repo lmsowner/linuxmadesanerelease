@@ -761,104 +761,32 @@ window.lmsForms = {
 
 window.lmsLayout = (() => {
     const sidebarKey = "lms.layout.sidebar-collapsed";
-    const sidebarRootSelector = "[data-sidebar-root]";
-    const sidebarToggleSelector = "[data-sidebar-toggle]";
-    let sidebarEventsBound = false;
-    let sidebarObserver = null;
-    let sidebarApplyScheduled = false;
 
     function getSidebarCollapsed() {
+        return false;
+    }
+
+    function clearSidebarCollapsed() {
+        document.documentElement.classList.remove("sidebar-collapsed");
+        document.querySelectorAll(".sidebar-collapsed").forEach(element => {
+            element.classList.remove("sidebar-collapsed");
+        });
+
         try {
-            return window.localStorage.getItem(sidebarKey) === "1";
-        } catch {
-            return false;
-        }
-    }
-
-    function applySidebarCollapsed(isCollapsed) {
-        document.documentElement.classList.toggle("sidebar-collapsed", isCollapsed);
-
-        document.querySelectorAll(sidebarRootSelector).forEach(root => {
-            root.classList.toggle("sidebar-collapsed", isCollapsed);
-        });
-
-        document.querySelectorAll(sidebarToggleSelector).forEach(toggle => {
-            const action = toggle.getAttribute("data-sidebar-toggle");
-            const controlsCollapsedState = action === "collapse";
-            toggle.setAttribute("aria-pressed", String(controlsCollapsedState ? isCollapsed : !isCollapsed));
-        });
-    }
-
-    function scheduleSidebarStateApply() {
-        if (sidebarApplyScheduled) {
-            return;
-        }
-
-        sidebarApplyScheduled = true;
-        window.requestAnimationFrame(() => {
-            sidebarApplyScheduled = false;
-            applySidebarCollapsed(getSidebarCollapsed());
-        });
-    }
-
-    function watchSidebarRoots() {
-        if (sidebarObserver || !document.body) {
-            return;
-        }
-
-        sidebarObserver = new MutationObserver(scheduleSidebarStateApply);
-        sidebarObserver.observe(document.body, { childList: true, subtree: true });
-    }
-
-    function setSidebarCollapsed(isCollapsed) {
-        try {
-            window.localStorage.setItem(sidebarKey, isCollapsed ? "1" : "0");
+            window.localStorage.removeItem(sidebarKey);
         } catch {
         }
-
-        applySidebarCollapsed(isCollapsed);
     }
 
-    function handleSidebarToggleClick(event) {
-        const toggle = event.target?.closest?.(sidebarToggleSelector);
-        if (!toggle) {
-            return;
-        }
-
-        const action = toggle.getAttribute("data-sidebar-toggle");
-        if (action !== "expand" && action !== "collapse" && action !== "toggle") {
-            return;
-        }
-
-        event.preventDefault();
-        event.stopPropagation();
-
-        if (action === "expand") {
-            setSidebarCollapsed(false);
-            return;
-        }
-
-        if (action === "collapse") {
-            setSidebarCollapsed(true);
-            return;
-        }
-
-        setSidebarCollapsed(!getSidebarCollapsed());
+    function setSidebarCollapsed() {
+        clearSidebarCollapsed();
     }
 
     function initializeSidebar() {
-        applySidebarCollapsed(getSidebarCollapsed());
-        watchSidebarRoots();
-
-        if (sidebarEventsBound) {
-            return;
-        }
-
-        sidebarEventsBound = true;
-        document.addEventListener("click", handleSidebarToggleClick, true);
+        clearSidebarCollapsed();
     }
 
-    applySidebarCollapsed(getSidebarCollapsed());
+    clearSidebarCollapsed();
 
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", initializeSidebar, { once: true });

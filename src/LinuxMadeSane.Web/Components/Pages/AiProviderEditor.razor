@@ -9,17 +9,6 @@
 <PageTitle>@(IsEditMode ? "Edit AI Provider" : "New AI Provider") | Linux Made Sane</PageTitle>
 
 <div class="page-shell ai-chat-shell">
-        <section class="hero-panel compact">
-            <div>
-                <p class="eyebrow">LinuxMadeSane.AI</p>
-                <h1>@(IsEditMode ? "Edit provider" : "Add provider")</h1>
-                <p class="hero-copy">@GetHeroCopy()</p>
-            </div>
-            <div class="hero-actions">
-                <UiCommandButton Label="Back to providers" Glyph="UiIconGlyph.FolderOpen" Href="/ai/providers" Variant="UiButtonVariant.Ghost" />
-            </div>
-        </section>
-
     @if (!isLoaded)
     {
         <section class="surface-card">
@@ -44,13 +33,6 @@
     {
         <div class="dashboard-columns">
             <section class="surface-card">
-                <div class="section-heading">
-                    <div>
-                        <p class="eyebrow">Provider settings</p>
-                        <h2>@(IsEditMode ? "Update record" : "Create record")</h2>
-                    </div>
-                </div>
-
                 @if (!string.IsNullOrWhiteSpace(saveError))
                 {
                     <div class="callout warning">@saveError</div>
@@ -73,21 +55,35 @@
                     <ValidationSummary />
 
                     <div class="field-row">
-                        <UiComboboxField TValue="AiProviderType"
-                                       @bind-Value="providerContext.Editor.ProviderType"
-                                       @bind-Value:after="OnProviderTypeChanged"
-                                       Label="Provider type">
-                            @foreach (var provider in providerContext.SupportedProviders.OrderBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase))
-                            {
-                                <option value="@provider.ProviderType">@provider.DisplayName</option>
-                            }
-                        </UiComboboxField>
+                        @if (IsEditMode)
+                        {
+                            <div class="provider-type-label">
+                                <div class="ui-field-copy">
+                                    <span class="ui-field-label">Provider</span>
+                                </div>
+                                <div class="ui-field-input-region">
+                                    <div class="provider-type-value">@SelectedProviderTypeDefinition.DisplayName</div>
+                                </div>
+                            </div>
+                        }
+                        else
+                        {
+                            <UiComboboxField TValue="AiProviderType"
+                                           @bind-Value="providerContext.Editor.ProviderType"
+                                           @bind-Value:after="OnProviderTypeChanged"
+                                           Label="Provider">
+                                @foreach (var provider in providerContext.SupportedProviders.OrderBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase))
+                                {
+                                    <option value="@provider.ProviderType">@provider.DisplayName</option>
+                                }
+                            </UiComboboxField>
+                        }
 
                         <UiTextField @bind-Value="providerContext.Editor.DisplayName"
                                      Label="Display name" />
                     </div>
 
-                    <div class="field-row">
+                    <div class="field-row ai-provider-model-row">
                         <UiComboboxField TValue="string"
                                        @bind-Value="providerContext.Editor.DefaultModelId"
                                        Label="Default model"
@@ -97,7 +93,16 @@
                                 <option value="@model.ModelId">@model.DisplayName</option>
                             }
                         </UiComboboxField>
+                        <CompactUIButton Label="@(isRefreshingModels ? "Refreshing..." : "Refresh models")"
+                                         Glyph="UiIconGlyph.Search"
+                                         Disabled="@(isSaving || isTestingProvider || isRefreshingModels)"
+                                         OnClick="HandleRefreshModelsAsync" />
                     </div>
+
+                    @if (!string.IsNullOrWhiteSpace(modelRefreshMessage))
+                    {
+                        <div class="callout @modelRefreshTone">@modelRefreshMessage</div>
+                    }
 
                     <details class="identity-advanced" open>
                         <summary>Capability flags</summary>
@@ -222,10 +227,13 @@
     private bool isLoaded;
     private bool isSaving;
     private bool isTestingProvider;
+    private bool isRefreshingModels;
     private string loadError = string.Empty;
     private string saveError = string.Empty;
     private string? providerTestMessage;
     private string providerTestTone = "success";
+    private string? modelRefreshMessage;
+    private string modelRefreshTone = "success";
     private AiProviderType? lastProviderType;
     private bool IsEditMode => !string.IsNullOrWhiteSpace(ProviderKey);
     private AiProviderDefinition SelectedProviderTypeDefinition =>
@@ -250,6 +258,7 @@
         loadError = string.Empty;
         saveError = string.Empty;
         ClearProviderTestMessage();
+        ClearModelRefreshMessage();
 
         try
         {
@@ -276,6 +285,7 @@
         }
 
         ClearProviderTestMessage();
+        ClearModelRefreshMessage();
 
         var previousDefinition = lastProviderType.HasValue
             ? providerContext.SupportedProviders.FirstOrDefault(provider => provider.ProviderType == lastProviderType.Value)
@@ -370,14 +380,54 @@
         }
     }
 
+    private async Task HandleRefreshModelsAsync()
+    {
+        if (providerContext is null)
+        {
+            return;
+        }
+
+        isRefreshingModels = true;
+        saveError = string.Empty;
+        modelRefreshTone = "warning";
+        modelRefreshMessage = "Refreshing model list...";
+
+        try
+        {
+            var refreshedCatalog = await ProviderSettingsService.RefreshModelCatalogAsync(providerContext.Editor);
+            providerContext = providerContext with { AvailableModelOptions = refreshedCatalog };
+
+            var selectedModel = CurrentModelOptions.FirstOrDefault(model =>
+                model.ModelId.Equals(providerContext.Editor.DefaultModelId, StringComparison.OrdinalIgnoreCase));
+
+            if (selectedModel is null)
+            {
+                providerContext.Editor.DefaultModelId = CurrentModelOptions.FirstOrDefault()?.ModelId ?? string.Empty;
+            }
+
+            modelRefreshTone = "success";
+            modelRefreshMessage = $"Model list refreshed. {CurrentModelOptions.Count} option(s) available for {SelectedProviderTypeDefinition.DisplayName}.";
+        }
+        catch (Exception exception)
+        {
+            modelRefreshTone = "error";
+            modelRefreshMessage = exception.Message;
+        }
+        finally
+        {
+            isRefreshingModels = false;
+        }
+    }
+
     private void ClearProviderTestMessage()
     {
         providerTestMessage = null;
         providerTestTone = "success";
     }
 
-    private string GetHeroCopy() =>
-        providerContext?.Editor.RequiresApiKey == false
-            ? "Required: provider type, display name, and default model. Linux Made Sane manages the runtime connection."
-            : "Required: provider type, display name, default model, and API key.";
+    private void ClearModelRefreshMessage()
+    {
+        modelRefreshMessage = null;
+        modelRefreshTone = "success";
+    }
 }

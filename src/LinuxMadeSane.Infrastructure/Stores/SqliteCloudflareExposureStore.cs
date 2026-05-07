@@ -119,6 +119,7 @@ public sealed class SqliteCloudflareExposureStore(LinuxMadeSaneDbContext dbConte
             entity.AccessMode = (int)config.AccessMode;
             entity.AllowedEmailsJson = Serialize(config.AllowedEmails);
             entity.AllowedEmailDomainsJson = Serialize(config.AllowedEmailDomains);
+            entity.OriginRequestSettingsJson = SerializeOriginRequestSettings(config.OriginRequestSettings);
             entity.CreatedAtUtc = config.CreatedAtUtc;
             entity.UpdatedAtUtc = config.UpdatedAtUtc;
             entity.DisabledAtUtc = config.DisabledAtUtc;
@@ -186,7 +187,8 @@ public sealed class SqliteCloudflareExposureStore(LinuxMadeSaneDbContext dbConte
             Deserialize(entity.AllowedEmailDomainsJson),
             entity.CreatedAtUtc,
             entity.UpdatedAtUtc,
-            entity.DisabledAtUtc);
+            entity.DisabledAtUtc,
+            DeserializeOriginRequestSettings(entity.OriginRequestSettingsJson));
 
     private static ExposedServiceConfigEntity Map(ExposedServiceConfig config) =>
         new()
@@ -208,6 +210,7 @@ public sealed class SqliteCloudflareExposureStore(LinuxMadeSaneDbContext dbConte
             AccessMode = (int)config.AccessMode,
             AllowedEmailsJson = Serialize(config.AllowedEmails),
             AllowedEmailDomainsJson = Serialize(config.AllowedEmailDomains),
+            OriginRequestSettingsJson = SerializeOriginRequestSettings(config.OriginRequestSettings),
             CreatedAtUtc = config.CreatedAtUtc,
             UpdatedAtUtc = config.UpdatedAtUtc,
             DisabledAtUtc = config.DisabledAtUtc
@@ -220,4 +223,12 @@ public sealed class SqliteCloudflareExposureStore(LinuxMadeSaneDbContext dbConte
         string.IsNullOrWhiteSpace(value)
             ? Array.Empty<string>()
             : JsonSerializer.Deserialize<string[]>(value) ?? Array.Empty<string>();
+
+    private static string SerializeOriginRequestSettings(CloudflareOriginRequestSettings? settings) =>
+        JsonSerializer.Serialize(settings ?? CloudflareOriginRequestSettings.Default);
+
+    private static CloudflareOriginRequestSettings DeserializeOriginRequestSettings(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? CloudflareOriginRequestSettings.Default
+            : JsonSerializer.Deserialize<CloudflareOriginRequestSettings>(value) ?? CloudflareOriginRequestSettings.Default;
 }

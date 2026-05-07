@@ -9,6 +9,19 @@ public sealed class LocalModelManagementService : ILocalModelManagementService
     private static readonly IReadOnlyList<ModelTemplate> Templates =
     [
         new(
+            "qwen2.5-coder:1.5b",
+            "Qwen 2.5 Coder 1.5B",
+            "Fast local coding model for low-resource LMS hosts and quick command help.",
+            3L * 1024 * 1024 * 1024,
+            2L * 1024 * 1024 * 1024,
+            AiProviderCapabilityFlag.BasicChat |
+            AiProviderCapabilityFlag.CommandExplanation |
+            AiProviderCapabilityFlag.LogSummary |
+            AiProviderCapabilityFlag.FixPlanGeneration |
+            AiProviderCapabilityFlag.DeepFixAllowedWithExtraApproval,
+            SupportsTools: false,
+            SupportsStreaming: true),
+        new(
             "qwen2.5-coder:3b",
             "Qwen 2.5 Coder 3B",
             "Lowest-resource Qwen coder profile for constrained LMS hosts.",
@@ -24,7 +37,7 @@ public sealed class LocalModelManagementService : ILocalModelManagementService
         new(
             "qwen2.5-coder:7b",
             "Qwen 2.5 Coder 7B",
-            "Balanced local coding model and the default LMS local recommendation.",
+            "Balanced local coding model for larger LMS hosts.",
             12L * 1024 * 1024 * 1024,
             8L * 1024 * 1024 * 1024,
             AiProviderCapabilityFlag.BasicChat |
@@ -49,6 +62,20 @@ public sealed class LocalModelManagementService : ILocalModelManagementService
             AiProviderCapabilityFlag.ToolCalling |
             AiProviderCapabilityFlag.DeepFixRecommended,
             SupportsTools: true,
+            SupportsStreaming: true),
+        new(
+            "qwen3-coder:30b",
+            "Qwen3-Coder 30B",
+            "Large Qwen3 coding model for stronger local agentic coding on high-memory LMS hosts.",
+            32L * 1024 * 1024 * 1024,
+            24L * 1024 * 1024 * 1024,
+            AiProviderCapabilityFlag.BasicChat |
+            AiProviderCapabilityFlag.CommandExplanation |
+            AiProviderCapabilityFlag.LogSummary |
+            AiProviderCapabilityFlag.FixPlanGeneration |
+            AiProviderCapabilityFlag.Streaming |
+            AiProviderCapabilityFlag.DeepFixRecommended,
+            SupportsTools: false,
             SupportsStreaming: true)
     ];
 
@@ -102,6 +129,7 @@ public sealed class LocalModelManagementService : ILocalModelManagementService
         var requiresExtraApproval = !capabilities.HasFlag(AiProviderCapabilityFlag.DeepFixRecommended);
         var warning = template.ModelId switch
         {
+            "qwen2.5-coder:1.5b" => "This model is fast and light, but mutating Deep Fix actions should require extra approval.",
             "qwen2.5-coder:3b" => "This model is suitable for explanations and light planning, but Deep Fix should require extra approval.",
             "qwen2.5-coder:7b" => "This model is suitable for most explanations and fix plans. Mutating Deep Fix actions should still be reviewed carefully.",
             _ => "This local model can drive Deep Fix planning, but Linux Made Sane guardrails and approvals still apply."
@@ -115,7 +143,9 @@ public sealed class LocalModelManagementService : ILocalModelManagementService
             requiresExtraApproval,
             template.ModelId == "qwen2.5-coder:14b"
                 ? "Strong local model for private coding, log analysis, and guarded Deep Fix planning."
-                : "Local model suitable for explanations, log analysis, and guarded fix-plan generation.",
+                : template.ModelId == "qwen2.5-coder:1.5b"
+                    ? "Fast local model suitable for quick explanations, command help, and lightweight fix-plan generation."
+                    : "Local model suitable for explanations, log analysis, and guarded fix-plan generation.",
             warning);
     }
 
@@ -147,24 +177,37 @@ public sealed class LocalModelManagementService : ILocalModelManagementService
             suitability = LocalAiModelSuitability.Limited;
             warning = "GPU detected, but VRAM headroom is below the preferred size for this model.";
         }
-        else if (availableRam < 8L * 1024 * 1024 * 1024 && !template.ModelId.Equals("qwen2.5-coder:3b", StringComparison.OrdinalIgnoreCase))
+        else if (availableRam < 6L * 1024 * 1024 * 1024 && !template.ModelId.Equals("qwen2.5-coder:1.5b", StringComparison.OrdinalIgnoreCase))
         {
             suitability = LocalAiModelSuitability.NotRecommended;
-            warning = "This LMS host is below the practical RAM floor for mid-sized local models.";
+            warning = "This LMS host is below the practical RAM floor for mid-sized local coder models.";
+        }
+        else if (availableRam < 8L * 1024 * 1024 * 1024 && !template.ModelId.Equals("qwen2.5-coder:1.5b", StringComparison.OrdinalIgnoreCase))
+        {
+            suitability = LocalAiModelSuitability.Limited;
+            warning = "This model may run, but the 1.5B profile will start faster on this host.";
         }
         else if (availableRam < 16L * 1024 * 1024 * 1024 && template.ModelId.Equals("qwen2.5-coder:14b", StringComparison.OrdinalIgnoreCase))
         {
             suitability = LocalAiModelSuitability.NotRecommended;
             warning = "The 14B profile is unrealistic on this RAM tier.";
         }
+        else if (availableRam < 48L * 1024 * 1024 * 1024 && template.ModelId.Equals("qwen3-coder:30b", StringComparison.OrdinalIgnoreCase))
+        {
+            suitability = LocalAiModelSuitability.Limited;
+            warning = "Qwen3-Coder 30B is a large local model. It may run here, but startup and response times will be poor without strong memory and GPU headroom.";
+        }
         else if (availableRam >= template.EstimatedRamBytes + (4L * 1024 * 1024 * 1024))
         {
             suitability = LocalAiModelSuitability.Recommended;
         }
 
-        var isDefaultRecommendation = hardwareProfile.TotalMemoryBytes >= 16L * 1024 * 1024 * 1024
-                                      ? template.ModelId.Equals("qwen2.5-coder:7b", StringComparison.OrdinalIgnoreCase)
-                                      : template.ModelId.Equals("qwen2.5-coder:3b", StringComparison.OrdinalIgnoreCase);
+        var defaultModelId = hardwareProfile.TotalMemoryBytes >= 32L * 1024 * 1024 * 1024
+            ? "qwen2.5-coder:7b"
+            : hardwareProfile.TotalMemoryBytes >= 12L * 1024 * 1024 * 1024
+                ? "qwen2.5-coder:3b"
+                : "qwen2.5-coder:1.5b";
+        var isDefaultRecommendation = template.ModelId.Equals(defaultModelId, StringComparison.OrdinalIgnoreCase);
 
         return template.ToDefinition(suitability, isDefaultRecommendation, warning);
     }

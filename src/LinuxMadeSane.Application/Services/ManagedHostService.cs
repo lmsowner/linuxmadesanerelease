@@ -378,16 +378,41 @@ public sealed class ManagedHostService(
         ManagedHost host,
         CancellationToken cancellationToken)
     {
+        HostConnectionTestResult connection;
+
         if (AiLocalMachine.IsLocalMachine(host.Id))
         {
-            return new HostConnectionTestResult(
+            connection = new HostConnectionTestResult(
                 ConnectionTestStatus.Succeeded,
                 "Local Linux Made Sane host.",
                 "Live health is collected directly from this machine.",
                 DateTimeOffset.UtcNow);
         }
+        else
+        {
+            connection = await sshConnectionService.TestConnectionAsync(host, cancellationToken);
+        }
 
-        return await sshConnectionService.TestConnectionAsync(host, cancellationToken);
+        await RecordConnectionResultAsync(host, connection, cancellationToken);
+        return connection;
+    }
+
+    private Task RecordConnectionResultAsync(
+        ManagedHost host,
+        HostConnectionTestResult connection,
+        CancellationToken cancellationToken)
+    {
+        var lastSeenUtc = connection.Status == ConnectionTestStatus.Succeeded
+            ? connection.CheckedAtUtc
+            : host.LastSeenUtc;
+
+        var updatedHost = host with
+        {
+            LastSeenUtc = lastSeenUtc,
+            LastConnectionTestStatus = connection.Status
+        };
+
+        return hostStore.SaveAsync(updatedHost, cancellationToken);
     }
 
     private async Task<ServerHealthSnapshot> BuildHealthSnapshotAsync(

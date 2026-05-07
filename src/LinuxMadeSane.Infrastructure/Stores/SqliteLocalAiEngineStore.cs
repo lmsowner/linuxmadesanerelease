@@ -25,7 +25,7 @@ public sealed class SqliteLocalAiEngineStore(LinuxMadeSaneDbContext dbContext) :
             return new LocalAiEngineSettings(
                 LocalAiRuntimeKind.Ollama,
                 "http://127.0.0.1:11434",
-                "qwen2.5-coder:7b",
+                "qwen2.5-coder:1.5b",
                 "local-ollama",
                 false,
                 true,

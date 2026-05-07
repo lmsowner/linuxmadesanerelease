@@ -60,6 +60,7 @@ public static class DependencyInjection
         services.AddScoped<ILocalAiEngineStore, SqliteLocalAiEngineStore>();
         services.AddScoped<IAiProviderRegistry, SqliteAiProviderRegistry>();
         services.AddScoped<IAiProviderConnectionTester, AiProviderConnectionTester>();
+        services.AddScoped<IAiProviderModelDiscoveryService, AiProviderModelDiscoveryService>();
         services.AddScoped<IAiToolRegistry, LinuxMadeSaneAiToolRegistry>();
         services.AddScoped<IAiSafeChangeService, AiSafeChangeService>();
         services.AddScoped<IAiToolBridge, LinuxMadeSaneAiToolBridge>();

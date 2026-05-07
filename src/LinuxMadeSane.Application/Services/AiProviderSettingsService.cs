@@ -11,7 +11,8 @@ public sealed class AiProviderSettingsService(
     IAiProviderSettingsStore providerSettingsStore,
     IAiProviderRegistry providerRegistry,
     ISecretStore secretStore,
-    IAiProviderConnectionTester connectionTester) : IAiProviderSettingsService
+    IAiProviderConnectionTester connectionTester,
+    IAiProviderModelDiscoveryService modelDiscoveryService) : IAiProviderSettingsService
 {
     public async Task<AiProviderSettingsPageViewModel> GetPageAsync(CancellationToken cancellationToken = default)
     {
@@ -80,6 +81,68 @@ public sealed class AiProviderSettingsService(
             true);
     }
 
+    public async Task<IReadOnlyList<AiProviderModelOption>> RefreshModelCatalogAsync(
+        AiProviderSettingsEditor editor,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(editor);
+
+        var supportedProviders = providerRegistry.ListSupportedProviders();
+        var definition = supportedProviders.FirstOrDefault(provider => provider.ProviderType == editor.ProviderType);
+        if (definition is null)
+        {
+            throw new InvalidOperationException("The selected provider type is not supported.");
+        }
+
+        var allProviders = await providerSettingsStore.ListAsync(cancellationToken);
+        var existing = string.IsNullOrWhiteSpace(editor.ProviderKey)
+            ? null
+            : allProviders.FirstOrDefault(provider => provider.ProviderKey.Equals(editor.ProviderKey, StringComparison.OrdinalIgnoreCase));
+
+        if (existing is null && !string.IsNullOrWhiteSpace(editor.ProviderKey))
+        {
+            throw new InvalidOperationException("That provider record no longer exists.");
+        }
+
+        if (existing is not null && editor.ProviderType != existing.ProviderType)
+        {
+            throw new InvalidOperationException("Provider type cannot be changed for an existing record. Create a new provider for a different API.");
+        }
+
+        if (definition.RequiresApiKey &&
+            string.IsNullOrWhiteSpace(editor.ApiKeyInput) &&
+            (existing is null || string.IsNullOrWhiteSpace(existing.ApiKeySecretReference) || editor.ClearStoredApiKey))
+        {
+            throw new InvalidOperationException("Enter an API key or keep the stored key before refreshing models.");
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var providerKey = existing?.ProviderKey ?? GenerateProviderKey(editor, allProviders);
+        var displayName = string.IsNullOrWhiteSpace(editor.DisplayName)
+            ? definition.DisplayName
+            : editor.DisplayName.Trim();
+        var settings = new AiProviderSettings(
+            providerKey,
+            editor.ProviderType,
+            displayName,
+            editor.IsEnabled,
+            editor.IsDefault,
+            existing?.BaseUrl ?? string.Empty,
+            editor.DefaultModelId.Trim(),
+            editor.StreamingEnabled,
+            editor.ToolUseEnabled,
+            existing?.Notes ?? string.Empty,
+            existing?.MetadataJson ?? string.Empty,
+            editor.ClearStoredApiKey ? string.Empty : existing?.ApiKeySecretReference ?? string.Empty,
+            existing?.CreatedAtUtc ?? now,
+            now);
+
+        var discoveredModels = await modelDiscoveryService.DiscoverAsync(settings, editor.ApiKeyInput, cancellationToken);
+        var mergedCatalog = MergeModelCatalog(providerRegistry.ListModelCatalog(), discoveredModels);
+
+        return EnsureCurrentModelIsListed(editor, mergedCatalog);
+    }
+
     public async Task<string> SaveAsync(AiProviderSettingsEditor editor, CancellationToken cancellationToken = default)
     {
         ValidateEditor(editor);
@@ -100,11 +163,21 @@ public sealed class AiProviderSettingsService(
             throw new InvalidOperationException("That provider record no longer exists.");
         }
 
+        if (existing is not null && editor.ProviderType != existing.ProviderType)
+        {
+            throw new InvalidOperationException("Provider type cannot be changed for an existing record. Create a new provider for a different API.");
+        }
+
         var supportedModels = providerRegistry.ListModelCatalog(editor.ProviderType);
         var selectedModelId = editor.DefaultModelId.Trim();
-        var selectedModelIsSupported = supportedModels.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase));
-        if (!selectedModelIsSupported &&
-            (existing is null || !existing.DefaultModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase)))
+        var selectedModelIsSupported = await IsSelectedModelSupportedAsync(
+            editor,
+            existing,
+            supportedModels,
+            selectedModelId,
+            allProviders,
+            cancellationToken);
+        if (!selectedModelIsSupported)
         {
             throw new InvalidOperationException("Select a supported default model for the selected provider.");
         }
@@ -137,7 +210,7 @@ public sealed class AiProviderSettingsService(
             editor.DisplayName.Trim(),
             editor.IsEnabled,
             shouldBeDefault,
-            string.Empty,
+            existing?.BaseUrl ?? string.Empty,
             editor.DefaultModelId.Trim(),
             editor.StreamingEnabled,
             editor.ToolUseEnabled,
@@ -211,11 +284,21 @@ public sealed class AiProviderSettingsService(
             throw new InvalidOperationException("That provider record no longer exists.");
         }
 
+        if (existing is not null && editor.ProviderType != existing.ProviderType)
+        {
+            throw new InvalidOperationException("Provider type cannot be changed for an existing record. Create a new provider for a different API.");
+        }
+
         var supportedModels = providerRegistry.ListModelCatalog(editor.ProviderType);
         var selectedModelId = editor.DefaultModelId.Trim();
-        var selectedModelIsSupported = supportedModels.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase));
-        if (!selectedModelIsSupported &&
-            (existing is null || !existing.DefaultModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase)))
+        var selectedModelIsSupported = await IsSelectedModelSupportedAsync(
+            editor,
+            existing,
+            supportedModels,
+            selectedModelId,
+            allProviders,
+            cancellationToken);
+        if (!selectedModelIsSupported)
         {
             throw new InvalidOperationException("Select a supported default model before testing.");
         }
@@ -349,6 +432,74 @@ public sealed class AiProviderSettingsService(
                     false)
             ])
             .ToArray();
+    }
+
+    private async Task<bool> IsSelectedModelSupportedAsync(
+        AiProviderSettingsEditor editor,
+        AiProviderSettings? existing,
+        IReadOnlyList<AiProviderModelOption> supportedModels,
+        string selectedModelId,
+        IReadOnlyList<AiProviderSettings> allProviders,
+        CancellationToken cancellationToken)
+    {
+        if (supportedModels.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        if (existing is not null && existing.DefaultModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var providerKey = existing?.ProviderKey ?? GenerateProviderKey(editor, allProviders);
+            var settings = new AiProviderSettings(
+                providerKey,
+                editor.ProviderType,
+                string.IsNullOrWhiteSpace(editor.DisplayName) ? providerKey : editor.DisplayName.Trim(),
+                editor.IsEnabled,
+                editor.IsDefault,
+                existing?.BaseUrl ?? string.Empty,
+                selectedModelId,
+                editor.StreamingEnabled,
+                editor.ToolUseEnabled,
+                existing?.Notes ?? string.Empty,
+                existing?.MetadataJson ?? string.Empty,
+                editor.ClearStoredApiKey ? string.Empty : existing?.ApiKeySecretReference ?? string.Empty,
+                existing?.CreatedAtUtc ?? now,
+                now);
+
+            var discoveredModels = await modelDiscoveryService.DiscoverAsync(settings, editor.ApiKeyInput, cancellationToken);
+            return discoveredModels.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static IReadOnlyList<AiProviderModelOption> MergeModelCatalog(
+        IReadOnlyList<AiProviderModelOption> catalog,
+        IReadOnlyList<AiProviderModelOption> discoveredModels)
+    {
+        var merged = new List<AiProviderModelOption>(catalog);
+
+        foreach (var discoveredModel in discoveredModels)
+        {
+            if (merged.Any(model =>
+                    model.ProviderType == discoveredModel.ProviderType &&
+                    model.ModelId.Equals(discoveredModel.ModelId, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            merged.Add(discoveredModel);
+        }
+
+        return merged.ToArray();
     }
 
     private static string GenerateProviderKey(

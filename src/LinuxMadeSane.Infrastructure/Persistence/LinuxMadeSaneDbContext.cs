@@ -105,6 +105,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(item => item.AccessPolicyId).HasMaxLength(64);
             entity.Property(item => item.AllowedEmailsJson).HasColumnType("TEXT");
             entity.Property(item => item.AllowedEmailDomainsJson).HasColumnType("TEXT");
+            entity.Property(item => item.OriginRequestSettingsJson).HasColumnType("TEXT");
             entity.HasIndex(item => new { item.ManagedHostId, item.Hostname }).IsUnique();
             entity.HasOne<ManagedHostEntity>()
                 .WithMany()

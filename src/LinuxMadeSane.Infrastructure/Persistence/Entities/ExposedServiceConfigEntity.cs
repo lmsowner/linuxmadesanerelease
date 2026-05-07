@@ -19,6 +19,7 @@ public sealed class ExposedServiceConfigEntity
     public int AccessMode { get; set; }
     public string AllowedEmailsJson { get; set; } = "[]";
     public string AllowedEmailDomainsJson { get; set; } = "[]";
+    public string OriginRequestSettingsJson { get; set; } = "{}";
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
     public DateTimeOffset? DisabledAtUtc { get; set; }

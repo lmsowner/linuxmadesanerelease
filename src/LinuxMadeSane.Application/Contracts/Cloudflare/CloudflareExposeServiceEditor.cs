@@ -28,13 +28,41 @@ public sealed class CloudflareExposeServiceEditor
     [Url(ErrorMessage = "Enter an absolute local service URL such as http://localhost:8080.")]
     public string LocalServiceUrl { get; set; } = "http://localhost:8080";
 
+    public bool NoTlsVerify { get; set; } = true;
+
+    public string OriginServerName { get; set; } = string.Empty;
+
+    public string CertificateAuthorityPool { get; set; } = string.Empty;
+
+    public int TlsTimeoutSeconds { get; set; } = 10;
+
+    public bool Http2Origin { get; set; }
+
+    public bool MatchSniToHost { get; set; }
+
+    public string HttpHostHeader { get; set; } = string.Empty;
+
+    public bool DisableChunkedEncoding { get; set; }
+
+    public int ConnectTimeoutSeconds { get; set; } = 30;
+
+    public bool NoHappyEyeballs { get; set; }
+
+    public string ProxyType { get; set; } = string.Empty;
+
+    public int KeepAliveTimeoutSeconds { get; set; } = 90;
+
+    public int KeepAliveConnections { get; set; } = 100;
+
+    public int TcpKeepAliveSeconds { get; set; } = 30;
+
     public string TunnelId { get; set; } = string.Empty;
 
     public bool CreateNewTunnel { get; set; }
 
     public bool RunConnectorInstallOnHost { get; set; } = true;
 
-    public ExposedServiceAccessMode AccessMode { get; set; } = ExposedServiceAccessMode.OnlyMe;
+    public ExposedServiceAccessMode AccessMode { get; set; } = ExposedServiceAccessMode.NoAccessProtection;
 
     public string EmailAllowList { get; set; } = string.Empty;
 

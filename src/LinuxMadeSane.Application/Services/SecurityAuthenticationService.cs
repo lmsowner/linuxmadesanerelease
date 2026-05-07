@@ -13,25 +13,25 @@ public sealed class SecurityAuthenticationService(
         var normalizedIdentifier = identifier.Trim();
         if (string.IsNullOrWhiteSpace(normalizedIdentifier))
         {
-            return SecurityAuthenticationResult.Failure("Enter the username or email registered for this authenticator user.");
+            return SecurityAuthenticationResult.Failure("Enter the username or email registered for this LMS account.");
         }
 
         var users = await securityUserStore.ListAsync(cancellationToken);
         if (users.Count == 0)
         {
-            return SecurityAuthenticationResult.Failure("No authenticator users are registered yet. Provision one from an enabled interface first.");
+            return SecurityAuthenticationResult.Failure("No LMS accounts are registered yet. Provision one from an enabled interface first.");
         }
 
         var user = await securityUserStore.FindByEmailAsync(normalizedIdentifier.ToLowerInvariant(), cancellationToken)
             ?? await securityUserStore.FindByLinuxUsernameAsync(normalizedIdentifier.ToLowerInvariant(), cancellationToken);
         if (user is null)
         {
-            return SecurityAuthenticationResult.Failure("That username or email is not registered for remote login.");
+            return SecurityAuthenticationResult.Failure("That username or email is not registered for an LMS account.");
         }
 
         if (!user.IsEnabled)
         {
-            return SecurityAuthenticationResult.Failure("This authenticator user is disabled.");
+            return SecurityAuthenticationResult.Failure("This LMS account is disabled.");
         }
 
         var secret = await secretStore.ResolveSecretAsync(user.OtpSecretReference, cancellationToken);

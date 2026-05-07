@@ -465,7 +465,7 @@ public class Program
 
         Console.WriteLine("Linux Made Sane console access has been restored for localhost.");
         Console.WriteLine($"Updated security rules in: {dbContext.Database.GetDbConnection().DataSource}");
-        Console.WriteLine("Open http://127.0.0.1:5080 on the server console, or use SSH port forwarding, then fix the Security rules.");
+        Console.WriteLine("Open http://127.0.0.1:5080 on the server console, or use SSH port forwarding, then fix the LMS Accounts rules.");
     }
 
     private static bool IsAlwaysAnonymousAllowedPath(PathString path)

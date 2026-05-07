@@ -167,7 +167,7 @@ public sealed class LocalRemoteAccessSystemService(
     public async Task ResetLocalPasswordAsync(string linuxUsername, string newPassword, CancellationToken cancellationToken = default)
     {
         var normalizedUsername = linuxUsername.Trim().ToLowerInvariant();
-        logger.LogInformation("Resetting local Linux password for LMS remote access user {LinuxUsername}.", normalizedUsername);
+        logger.LogInformation("Resetting local Linux password for LMS account local login {LinuxUsername}.", normalizedUsername);
 
         var command = Environment.UserName.Equals("root", StringComparison.OrdinalIgnoreCase)
             ? ("chpasswd", Array.Empty<string>())

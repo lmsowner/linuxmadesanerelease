@@ -1,4 +1,6 @@
 @using System.Linq
+@implements IDisposable
+@inject NavigationManager NavigationManager
 
 <NavLink class="@CssClass" href="@Href" Match="@Match" ActiveClass="active" title="@Label" aria-label="@Label">
     <span class="ui-nav-button-main">
@@ -25,12 +27,24 @@
     [Parameter] public bool Preview { get; set; }
     [Parameter] public bool Compact { get; set; }
     [Parameter] public string? Class { get; set; }
+    [Parameter] public IReadOnlyList<string>? AdditionalActivePathPrefixes { get; set; }
 
     private string CssClass => string.Join(" ", GetClasses().Where(static value => !string.IsNullOrWhiteSpace(value)));
+
+    protected override void OnInitialized() =>
+        NavigationManager.LocationChanged += HandleLocationChanged;
+
+    public void Dispose() =>
+        NavigationManager.LocationChanged -= HandleLocationChanged;
 
     private IEnumerable<string?> GetClasses()
     {
         yield return "ui-nav-button";
+        if (HasAdditionalActiveMatch)
+        {
+            yield return "active";
+        }
+
         if (Preview)
         {
             yield return "ui-nav-button-preview";
@@ -43,4 +57,33 @@
 
         yield return Class;
     }
+
+    private bool HasAdditionalActiveMatch =>
+        AdditionalActivePathPrefixes?.Any(prefix => IsCurrentPathWithin(prefix)) == true;
+
+    private bool IsCurrentPathWithin(string pathPrefix)
+    {
+        var currentPath = NormalizePath(NavigationManager.ToBaseRelativePath(NavigationManager.Uri));
+        var normalizedPrefix = NormalizePath(pathPrefix);
+        return string.Equals(currentPath, normalizedPrefix, StringComparison.OrdinalIgnoreCase)
+            || currentPath.StartsWith($"{normalizedPrefix}/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizePath(string path)
+    {
+        var queryStart = path.IndexOfAny(['?', '#']);
+        var trimmed = queryStart >= 0 ? path[..queryStart] : path;
+        trimmed = trimmed.Trim();
+
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return "/";
+        }
+
+        trimmed = trimmed.Trim('/');
+        return string.IsNullOrWhiteSpace(trimmed) ? "/" : $"/{trimmed}";
+    }
+
+    private void HandleLocationChanged(object? sender, LocationChangedEventArgs args) =>
+        _ = InvokeAsync(StateHasChanged);
 }

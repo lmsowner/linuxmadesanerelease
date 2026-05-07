@@ -170,10 +170,23 @@ else
                                     @foreach (var serviceEntry in ServiceEntries)
                                     {
                                         var service = serviceEntry.Config;
+                                        var publicHref = BuildPublicServiceUrl(service.Hostname);
+                                        var localHref = BuildAbsoluteHref(service.LocalServiceUrl);
                                         <div class="cloudflare-saved-row">
                                             <div>
                                                 <strong>@service.ServiceName</strong>
-                                                <div class="meta-text cloudflare-saved-mapping">@service.Hostname -> @service.LocalServiceUrl</div>
+                                                <div class="meta-text cloudflare-saved-mapping">
+                                                    <a href="@publicHref" target="_blank" rel="noreferrer">@publicHref</a>
+                                                    <span aria-hidden="true">-&gt;</span>
+                                                    @if (localHref is null)
+                                                    {
+                                                        <span>@service.LocalServiceUrl</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <a href="@localHref" target="_blank" rel="noreferrer">@service.LocalServiceUrl</a>
+                                                    }
+                                                </div>
                                             </div>
                                             <div class="cloudflare-saved-actions">
                                                 <span class="status-pill neutral">@FormatAccessMode(service.AccessMode)</span>
@@ -271,85 +284,217 @@ else
                                         </div>
                                     }
 
-                                    <div class="field-row cloudflare-primary-grid">
-                                        <UiTextField @bind-Value="editor.Subdomain"
-                                                     Label="Subdomain"
-                                                     Helper="@SubdomainHelperText"
-                                                     Placeholder="myapp" />
+                                    <section class="surface-subcard cloudflare-route-options">
+                                        <div class="cloudflare-config-options-heading">
+                                            <strong>Route mapping</strong>
+                                            <span>Public hostname and local origin for this application.</span>
+                                        </div>
 
-                                        <UiComboboxField TValue="string"
-                                                       Label="Zone / domain"
-                                                       Value="@editor.ZoneId"
-                                                       ValueChanged="HandleZoneChangedAsync"
-                                                       ValueExpression="@(() => editor.ZoneId)"
-                                                       Helper="Pick the Cloudflare zone that will hold the public hostname.">
-                                            @if (FilteredZones.Count == 0)
+                                        <div class="field-row cloudflare-primary-grid cloudflare-route-grid">
+                                            <UiTextField @bind-Value="editor.Subdomain"
+                                                         Label="Subdomain"
+                                                         Helper="@SubdomainHelperText"
+                                                         Placeholder="myapp"
+                                                         Class="cloudflare-route-field" />
+
+                                            <UiComboboxField TValue="string"
+                                                           Label="Zone / domain"
+                                                           Value="@editor.ZoneId"
+                                                           ValueChanged="HandleZoneChangedAsync"
+                                                           ValueExpression="@(() => editor.ZoneId)"
+                                                           Helper="Pick the Cloudflare zone that will hold the public hostname."
+                                                           Class="cloudflare-route-field">
+                                                @if (FilteredZones.Count == 0)
+                                                {
+                                                    <option value="">Validate a token first</option>
+                                                }
+                                                else
+                                                {
+                                                    @foreach (var zone in FilteredZones)
+                                                    {
+                                                        <option value="@zone.Id">@zone.Name</option>
+                                                    }
+                                                }
+                                            </UiComboboxField>
+
+                                            <UiTextField Value="@editor.LocalServiceUrl"
+                                                         ValueChanged="HandleLocalServiceUrlChangedAsync"
+                                                         ValueExpression="@(() => editor.LocalServiceUrl)"
+                                                         Label="Local service URL"
+                                                         Helper="Origin URL only. HTTPS defaults to No TLS Verify for local/self-signed origins."
+                                                         Placeholder="http://localhost:5080"
+                                                         Class="cloudflare-route-field" />
+                                        </div>
+                                    </section>
+
+                                    <section class="surface-subcard cloudflare-config-options">
+                                        <div class="cloudflare-config-options-heading">
+                                            <strong>Configuration options</strong>
+                                            <span>Access and origin settings for this hostname.</span>
+                                        </div>
+
+                                        <div class="field-row cloudflare-config-grid cloudflare-config-main-grid">
+                                            <UiTextField @bind-Value="editor.ServiceName"
+                                                         Label="Service name"
+                                                         Helper="Friendly label shown in Linux Made Sane and Cloudflare Access."
+                                                         Class="cloudflare-config-field" />
+
+                                            <UiComboboxField TValue="ExposedServiceAccessMode"
+                                                          Label="Access mode"
+                                                          Value="@editor.AccessMode"
+                                                          ValueChanged="HandleAccessModeChangedAsync"
+                                                          ValueExpression="@(() => editor.AccessMode)"
+                                                           Helper="Default is DNS/tunnel only; LMS handles app login."
+                                                           Class="cloudflare-config-field">
+                                                @foreach (var option in accessModes)
+                                                {
+                                                    <option value="@option.Value">@option.Label</option>
+                                                }
+                                            </UiComboboxField>
+
+                                            @if (editor.AccessMode == ExposedServiceAccessMode.EmailAllowList)
                                             {
-                                                <option value="">Validate a token first</option>
+                                                <UiTextField @bind-Value="editor.EmailAllowList"
+                                                             Label="Email allow list"
+                                                             Helper="Comma or newline separated email addresses."
+                                                             Class="cloudflare-config-field" />
+                                            }
+                                            else if (editor.AccessMode == ExposedServiceAccessMode.EmailDomainAllowList)
+                                            {
+                                                <UiTextField @bind-Value="editor.EmailDomainAllowList"
+                                                             Label="Email domain allow list"
+                                                             Helper="Comma or newline separated email domains such as example.com."
+                                                             Class="cloudflare-config-field" />
+                                            }
+                                            else if (editor.AccessMode == ExposedServiceAccessMode.OnlyMe)
+                                            {
+                                                <div class="surface-subcard cloudflare-mode-note cloudflare-config-mode-note">
+                                                    <strong>Only me</strong>
+                                                    <span>@(string.IsNullOrWhiteSpace(currentUserEmail) ? "This login does not expose an email claim." : currentUserEmail)</span>
+                                                </div>
                                             }
                                             else
                                             {
-                                                @foreach (var zone in FilteredZones)
-                                                {
-                                                    <option value="@zone.Id">@zone.Name</option>
-                                                }
+                                                <div class="surface-subcard cloudflare-mode-note cloudflare-config-mode-note">
+                                                    <strong>DNS / tunnel only</strong>
+                                                    <span>No Cloudflare Access app or policy will be created for this hostname.</span>
+                                                </div>
                                             }
-                                        </UiComboboxField>
 
-                                        <UiTextField @bind-Value="editor.LocalServiceUrl"
-                                                     Label="Local service URL"
-                                                     Helper="Absolute origin URL on the target host, for example http://localhost:8080. Do not include a path such as /app or even a trailing /."
-                                                     Placeholder="http://localhost:5080" />
-                                    </div>
+                                        </div>
 
-                                    <div class="field-row">
-                                        <UiTextField @bind-Value="editor.ServiceName"
-                                                     Label="Service name"
-                                                     Helper="Friendly label shown in Linux Made Sane and Cloudflare Access." />
-                                    </div>
+                                        <div class="cloudflare-origin-quick-row">
+                                            <UiCheckboxField Value="@NoTlsVerifyFieldValue"
+                                                             ValueChanged="HandleNoTlsVerifyChangedAsync"
+                                                             ValueExpression="@(() => editor.NoTlsVerify)"
+                                                             Label="No TLS Verify"
+                                                             Helper="@NoTlsVerifyHelperText"
+                                                             Compact="true"
+                                                             Disabled="@(!LocalServiceUsesHttps)"
+                                                             Class="cloudflare-config-checkbox" />
+                                        </div>
 
-                                    <div class="field-row cloudflare-primary-grid">
-                                        <UiComboboxField TValue="ExposedServiceAccessMode"
-                                                       Label="Access mode"
-                                                       Value="@editor.AccessMode"
-                                                       ValueChanged="HandleAccessModeChangedAsync"
-                                                       ValueExpression="@(() => editor.AccessMode)"
-                                                       Helper="Access protection is enabled by default.">
-                                            @foreach (var option in accessModes)
-                                            {
-                                                <option value="@option.Value">@option.Label</option>
-                                            }
-                                        </UiComboboxField>
+                                        <details class="cloudflare-origin-advanced">
+                                            <summary>Advanced origin request settings</summary>
 
-                                        @if (editor.AccessMode == ExposedServiceAccessMode.EmailAllowList)
-                                        {
-                                            <UiTextField @bind-Value="editor.EmailAllowList"
-                                                         Label="Email allow list"
-                                                         Helper="Comma or newline separated email addresses." />
-                                        }
-                                        else if (editor.AccessMode == ExposedServiceAccessMode.EmailDomainAllowList)
-                                        {
-                                            <UiTextField @bind-Value="editor.EmailDomainAllowList"
-                                                         Label="Email domain allow list"
-                                                         Helper="Comma or newline separated email domains such as example.com." />
-                                        }
-                                        else if (editor.AccessMode == ExposedServiceAccessMode.OnlyMe)
-                                        {
-                                            <div class="surface-subcard cloudflare-mode-note">
-                                                <strong>Only me</strong>
-                                                <span>@(string.IsNullOrWhiteSpace(currentUserEmail) ? "This login does not expose an email claim." : currentUserEmail)</span>
+                                            <div class="cloudflare-origin-settings">
+                                                <section class="cloudflare-origin-settings-group">
+                                                    <div class="cloudflare-origin-settings-heading">
+                                                        <strong>TLS</strong>
+                                                        <span>Certificate and HTTPS handshake behaviour.</span>
+                                                    </div>
+                                                    <div class="field-row cloudflare-origin-grid">
+                                                        <UiTextField @bind-Value="editor.OriginServerName"
+                                                                     Label="Origin server name"
+                                                                     Helper="Hostname cloudflared expects on the origin certificate."
+                                                                     Disabled="@(!LocalServiceUsesHttps)" />
+                                                        <UiTextField @bind-Value="editor.CertificateAuthorityPool"
+                                                                     Label="Certificate authority pool"
+                                                                     Helper="Local CA bundle path for non-Cloudflare-signed origin certificates."
+                                                                     Disabled="@(!LocalServiceUsesHttps)" />
+                                                        <UiNumberField TValue="int"
+                                                                       @bind-Value="editor.TlsTimeoutSeconds"
+                                                                       Label="TLS timeout"
+                                                                       Helper="Seconds allowed for TLS handshake."
+                                                                       Disabled="@(!LocalServiceUsesHttps)"
+                                                                       min="1" />
+                                                        <UiCheckboxField @bind-Value="editor.Http2Origin"
+                                                                         Label="HTTP2 connection"
+                                                                         Helper="Use HTTP/2 from cloudflared to an HTTPS origin."
+                                                                         Compact="true"
+                                                                         Disabled="@(!LocalServiceUsesHttps)"
+                                                                         Class="cloudflare-config-checkbox" />
+                                                        <UiCheckboxField @bind-Value="editor.MatchSniToHost"
+                                                                         Label="Match SNI to host"
+                                                                         Helper="Use the incoming hostname as the TLS SNI."
+                                                                         Compact="true"
+                                                                         Disabled="@(!LocalServiceUsesHttps)"
+                                                                         Class="cloudflare-config-checkbox" />
+                                                    </div>
+                                                </section>
+
+                                                <section class="cloudflare-origin-settings-group">
+                                                    <div class="cloudflare-origin-settings-heading">
+                                                        <strong>HTTP Settings</strong>
+                                                        <span>Headers and transfer behaviour.</span>
+                                                    </div>
+                                                    <div class="field-row cloudflare-origin-grid">
+                                                        <UiTextField @bind-Value="editor.HttpHostHeader"
+                                                                     Label="HTTP host header"
+                                                                     Helper="Host header sent to the local service." />
+                                                        <UiCheckboxField @bind-Value="editor.DisableChunkedEncoding"
+                                                                         Label="Disable chunked encoding"
+                                                                         Helper="Useful for some WSGI servers."
+                                                                         Compact="true"
+                                                                         Class="cloudflare-config-checkbox" />
+                                                    </div>
+                                                </section>
+
+                                                <section class="cloudflare-origin-settings-group">
+                                                    <div class="cloudflare-origin-settings-heading">
+                                                        <strong>Connection</strong>
+                                                        <span>Timeouts, connection reuse, and proxy behaviour.</span>
+                                                    </div>
+                                                    <div class="field-row cloudflare-origin-grid">
+                                                        <UiNumberField TValue="int"
+                                                                       @bind-Value="editor.ConnectTimeoutSeconds"
+                                                                       Label="Connect timeout"
+                                                                       Helper="Seconds allowed for establishing a TCP connection."
+                                                                       min="1" />
+                                                        <UiNumberField TValue="int"
+                                                                       @bind-Value="editor.KeepAliveTimeoutSeconds"
+                                                                       Label="Idle connection expiration"
+                                                                       Helper="Seconds before idle keep-alive connections can be discarded."
+                                                                       min="1" />
+                                                        <UiNumberField TValue="int"
+                                                                       @bind-Value="editor.KeepAliveConnections"
+                                                                       Label="Keep alive connections"
+                                                                       Helper="Maximum idle keep-alive connections."
+                                                                       min="0" />
+                                                        <UiNumberField TValue="int"
+                                                                       @bind-Value="editor.TcpKeepAliveSeconds"
+                                                                       Label="TCP keep alive interval"
+                                                                       Helper="Seconds between TCP keep-alive packets."
+                                                                       min="1" />
+                                                        <UiComboboxField TValue="string"
+                                                                         Label="Proxy type"
+                                                                         @bind-Value="editor.ProxyType"
+                                                                         Helper="Use SOCKS only for TCP-style proxy translation. Leave blank for normal HTTP proxying.">
+                                                            <option value="">Regular</option>
+                                                            <option value="socks">SOCKS5</option>
+                                                        </UiComboboxField>
+                                                        <UiCheckboxField @bind-Value="editor.NoHappyEyeballs"
+                                                                         Label="No Happy Eyeballs"
+                                                                         Helper="Disable IPv4/IPv6 fallback selection."
+                                                                         Compact="true"
+                                                                         Class="cloudflare-config-checkbox" />
+                                                    </div>
+                                                </section>
                                             </div>
-                                        }
-                                        else
-                                        {
-                                            <div class="surface-subcard cloudflare-mode-note">
-                                                <strong>DNS / tunnel only</strong>
-                                                <span>No Cloudflare Access app or policy will be created for this hostname.</span>
-                                            </div>
-                                        }
-                                    </div>
+                                        </details>
+                                    </section>
 
-                                    <div class="toolbar-row">
+                                    <div class="toolbar-row cloudflare-form-actions">
                                         <UiCommandButton Label="@(isPreviewing ? "Building preview..." : "Dry-run preview")"
                                                          Glyph="UiIconGlyph.Analyze"
                                                          Disabled="@isPreviewing"
@@ -521,10 +666,10 @@ else
     private readonly CloudflareExposeServiceEditor editor = new();
     private readonly (ExposedServiceAccessMode Value, string Label)[] accessModes =
     [
+        (ExposedServiceAccessMode.NoAccessProtection, "No Access protection"),
         (ExposedServiceAccessMode.OnlyMe, "Only me"),
         (ExposedServiceAccessMode.EmailAllowList, "Email allow list"),
-        (ExposedServiceAccessMode.EmailDomainAllowList, "Email domain allow list"),
-        (ExposedServiceAccessMode.NoAccessProtection, "No Access protection")
+        (ExposedServiceAccessMode.EmailDomainAllowList, "Email domain allow list")
     ];
 
     private EditContext editContext = default!;
@@ -545,6 +690,7 @@ else
     private string statusMessage = string.Empty;
     private bool statusIsError;
     private bool connectorInstallPreferenceTouched;
+    private bool noTlsVerifyPreferenceTouched;
     private List<string> validationMessages = [];
     private bool previewPanelExpanded = true;
     private CancellationTokenSource? statusMessageCts;
@@ -659,6 +805,17 @@ else
 
     private bool CanManageApplications =>
         validation is not null;
+
+    private bool LocalServiceUsesHttps =>
+        TryParseLocalServiceUri(editor.LocalServiceUrl)?.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) == true;
+
+    private bool NoTlsVerifyFieldValue =>
+        LocalServiceUsesHttps && editor.NoTlsVerify;
+
+    private string NoTlsVerifyHelperText =>
+        LocalServiceUsesHttps
+            ? "Recommended for local HTTPS services with self-signed certificates."
+            : "Only applies when the local service URL starts with https://.";
 
     private string ApplicationEditorHeading =>
         editor.ConfigId.HasValue
@@ -1054,13 +1211,41 @@ else
         return Task.CompletedTask;
     }
 
+    private Task HandleLocalServiceUrlChangedAsync(string? value)
+    {
+        editor.LocalServiceUrl = value ?? string.Empty;
+
+        if (!noTlsVerifyPreferenceTouched && LocalServiceUsesHttps)
+        {
+            editor.NoTlsVerify = true;
+        }
+
+        previewPlan = null;
+        applyResult = null;
+        return Task.CompletedTask;
+    }
+
+    private Task HandleNoTlsVerifyChangedAsync(bool value)
+    {
+        noTlsVerifyPreferenceTouched = true;
+        editor.NoTlsVerify = value;
+        previewPlan = null;
+        applyResult = null;
+        return Task.CompletedTask;
+    }
+
     private Task HandleAccessModeChangedAsync(ExposedServiceAccessMode mode)
     {
         editor.AccessMode = mode;
         editor.ConfirmDangerousExposure = false;
+        ClearApplicationPreviewState();
+        return Task.CompletedTask;
+    }
+
+    private void ClearApplicationPreviewState()
+    {
         previewPlan = null;
         applyResult = null;
-        return Task.CompletedTask;
     }
 
     private async Task LoadAvailableTunnelsAsync()
@@ -1386,11 +1571,13 @@ else
         editor.LocalServiceUrl = "http://localhost:8080";
         editor.TunnelId = string.Empty;
         editor.CreateNewTunnel = !HostHasInstalledConnector;
-        editor.AccessMode = ExposedServiceAccessMode.OnlyMe;
+        editor.AccessMode = ExposedServiceAccessMode.NoAccessProtection;
         editor.EmailAllowList = string.Empty;
         editor.EmailDomainAllowList = string.Empty;
+        ApplyOriginRequestSettingsToEditor(CloudflareOriginRequestSettings.Default with { NoTlsVerify = true });
         editor.ConfirmDangerousExposure = false;
         connectorInstallPreferenceTouched = false;
+        noTlsVerifyPreferenceTouched = false;
         ApplySuggestedConnectorInstallDefault();
     }
 
@@ -1407,10 +1594,51 @@ else
         editor.AccessMode = config.AccessMode;
         editor.EmailAllowList = string.Join(Environment.NewLine, config.AllowedEmails);
         editor.EmailDomainAllowList = string.Join(Environment.NewLine, config.AllowedEmailDomains);
+        ApplyOriginRequestSettingsToEditor(
+            config.OriginRequestSettings
+            ?? (CloudflareOriginRequestSettings.Default with { NoTlsVerify = IsHttpsLocalServiceUrl(config.LocalServiceUrl) }));
         editor.ConfirmDangerousExposure = false;
         connectorInstallPreferenceTouched = false;
+        noTlsVerifyPreferenceTouched = false;
         ApplySuggestedConnectorInstallDefault();
     }
+
+    private void ApplyOriginRequestSettingsToEditor(CloudflareOriginRequestSettings settings)
+    {
+        editor.OriginServerName = settings.OriginServerName;
+        editor.CertificateAuthorityPool = settings.CertificateAuthorityPool;
+        editor.NoTlsVerify = settings.NoTlsVerify;
+        editor.TlsTimeoutSeconds = settings.TlsTimeoutSeconds;
+        editor.Http2Origin = settings.Http2Origin;
+        editor.MatchSniToHost = settings.MatchSniToHost;
+        editor.HttpHostHeader = settings.HttpHostHeader;
+        editor.DisableChunkedEncoding = settings.DisableChunkedEncoding;
+        editor.ConnectTimeoutSeconds = settings.ConnectTimeoutSeconds;
+        editor.NoHappyEyeballs = settings.NoHappyEyeballs;
+        editor.ProxyType = settings.ProxyType;
+        editor.KeepAliveTimeoutSeconds = settings.KeepAliveTimeoutSeconds;
+        editor.KeepAliveConnections = settings.KeepAliveConnections;
+        editor.TcpKeepAliveSeconds = settings.TcpKeepAliveSeconds;
+    }
+
+    private static Uri? TryParseLocalServiceUri(string? value) =>
+        Uri.TryCreate(value?.Trim(), UriKind.Absolute, out var uri)
+            ? uri
+            : null;
+
+    private static bool IsHttpsLocalServiceUrl(string? value) =>
+        TryParseLocalServiceUri(value)?.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) == true;
+
+    private static string BuildPublicServiceUrl(string hostname) =>
+        hostname.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+        hostname.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            ? hostname
+            : $"https://{hostname}";
+
+    private static string? BuildAbsoluteHref(string? value) =>
+        Uri.TryCreate(value?.Trim(), UriKind.Absolute, out var uri)
+            ? uri.ToString()
+            : null;
 
     private static string ExtractRelativeHostname(string hostname, string zoneName)
     {

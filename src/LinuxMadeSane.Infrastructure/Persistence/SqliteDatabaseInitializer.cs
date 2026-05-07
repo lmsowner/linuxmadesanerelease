@@ -1383,6 +1383,7 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
                 AccessMode INTEGER NOT NULL,
                 AllowedEmailsJson TEXT NOT NULL DEFAULT '[]',
                 AllowedEmailDomainsJson TEXT NOT NULL DEFAULT '[]',
+                OriginRequestSettingsJson TEXT NOT NULL DEFAULT '{{}}',
                 CreatedAtUtc TEXT NOT NULL,
                 UpdatedAtUtc TEXT NOT NULL,
                 DisabledAtUtc TEXT NULL,
@@ -1391,6 +1392,7 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(exposedServiceConfigsSql, cancellationToken);
+        await EnsureColumnExistsAsync("exposed_service_configs", "OriginRequestSettingsJson", "TEXT NOT NULL DEFAULT '{{}}'", cancellationToken);
 
         const string exposedServiceHostHostnameIndexSql = """
             CREATE UNIQUE INDEX IF NOT EXISTS IX_exposed_service_configs_ManagedHostId_Hostname

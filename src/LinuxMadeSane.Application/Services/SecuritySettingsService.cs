@@ -38,7 +38,7 @@ public sealed class SecuritySettingsService(
         var existing = await securityUserStore.FindByEmailAsync(normalizedEmail, cancellationToken);
         if (existing is not null)
         {
-            throw new InvalidOperationException("A remote access user with that email already exists.");
+            throw new InvalidOperationException("An LMS account with that email already exists.");
         }
 
         ValidateAuthorizedKeys(editor.SshAuthenticationMode, editor.AuthorizedKeyEntries);
@@ -104,7 +104,7 @@ public sealed class SecuritySettingsService(
         var existingLinuxUsername = await securityUserStore.FindByLinuxUsernameAsync(linuxUsername, cancellationToken);
         if (existingLinuxUsername is not null && existingLinuxUsername.Id != user.Id)
         {
-            throw new InvalidOperationException("A remote access user with that Linux username already exists.");
+            throw new InvalidOperationException("An LMS account with that Linux username already exists.");
         }
 
         var linuxUsernameChanged = !string.Equals(currentLinuxUsername, linuxUsername, StringComparison.Ordinal);
@@ -114,7 +114,7 @@ public sealed class SecuritySettingsService(
 
         if (linuxUsernameChanged && !createdLocalAccount)
         {
-            throw new InvalidOperationException("That Linux username already exists on this machine. Choose a new dedicated remote access login.");
+            throw new InvalidOperationException("That Linux username already exists on this machine. Choose a new dedicated local login for this LMS account.");
         }
 
         var updated = user with
@@ -346,13 +346,13 @@ public sealed class SecuritySettingsService(
             var existingLinuxUsername = await securityUserStore.FindByLinuxUsernameAsync(linuxUsername, cancellationToken);
             if (existingLinuxUsername is not null)
             {
-                throw new InvalidOperationException("A remote access user with that Linux username already exists.");
+                throw new InvalidOperationException("An LMS account with that Linux username already exists.");
             }
 
             var isLocalAccountManaged = await remoteAccessSystemService.EnsureLocalAccountAsync(linuxUsername, cancellationToken);
             if (!isLocalAccountManaged)
             {
-                throw new InvalidOperationException("That Linux username already exists on this machine. Choose a new dedicated remote access login.");
+                throw new InvalidOperationException("That Linux username already exists on this machine. Choose a new dedicated local login for this LMS account.");
             }
 
             return (linuxUsername, true);
@@ -388,7 +388,7 @@ public sealed class SecuritySettingsService(
             }
         }
 
-        throw new InvalidOperationException("Linux Made Sane could not find a free local login name for that remote access user.");
+        throw new InvalidOperationException("Linux Made Sane could not find a free local login name for that LMS account.");
     }
 
     private static void ValidateLinuxUsername(string linuxUsername)
@@ -462,7 +462,7 @@ public sealed class SecuritySettingsService(
 
     private async Task<SecurityUser> GetRequiredUserAsync(Guid userId, CancellationToken cancellationToken) =>
         await securityUserStore.GetAsync(userId, cancellationToken)
-        ?? throw new InvalidOperationException("Remote access user was not found.");
+        ?? throw new InvalidOperationException("LMS account was not found.");
 
     private async Task ApplyRemoteAccessConfigurationAsync(CancellationToken cancellationToken)
     {

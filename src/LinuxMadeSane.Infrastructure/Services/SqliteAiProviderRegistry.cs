@@ -24,7 +24,10 @@ public sealed class SqliteAiProviderRegistry(
         new("remote-lms-ai-engine", AiProviderType.RemoteLmsAiEngine, "Remote LMS AI Engine", "Secure AI inference routed through another Linux Made Sane instance by way of LMS Connect.", true, true, true, string.Empty, false, false);
     private static readonly IReadOnlyList<AiProviderModelOption> CloudModelCatalog =
     [
-        new(AiProviderType.OpenAi, "gpt-5.4", "GPT-5.4", "Current flagship OpenAI model for complex reasoning and coding.", true, true),
+        new(AiProviderType.OpenAi, "gpt-5.5", "GPT-5.5", "Latest OpenAI flagship model for complex reasoning, coding, and professional work.", true, true),
+        new(AiProviderType.OpenAi, "gpt-5.5-pro", "GPT-5.5 Pro", "Highest-capability GPT-5.5 variant for demanding reasoning work.", true, false),
+        new(AiProviderType.OpenAi, "gpt-5.4", "GPT-5.4", "Current lower-cost OpenAI frontier model for complex reasoning and coding.", true, false),
+        new(AiProviderType.OpenAi, "gpt-5.4-pro", "GPT-5.4 Pro", "Higher-compute GPT-5.4 variant for difficult reasoning and coding tasks.", true, false),
         new(AiProviderType.OpenAi, "gpt-5.4-mini", "GPT-5.4 mini", "Lower-latency GPT-5.4 variant for coding, computer use, and subagents.", true, false),
         new(AiProviderType.OpenAi, "gpt-5.4-nano", "GPT-5.4 nano", "Lowest-cost GPT-5.4-class model for lightweight high-volume tasks.", true, false),
         new(AiProviderType.OpenAi, "gpt-5.2", "GPT-5.2", "Previous GPT-5 generation model for reasoning and coding.", true, false),
@@ -44,13 +47,23 @@ public sealed class SqliteAiProviderRegistry(
         new(AiProviderType.OpenAi, "gpt-5-nano", "GPT-5 nano", "Fastest low-cost OpenAI model for lightweight summaries and classification.", true, false),
         new(AiProviderType.OpenAi, "codex-mini-latest", "Codex mini latest", "Dedicated Codex mini model for coding-oriented environments.", true, false),
         new(AiProviderType.OpenAi, "gpt-4.1", "GPT-4.1", "High-capability non-reasoning OpenAI model with strong tool support.", true, false),
+        new(AiProviderType.OpenAi, "gpt-4.1-mini", "GPT-4.1 mini", "Smaller GPT-4.1 model for lower-latency non-reasoning work.", true, false),
+        new(AiProviderType.OpenAi, "gpt-4.1-nano", "GPT-4.1 nano", "Fastest GPT-4.1 model for lightweight classification and extraction.", true, false),
 
-        new(AiProviderType.Anthropic, "claude-sonnet-4-20250514", "Claude Sonnet 4", "Balanced Claude 4 model with strong reasoning and coding performance.", true, true),
+        new(AiProviderType.Anthropic, "claude-sonnet-4-6", "Claude Sonnet 4.6", "Latest balanced Claude model with strong coding, speed, and long-context reasoning.", true, true),
+        new(AiProviderType.Anthropic, "claude-opus-4-7", "Claude Opus 4.7", "Anthropic's most capable generally available Claude model for complex reasoning and agentic coding.", true, false),
+        new(AiProviderType.Anthropic, "claude-haiku-4-5", "Claude Haiku 4.5", "Fast Claude model with near-frontier intelligence for lighter workloads.", true, false),
+        new(AiProviderType.Anthropic, "claude-haiku-4-5-20251001", "Claude Haiku 4.5 snapshot", "Pinned Claude Haiku 4.5 snapshot.", true, false),
+        new(AiProviderType.Anthropic, "claude-sonnet-4-20250514", "Claude Sonnet 4", "Earlier Claude 4 model with strong reasoning and coding performance.", true, false),
         new(AiProviderType.Anthropic, "claude-opus-4-1-20250805", "Claude Opus 4.1", "Highest-capability Claude 4.1 model.", true, false),
         new(AiProviderType.Anthropic, "claude-3-7-sonnet-20250219", "Claude Sonnet 3.7", "Earlier high-capability Claude model with extended thinking support.", true, false),
         new(AiProviderType.Anthropic, "claude-3-5-haiku-20241022", "Claude Haiku 3.5", "Fast lower-cost Claude model for lighter workloads.", true, false),
 
-        new(AiProviderType.Gemini, "gemini-2.5-pro", "Gemini 2.5 Pro", "Advanced Gemini model for complex reasoning and coding tasks.", true, true),
+        new(AiProviderType.Gemini, "gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite", "Latest stable low-latency Gemini model for high-frequency lightweight tasks.", true, true),
+        new(AiProviderType.Gemini, "gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", "Latest Gemini 3.1 Pro preview for advanced reasoning, coding, and agentic workflows.", true, false),
+        new(AiProviderType.Gemini, "gemini-3-flash-preview", "Gemini 3 Flash Preview", "Gemini 3 Flash preview for frontier-class performance at lower latency and cost.", true, false),
+        new(AiProviderType.Gemini, "gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash-Lite Preview", "Preview Gemini 3.1 Flash-Lite endpoint for fast lightweight work.", true, false),
+        new(AiProviderType.Gemini, "gemini-2.5-pro", "Gemini 2.5 Pro", "Advanced Gemini model for complex reasoning and coding tasks.", true, false),
         new(AiProviderType.Gemini, "gemini-2.5-flash", "Gemini 2.5 Flash", "Balanced Gemini model for faster production traffic.", true, false),
         new(AiProviderType.Gemini, "gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "Fastest low-cost Gemini model for high-throughput workloads.", true, false)
     ];

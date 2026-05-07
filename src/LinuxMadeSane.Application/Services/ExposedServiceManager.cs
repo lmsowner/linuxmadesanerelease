@@ -179,7 +179,11 @@ public sealed class ExposedServiceManager(
                 break;
         }
 
-        var updatedRoutes = MergeTunnelRoutes(prepared.TunnelConfiguration.Routes, prepared.Hostname, FormatLocalServiceOrigin(prepared.LocalServiceUri));
+        var updatedRoutes = MergeTunnelRoutes(
+            prepared.TunnelConfiguration.Routes,
+            prepared.Hostname,
+            FormatLocalServiceOrigin(prepared.LocalServiceUri),
+            prepared.OriginRequestSettings);
         await tunnelService.UpdateConfigurationAsync(
             prepared.ApiToken,
             prepared.Account.Id,
@@ -257,7 +261,8 @@ public sealed class ExposedServiceManager(
             prepared.AllowedEmailDomains,
             prepared.StoredConfig?.CreatedAtUtc ?? now,
             now,
-            null);
+            null,
+            prepared.OriginRequestSettings);
 
         await exposureStore.SaveConfigAsync(config, cancellationToken);
 
@@ -471,6 +476,7 @@ public sealed class ExposedServiceManager(
         var hostname = CloudflareHostnameValidator.BuildAbsoluteHostname(relativeHostname, zone.Name);
         var localServiceUri = ParseLocalServiceUri(editor.LocalServiceUrl);
         var localServiceOrigin = FormatLocalServiceOrigin(localServiceUri);
+        var originRequestSettings = BuildOriginRequestSettings(editor, localServiceUri);
         var warnings = DangerousExposureInspector.Inspect(editor.ServiceName, localServiceUri);
         var storedConfig = await exposureStore.GetConfigByHostnameAsync(hostId, hostname, cancellationToken);
 
@@ -550,7 +556,8 @@ public sealed class ExposedServiceManager(
                     !string.IsNullOrWhiteSpace(connectorStatus.TunnelId) &&
                     connectorStatus.TunnelId.Equals(tunnel.Id, StringComparison.OrdinalIgnoreCase),
                 editor.RunConnectorInstallOnHost,
-                warnings));
+                warnings,
+                originRequestSettings.NoTlsVerify));
 
         return new PreparedExposureContext(
             host,
@@ -572,6 +579,7 @@ public sealed class ExposedServiceManager(
             editor.AccessMode,
             allowedEmails,
             allowedEmailDomains,
+            originRequestSettings,
             plan);
     }
 
@@ -806,7 +814,8 @@ public sealed class ExposedServiceManager(
                     policy?.IncludeEmailDomains ?? [],
                     record.ModifiedAtUtc ?? DateTimeOffset.UtcNow,
                     record.ModifiedAtUtc ?? DateTimeOffset.UtcNow,
-                    null));
+                    null,
+                    route?.OriginRequest));
         }
 
         return discoveredConfigs
@@ -1396,15 +1405,43 @@ public sealed class ExposedServiceManager(
     private static IReadOnlyList<CloudflareTunnelRoute> MergeTunnelRoutes(
         IReadOnlyList<CloudflareTunnelRoute> existingRoutes,
         string hostname,
-        string service)
+        string service,
+        CloudflareOriginRequestSettings originRequestSettings)
     {
         var routes = existingRoutes
             .Where(item => !string.IsNullOrWhiteSpace(item.Hostname) && !item.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        routes.Add(new CloudflareTunnelRoute(hostname, service));
+        routes.Add(new CloudflareTunnelRoute(hostname, service, originRequestSettings));
         routes.Add(new CloudflareTunnelRoute(string.Empty, "http_status:404"));
         return routes;
+    }
+
+    private static CloudflareOriginRequestSettings BuildOriginRequestSettings(CloudflareExposeServiceEditor editor, Uri localServiceUri)
+    {
+        var isHttps = localServiceUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
+
+        return new CloudflareOriginRequestSettings(
+            isHttps ? editor.OriginServerName.Trim() : string.Empty,
+            isHttps ? editor.CertificateAuthorityPool.Trim() : string.Empty,
+            editor.NoTlsVerify && isHttps,
+            Math.Max(1, editor.TlsTimeoutSeconds),
+            editor.Http2Origin && isHttps,
+            editor.MatchSniToHost && isHttps,
+            editor.HttpHostHeader.Trim(),
+            editor.DisableChunkedEncoding,
+            Math.Max(1, editor.ConnectTimeoutSeconds),
+            editor.NoHappyEyeballs,
+            NormalizeProxyType(editor.ProxyType),
+            Math.Max(1, editor.KeepAliveTimeoutSeconds),
+            Math.Max(0, editor.KeepAliveConnections),
+            Math.Max(1, editor.TcpKeepAliveSeconds));
+    }
+
+    private static string NormalizeProxyType(string? proxyType)
+    {
+        var value = proxyType?.Trim() ?? string.Empty;
+        return value.Equals("socks", StringComparison.OrdinalIgnoreCase) ? "socks" : string.Empty;
     }
 
     private static IReadOnlyList<CloudflareTunnelRoute> RemoveTunnelRoute(
@@ -1479,6 +1516,7 @@ public sealed class ExposedServiceManager(
             AccessMode = discovered.AccessMode,
             AllowedEmails = discovered.AllowedEmails.Count > 0 ? discovered.AllowedEmails : stored.AllowedEmails,
             AllowedEmailDomains = discovered.AllowedEmailDomains.Count > 0 ? discovered.AllowedEmailDomains : stored.AllowedEmailDomains,
+            OriginRequestSettings = discovered.OriginRequestSettings ?? stored.OriginRequestSettings,
             UpdatedAtUtc = Max(stored.UpdatedAtUtc, discovered.UpdatedAtUtc)
         };
 
@@ -1488,6 +1526,7 @@ public sealed class ExposedServiceManager(
         !string.Equals(stored.AccessApplicationId ?? string.Empty, discovered.AccessApplicationId ?? string.Empty, StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(stored.AccessPolicyId ?? string.Empty, discovered.AccessPolicyId ?? string.Empty, StringComparison.OrdinalIgnoreCase) ||
         !string.Equals(NormalizeUrl(stored.LocalServiceUrl), NormalizeUrl(discovered.LocalServiceUrl), StringComparison.OrdinalIgnoreCase) ||
+        !OriginRequestSettingsEqual(stored.OriginRequestSettings, discovered.OriginRequestSettings) ||
         stored.AccessMode != discovered.AccessMode ||
         !SetEquals(stored.AllowedEmails, discovered.AllowedEmails) ||
         !SetEquals(stored.AllowedEmailDomains, discovered.AllowedEmailDomains);
@@ -1501,6 +1540,32 @@ public sealed class ExposedServiceManager(
                 right
                     .Where(static value => !string.IsNullOrWhiteSpace(value))
                     .Select(static value => value.Trim()));
+
+    private static bool OriginRequestSettingsEqual(
+        CloudflareOriginRequestSettings? left,
+        CloudflareOriginRequestSettings? right) =>
+        NormalizeOriginRequestSettings(left) == NormalizeOriginRequestSettings(right);
+
+    private static CloudflareOriginRequestSettings NormalizeOriginRequestSettings(CloudflareOriginRequestSettings? settings)
+    {
+        settings ??= CloudflareOriginRequestSettings.Default;
+
+        return new CloudflareOriginRequestSettings(
+            settings.OriginServerName.Trim(),
+            settings.CertificateAuthorityPool.Trim(),
+            settings.NoTlsVerify,
+            Math.Max(1, settings.TlsTimeoutSeconds),
+            settings.Http2Origin,
+            settings.MatchSniToHost,
+            settings.HttpHostHeader.Trim(),
+            settings.DisableChunkedEncoding,
+            Math.Max(1, settings.ConnectTimeoutSeconds),
+            settings.NoHappyEyeballs,
+            settings.ProxyType.Trim(),
+            Math.Max(1, settings.KeepAliveTimeoutSeconds),
+            Math.Max(0, settings.KeepAliveConnections),
+            Math.Max(1, settings.TcpKeepAliveSeconds));
+    }
 
     private static string NormalizeUrl(string? value) =>
         string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim().TrimEnd('/');
@@ -1545,5 +1610,6 @@ public sealed class ExposedServiceManager(
         ExposedServiceAccessMode AccessMode,
         IReadOnlyList<string> AllowedEmails,
         IReadOnlyList<string> AllowedEmailDomains,
+        CloudflareOriginRequestSettings OriginRequestSettings,
         ExposedServiceDryRunPlan Plan);
 }

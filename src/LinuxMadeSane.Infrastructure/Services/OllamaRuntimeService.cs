@@ -18,6 +18,7 @@ public sealed class OllamaRuntimeService(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const string DefaultEndpoint = "http://127.0.0.1:11434";
+    private const string DefaultKeepAlive = "1h";
 
     public async Task<LocalAiRuntime> InspectAsync(CancellationToken cancellationToken = default)
     {
@@ -386,7 +387,8 @@ public sealed class OllamaRuntimeService(
         {
             ["model"] = modelId,
             ["stream"] = false,
-            ["messages"] = messages
+            ["messages"] = messages,
+            ["keep_alive"] = DefaultKeepAlive
         };
 
         if (request.AvailableTools.Count > 0)

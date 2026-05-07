@@ -22,4 +22,5 @@ public sealed record ExposedServiceConfig(
     IReadOnlyList<string> AllowedEmailDomains,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? DisabledAtUtc);
+    DateTimeOffset? DisabledAtUtc,
+    CloudflareOriginRequestSettings? OriginRequestSettings = null);

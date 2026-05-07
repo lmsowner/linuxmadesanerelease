@@ -119,6 +119,30 @@ internal sealed class CloudflareTunnelIngressDto
 {
     public string? Hostname { get; set; }
     public string Service { get; set; } = string.Empty;
+    public CloudflareTunnelOriginRequestDto? OriginRequest { get; set; }
+}
+
+internal sealed class CloudflareTunnelOriginRequestDto
+{
+    [JsonPropertyName("noTLSVerify")]
+    public bool? NoTlsVerify { get; set; }
+
+    public string? OriginServerName { get; set; }
+
+    [JsonPropertyName("matchSNItoHost")]
+    public bool? MatchSniToHost { get; set; }
+
+    public string? CaPool { get; set; }
+    public int? TlsTimeout { get; set; }
+    public bool? Http2Origin { get; set; }
+    public string? HttpHostHeader { get; set; }
+    public bool? DisableChunkedEncoding { get; set; }
+    public int? ConnectTimeout { get; set; }
+    public bool? NoHappyEyeballs { get; set; }
+    public string? ProxyType { get; set; }
+    public int? KeepAliveTimeout { get; set; }
+    public int? KeepAliveConnections { get; set; }
+    public int? TcpKeepAlive { get; set; }
 }
 
 internal sealed class CloudflareAccessApplicationDto
@@ -184,12 +208,32 @@ internal static class CloudflareMappings
     {
         var routes = dto.Config?.Ingress
             .Where(item => !string.IsNullOrWhiteSpace(item.Service))
-            .Select(item => new CloudflareTunnelRoute(item.Hostname ?? string.Empty, item.Service))
+            .Select(item => new CloudflareTunnelRoute(
+                item.Hostname ?? string.Empty,
+                item.Service,
+                item.OriginRequest?.ToModel()))
             .ToArray()
             ?? [];
 
         return new CloudflareTunnelConfiguration(routes);
     }
+
+    private static CloudflareOriginRequestSettings ToModel(this CloudflareTunnelOriginRequestDto dto) =>
+        new(
+            dto.OriginServerName ?? string.Empty,
+            dto.CaPool ?? string.Empty,
+            dto.NoTlsVerify == true,
+            dto.TlsTimeout ?? 10,
+            dto.Http2Origin == true,
+            dto.MatchSniToHost == true,
+            dto.HttpHostHeader ?? string.Empty,
+            dto.DisableChunkedEncoding == true,
+            dto.ConnectTimeout ?? 30,
+            dto.NoHappyEyeballs == true,
+            dto.ProxyType ?? string.Empty,
+            dto.KeepAliveTimeout ?? 90,
+            dto.KeepAliveConnections ?? 100,
+            dto.TcpKeepAlive ?? 30);
 
     public static CloudflareAccessApplication ToModel(this CloudflareAccessApplicationDto dto, string accountId)
     {

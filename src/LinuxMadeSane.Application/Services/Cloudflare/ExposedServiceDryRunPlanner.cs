@@ -39,7 +39,7 @@ public static class ExposedServiceDryRunPlanner
 
         steps.Add(new ExposedServicePlanStep(
             context.HasHostnameRoute ? "Update hostname route" : "Create hostname route",
-            $"{(context.HasHostnameRoute ? "Update" : "Create")} the tunnel route {context.Hostname} -> {context.LocalServiceUrl}.",
+            $"{(context.HasHostnameRoute ? "Update" : "Create")} the tunnel route {context.Hostname} -> {context.LocalServiceUrl}{(context.NoTlsVerify ? " with origin TLS verification disabled." : ".")}",
             true));
 
         steps.Add(new ExposedServicePlanStep(
@@ -99,4 +99,5 @@ public sealed record ExposedServicePlanningContext(
     bool HasInstalledConnector,
     bool ConnectorMatchesSelectedTunnel,
     bool RunConnectorInstallOnHost,
-    IReadOnlyList<ExposureWarning> Warnings);
+    IReadOnlyList<ExposureWarning> Warnings,
+    bool NoTlsVerify = false);
