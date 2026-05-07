@@ -15,12 +15,15 @@ The public installer:
 - stores data in `/var/lib/linuxmadesane/ce`
 - writes config to `/etc/linuxmadesane/ce/service.env`
 - creates the `linux-made-sane.service` systemd unit
+- creates a dedicated `linuxmadesane` service account for the LMS web service
 - starts the service and checks `/healthz`
+
+The installer does not silently grant root access. Elevated unattended automation needs explicit LMS runner access with key-based login and deliberate passwordless sudo. See [Security model](SECURITY.md).
 
 ## Install Options
 
 ```bash
-sudo VERSION=2026.05.06.1 RID=linux-arm64 PORT=5095 bash install.sh
+sudo VERSION=2026.05.07.0 RID=linux-arm64 PORT=5095 bash install.sh
 ```
 
 Supported environment variables:
@@ -38,7 +41,7 @@ Supported environment variables:
 Supported flags:
 
 ```bash
-sudo bash install.sh --version 2026.05.06.1 --rid linux-arm64 --port 5095
+sudo bash install.sh --version 2026.05.07.0 --rid linux-arm64 --port 5095
 sudo bash install.sh --skip-host-packages
 sudo bash install.sh --no-start
 ```

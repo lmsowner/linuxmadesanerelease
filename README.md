@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/
 For a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/install.sh | sudo VERSION=2026.05.06.1 bash
+curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/install.sh | sudo VERSION=2026.05.07.0 bash
 ```
 
 ## Supported Linux Builds
@@ -62,11 +62,18 @@ The core app installs without these tools, but some workflows need them:
 
 The installer tries to install those packages when it recognizes the distro package manager. Use `--skip-host-packages` when you manage packages separately.
 
+## Security Model
+
+LMS is an automation control plane. The installer creates a dedicated `linuxmadesane` service account for the web service, but it does not silently grant root access.
+
+For unattended terminals, runbooks, patching, and service repair, configure a dedicated LMS runner account with key-based login and deliberate passwordless sudo. See [Security model](docs/SECURITY.md).
+
 ## More Docs
 
 - [Install details](docs/INSTALL.md)
+- [Security model](docs/SECURITY.md)
 - [Release assets](docs/RELEASES.md)
 - [CE source](docs/SOURCE.md)
 - [Distro and Raspberry Pi testing](docs/TESTING.md)
 
-This public repository intentionally contains installer/docs only. Application source, Pro packages, portal packages, private configuration, and credentials are not part of the public release channel.
+This public repository intentionally contains CE source, installer/docs, and CE release assets only. Pro packages, portal packages, private configuration, and credentials are not part of the public release channel.

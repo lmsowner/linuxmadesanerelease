@@ -210,6 +210,10 @@ lms_prepare_live_service_user() {
   local service_group="$2"
   local home_directory="$3"
 
+  # Security contract: this account runs the LMS web service and owns LMS data.
+  # Do not treat service account creation as implicit root authorization.
+  # Privileged runner access must be an explicit operator decision with
+  # key-based login and a deliberate passwordless sudo policy.
   if getent group "$service_group" >/dev/null 2>&1; then
     :
   else

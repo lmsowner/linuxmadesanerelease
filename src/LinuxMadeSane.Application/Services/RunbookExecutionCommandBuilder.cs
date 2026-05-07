@@ -4,6 +4,11 @@ namespace LinuxMadeSane.Application.Services;
 
 public static class RunbookExecutionCommandBuilder
 {
+    // LMS runbooks must never block on an interactive sudo password prompt. Elevated
+    // automation requires an explicitly configured runner account with passwordless
+    // sudo, so sudo-marked commands use -n and fail cleanly when that contract is absent.
+    private const string NonInteractiveSudo = "sudo -n";
+
     public static bool IsScript(string content) =>
         NormalizeContent(content).Length > 0;
 
@@ -82,7 +87,7 @@ public static class RunbookExecutionCommandBuilder
         builder.Append("chmod 700 \"$lms_runbook_tmp\"; ");
         if (useSudoPrefix)
         {
-            builder.Append("sudo bash \"$lms_runbook_tmp\"; lms_runbook_rc=$?; sudo rm -f \"$lms_runbook_tmp\"; ");
+            builder.Append($"{NonInteractiveSudo} bash \"$lms_runbook_tmp\"; lms_runbook_rc=$?; {NonInteractiveSudo} rm -f \"$lms_runbook_tmp\"; ");
         }
         else
         {
@@ -105,8 +110,8 @@ public static class RunbookExecutionCommandBuilder
     private static string BuildBatchScriptCommand(string scriptBody, bool useSudoPrefix)
     {
         var encodedScript = Convert.ToBase64String(Encoding.UTF8.GetBytes(scriptBody));
-        var cleanupCommand = useSudoPrefix ? "sudo rm -f \"$lms_runbook_tmp\"" : "rm -f \"$lms_runbook_tmp\"";
-        var executeCommand = useSudoPrefix ? "sudo bash \"$lms_runbook_tmp\"" : "bash \"$lms_runbook_tmp\"";
+        var cleanupCommand = useSudoPrefix ? $"{NonInteractiveSudo} rm -f \"$lms_runbook_tmp\"" : "rm -f \"$lms_runbook_tmp\"";
+        var executeCommand = useSudoPrefix ? $"{NonInteractiveSudo} bash \"$lms_runbook_tmp\"" : "bash \"$lms_runbook_tmp\"";
         return $"lms_runbook_tmp=\"/tmp/lms-runbook-$(date +%s)-$$.sh\"; printf '%s' '{encodedScript}' | base64 -d > \"$lms_runbook_tmp\"; chmod 700 \"$lms_runbook_tmp\"; {executeCommand}; lms_runbook_rc=$?; {cleanupCommand}; exit \"$lms_runbook_rc\"";
     }
 

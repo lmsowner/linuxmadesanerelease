@@ -218,6 +218,11 @@ CURRENT_DIR="$INSTALL_ROOT/current"
 ENV_FILE="$CONFIG_ROOT/service.env"
 UNIT_FILE="/etc/systemd/system/$SERVICE_UNIT"
 
+# Security contract: the installer creates a dedicated account for the LMS web
+# service and data ownership. It does not silently grant root access. Elevated
+# unattended automation requires an explicit runner/sudoers decision by the
+# operator; sudo-marked LMS runbooks use non-interactive sudo and fail clearly
+# when passwordless elevation is not configured.
 if getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
   :
 else
