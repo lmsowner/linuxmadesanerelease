@@ -1,6 +1,18 @@
 # Release Assets
 
-Public GitHub Releases should contain CE assets only.
+Current Community Edition release assets are served by the public website:
+
+```text
+https://www.linuxmadesane.com
+```
+
+The canonical installer is:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
+```
+
+The public repository remains a safe public CE source/docs surface. It must not receive the public website project, Pro/Enterprise packages, portal packages, private manifests, license secrets, databases, local configuration, credentials, or proprietary implementation details.
 
 Expected files for each release:
 
@@ -12,15 +24,15 @@ SHA256SUMS
 release-manifest-<version>.json
 ```
 
-The installer downloads the matching tarball for the detected runtime ID and verifies it against `SHA256SUMS` when available.
+The installer downloads the matching tarball for the detected runtime ID from the website and verifies it against `SHA256SUMS` when available.
 
-During early distro testing, the same CE files may also be committed under:
+The website serves release assets from its configured Community release directory. The private build workflow stages CE tarballs there after the private release matrix is built.
+
+The old repo-hosted package fallback is retired for current releases. Do not add new package tarballs under:
 
 ```text
 packages/<version>/
 packages/latest.txt
 ```
 
-That repo-hosted package path is a fallback so the one-line installer can work before the formal GitHub Release upload process is in place.
-
-Do not upload Pro, portal-local, private manifests, private checksums, app source, local config files, database files, or credentials to the public release repository.
+Historical files may still exist in the repository, but new download testing should use `https://www.linuxmadesane.com/install.sh`.

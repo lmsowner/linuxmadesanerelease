@@ -1,15 +1,23 @@
-# Linux Made Sane Releases
+# Linux Made Sane Community Edition
 
-This repository is the public release channel for Linux Made Sane.
+This repository is the public Community Edition release and documentation surface for Linux Made Sane.
 
 Linux Made Sane is a local-first Linux administration web app for managing hosts, terminals, files, services, shares, remote access, AI-assisted operations, and media-library workflows.
+
+Current Community downloads are served by the public website:
+
+```text
+https://www.linuxmadesane.com
+```
+
+Do not put the public website project, Pro/Enterprise packages, portal packages, private manifests, license secrets, private configuration, databases, credentials, or proprietary implementation details in this repository.
 
 ## Quick Install
 
 On a Linux machine with systemd:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/install.sh | sudo bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
 ```
 
 Then open:
@@ -18,17 +26,43 @@ Then open:
 http://127.0.0.1:5080
 ```
 
+Re-run the same install command to update an existing Community install in place.
+
+Uninstall:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --uninstall
+```
+
+Remove app, data, and config:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --purge
+```
+
 For a different port:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/install.sh | sudo PORT=5095 bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 5095
 ```
 
 For a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/install.sh | sudo VERSION=2026.05.07.0 bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=2026.05.08.0 bash
 ```
+
+## What The Installer Does
+
+- detects `linux-x64`, `linux-arm64`, or `linux-arm`
+- downloads the matching CE tarball from `https://www.linuxmadesane.com`
+- installs to `/opt/linuxmadesane/ce`
+- stores data in `/var/lib/linuxmadesane/ce`
+- writes config to `/etc/linuxmadesane/ce/service.env`
+- creates and manages the `linux-made-sane.service` systemd unit
+- installs useful host packages on apt-based systems unless disabled
+- configures localhost SSH access for LMS automation unless disabled
+- stops an existing service before replacing files during an update
 
 ## Supported Linux Builds
 
@@ -40,33 +74,15 @@ Release assets are published as self-contained tarballs for:
 
 The installer detects the runtime ID from `uname -m`. Override it with `RID=linux-arm64` or `RID=linux-arm` when testing unusual Raspberry Pi or distro images.
 
-For early distro testing, CE package tarballs may be served directly from this repository under `packages/` until the formal GitHub Releases flow is used.
-
 ## Source
 
-This repository also contains the CE source tree needed to build the public app. See [CE source](docs/SOURCE.md).
+This repository contains the public CE source subset needed to build the Community app. See [CE source](docs/SOURCE.md).
 
 Build from source:
 
 ```bash
 dotnet build src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj
 ```
-
-## Optional Host Tools
-
-The core app installs without these tools, but some workflows need them:
-
-- `ffmpeg` for media preview/transcoding
-- Samba client tooling for share discovery
-- `cifs-utils` for mount workflows
-
-The installer tries to install those packages when it recognizes the distro package manager. Use `--skip-host-packages` when you manage packages separately.
-
-## Security Model
-
-LMS is an automation control plane. The installer creates a dedicated `linuxmadesane` service account for the web service, but it does not silently grant root access.
-
-For unattended terminals, runbooks, patching, and service repair, configure a dedicated LMS runner account with key-based login and deliberate passwordless sudo. See [Security model](docs/SECURITY.md).
 
 ## More Docs
 
@@ -75,5 +91,3 @@ For unattended terminals, runbooks, patching, and service repair, configure a de
 - [Release assets](docs/RELEASES.md)
 - [CE source](docs/SOURCE.md)
 - [Distro and Raspberry Pi testing](docs/TESTING.md)
-
-This public repository intentionally contains CE source, installer/docs, and CE release assets only. Pro packages, portal packages, private configuration, and credentials are not part of the public release channel.

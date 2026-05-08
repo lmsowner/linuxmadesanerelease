@@ -1,6 +1,6 @@
 # CE Source
 
-This repository contains the Linux Made Sane CE source tree needed to build the public CE app.
+This repository contains the public Linux Made Sane CE source subset needed to build the Community app.
 
 Included projects:
 
@@ -10,13 +10,12 @@ Included projects:
 - `src/LinuxMadeSane.Core`
 - `src/LinuxMadeSane.Connect.Protocol`
 
-Excluded private/non-CE projects:
+Not included:
 
-- `LinuxMadeSane.Connect.Client`
-- `LinuxMadeSane.Portal.Web`
-- `LinuxMadeSane.Portal.Core`
-- `LinuxMadeSane.Portal.Infrastructure`
-- private portal deployment docs
+- public website project
+- Pro/Enterprise packages and code
+- portal projects and deployment details
+- licensing secrets and private manifests
 - local runtime databases and private artifacts
 
 Build from source:

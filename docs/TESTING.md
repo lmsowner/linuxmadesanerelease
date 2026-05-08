@@ -5,7 +5,7 @@ Use the public installer on clean machines where possible. That gives the closes
 ## Minimum Smoke Test
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/install.sh | sudo bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
 curl -fsS http://127.0.0.1:5080/healthz
 sudo systemctl status linux-made-sane.service
 ```
@@ -24,13 +24,13 @@ Record:
 Use `linux-arm64` for 64-bit Raspberry Pi OS or Ubuntu Server images:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/install.sh | sudo RID=linux-arm64 bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env RID=linux-arm64 bash
 ```
 
 Use `linux-arm` for 32-bit images:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lmsowner/linuxmadesanerelease/main/install.sh | sudo RID=linux-arm bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env RID=linux-arm bash
 ```
 
 ## Useful Diagnostics
@@ -45,13 +45,23 @@ ls -lah /opt/linuxmadesane/ce /var/lib/linuxmadesane/ce /etc/linuxmadesane/ce
 
 ## Roll Forward
 
-Re-run the installer with a newer `VERSION`. Releases are installed into versioned folders and `current` is updated to point at the newest release.
+Re-run the installer to update to the latest available Community release:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
+```
+
+Test a specific version with `LMS_VERSION`:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=2026.05.08.0 bash
+```
+
+Releases are installed into versioned folders and `current` is updated to point at the newest installed release.
 
 ## Remove Test Install
 
 ```bash
-sudo systemctl disable --now linux-made-sane.service
-sudo rm -f /etc/systemd/system/linux-made-sane.service
-sudo systemctl daemon-reload
-sudo rm -rf /opt/linuxmadesane/ce /var/lib/linuxmadesane/ce /etc/linuxmadesane/ce
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --uninstall
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --purge
 ```
