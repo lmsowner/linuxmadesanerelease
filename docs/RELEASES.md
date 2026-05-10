@@ -35,4 +35,4 @@ packages/<version>/
 packages/latest.txt
 ```
 
-Historical files may still exist in the repository, but new download testing should use `https://www.linuxmadesane.com/install.sh`.
+Current public repository commits should not include release tarballs. Build artifacts are staged into the website release directories by the private build workflow, and download testing should use `https://www.linuxmadesane.com/install.sh`.
