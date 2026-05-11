@@ -17,7 +17,9 @@ The public installer:
 - creates the `linux-made-sane.service` systemd unit
 - creates a dedicated `linuxmadesane` service account for the LMS web service
 - configures localhost SSH runner access for terminal, runbook, and scheduled automation workflows unless disabled
+- creates `/var/lib/linuxmadesane/runner/workspace` as the default writable local runner workspace
 - stops any existing `linux-made-sane.service` before replacing application files during an update
+- installs `linux-made-sane-update` for LMS-managed self-updates
 - starts the service and checks `/healthz`
 
 See [Security model](SECURITY.md) before changing runner, SSH, or sudo defaults.
@@ -43,6 +45,7 @@ Supported environment variables:
 - `LMS_CONFIGURE_LOCAL_SSH`: set `false` to skip localhost SSH runner setup
 - `LMS_ENABLE_LOCAL_SUDO`: set `false` to skip passwordless sudo setup for local automation
 - `LMS_BASE_URL`: override the public website base URL for staging tests
+- `LMS_UPDATE_HELPER_PATH`: default `/usr/local/sbin/linux-made-sane-update`
 
 Supported flags:
 
@@ -64,6 +67,7 @@ sudo systemctl start linux-made-sane.service
 sudo systemctl stop linux-made-sane.service
 sudo systemctl restart linux-made-sane.service
 sudo journalctl -u linux-made-sane.service -n 100 --no-pager
+sudo /usr/local/sbin/linux-made-sane-update
 ```
 
 ## Cold Start

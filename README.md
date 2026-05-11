@@ -62,6 +62,8 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=2026.
 - creates and manages the `linux-made-sane.service` systemd unit
 - installs useful host packages on apt-based systems unless disabled
 - configures localhost SSH access for LMS automation unless disabled
+- creates a writable local runner workspace for terminals, files, runbooks, and scheduled jobs
+- installs the local update helper used by LMS-managed updates
 - stops an existing service before replacing files during an update
 
 ## Supported Linux Builds

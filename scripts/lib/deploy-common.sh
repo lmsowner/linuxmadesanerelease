@@ -21,6 +21,17 @@ lms_require_command() {
   command -v "$1" >/dev/null 2>&1 || lms_die "required command not found: $1"
 }
 
+lms_is_truthy() {
+  case "${1:-}" in
+    true|True|TRUE|1|yes|Yes|YES|on|On|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+lms_has_systemd() {
+  command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
+}
+
 lms_install_host_packages() {
   local packages=("$@")
   [[ ${#packages[@]} -gt 0 ]] || return
@@ -67,6 +78,195 @@ lms_install_host_packages() {
   lms_log "Installing host packages: ${missing[*]}"
   DEBIAN_FRONTEND=noninteractive apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y -- "${missing[@]}"
+}
+
+lms_enable_openssh_server() {
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return
+  fi
+
+  if ! lms_has_systemd; then
+    lms_log "systemd not detected; skipping OpenSSH service enable/start"
+    return
+  fi
+
+  if systemctl list-unit-files ssh.service >/dev/null 2>&1; then
+    lms_log "Enabling OpenSSH server"
+    systemctl enable --now ssh.service
+    return
+  fi
+
+  if systemctl list-unit-files sshd.service >/dev/null 2>&1; then
+    lms_log "Enabling OpenSSH server"
+    systemctl enable --now sshd.service
+    return
+  fi
+
+  lms_log "OpenSSH server unit was not found; install or start sshd before using local terminal sessions"
+}
+
+lms_prepare_local_ssh_runner() {
+  local service_user="$1"
+  local service_group="$2"
+  local config_root="$3"
+  local runner_user="$4"
+  local runner_group="$5"
+  local runner_home="$6"
+  local enable_local_sudo="${7:-true}"
+  local runner_workspace="${8:-$runner_home/workspace}"
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    lms_log "Skipping localhost SSH runner while staging under LMS_DEST_ROOT"
+    return
+  fi
+
+  lms_require_command useradd
+  lms_require_command ssh-keygen
+
+  if getent group "$runner_group" >/dev/null 2>&1; then
+    :
+  else
+    groupadd --system "$runner_group"
+  fi
+
+  if id -u "$runner_user" >/dev/null 2>&1; then
+    usermod --shell /bin/bash "$runner_user" >/dev/null 2>&1 || true
+    mkdir -p "$runner_home"
+  else
+    useradd \
+      --system \
+      --gid "$runner_group" \
+      --home-dir "$runner_home" \
+      --create-home \
+      --shell /bin/bash \
+      "$runner_user"
+  fi
+
+  passwd -l "$runner_user" >/dev/null 2>&1 || true
+
+  local ssh_dir="$runner_home/.ssh"
+  local workspace_dir="$runner_workspace"
+  local key_dir="$config_root/ssh"
+  local key_file="$key_dir/lms_local_runner_ed25519"
+  local public_key_file="$key_file.pub"
+  local authorized_keys="$ssh_dir/authorized_keys"
+
+  mkdir -p "$ssh_dir" "$workspace_dir" "$key_dir"
+  if [[ ! -s "$key_file" || ! -s "$public_key_file" ]]; then
+    rm -f "$key_file" "$public_key_file"
+    ssh-keygen -q -t ed25519 -N "" -C "linux-made-sane-local-runner@$(hostname 2>/dev/null || printf localhost)" -f "$key_file"
+  fi
+
+  touch "$authorized_keys"
+  if ! grep -Fxq "$(cat "$public_key_file")" "$authorized_keys"; then
+    cat "$public_key_file" >> "$authorized_keys"
+    printf '\n' >> "$authorized_keys"
+  fi
+
+  chown -R "$runner_user:$runner_group" "$runner_home"
+  chown -R "$runner_user:$runner_group" "$workspace_dir"
+  usermod -a -G "$runner_group" "$service_user" >/dev/null 2>&1 || true
+  chmod 750 "$runner_home"
+  chmod 770 "$workspace_dir"
+  chmod 700 "$ssh_dir"
+  chmod 600 "$authorized_keys"
+  chown -R "$service_user:$service_group" "$key_dir"
+  chmod 750 "$key_dir"
+  chmod 600 "$key_file"
+  chmod 644 "$public_key_file"
+
+  if lms_is_truthy "$enable_local_sudo"; then
+    lms_write_local_sudoers "$service_user" "$runner_user"
+  fi
+
+  lms_log "Prepared localhost SSH runner $runner_user with key-only authentication"
+}
+
+lms_write_local_sudoers() {
+  local service_user="$1"
+  local runner_user="$2"
+  local sudoers_file="/etc/sudoers.d/linux-made-sane"
+
+  command -v sudo >/dev/null 2>&1 || {
+    lms_log "sudo is not installed; skipping passwordless sudo policy"
+    return
+  }
+
+  cat > "$sudoers_file" <<SUDOERS
+$service_user ALL=(ALL) NOPASSWD:ALL
+$runner_user ALL=(ALL) NOPASSWD:ALL
+SUDOERS
+  chmod 440 "$sudoers_file"
+
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "$sudoers_file" >/dev/null
+  fi
+}
+
+lms_write_update_helper() {
+  local service_user="$1"
+  local base_url="${2:-https://www.linuxmadesane.com}"
+  local helper_path="${3:-/usr/local/sbin/linux-made-sane-update}"
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    lms_log "Skipping update helper while staging under LMS_DEST_ROOT"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    lms_log "Skipping update helper because the installer is not running as root"
+    return
+  fi
+
+  local helper_dir
+  helper_dir="$(dirname "$helper_path")"
+  mkdir -p "$helper_dir"
+
+  cat > "$helper_path" <<HELPER
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_URL="\${LMS_INSTALL_URL:-$base_url/install.sh}"
+SOURCE="\${LMS_SOURCE:-lms-auto-update}"
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required" >&2
+  exit 127
+fi
+
+if [[ -z "\${LMS_UPDATE_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  UNIT_NAME="linux-made-sane-self-update-\$(date -u +%Y%m%d%H%M%S)"
+  exec systemd-run \
+    --unit="\$UNIT_NAME" \
+    --collect \
+    --wait \
+    --pipe \
+    --property=Type=exec \
+    env LMS_UPDATE_DETACHED=1 LMS_INSTALL_URL="\$INSTALL_URL" LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" "\$0" "\$@"
+fi
+
+curl -fsSL "\$INSTALL_URL" | env LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" bash -s -- --install --start "\$@"
+HELPER
+  chmod 755 "$helper_path"
+  chown root:root "$helper_path" 2>/dev/null || true
+
+  command -v sudo >/dev/null 2>&1 || {
+    lms_log "sudo is not installed; skipping update helper sudo policy"
+    return
+  }
+
+  local sudoers_file="/etc/sudoers.d/linux-made-sane-update"
+  cat > "$sudoers_file" <<SUDOERS
+$service_user ALL=(root) NOPASSWD: $helper_path
+$service_user ALL=(root) NOPASSWD: $helper_path *
+SUDOERS
+  chmod 440 "$sudoers_file"
+
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "$sudoers_file" >/dev/null
+  fi
+
+  lms_log "Prepared LMS update helper $helper_path"
 }
 
 lms_reset_dir() {
@@ -211,9 +411,7 @@ lms_prepare_live_service_user() {
   local home_directory="$3"
 
   # Security contract: this account runs the LMS web service and owns LMS data.
-  # Do not treat service account creation as implicit root authorization.
-  # Privileged runner access must be an explicit operator decision with
-  # key-based login and a deliberate passwordless sudo policy.
+  # Privileged local access is configured separately by lms_prepare_local_ssh_runner.
   if getent group "$service_group" >/dev/null 2>&1; then
     :
   else
