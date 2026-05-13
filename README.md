@@ -114,4 +114,6 @@ It is free for personal, homelab, educational, non-profit, and internal commerci
 
 A commercial license from Richard D. Kiernan is required for hosted, MSP, SaaS, white-label, resale, or third-party managed-service use.
 
+Linux Made Sane is provided as-is, with no warranties, express or implied. You are responsible for how you install, configure, expose, and operate it, and you use it at your own risk.
+
 See [LICENSE.md](LICENSE.md).
