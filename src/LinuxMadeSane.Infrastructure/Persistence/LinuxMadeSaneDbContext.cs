@@ -1,3 +1,4 @@
+using LinuxMadeSane.Core.Models;
 using LinuxMadeSane.Infrastructure.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
 
@@ -14,6 +15,10 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<LinuxServiceEntity> LinuxServices => Set<LinuxServiceEntity>();
     public DbSet<ScheduledTaskEntity> ScheduledTasks => Set<ScheduledTaskEntity>();
     public DbSet<CaddyProxyRouteEntity> CaddyProxyRoutes => Set<CaddyProxyRouteEntity>();
+    public DbSet<EdgeGatewayRouteEntity> EdgeGatewayRoutes => Set<EdgeGatewayRouteEntity>();
+    public DbSet<EdgeGatewayAuditEntryEntity> EdgeGatewayAuditEntries => Set<EdgeGatewayAuditEntryEntity>();
+    public DbSet<EdgeGatewaySettingsEntity> EdgeGatewaySettings => Set<EdgeGatewaySettingsEntity>();
+    public DbSet<MessagingEmailSettingsEntity> MessagingEmailSettings => Set<MessagingEmailSettingsEntity>();
     public DbSet<SftpHostSettingsEntity> SftpHostSettings => Set<SftpHostSettingsEntity>();
     public DbSet<SftpManagedUserEntity> SftpManagedUsers => Set<SftpManagedUserEntity>();
     public DbSet<SftpPublicKeyEntity> SftpPublicKeys => Set<SftpPublicKeyEntity>();
@@ -37,6 +42,8 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<FileBrowserShortcutEntity> FileBrowserShortcuts => Set<FileBrowserShortcutEntity>();
     public DbSet<ProtectedSecretEntity> ProtectedSecrets => Set<ProtectedSecretEntity>();
     public DbSet<SecurityUserEntity> SecurityUsers => Set<SecurityUserEntity>();
+    public DbSet<SecurityPasskeyCredentialEntity> SecurityPasskeyCredentials => Set<SecurityPasskeyCredentialEntity>();
+    public DbSet<LocalInstanceIdentityEntity> LocalInstanceIdentities => Set<LocalInstanceIdentityEntity>();
     public DbSet<TrustedNetworkEntryEntity> TrustedNetworkEntries => Set<TrustedNetworkEntryEntity>();
     public DbSet<CloudflareSettingsEntity> CloudflareSettings => Set<CloudflareSettingsEntity>();
     public DbSet<ExposedServiceConfigEntity> ExposedServiceConfigs => Set<ExposedServiceConfigEntity>();
@@ -248,6 +255,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.HasKey(command => command.Id);
             entity.Property(command => command.Name).HasMaxLength(128);
             entity.Property(command => command.IsQuickAccess).HasDefaultValue(false);
+            entity.Property(command => command.IsGlobalFavorite).HasDefaultValue(false);
             entity.Property(command => command.IsTemplate).HasDefaultValue(false);
             entity.Property(command => command.ParameterDefinitionsJson).HasColumnType("TEXT");
             entity.Property(command => command.ParameterValueSnapshotJson).HasColumnType("TEXT");
@@ -315,6 +323,63 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(route => route.Hostname).HasMaxLength(255);
             entity.Property(route => route.UpstreamUrl).HasMaxLength(512);
             entity.Property(route => route.Description).HasMaxLength(320);
+        });
+
+        modelBuilder.Entity<EdgeGatewayRouteEntity>(entity =>
+        {
+            entity.ToTable("edge_gateway_routes");
+            entity.HasKey(route => route.Id);
+            entity.Property(route => route.DisplayName).HasMaxLength(160);
+            entity.Property(route => route.Hostname).HasMaxLength(255);
+            entity.Property(route => route.DomainName).HasMaxLength(255);
+            entity.Property(route => route.TargetHost).HasMaxLength(255);
+            entity.Property(route => route.TargetPathPrefix).HasMaxLength(255);
+            entity.Property(route => route.AllowedUsers).HasColumnType("TEXT");
+            entity.Property(route => route.AllowedGroups).HasColumnType("TEXT");
+            entity.Property(route => route.AllowKnownIps).HasColumnType("TEXT");
+            entity.Property(route => route.Notes).HasColumnType("TEXT");
+            entity.Property(route => route.LastTestMessage).HasColumnType("TEXT");
+            entity.HasIndex(route => route.Hostname).IsUnique();
+            entity.HasIndex(route => route.DomainName);
+            entity.HasIndex(route => route.Enabled);
+        });
+
+        modelBuilder.Entity<EdgeGatewayAuditEntryEntity>(entity =>
+        {
+            entity.ToTable("edge_gateway_audit_entries");
+            entity.HasKey(entry => entry.Id);
+            entity.Property(entry => entry.Hostname).HasMaxLength(255);
+            entity.Property(entry => entry.RequestedPath).HasMaxLength(2048);
+            entity.Property(entry => entry.SourceIp).HasMaxLength(96);
+            entity.Property(entry => entry.UserEmail).HasMaxLength(255);
+            entity.Property(entry => entry.Reason).HasMaxLength(512);
+            entity.HasIndex(entry => entry.TimestampUtc);
+            entity.HasIndex(entry => entry.Hostname);
+            entity.HasIndex(entry => entry.UserEmail);
+            entity.HasIndex(entry => entry.Decision);
+        });
+
+        modelBuilder.Entity<EdgeGatewaySettingsEntity>(entity =>
+        {
+            entity.ToTable("edge_gateway_settings");
+            entity.HasKey(settings => settings.Id);
+            entity.Property(settings => settings.GatewaySubdomain).HasMaxLength(63);
+        });
+
+        modelBuilder.Entity<MessagingEmailSettingsEntity>(entity =>
+        {
+            entity.ToTable("messaging_email_settings");
+            entity.HasKey(settings => settings.Id);
+            entity.Property(settings => settings.SenderAddress).HasMaxLength(255);
+            entity.Property(settings => settings.SenderDisplayName).HasMaxLength(160);
+            entity.Property(settings => settings.SmtpHost).HasMaxLength(255);
+            entity.Property(settings => settings.SmtpUsername).HasMaxLength(255);
+            entity.Property(settings => settings.SmtpPasswordSecretReference).HasMaxLength(255);
+            entity.Property(settings => settings.GraphTenantId).HasMaxLength(128);
+            entity.Property(settings => settings.GraphClientId).HasMaxLength(128);
+            entity.Property(settings => settings.GraphClientSecretReference).HasMaxLength(255);
+            entity.Property(settings => settings.GraphAuthority).HasMaxLength(255);
+            entity.Property(settings => settings.GraphBaseUrl).HasMaxLength(255);
         });
 
         modelBuilder.Entity<SftpHostSettingsEntity>(entity =>
@@ -651,9 +716,36 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(user => user.Email).HasMaxLength(255);
             entity.Property(user => user.NormalizedEmail).HasMaxLength(255);
             entity.Property(user => user.LinuxUsername).HasMaxLength(64);
+            entity.Property(user => user.SessionLifetimeMinutes).HasDefaultValue(SecuritySessionPolicy.DefaultSessionLifetimeMinutes);
             entity.Property(user => user.AuthorizedKeyEntries).HasColumnType("TEXT");
             entity.Property(user => user.OtpSecretReference).HasMaxLength(255);
             entity.HasIndex(user => user.NormalizedEmail).IsUnique();
+        });
+
+        modelBuilder.Entity<SecurityPasskeyCredentialEntity>(entity =>
+        {
+            entity.ToTable("security_passkey_credentials");
+            entity.HasKey(credential => credential.Id);
+            entity.Property(credential => credential.CredentialId).HasMaxLength(1024);
+            entity.Property(credential => credential.PublicKey).HasColumnType("TEXT");
+            entity.Property(credential => credential.UserHandle).HasMaxLength(256);
+            entity.Property(credential => credential.FriendlyName).HasMaxLength(160);
+            entity.HasIndex(credential => credential.CredentialId).IsUnique();
+            entity.HasIndex(credential => credential.UserId);
+            entity.HasOne(credential => credential.User)
+                .WithMany()
+                .HasForeignKey(credential => credential.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<LocalInstanceIdentityEntity>(entity =>
+        {
+            entity.ToTable("local_instance_identity");
+            entity.HasKey(identity => identity.Id);
+            entity.Property(identity => identity.DisplayName).HasMaxLength(160);
+            entity.Property(identity => identity.PrivateKeySecretReference).HasMaxLength(255);
+            entity.Property(identity => identity.PublicKey).HasColumnType("TEXT");
+            entity.Property(identity => identity.PublicKeyFingerprint).HasMaxLength(128);
         });
 
         modelBuilder.Entity<TrustedNetworkEntryEntity>(entity =>

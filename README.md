@@ -20,6 +20,12 @@ On a Linux machine with systemd:
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
 ```
 
+Short link:
+
+```bash
+curl -fsSL https://bit.ly/4tCQKCN | sudo bash
+```
+
 Then open:
 
 ```text
@@ -49,7 +55,7 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 509
 For a specific release:
 
 ```bash
-curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=2026.05.08.0 bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=v2026.05.13.10.08 bash
 ```
 
 ## What The Installer Does

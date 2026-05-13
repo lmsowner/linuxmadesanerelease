@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models;
 
 namespace LinuxMadeSane.Application.Contracts.Security;
 
@@ -12,6 +13,10 @@ public sealed class SecurityUserAccessEditor
     public string LinuxUsername { get; set; } = string.Empty;
 
     public bool IsEnabled { get; set; }
+
+    [Range(SecuritySessionPolicy.MinimumSessionLifetimeMinutes, SecuritySessionPolicy.MaximumSessionLifetimeMinutes)]
+    public int SessionLifetimeMinutes { get; set; } = SecuritySessionPolicy.DefaultSessionLifetimeMinutes;
+
     public RemoteAccessSshAuthenticationMode SshAuthenticationMode { get; set; } = RemoteAccessSshAuthenticationMode.Password;
     public string AuthorizedKeyEntries { get; set; } = string.Empty;
 }

@@ -1,10 +1,12 @@
 @using System.Security.Claims
 @using System.Threading
+@using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Models.Cloudflare
 @using LinuxMadeSane.Application.Contracts.Cloudflare
 @using LinuxMadeSane.Application.Interfaces
 @using Microsoft.AspNetCore.Components.Authorization
 @inject IExposedServiceManager ExposedServiceManager
+@inject ILocalHttpServiceDiscoveryService LocalHttpServiceDiscovery
 @implements IDisposable
 
 @if (ShowBlockingLoad)
@@ -35,6 +37,10 @@ else
                         Class="cloudflare-page-tab-control"
                         PanelClass="cloudflare-page-tab-panel">
                 <HeaderActions>
+                    <UiCommandButton Label="Setup guide"
+                                     Glyph="UiIconGlyph.Info"
+                                     Variant="UiButtonVariant.Ghost"
+                                     OnClick="OnOpenSetupGuide" />
                     <UiCommandButton Label="@(IsRefreshBusy ? "Refreshing..." : "Refresh")"
                                      Glyph="UiIconGlyph.Refresh"
                                      Variant="UiButtonVariant.Ghost"
@@ -44,13 +50,6 @@ else
                 <ChildContent>
                     <TabPage Value="@SetupTabValue" Title="Setup">
                         <div class="cloudflare-tab-section">
-                        <div class="cloudflare-token-actions cloudflare-token-actions-standalone">
-                            <UiCommandButton Label="Setup guide"
-                                             Glyph="UiIconGlyph.Info"
-                                             Variant="UiButtonVariant.Ghost"
-                                             OnClick="OnOpenSetupGuide" />
-                        </div>
-
                         @if (ShowSetupSummary)
                         {
                             <section class="surface-subcard cloudflare-setup-summary">
@@ -79,13 +78,22 @@ else
                         @if (!HostHasInstalledConnector)
                         {
                             <section class="surface-subcard cloudflare-mode-note">
-                                <strong>Install cloudflared</strong>
-                                <span>This LMS host does not have a working cloudflared service yet. Linux Made Sane can install or attach it when you apply the first application.</span>
+                                <strong>Set up this box as the Cloudflare connector</strong>
+                                <span>Validate a Cloudflare token and LMS will create or reuse a tunnel, then attach cloudflared on this host before you add applications.</span>
                                 <UiCheckboxField Value="@editor.RunConnectorInstallOnHost"
                                                  ValueChanged="HandleRunConnectorInstallOnHostChangedAsync"
                                                  ValueExpression="@(() => editor.RunConnectorInstallOnHost)"
                                                  Label="Install or attach cloudflared automatically"
                                                  Helper="@ConnectorInstallHelper" />
+                                @if (validation is not null)
+                                {
+                                    <div class="cloudflare-token-actions">
+                                        <UiCommandButton Label="@(isEnsuringConnector ? "Setting up connector..." : "Set up connector")"
+                                                         Glyph="UiIconGlyph.Connect"
+                                                         Disabled="@isEnsuringConnector"
+                                                         OnClick="@(() => EnsureConnectorAsync(switchToApplicationsOnSuccess: true))" />
+                                    </div>
+                                }
                             </section>
                         }
 
@@ -105,12 +113,12 @@ else
                                              Label="Cloudflare API token"
                                              Type="password"
                                              Autocomplete="off"
-                                             Helper="The token is only kept in memory unless you explicitly save it."
+                                             Helper="Keep the save option enabled so Edge Gateway and future app publishing can reuse this token."
                                              Placeholder="Paste a scoped Bearer API token" />
                                 <div class="cloudflare-token-actions">
-                                    <UiCommandButton Label="@(isValidating ? "Validating..." : "Validate token")"
+                                    <UiCommandButton Label="@CloudflareTokenActionLabel"
                                                      Glyph="UiIconGlyph.Connect"
-                                                     Disabled="@isValidating"
+                                                     Disabled="@(isValidating || isEnsuringConnector)"
                                                      OnClick="@(() => ValidateTokenAsync())" />
                                     @if (hasSavedToken)
                                     {
@@ -130,6 +138,11 @@ else
                         @if (!string.IsNullOrWhiteSpace(statusMessage) && activeCloudflareTab == SetupTabValue)
                         {
                             <p class="callout @(statusIsError ? "error" : "success")">@statusMessage</p>
+                        }
+
+                        @if (connectorSetupResult is not null && activeCloudflareTab == SetupTabValue)
+                        {
+                            <p class="callout @(connectorSetupResult.Succeeded ? "success" : "warning")">@connectorSetupResult.NextStep</p>
                         }
                         </div>
                     </TabPage>
@@ -190,7 +203,7 @@ else
                                             </div>
                                             <div class="cloudflare-saved-actions">
                                                 <span class="status-pill neutral">@FormatAccessMode(service.AccessMode)</span>
-                                                <span class="status-pill @(serviceEntry.IsOutOfSync ? "warning" : "success")">@GetSyncLabel(serviceEntry)</span>
+                                                <span class="status-pill @(serviceEntry.ExistsInCloudflare ? "success" : "warning")">@GetSyncLabel(serviceEntry)</span>
                                                 @if (CanManageApplications)
                                                 {
                                                     <UiCommandButton Label="Edit"
@@ -214,7 +227,7 @@ else
                         {
                             <section class="surface-subcard cloudflare-mode-note">
                                 <strong>Setup required</strong>
-                                <span>Validate or save a Cloudflare API token in Setup before adding or editing applications.</span>
+                                <span>Validate a Cloudflare API token and set up this host as the connector before adding or editing applications.</span>
                             </section>
                         }
                         else if (isApplicationEditorOpen)
@@ -291,7 +304,9 @@ else
                                         </div>
 
                                         <div class="field-row cloudflare-primary-grid cloudflare-route-grid">
-                                            <UiTextField @bind-Value="editor.Subdomain"
+                                            <UiTextField Value="@editor.Subdomain"
+                                                         ValueChanged="HandleSubdomainChangedAsync"
+                                                         ValueExpression="@(() => editor.Subdomain)"
                                                          Label="Subdomain"
                                                          Helper="@SubdomainHelperText"
                                                          Placeholder="myapp"
@@ -317,13 +332,21 @@ else
                                                 }
                                             </UiComboboxField>
 
-                                            <UiTextField Value="@editor.LocalServiceUrl"
-                                                         ValueChanged="HandleLocalServiceUrlChangedAsync"
-                                                         ValueExpression="@(() => editor.LocalServiceUrl)"
-                                                         Label="Local service URL"
-                                                         Helper="Origin URL only. HTTPS defaults to No TLS Verify for local/self-signed origins."
-                                                         Placeholder="http://localhost:5080"
-                                                         Class="cloudflare-route-field" />
+                                            <div class="cloudflare-local-service-field">
+                                                <UiTextField Value="@editor.LocalServiceUrl"
+                                                             ValueChanged="HandleLocalServiceUrlChangedAsync"
+                                                             ValueExpression="@(() => editor.LocalServiceUrl)"
+                                                             Label="Local service URL"
+                                                             Helper="Origin URL only. Use Find to discover localhost HTTP services."
+                                                             Placeholder="http://localhost:5080"
+                                                             Class="cloudflare-route-field" />
+                                                <UiCommandButton Label="Find"
+                                                                 Title="Find localhost HTTP and HTTPS services"
+                                                                 Glyph="UiIconGlyph.Search"
+                                                                 Variant="UiButtonVariant.Ghost"
+                                                                 Class="cloudflare-local-service-find-button"
+                                                                 OnClick="OpenLocalServicePickerAsync" />
+                                            </div>
                                         </div>
                                     </section>
 
@@ -517,9 +540,19 @@ else
 
                                         @if (previewPlan.RequiresConfirmation)
                                         {
-                                            <UiCheckboxField @bind-Value="editor.ConfirmDangerousExposure"
-                                                             Label="I understand the exposure warnings and want to continue"
-                                                             Helper="Required before applying dangerous or ambiguous targets." />
+                                            @if (PreviewRequiresDnsReplacementConfirmation)
+                                            {
+                                                <UiCheckboxField @bind-Value="editor.ConfirmDnsRecordReplacement"
+                                                                 Label="Delete and replace the existing Cloudflare DNS record"
+                                                                 Helper="Required when Cloudflare already has a DNS record for this hostname. LMS will remove that record and create a proxied CNAME for the selected tunnel." />
+                                            }
+
+                                            @if (PreviewRequiresDangerousExposureConfirmation)
+                                            {
+                                                <UiCheckboxField @bind-Value="editor.ConfirmDangerousExposure"
+                                                                 Label="I understand the exposure warnings and want to continue"
+                                                                 Helper="Required before applying dangerous or ambiguous targets." />
+                                            }
                                         }
                                     }
                                 </EditForm>
@@ -651,6 +684,77 @@ else
         </section>
 
     </div>
+
+    <UiModal IsOpen="@isLocalServicePickerOpen"
+             Title="Local service lookup"
+             Subtitle="Detected HTTP and HTTPS services listening on localhost or wildcard addresses."
+             Class="cloudflare-local-service-modal"
+             OnClose="CloseLocalServicePickerAsync">
+        <ChildContent>
+            <div class="cloudflare-local-service-picker">
+                <div class="table-header cloudflare-local-service-picker-header">
+                    <div>
+                        <strong>Available origins</strong>
+                        <p class="meta-text">Pick one to fill the Local service URL field.</p>
+                    </div>
+                    <UiCommandButton Label="@(isDiscoveringLocalServices ? "Scanning..." : "Refresh")"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@isDiscoveringLocalServices"
+                                     OnClick="DiscoverLocalServicesAsync" />
+                </div>
+
+                @if (isDiscoveringLocalServices)
+                {
+                    <section class="surface-subcard cloudflare-local-service-scanning" role="status" aria-live="polite">
+                        <span class="cloudflare-loading-progress">
+                            <span class="cloudflare-loading-progress-fill"></span>
+                        </span>
+                        <span>Scanning localhost listeners and probing HTTP/HTTPS.</span>
+                    </section>
+                }
+                else if (localServiceSuggestions.Count == 0)
+                {
+                    <section class="empty-state cloudflare-local-service-empty">
+                        <h3>No HTTP services found</h3>
+                        <p>@(localServiceDiscoveryMessage ?? "No localhost HTTP or HTTPS responses were detected from listening TCP ports.")</p>
+                    </section>
+                }
+                else
+                {
+                    <div class="cloudflare-local-service-list" role="list">
+                        @foreach (var service in localServiceSuggestions)
+                        {
+                            <section class="surface-subcard cloudflare-local-service-row" role="listitem">
+                                <div class="cloudflare-local-service-copy">
+                                    <div class="cloudflare-local-service-title-line">
+                                        <strong>@service.Url</strong>
+                                        <UiPill Tone="@GetLocalServiceTone(service)">@service.Scheme.ToUpperInvariant()</UiPill>
+                                        <UiPill Tone="UiPillTone.Neutral">@service.StatusCode</UiPill>
+                                    </div>
+                                    <span>@GetLocalServiceDescription(service)</span>
+                                </div>
+                                <UiCommandButton Label="Use"
+                                                 Glyph="UiIconGlyph.Connect"
+                                                 OnClick="@(() => SelectLocalServiceAsync(service))" />
+                            </section>
+                        }
+                    </div>
+                }
+
+                @if (!string.IsNullOrWhiteSpace(localServiceDiscoveryMessage) && localServiceSuggestions.Count > 0)
+                {
+                    <p class="meta-text">@localServiceDiscoveryMessage</p>
+                }
+            </div>
+        </ChildContent>
+        <Footer>
+            <UiCommandButton Label="Close"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             OnClick="CloseLocalServicePickerAsync" />
+        </Footer>
+    </UiModal>
 }
 
 @code {
@@ -676,12 +780,17 @@ else
     private CloudflareExposeServiceWorkspaceViewModel? workspace;
     private CloudflareValidationResult? validation;
     private List<CloudflareTunnel> availableTunnels = [];
+    private IReadOnlyList<LocalHttpServiceEndpoint> localServiceSuggestions = [];
     private ExposedServiceDryRunPlan? previewPlan;
     private ExposedServiceApplyResult? applyResult;
+    private ExposedServiceConnectorSetupResult? connectorSetupResult;
     private bool isLoaded;
     private bool isRefreshingWorkspace;
     private bool isBackgroundRefreshing;
+    private bool isLocalServicePickerOpen;
+    private bool isDiscoveringLocalServices;
     private bool isValidating;
+    private bool isEnsuringConnector;
     private bool isPreviewing;
     private bool isApplying;
     private Guid? removingServiceId;
@@ -701,6 +810,7 @@ else
     private string initialLoadPhase = LoadingSettingsPhase;
     private string initialLoadStep = "Opening Cloudflare integration";
     private string initialLoadDetail = "Loading this LMS host configuration.";
+    private string? localServiceDiscoveryMessage;
     private const string CreateNewTunnelOptionValue = "__create_new_tunnel__";
     private const string SetupTabValue = "setup";
     private const string ApplicationsTabValue = "applications";
@@ -723,6 +833,7 @@ else
         isRefreshingWorkspace ||
         isBackgroundRefreshing ||
         isValidating ||
+        isEnsuringConnector ||
         isPreviewing ||
         isApplying;
 
@@ -804,7 +915,8 @@ else
         ?? [];
 
     private bool CanManageApplications =>
-        validation is not null;
+        validation is not null &&
+        (HostHasInstalledConnector || connectorSetupResult?.Succeeded == true);
 
     private bool LocalServiceUsesHttps =>
         TryParseLocalServiceUri(editor.LocalServiceUrl)?.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) == true;
@@ -812,10 +924,40 @@ else
     private bool NoTlsVerifyFieldValue =>
         LocalServiceUsesHttps && editor.NoTlsVerify;
 
+    private bool PreviewRequiresDnsReplacementConfirmation =>
+        previewPlan?.Warnings.Any(warning =>
+            warning.RequiresConfirmation &&
+            warning.Code.Equals("dns-conflict", StringComparison.OrdinalIgnoreCase)) == true;
+
+    private bool PreviewRequiresDangerousExposureConfirmation =>
+        previewPlan?.Warnings.Any(warning =>
+            warning.RequiresConfirmation &&
+            !warning.Code.Equals("dns-conflict", StringComparison.OrdinalIgnoreCase)) == true;
+
     private string NoTlsVerifyHelperText =>
         LocalServiceUsesHttps
             ? "Recommended for local HTTPS services with self-signed certificates."
             : "Only applies when the local service URL starts with https://.";
+
+    private static UiPillTone GetLocalServiceTone(LocalHttpServiceEndpoint service) =>
+        service.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            ? UiPillTone.Success
+            : UiPillTone.Neutral;
+
+    private static string GetLocalServiceDescription(LocalHttpServiceEndpoint service)
+    {
+        if (!string.IsNullOrWhiteSpace(service.Title))
+        {
+            return service.Title;
+        }
+
+        if (!string.IsNullOrWhiteSpace(service.ServerHeader))
+        {
+            return service.ServerHeader;
+        }
+
+        return $"Listening on localhost:{service.Port}";
+    }
 
     private string ApplicationEditorHeading =>
         editor.ConfigId.HasValue
@@ -831,10 +973,10 @@ else
         HostHasInstalledConnector
             ? "cloudflared is already installed on this managed host, so LMS will reuse the existing service instead of running another install."
         : editor.CreateNewTunnel
-            ? "Recommended for a new tunnel. LMS will run the cloudflared install command over SSH on this managed host after apply."
+            ? "Recommended for a new tunnel. LMS will run the cloudflared install command on this managed host during connector setup."
             : SelectedTunnelIsLmsManaged
-                ? "Recommended for an LMS-managed tunnel. Leave this enabled to repair or reattach cloudflared on this managed host after apply."
-                : "Enable this if this managed host should attach or reattach its cloudflared service to the selected tunnel after apply.";
+                ? "Recommended for an LMS-managed tunnel. Leave this enabled to repair or reattach cloudflared on this managed host during setup."
+                : "Enable this if this managed host should attach or reattach its cloudflared service to the selected tunnel during setup.";
 
     private bool HasValidatedSavedToken =>
         hasSavedToken &&
@@ -864,6 +1006,15 @@ else
                 : hasSavedToken
                     ? "Saved token present"
                     : "Not validated";
+
+    private string CloudflareTokenActionLabel =>
+        isValidating
+            ? "Validating..."
+            : isEnsuringConnector
+                ? "Setting up..."
+                : HostHasInstalledConnector
+                    ? "Validate token"
+                    : "Validate and set up";
 
     private string SelectedAccountName =>
         validation?.Accounts.FirstOrDefault(account => account.Id == editor.AccountId)?.Name
@@ -984,6 +1135,12 @@ else
         }
     }
 
+    private async Task ReloadWorkspaceSnapshotAsync()
+    {
+        workspace = await ExposedServiceManager.GetWorkspaceAsync(HostId);
+        hasSavedToken = !string.IsNullOrWhiteSpace(workspace.SavedSettings?.ApiTokenSecretReference);
+    }
+
     private void QueueBackgroundValidation()
     {
         if (isDisposed || !hasSavedToken || isBackgroundRefreshing || isRefreshingWorkspace)
@@ -1032,6 +1189,7 @@ else
 
         isRefreshingWorkspace = true;
         ClearStatus();
+        connectorSetupResult = null;
         ResetInitialLoadProgress();
         await SetInitialLoadProgressAsync(
             LoadingSettingsPhase,
@@ -1076,6 +1234,7 @@ else
             ClearStatus();
             previewPlan = null;
             applyResult = null;
+            connectorSetupResult = null;
         }
 
         isValidating = true;
@@ -1124,6 +1283,12 @@ else
 
             await LoadAvailableTunnelsAsync();
 
+            if (!preserveUiState && !suppressStatus && !HostHasInstalledConnector)
+            {
+                await EnsureConnectorAsync(switchToApplicationsOnSuccess: true, clearStatus: false);
+                return;
+            }
+
             if (!preserveUiState)
             {
                 activeCloudflareTab = ApplicationsTabValue;
@@ -1168,9 +1333,62 @@ else
         }
     }
 
+    private async Task EnsureConnectorAsync(
+        bool switchToApplicationsOnSuccess = false,
+        bool clearStatus = true)
+    {
+        if (isEnsuringConnector)
+        {
+            return;
+        }
+
+        if (validation is null)
+        {
+            activeCloudflareTab = SetupTabValue;
+            SetStatus("Validate a Cloudflare token before setting up the connector.", isError: true);
+            return;
+        }
+
+        isEnsuringConnector = true;
+        if (clearStatus)
+        {
+            ClearStatus();
+            previewPlan = null;
+            applyResult = null;
+            connectorSetupResult = null;
+        }
+
+        SetStatus("Setting up the local Cloudflare connector...", isError: false);
+
+        try
+        {
+            connectorSetupResult = await ExposedServiceManager.EnsureConnectorAsync(HostId, editor);
+            await ReloadWorkspaceSnapshotAsync();
+            await LoadAvailableTunnelsAsync();
+
+            SetStatus(
+                connectorSetupResult.Status,
+                isError: !connectorSetupResult.Succeeded);
+
+            if (connectorSetupResult.Succeeded && switchToApplicationsOnSuccess)
+            {
+                activeCloudflareTab = ApplicationsTabValue;
+            }
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, isError: true);
+        }
+        finally
+        {
+            isEnsuringConnector = false;
+        }
+    }
+
     private async Task HandleAccountChangedAsync(string value)
     {
         editor.AccountId = value;
+        editor.ConfirmDnsRecordReplacement = false;
         previewPlan = null;
         applyResult = null;
 
@@ -1185,6 +1403,7 @@ else
     private async Task HandleZoneChangedAsync(string value)
     {
         editor.ZoneId = value;
+        editor.ConfirmDnsRecordReplacement = false;
         previewPlan = null;
         applyResult = null;
         AlignAccountToSelectedZone();
@@ -1196,7 +1415,17 @@ else
     {
         editor.CreateNewTunnel = value == CreateNewTunnelOptionValue;
         editor.TunnelId = editor.CreateNewTunnel ? string.Empty : value;
+        editor.ConfirmDnsRecordReplacement = false;
         ApplySuggestedConnectorInstallDefault();
+        previewPlan = null;
+        applyResult = null;
+        return Task.CompletedTask;
+    }
+
+    private Task HandleSubdomainChangedAsync(string? value)
+    {
+        editor.Subdomain = value ?? string.Empty;
+        editor.ConfirmDnsRecordReplacement = false;
         previewPlan = null;
         applyResult = null;
         return Task.CompletedTask;
@@ -1223,6 +1452,55 @@ else
         previewPlan = null;
         applyResult = null;
         return Task.CompletedTask;
+    }
+
+    private async Task OpenLocalServicePickerAsync()
+    {
+        isLocalServicePickerOpen = true;
+        if (localServiceSuggestions.Count == 0)
+        {
+            await DiscoverLocalServicesAsync();
+        }
+    }
+
+    private Task CloseLocalServicePickerAsync()
+    {
+        isLocalServicePickerOpen = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task DiscoverLocalServicesAsync()
+    {
+        if (isDiscoveringLocalServices)
+        {
+            return;
+        }
+
+        isDiscoveringLocalServices = true;
+        localServiceDiscoveryMessage = null;
+
+        try
+        {
+            localServiceSuggestions = await LocalHttpServiceDiscovery.DiscoverAsync();
+            localServiceDiscoveryMessage = localServiceSuggestions.Count == 0
+                ? "No localhost HTTP or HTTPS responses were detected from listening TCP ports."
+                : $"{localServiceSuggestions.Count} localhost HTTP service(s) found.";
+        }
+        catch (Exception exception)
+        {
+            localServiceSuggestions = [];
+            localServiceDiscoveryMessage = $"Local service lookup failed: {exception.Message}";
+        }
+        finally
+        {
+            isDiscoveringLocalServices = false;
+        }
+    }
+
+    private async Task SelectLocalServiceAsync(LocalHttpServiceEndpoint service)
+    {
+        await HandleLocalServiceUrlChangedAsync(service.Url);
+        isLocalServicePickerOpen = false;
     }
 
     private Task HandleNoTlsVerifyChangedAsync(bool value)
@@ -1313,6 +1591,11 @@ else
         }
         catch (Exception exception)
         {
+            if (IsDnsReplacementConfirmationError(exception))
+            {
+                await TryLoadPreviewForDnsReplacementPromptAsync();
+            }
+
             SetStatus(exception.Message, isError: true);
         }
         finally
@@ -1358,6 +1641,11 @@ else
         }
         catch (Exception exception)
         {
+            if (IsDnsReplacementConfirmationError(exception))
+            {
+                await TryLoadPreviewForDnsReplacementPromptAsync();
+            }
+
             SetStatus(exception.Message, isError: true);
         }
         finally
@@ -1365,6 +1653,23 @@ else
             isApplying = false;
         }
     }
+
+    private async Task TryLoadPreviewForDnsReplacementPromptAsync()
+    {
+        try
+        {
+            previewPlan = await ExposedServiceManager.PreviewAsync(HostId, editor, currentUserEmail);
+            previewPanelExpanded = true;
+        }
+        catch
+        {
+        }
+    }
+
+    private static bool IsDnsReplacementConfirmationError(Exception exception) =>
+        exception is InvalidOperationException &&
+        exception.Message.Contains("DNS conflict", StringComparison.OrdinalIgnoreCase) &&
+        exception.Message.Contains("deleting/replacing", StringComparison.OrdinalIgnoreCase);
 
     private async Task RemoveServiceAsync(CloudflareExposedServiceListItemViewModel serviceEntry)
     {
@@ -1426,7 +1731,7 @@ else
         if (!CanManageApplications)
         {
             activeCloudflareTab = SetupTabValue;
-            SetStatus("Validate a Cloudflare token in Setup before adding applications.", isError: true);
+            SetStatus("Validate a Cloudflare token and set up this host as the connector before adding applications.", isError: true);
             return;
         }
 
@@ -1446,7 +1751,7 @@ else
         if (!CanManageApplications)
         {
             activeCloudflareTab = SetupTabValue;
-            SetStatus("Validate a Cloudflare token in Setup before editing applications.", isError: true);
+            SetStatus("Validate a Cloudflare token and set up this host as the connector before editing applications.", isError: true);
             return;
         }
 
@@ -1576,6 +1881,7 @@ else
         editor.EmailDomainAllowList = string.Empty;
         ApplyOriginRequestSettingsToEditor(CloudflareOriginRequestSettings.Default with { NoTlsVerify = true });
         editor.ConfirmDangerousExposure = false;
+        editor.ConfirmDnsRecordReplacement = false;
         connectorInstallPreferenceTouched = false;
         noTlsVerifyPreferenceTouched = false;
         ApplySuggestedConnectorInstallDefault();
@@ -1598,6 +1904,7 @@ else
             config.OriginRequestSettings
             ?? (CloudflareOriginRequestSettings.Default with { NoTlsVerify = IsHttpsLocalServiceUrl(config.LocalServiceUrl) }));
         editor.ConfirmDangerousExposure = false;
+        editor.ConfirmDnsRecordReplacement = false;
         connectorInstallPreferenceTouched = false;
         noTlsVerifyPreferenceTouched = false;
         ApplySuggestedConnectorInstallDefault();
@@ -1705,8 +2012,9 @@ else
     private static string GetSyncLabel(CloudflareExposedServiceListItemViewModel item) =>
         item switch
         {
-            { ExistsInLmsStore: true, ExistsInCloudflare: true, IsOutOfSync: false } => "Good",
-            _ => "Check"
+            { ExistsInCloudflare: true } => "Live",
+            { ExistsInLmsStore: true } => "Saved",
+            _ => "Saved"
         };
 
     private void ApplySuggestedConnectorInstallDefault()

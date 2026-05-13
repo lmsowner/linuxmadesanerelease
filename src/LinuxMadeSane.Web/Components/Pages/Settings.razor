@@ -10,6 +10,7 @@
 @using Microsoft.AspNetCore.Components.Forms
 @inject ISecuritySettingsService SecuritySettingsService
 @inject ITrustedNetworkAccessService TrustedNetworkAccessService
+@inject NavigationManager Navigation
 
 <PageTitle>LMS Security | Linux Made Sane</PageTitle>
 
@@ -55,7 +56,7 @@
                                 <summary>
                                     <span>
                                         <strong>@(networkEditor.Id.HasValue ? "Edit access rule" : "Add access rule")</strong>
-                                        <span class="meta-text">CIDR rules control direct access, username + OTP, or no access for matching networks.</span>
+                                        <span class="meta-text">CIDR rules control direct access, email + OTP, or no access for matching networks.</span>
                                     </span>
                                     <span class="status-pill neutral">@(page.TrustedNetworks.Count) rules</span>
                                 </summary>
@@ -72,7 +73,7 @@
 
                                     <div class="field-row">
                                         <UiCheckboxField @bind-Value="networkEditor.IsEnabled" Label="Rule enabled" />
-                                        <UiCheckboxField @bind-Value="networkEditor.IsAuthenticationEnabled" Label="Authentication enabled" Helper="Require username or email plus OTP before allowing access." />
+                                        <UiCheckboxField @bind-Value="networkEditor.IsAuthenticationEnabled" Label="Authentication enabled" Helper="Require email plus OTP before allowing access." />
                                     </div>
 
                                     <div class="toolbar-row">
@@ -288,7 +289,9 @@
                                         <h3>Create LMS account</h3>
                                         <p>Create an LMS account and issue the authenticator QR for app access.</p>
                                     </div>
-                                    <span class="status-pill neutral">Email + OTP</span>
+                                    <span class="status-pill @(page.Messaging.CanSendLoginSetupEmail ? "success" : "neutral")">
+                                        @(page.Messaging.CanSendLoginSetupEmail ? "Email + OTP" : "OTP only")
+                                    </span>
                                 </div>
 
                                 <EditForm Model="@userEditor" OnValidSubmit="CreateUserAsync" class="stack-form">
@@ -298,6 +301,50 @@
                                                  Label="Email"
                                                  Type="email"
                                                  Helper="Used for Linux Made Sane sign-in and OTP verification." />
+
+                                    @if (page.Messaging.CanSendLoginSetupEmail)
+                                    {
+                                        <p class="callout success">Verified Messaging is available. LMS will email the setup QR code and login link to the account email.</p>
+                                    }
+                                    else
+                                    {
+                                        <p class="meta-text">Messaging must be saved and pass a test email before LMS can email login setup QR codes. The QR code will still be shown here.</p>
+                                    }
+
+                                    <div class="remote-access-session-duration">
+                                        <span class="ui-field-label">Login session</span>
+                                        <span class="meta-text">How long this LMS account stays signed in before OTP is required again.</span>
+                                        <div class="remote-access-session-duration-grid">
+                                            <UiNumberField TValue="int"
+                                                           Value="@GetSessionLifetimePart(userEditor.SessionLifetimeMinutes, SessionLifetimePart.Days)"
+                                                           ValueChanged="@((int value) => SetNewUserSessionLifetimePart(SessionLifetimePart.Days, value))"
+                                                           ValueExpression="@(() => userEditor.SessionLifetimeMinutes)"
+                                                           Label="Days"
+                                                           min="0"
+                                                           max="@MaxSessionLifetimeDays"
+                                                           step="1"
+                                                           Compact="true" />
+                                            <UiNumberField TValue="int"
+                                                           Value="@GetSessionLifetimePart(userEditor.SessionLifetimeMinutes, SessionLifetimePart.Hours)"
+                                                           ValueChanged="@((int value) => SetNewUserSessionLifetimePart(SessionLifetimePart.Hours, value))"
+                                                           ValueExpression="@(() => userEditor.SessionLifetimeMinutes)"
+                                                           Label="Hours"
+                                                           min="0"
+                                                           max="23"
+                                                           step="1"
+                                                           Compact="true" />
+                                            <UiNumberField TValue="int"
+                                                           Value="@GetSessionLifetimePart(userEditor.SessionLifetimeMinutes, SessionLifetimePart.Minutes)"
+                                                           ValueChanged="@((int value) => SetNewUserSessionLifetimePart(SessionLifetimePart.Minutes, value))"
+                                                           ValueExpression="@(() => userEditor.SessionLifetimeMinutes)"
+                                                           Label="Minutes"
+                                                           min="0"
+                                                           max="59"
+                                                           step="5"
+                                                           Compact="true" />
+                                        </div>
+                                        <span class="meta-text">@FormatSessionLifetimeMinutes(userEditor.SessionLifetimeMinutes)</span>
+                                    </div>
 
                                     <div class="toolbar-row">
                                         <UiCommandButton Label="@(isSavingUser ? "Registering..." : "Register account")"
@@ -321,6 +368,18 @@
                                         <ServiceMetricComponent TagName="div" Label="Provisioned email" Value="@provisioningResult.Email" />
                                         <ServiceMetricComponent TagName="div" Label="Manual key" Value="@provisioningResult.ManualEntryKey" />
                                         <ServiceMetricComponent TagName="div" Label="OTP URI" Value="@provisioningResult.OtpUri" />
+                                        @if (provisioningResult.EmailSucceeded)
+                                        {
+                                            <p class="callout success">Setup email sent to @provisioningResult.Email.</p>
+                                        }
+                                        else if (provisioningResult.EmailAttempted)
+                                        {
+                                            <p class="callout warning">Account setup succeeded, but the setup email was not sent. @provisioningResult.EmailMessage</p>
+                                        }
+                                        else if (!page.Messaging.CanSendLoginSetupEmail)
+                                        {
+                                            <p class="callout warning">Setup email was not sent because Messaging is not verified. Send a successful test email from the Messaging tab to enable this.</p>
+                                        }
                                         <p class="meta-text">Scan the QR code or enter the manual key in your authenticator app. If you reset OTP, the new QR is shown here again.</p>
                                     </div>
                                 </div>
@@ -340,6 +399,7 @@
                                         <tr>
                                             <th>Account</th>
                                             <th>Status</th>
+                                            <th>Login session</th>
                                             <th>Last login</th>
                                             <th></th>
                                         </tr>
@@ -361,6 +421,46 @@
                                                         <span class="status-pill @(user.HasOtpSecret ? "neutral" : "warning")">@(user.HasOtpSecret ? "OTP ready" : "OTP missing")</span>
                                                     </div>
                                                 </td>
+                                                <td>
+                                                    <div class="remote-access-session-editor">
+                                                        <label class="remote-access-session-part">
+                                                            <span>Days</span>
+                                                            <input class="remote-access-session-input"
+                                                                   type="number"
+                                                                   min="0"
+                                                                   max="@MaxSessionLifetimeDays"
+                                                                   step="1"
+                                                                   value="@GetSessionLifetimePart(GetSessionLifetimeEditor(user), SessionLifetimePart.Days)"
+                                                                   @onchange="@((ChangeEventArgs args) => SetSessionLifetimeEditorPart(user.Id, SessionLifetimePart.Days, args))" />
+                                                        </label>
+                                                        <label class="remote-access-session-part">
+                                                            <span>Hours</span>
+                                                            <input class="remote-access-session-input"
+                                                                   type="number"
+                                                                   min="0"
+                                                                   max="23"
+                                                                   step="1"
+                                                                   value="@GetSessionLifetimePart(GetSessionLifetimeEditor(user), SessionLifetimePart.Hours)"
+                                                                   @onchange="@((ChangeEventArgs args) => SetSessionLifetimeEditorPart(user.Id, SessionLifetimePart.Hours, args))" />
+                                                        </label>
+                                                        <label class="remote-access-session-part">
+                                                            <span>Minutes</span>
+                                                            <input class="remote-access-session-input"
+                                                                   type="number"
+                                                                   min="0"
+                                                                   max="59"
+                                                                   step="5"
+                                                                   value="@GetSessionLifetimePart(GetSessionLifetimeEditor(user), SessionLifetimePart.Minutes)"
+                                                                   @onchange="@((ChangeEventArgs args) => SetSessionLifetimeEditorPart(user.Id, SessionLifetimePart.Minutes, args))" />
+                                                        </label>
+                                                        <span class="meta-text">@FormatSessionLifetimeMinutes(GetSessionLifetimeEditor(user))</span>
+                                                        <UiCommandButton Label="@(IsSavingSessionLifetime(user.Id) ? "Saving..." : "Save")"
+                                                                         Glyph="UiIconGlyph.Save"
+                                                                         Variant="UiButtonVariant.Action"
+                                                                         Disabled="@IsSavingSessionLifetime(user.Id)"
+                                                                         OnClick="@(() => SaveUserSessionLifetimeAsync(user))" />
+                                                    </div>
+                                                </td>
                                                 <td>@FormatTimestamp(user.LastLoginAtUtc, "Never")</td>
                                                 <td class="actions-cell">
                                                     <UiCommandButton Label="@(user.IsEnabled ? "Disable" : "Enable")"
@@ -378,8 +478,165 @@
                         </div>
                     </ChildContent>
                 </TabPage>
+
+                <TabPage Value="@MessagingTabValue" Title="Messaging">
+                    <Header>
+                        <div class="security-tab-header">
+                            <span class="security-tab-title">Messaging</span>
+                            <span class="security-tab-count">@FormatMessagingProvider(page.Messaging.Provider)</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="security-tab-content remote-access-content">
+                            <div class="section-heading">
+                                <div>
+                                    <p class="eyebrow">Email delivery</p>
+                                    <h2>SMTP or Microsoft Graph</h2>
+                                    <p class="meta-text">Configure local LMS email for passkey setup, account workflows, and future notifications. Secrets are stored in the protected LMS secret store, not appsettings.</p>
+                                </div>
+                                <UiCommandButton Label="Graph setup help"
+                                                 Glyph="UiIconGlyph.Info"
+                                                 Variant="UiButtonVariant.Action"
+                                                 OnClick="OpenGraphHelpModal" />
+                            </div>
+
+                            @if (!string.IsNullOrWhiteSpace(messagingMessage))
+                            {
+                                <p class="callout @(messagingMessageIsError ? "error" : "success")">@messagingMessage</p>
+                            }
+
+                            <section class="surface-subcard remote-access-create-panel">
+                                <EditForm Model="@messagingEditor" OnValidSubmit="SaveMessagingAsync" class="stack-form">
+                                    <DataAnnotationsValidator />
+
+                                    <div class="field-row">
+                                        <UiCheckboxField @bind-Value="messagingEditor.IsEnabled"
+                                                         Label="Email enabled"
+                                                         Helper="Turn this on after the provider details are saved and tested." />
+                                        <UiSelectField TValue="MessagingEmailProvider"
+                                                       @bind-Value="messagingEditor.Provider"
+                                                       Label="Provider">
+                                            <option value="@MessagingEmailProvider.Disabled">Disabled</option>
+                                            <option value="@MessagingEmailProvider.Smtp">SMTP</option>
+                                            <option value="@MessagingEmailProvider.MicrosoftGraph">Microsoft Graph</option>
+                                        </UiSelectField>
+                                    </div>
+
+                                    <div class="field-row">
+                                        <UiTextField @bind-Value="messagingEditor.SenderAddress"
+                                                     Label="Sender email"
+                                                     Type="email"
+                                                     Placeholder="serviceaccount@example.com" />
+                                        <UiTextField @bind-Value="messagingEditor.SenderDisplayName"
+                                                     Label="Sender name"
+                                                     Placeholder="Linux Made Sane" />
+                                    </div>
+
+                                    @if (messagingEditor.Provider == MessagingEmailProvider.Smtp)
+                                    {
+                                        <div class="field-row">
+                                            <UiTextField @bind-Value="messagingEditor.SmtpHost"
+                                                         Label="SMTP host"
+                                                         Placeholder="smtp.example.com" />
+                                            <UiNumberField TValue="int"
+                                                           @bind-Value="messagingEditor.SmtpPort"
+                                                           Label="SMTP port"
+                                                           min="1"
+                                                           max="65535"
+                                                           step="1" />
+                                        </div>
+                                        <div class="field-row">
+                                            <UiTextField @bind-Value="messagingEditor.SmtpUsername"
+                                                         Label="SMTP username"
+                                                         Placeholder="serviceaccount@example.com"
+                                                         Autocomplete="off" />
+                                            <UiTextField @bind-Value="messagingEditor.SmtpPassword"
+                                                         Label="SMTP password"
+                                                         Type="password"
+                                                         Helper="Leave blank to keep the stored password."
+                                                         Autocomplete="new-password" />
+                                        </div>
+                                        <div class="field-row">
+                                            <UiCheckboxField @bind-Value="messagingEditor.SmtpUseStartTls"
+                                                             Label="Use TLS"
+                                                             Helper="Most SMTP providers expect this on port 587." />
+                                            <span class="meta-text">Stored password: @(messagingEditor.HasSmtpPassword ? "yes" : "no")</span>
+                                        </div>
+                                    }
+                                    else if (messagingEditor.Provider == MessagingEmailProvider.MicrosoftGraph)
+                                    {
+                                        <div class="field-row">
+                                            <UiTextField @bind-Value="messagingEditor.GraphTenantId"
+                                                         Label="Tenant ID"
+                                                         Autocomplete="off" />
+                                            <UiTextField @bind-Value="messagingEditor.GraphClientId"
+                                                         Label="Client ID"
+                                                         Autocomplete="off" />
+                                        </div>
+                                        <div class="field-row">
+                                            <UiTextField @bind-Value="messagingEditor.GraphClientSecret"
+                                                         Label="Client secret"
+                                                         Type="password"
+                                                         Helper="Leave blank to keep the stored client secret."
+                                                         Autocomplete="new-password" />
+                                            <UiCheckboxField @bind-Value="messagingEditor.GraphSaveToSentItems"
+                                                             Label="Save to Sent Items" />
+                                        </div>
+                                        <div class="field-row">
+                                            <UiTextField @bind-Value="messagingEditor.GraphAuthority"
+                                                         Label="Authority"
+                                                         Placeholder="https://login.microsoftonline.com/" />
+                                            <UiTextField @bind-Value="messagingEditor.GraphBaseUrl"
+                                                         Label="Graph base URL"
+                                                         Placeholder="https://graph.microsoft.com/v1.0" />
+                                        </div>
+                                        <p class="meta-text">Stored client secret: @(messagingEditor.HasGraphClientSecret ? "yes" : "no"). The Entra app needs Microsoft Graph application permission for Mail.Send and admin consent.</p>
+                                    }
+
+                                    <div class="toolbar-row">
+                                        <UiCommandButton Label="@(isSavingMessaging ? "Saving..." : "Save messaging")"
+                                                         Glyph="UiIconGlyph.Save"
+                                                         Type="submit"
+                                                         Disabled="@isSavingMessaging" />
+                                    </div>
+                                </EditForm>
+                            </section>
+
+                            <section class="surface-subcard remote-access-create-panel">
+                                <div class="remote-access-panel-heading">
+                                    <div>
+                                        <h3>Send test email</h3>
+                                        <p>Use this after saving SMTP or Graph settings.</p>
+                                    </div>
+                                    <span class="status-pill @(page.Messaging.IsEnabled ? "success" : "neutral")">@(page.Messaging.IsEnabled ? "Enabled" : "Disabled")</span>
+                                    <span class="status-pill @(page.Messaging.CanSendLoginSetupEmail ? "success" : "warning")">@(page.Messaging.CanSendLoginSetupEmail ? "Verified" : "Not verified")</span>
+                                </div>
+                                @if (page.Messaging.LastVerifiedAtUtc is not null)
+                                {
+                                    <p class="meta-text">Last verified @FormatTimestamp(page.Messaging.LastVerifiedAtUtc, "Never"). LMS account QR emails are enabled.</p>
+                                }
+                                else
+                                {
+                                    <p class="meta-text">Send a successful test email to verify Messaging before LMS account QR emails become available.</p>
+                                }
+                                <div class="field-row">
+                                    <UiTextField @bind-Value="messagingTestRecipient"
+                                                 Label="Test recipient"
+                                                 Type="email"
+                                                 Placeholder="you@example.com" />
+                                    <div class="toolbar-row">
+                                        <UiCommandButton Label="@(isSendingMessagingTest ? "Sending..." : "Send test")"
+                                                         Glyph="UiIconGlyph.Send"
+                                                         Disabled="@isSendingMessagingTest"
+                                                         OnClick="SendMessagingTestAsync" />
+                                    </div>
+                                </div>
+                            </section>
+                        </div>
+                    </ChildContent>
+                </TabPage>
             </ChildContent>
-        </TabControl>
+    </TabControl>
     }
 </div>
 
@@ -420,25 +677,149 @@
     </ChildContent>
 </UiModal>
 
+<UiModal IsOpen="@showGraphHelpModal"
+         Title="Microsoft Graph email setup"
+         Subtitle="Create a small Entra app registration for LMS email delivery."
+         Class="security-graph-help-modal"
+         OnClose="CloseGraphHelpModal">
+    <ChildContent>
+        <div class="security-graph-help-body">
+            <p class="callout warning">Use a dedicated mailbox for LMS. Microsoft Graph <code>Mail.Send</code> as an application permission is broad until your Microsoft 365 admin restricts it to the LMS sender mailbox.</p>
+
+            <section class="surface-subcard security-graph-help-section">
+                <h3>1. Create the Entra app</h3>
+                <ol class="security-graph-help-steps">
+                    <li>Open Microsoft Entra admin center.</li>
+                    <li>Go to <strong>Applications -> App registrations -> New registration</strong>.</li>
+                    <li>Name it something obvious, for example <strong>Linux Made Sane Mail</strong>.</li>
+                    <li>Set supported account type to <strong>Accounts in this organizational directory only</strong>.</li>
+                    <li>Leave redirect URI blank. LMS uses client credentials, not an interactive Microsoft login.</li>
+                    <li>After creation, copy <strong>Application (client) ID</strong> and <strong>Directory (tenant) ID</strong>.</li>
+                </ol>
+            </section>
+
+            <section class="surface-subcard security-graph-help-section">
+                <h3>2. Add the Graph permission</h3>
+                <ol class="security-graph-help-steps">
+                    <li>Open the app registration, then <strong>API permissions -> Add a permission -> Microsoft Graph</strong>.</li>
+                    <li>Choose <strong>Application permissions</strong>. Do not choose delegated permissions.</li>
+                    <li>Add <strong>Mail.Send</strong>.</li>
+                    <li>Click <strong>Grant admin consent</strong> for the tenant.</li>
+                </ol>
+            </section>
+
+            <section class="surface-subcard security-graph-help-section">
+                <h3>3. Create the secret</h3>
+                <ol class="security-graph-help-steps">
+                    <li>Open <strong>Certificates & secrets -> Client secrets -> New client secret</strong>.</li>
+                    <li>Use a clear name, for example <strong>LMS email delivery</strong>.</li>
+                    <li>Copy the secret <strong>Value</strong> immediately. Do not copy the Secret ID.</li>
+                    <li>Paste the value into LMS. It is stored in the protected LMS secret store.</li>
+                </ol>
+            </section>
+
+            <section class="surface-subcard security-graph-help-section">
+                <h3>4. Fill in LMS</h3>
+                <div class="security-graph-help-points">
+                    <div class="security-graph-help-point">
+                        <strong>Provider</strong>
+                        <span>Microsoft Graph</span>
+                    </div>
+                    <div class="security-graph-help-point">
+                        <strong>Sender email</strong>
+                        <span>The mailbox LMS sends from, for example <code>serviceaccount@example.com</code>.</span>
+                    </div>
+                    <div class="security-graph-help-point">
+                        <strong>Tenant ID</strong>
+                        <span>Directory (tenant) ID from the app overview.</span>
+                    </div>
+                    <div class="security-graph-help-point">
+                        <strong>Client ID</strong>
+                        <span>Application (client) ID from the app overview.</span>
+                    </div>
+                    <div class="security-graph-help-point">
+                        <strong>Client secret</strong>
+                        <span>The secret Value, not the Secret ID.</span>
+                    </div>
+                    <div class="security-graph-help-point">
+                        <strong>Authority</strong>
+                        <span><code>https://login.microsoftonline.com/</code></span>
+                    </div>
+                    <div class="security-graph-help-point">
+                        <strong>Graph base URL</strong>
+                        <span><code>https://graph.microsoft.com/v1.0</code></span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="surface-subcard security-graph-help-section">
+                <h3>5. Restrict the mailbox</h3>
+                <p class="meta-text">Strongly recommended: restrict the app so it can only send as the LMS mailbox. The simplest Exchange Online route is an application access policy scoped to a mail-enabled security group containing the LMS sender mailbox.</p>
+                <pre class="security-graph-help-code"><code>Connect-ExchangeOnline
+New-ApplicationAccessPolicy -AppId &lt;client-id&gt; -PolicyScopeGroupId &lt;mail-enabled-security-group&gt; -AccessRight RestrictAccess -Description "Restrict Linux Made Sane mail sender"
+Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;client-id&gt;</code></pre>
+                <p class="meta-text">If your tenant uses newer Exchange application RBAC instead, use the tenant standard. The important bit is the same: LMS should only be able to send from the LMS sender mailbox.</p>
+            </section>
+
+            <section class="surface-subcard security-graph-help-section">
+                <h3>Common failures</h3>
+                <div class="security-graph-help-points">
+                    <div class="security-graph-help-point">
+                        <strong>401 / invalid_client</strong>
+                        <span>Wrong tenant, wrong client ID, expired secret, or Secret ID copied instead of secret Value.</span>
+                    </div>
+                    <div class="security-graph-help-point">
+                        <strong>403 / access denied</strong>
+                        <span>Admin consent is missing, Mail.Send was added as delegated instead of application, or mailbox restriction blocks the sender.</span>
+                    </div>
+                    <div class="security-graph-help-point">
+                        <strong>404 / resource not found</strong>
+                        <span>The sender email is not a valid Exchange Online mailbox in that tenant.</span>
+                    </div>
+                    <div class="security-graph-help-point">
+                        <strong>Test hangs or times out</strong>
+                        <span>Check outbound HTTPS from the LMS host to Microsoft login and Graph endpoints.</span>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Close"
+                         Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Ghost"
+                         OnClick="CloseGraphHelpModal" />
+    </Footer>
+</UiModal>
+
 @code {
     [CascadingParameter]
     private HttpContext? HttpContext { get; set; }
 
-    private SecuritySettingsPageViewModel page = new([], []);
+    private SecuritySettingsPageViewModel page = new([], [], BuildDefaultMessagingViewModel());
     private IReadOnlyList<LocalNetworkInterfaceView> networkInterfaces = [];
     private TrustedNetworkAccessResult currentAccess = new("unknown", "unknown", false, null, false, false, false, false, false);
     private TrustedNetworkEntryEditor networkEditor = new();
     private SecurityUserEditor userEditor = new();
+    private SecurityMessagingSettingsEditor messagingEditor = new();
     private SecurityUserProvisioningViewModel? provisioningResult;
     private bool isLoaded;
     private bool isSavingNetwork;
     private bool isSavingUser;
+    private bool isSavingMessaging;
+    private bool isSendingMessagingTest;
     private string? networkMessage;
     private bool networkMessageIsError;
     private string? userMessage;
     private bool userMessageIsError;
+    private string? messagingMessage;
+    private bool messagingMessageIsError;
+    private string messagingTestRecipient = string.Empty;
+    private readonly Dictionary<Guid, int> sessionLifetimeEditors = new();
+    private readonly HashSet<Guid> savingSessionLifetimes = [];
     private string activeTab = TrustedNetworksTabValue;
     private bool showNetworkRiskModal;
+    private bool showGraphHelpModal;
     private string networkRiskModalTitle = "Confirm security change";
     private string networkRiskModalMessage = string.Empty;
     private string networkRiskCurrentAccessWarning = string.Empty;
@@ -450,6 +831,10 @@
 
     private const string TrustedNetworksTabValue = "trusted-networks";
     private const string RemoteAccessUsersTabValue = "remote-access-users";
+    private const string MessagingTabValue = "messaging";
+    private const int MinutesPerHour = 60;
+    private const int MinutesPerDay = 24 * MinutesPerHour;
+    private const int MaxSessionLifetimeDays = SecuritySessionPolicy.MaximumSessionLifetimeMinutes / MinutesPerDay;
 
     private bool IsNetworkRiskConfirmationSatisfied =>
         !networkRiskRequiresTypedConfirmation ||
@@ -468,16 +853,90 @@
     private async Task LoadAsync()
     {
         page = await SecuritySettingsService.GetPageAsync();
+        messagingEditor = await SecuritySettingsService.GetMessagingEditorAsync();
+        SyncSessionLifetimeEditors();
         networkInterfaces = LoadNetworkInterfaces();
         currentAccess = await TrustedNetworkAccessService.EvaluateAsync(
             HttpContext?.Connection.RemoteIpAddress,
             HttpContext?.Request.Host.Host);
     }
 
+    private void SyncSessionLifetimeEditors()
+    {
+        var currentUserIds = page.Users.Select(user => user.Id).ToHashSet();
+        foreach (var staleUserId in sessionLifetimeEditors.Keys.Where(userId => !currentUserIds.Contains(userId)).ToArray())
+        {
+            sessionLifetimeEditors.Remove(staleUserId);
+        }
+
+        foreach (var user in page.Users)
+        {
+            sessionLifetimeEditors[user.Id] = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(user.SessionLifetimeMinutes);
+        }
+    }
+
     private Task HandleTabChangedAsync(string? value)
     {
         activeTab = string.IsNullOrWhiteSpace(value) ? TrustedNetworksTabValue : value;
         return Task.CompletedTask;
+    }
+
+    private void OpenGraphHelpModal()
+    {
+        showGraphHelpModal = true;
+    }
+
+    private void CloseGraphHelpModal()
+    {
+        showGraphHelpModal = false;
+    }
+
+    private async Task SaveMessagingAsync()
+    {
+        isSavingMessaging = true;
+        messagingMessage = null;
+        messagingMessageIsError = false;
+        try
+        {
+            await SecuritySettingsService.SaveMessagingSettingsAsync(messagingEditor);
+            messagingMessage = "Messaging settings saved.";
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            messagingMessage = exception.Message;
+            messagingMessageIsError = true;
+        }
+        finally
+        {
+            isSavingMessaging = false;
+        }
+    }
+
+    private async Task SendMessagingTestAsync()
+    {
+        isSendingMessagingTest = true;
+        messagingMessage = null;
+        messagingMessageIsError = false;
+        try
+        {
+            var result = await SecuritySettingsService.SendMessagingTestAsync(messagingTestRecipient);
+            messagingMessage = result.Message;
+            messagingMessageIsError = !result.Succeeded;
+            if (result.Succeeded)
+            {
+                await LoadAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            messagingMessage = exception.Message;
+            messagingMessageIsError = true;
+        }
+        finally
+        {
+            isSendingMessagingTest = false;
+        }
     }
 
     private async Task SaveNetworkAsync()
@@ -874,7 +1333,7 @@
         }
 
         return entry.IsAuthenticationEnabled
-            ? "Username or email plus OTP is required before access is allowed."
+            ? "Email plus OTP is required before access is allowed."
             : "Straight through on this interface with no sign-in prompt.";
     }
 
@@ -1099,7 +1558,7 @@
 
         try
         {
-            provisioningResult = await SecuritySettingsService.CreateUserAsync(userEditor);
+            provisioningResult = await SecuritySettingsService.CreateUserAsync(userEditor, BuildLmsLoginUrl(userEditor.Email));
             userEditor = new SecurityUserEditor();
             userMessage = "LMS account created. Finish authenticator setup in the authenticator app.";
             userMessageIsError = false;
@@ -1136,7 +1595,7 @@
     {
         try
         {
-            provisioningResult = await SecuritySettingsService.ResetUserOtpAsync(user.Id);
+            provisioningResult = await SecuritySettingsService.ResetUserOtpAsync(user.Id, BuildLmsLoginUrl(user.Email));
             userMessage = "Authenticator secret rotated. Re-register it in the authenticator app.";
             userMessageIsError = false;
             await LoadAsync();
@@ -1169,8 +1628,202 @@
         }
     }
 
+    private int GetSessionLifetimeEditor(SecurityUserViewModel user)
+    {
+        if (sessionLifetimeEditors.TryGetValue(user.Id, out var minutes))
+        {
+            return minutes;
+        }
+
+        minutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(user.SessionLifetimeMinutes);
+        sessionLifetimeEditors[user.Id] = minutes;
+        return minutes;
+    }
+
+    private void SetSessionLifetimeEditorPart(
+        Guid userId,
+        SessionLifetimePart part,
+        ChangeEventArgs args)
+    {
+        if (!int.TryParse(args.Value?.ToString(), out var value))
+        {
+            return;
+        }
+
+        var currentMinutes = sessionLifetimeEditors.TryGetValue(userId, out var minutes)
+            ? minutes
+            : SecuritySessionPolicy.DefaultSessionLifetimeMinutes;
+        sessionLifetimeEditors[userId] = BuildSessionLifetimeMinutes(currentMinutes, part, value);
+    }
+
+    private void SetNewUserSessionLifetimePart(SessionLifetimePart part, int value)
+    {
+        userEditor.SessionLifetimeMinutes = BuildSessionLifetimeMinutes(
+            userEditor.SessionLifetimeMinutes,
+            part,
+            value);
+    }
+
+    private async Task SaveUserSessionLifetimeAsync(SecurityUserViewModel user)
+    {
+        if (!sessionLifetimeEditors.TryGetValue(user.Id, out var minutes))
+        {
+            minutes = user.SessionLifetimeMinutes;
+        }
+
+        savingSessionLifetimes.Add(user.Id);
+        userMessage = null;
+
+        try
+        {
+            var normalizedMinutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(minutes);
+            await SecuritySettingsService.SetUserSessionLifetimeAsync(user.Id, normalizedMinutes);
+            sessionLifetimeEditors[user.Id] = normalizedMinutes;
+            userMessage = $"Login session for {user.Email} set to {FormatSessionLifetimeMinutes(normalizedMinutes)}.";
+            userMessageIsError = false;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            userMessage = exception.Message;
+            userMessageIsError = true;
+        }
+        finally
+        {
+            savingSessionLifetimes.Remove(user.Id);
+        }
+    }
+
+    private bool IsSavingSessionLifetime(Guid userId) => savingSessionLifetimes.Contains(userId);
+
     private static string FormatTimestamp(DateTimeOffset? value, string fallback) =>
         value?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? fallback;
+
+    private static string FormatSessionLifetimeMinutes(int minutes)
+    {
+        var normalizedMinutes = NormalizeSessionLifetimeEditorMinutes(minutes);
+        var days = normalizedMinutes / MinutesPerDay;
+        var remainder = normalizedMinutes % MinutesPerDay;
+        var hours = remainder / MinutesPerHour;
+        var remainingMinutes = remainder % MinutesPerHour;
+        var parts = new List<string>(3);
+
+        if (days > 0)
+        {
+            parts.Add(days == 1 ? "1 day" : $"{days} days");
+        }
+
+        if (hours > 0)
+        {
+            parts.Add(hours == 1 ? "1 hour" : $"{hours} hours");
+        }
+
+        if (remainingMinutes > 0 || parts.Count == 0)
+        {
+            parts.Add(remainingMinutes == 1 ? "1 minute" : $"{remainingMinutes} minutes");
+        }
+
+        return string.Join(" ", parts);
+    }
+
+    private static int GetSessionLifetimePart(int minutes, SessionLifetimePart part)
+    {
+        var clampedMinutes = NormalizeSessionLifetimeEditorMinutes(minutes);
+        return part switch
+        {
+            SessionLifetimePart.Days => clampedMinutes / MinutesPerDay,
+            SessionLifetimePart.Hours => clampedMinutes % MinutesPerDay / MinutesPerHour,
+            SessionLifetimePart.Minutes => clampedMinutes % MinutesPerHour,
+            _ => 0
+        };
+    }
+
+    private static int BuildSessionLifetimeMinutes(
+        int currentMinutes,
+        SessionLifetimePart part,
+        int value)
+    {
+        var clampedCurrent = NormalizeSessionLifetimeEditorMinutes(currentMinutes);
+        var days = clampedCurrent / MinutesPerDay;
+        var remainder = clampedCurrent % MinutesPerDay;
+        var hours = remainder / MinutesPerHour;
+        var minutes = remainder % MinutesPerHour;
+
+        switch (part)
+        {
+            case SessionLifetimePart.Days:
+                days = Math.Clamp(value, 0, MaxSessionLifetimeDays);
+                break;
+            case SessionLifetimePart.Hours:
+                hours = Math.Clamp(value, 0, 23);
+                break;
+            case SessionLifetimePart.Minutes:
+                minutes = Math.Clamp(value, 0, 59);
+                break;
+        }
+
+        return ClampBuiltSessionLifetimeMinutes(days * MinutesPerDay + hours * MinutesPerHour + minutes);
+    }
+
+    private static int NormalizeSessionLifetimeEditorMinutes(int minutes) =>
+        minutes <= 0
+            ? SecuritySessionPolicy.DefaultSessionLifetimeMinutes
+            : ClampBuiltSessionLifetimeMinutes(minutes);
+
+    private static int ClampBuiltSessionLifetimeMinutes(int minutes) =>
+        Math.Clamp(
+            minutes,
+            SecuritySessionPolicy.MinimumSessionLifetimeMinutes,
+            SecuritySessionPolicy.MaximumSessionLifetimeMinutes);
+
+    private static string FormatMessagingProvider(MessagingEmailProvider provider) => provider switch
+    {
+        MessagingEmailProvider.Smtp => "SMTP",
+        MessagingEmailProvider.MicrosoftGraph => "Graph",
+        _ => "Off"
+    };
+
+    private static SecurityMessagingSettingsViewModel BuildDefaultMessagingViewModel() =>
+        new(
+            false,
+            MessagingEmailProvider.Disabled,
+            string.Empty,
+            "Linux Made Sane",
+            string.Empty,
+            587,
+            true,
+            string.Empty,
+            false,
+            string.Empty,
+            string.Empty,
+            false,
+            "https://login.microsoftonline.com/",
+            "https://graph.microsoft.com/v1.0",
+            true,
+            null,
+            false);
+
+    private string BuildLmsLoginUrl(string? email)
+    {
+        var loginUri = new Uri(new Uri(Navigation.BaseUri), "login");
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            return loginUri.ToString();
+        }
+
+        var builder = new UriBuilder(loginUri)
+        {
+            Query = $"email={Uri.EscapeDataString(email.Trim())}"
+        };
+        return builder.Uri.ToString();
+    }
+
+    private enum SessionLifetimePart
+    {
+        Days,
+        Hours,
+        Minutes
+    }
 
     private sealed record LocalNetworkInterfaceView(
         string Id,

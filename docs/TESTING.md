@@ -51,10 +51,16 @@ Re-run the installer to update to the latest available Community release:
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
 ```
 
+Short link:
+
+```bash
+curl -fsSL https://bit.ly/4tCQKCN | sudo bash
+```
+
 Test a specific version with `LMS_VERSION`:
 
 ```bash
-curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=2026.05.08.0 bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=v2026.05.13.10.08 bash
 ```
 
 Releases are installed into versioned folders and `current` is updated to point at the newest installed release.

@@ -1,10 +1,19 @@
+// Copyright (c) Openplan Software.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Net;
-using System.Reflection;
 using System.Security.Claims;
+using System.Text;
+using System.Text.Json;
 using LinuxMadeSane.Application;
+using LinuxMadeSane.Application.Contracts.EdgeGateway;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models;
+using LinuxMadeSane.Core.Models.Ai;
 using LinuxMadeSane.Core.Models.Scheduling;
+using LinuxMadeSane.Core.Versioning;
 using LinuxMadeSane.Infrastructure;
 using LinuxMadeSane.Infrastructure.Persistence;
 using LinuxMadeSane.Web.Components;
@@ -12,11 +21,14 @@ using LinuxMadeSane.Web.Services;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.HttpOverrides;
 
 namespace LinuxMadeSane.Web;
 
 public class Program
 {
+    private const string OriginalConnectionRemoteIpAddressItemKey = "LmsOriginalConnectionRemoteIpAddress";
+
     public static void Main(string[] args)
     {
         if (args.Any(argument =>
@@ -35,6 +47,15 @@ public class Program
             .AddInteractiveServerComponents();
         builder.Services.AddCascadingAuthenticationState();
         builder.Services.AddHttpContextAccessor();
+        builder.Services.AddMemoryCache();
+        builder.Services.Configure<ForwardedHeadersOptions>(options =>
+        {
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
+                                       ForwardedHeaders.XForwardedHost |
+                                       ForwardedHeaders.XForwardedProto;
+            options.KnownProxies.Add(IPAddress.Loopback);
+            options.KnownProxies.Add(IPAddress.IPv6Loopback);
+        });
         builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
             .AddCookie(options =>
             {
@@ -44,8 +65,12 @@ public class Program
                 options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
                 options.LoginPath = "/login";
                 options.AccessDeniedPath = "/access-denied";
-                options.SlidingExpiration = true;
+                options.SlidingExpiration = false;
                 options.ExpireTimeSpan = TimeSpan.FromHours(12);
+                options.Events = new CookieAuthenticationEvents
+                {
+                    OnValidatePrincipal = ValidateRemoteSessionAsync
+                };
             });
         builder.Services.AddAuthorization();
         builder.Services.AddSingleton<ITransientConnectionSecretStore, TransientConnectionSecretStore>();
@@ -54,6 +79,22 @@ public class Program
         builder.Services.AddSingleton<FileActionQueueService>();
         builder.Services.AddSingleton<BrowserFileTransferService>();
         builder.Services.AddSingleton<MediaLibrarySignedUrlService>();
+        builder.Services.AddScoped<LocalInstanceIdentityService>();
+        builder.Services.AddScoped<PasskeyAuthenticationService>();
+        builder.Services.Configure<ApplicationUpdateOptions>(builder.Configuration.GetSection("ApplicationUpdates"));
+        builder.Services.AddHttpClient("ApplicationUpdates");
+        builder.Services.AddSingleton(provider =>
+            new ApplicationUpdateService(
+                provider.GetRequiredService<IHttpClientFactory>().CreateClient("ApplicationUpdates"),
+                provider.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<ApplicationUpdateOptions>>(),
+                provider.GetRequiredService<ILogger<ApplicationUpdateService>>()));
+        builder.Services.AddHttpClient<LmsHostUpdateAvailabilityService>()
+            .ConfigurePrimaryHttpMessageHandler(static () => new HttpClientHandler
+            {
+                AllowAutoRedirect = false,
+                ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+            });
+        builder.Services.AddHostedService<ApplicationUpdateHostedService>();
         builder.Services.AddScoped<MediaLibraryTranscodePreviewService>();
         builder.Services.AddScoped<TerminalWorkspaceAccessor>();
         builder.Services.AddApplicationServices();
@@ -82,15 +123,23 @@ public class Program
         }
 
         app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
+        app.Use(async (context, next) =>
+        {
+            context.Items[OriginalConnectionRemoteIpAddressItemKey] = context.Connection.RemoteIpAddress;
+            await next();
+        });
+        app.UseForwardedHeaders();
         if (app.Environment.IsDevelopment())
         {
             app.UseWhen(
-                context => !IsMediaLibraryApiPath(context.Request.Path),
+                context => !IsMediaLibraryApiPath(context.Request.Path) && !IsEdgeAuthCheckPath(context.Request.Path),
                 branch => branch.UseHttpsRedirection());
         }
         else
         {
-            app.UseHttpsRedirection();
+            app.UseWhen(
+                context => !IsEdgeAuthCheckPath(context.Request.Path),
+                branch => branch.UseHttpsRedirection());
         }
         app.Use(async (context, next) =>
         {
@@ -133,6 +182,9 @@ public class Program
                 context.Connection.RemoteIpAddress,
                 context.Request.Host.Host,
                 context.RequestAborted);
+            accessResult = await TryEvaluateNoAccessCloudflareLocalExposureAsync(
+                context,
+                trustedNetworkAccessService) ?? accessResult;
             context.Items["LmsTrustedNetworkAccess"] = accessResult;
 
             if (accessResult.IsTrusted ||
@@ -189,19 +241,84 @@ public class Program
         app.MapGet("/healthz", () => Results.Json(new
         {
             status = "ok",
+            product = "linux-made-sane",
+            name = "Linux Made Sane",
             version = ResolveProductVersion()
         }));
-        app.MapPost("/auth/login", async (HttpContext context, ISecurityAuthenticationService authenticationService) =>
+        app.MapGet("/edge-auth/check", async Task (
+            HttpContext context,
+            IEdgeGatewayService edgeGatewayService) =>
+        {
+            var result = await edgeGatewayService.EvaluateAuthAsync(
+                new EdgeGatewayAuthCheckContext(
+                    context.Request.Headers["X-Forwarded-Host"].ToString(),
+                    context.Request.Headers["X-Forwarded-Proto"].ToString(),
+                    context.Request.Headers["X-Forwarded-Uri"].ToString(),
+                    context.Request.Headers["X-Forwarded-For"].ToString(),
+                    context.Request.Headers.Host.ToString(),
+                    context.Connection.RemoteIpAddress,
+                    context.User),
+                context.RequestAborted);
+
+            context.Response.StatusCode = result.StatusCode;
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers.Pragma = "no-cache";
+
+            if (!string.IsNullOrWhiteSpace(result.RedirectLocation))
+            {
+                context.Response.Headers.Location = result.RedirectLocation;
+            }
+
+            if (result.StatusCode == StatusCodes.Status200OK)
+            {
+                if (!string.IsNullOrWhiteSpace(result.UserName))
+                {
+                    context.Response.Headers["X-LMS-User"] = result.UserName;
+                }
+
+                if (!string.IsNullOrWhiteSpace(result.UserEmail))
+                {
+                    context.Response.Headers["X-LMS-Email"] = result.UserEmail;
+                }
+
+                if (!string.IsNullOrWhiteSpace(result.Groups))
+                {
+                    context.Response.Headers["X-LMS-Groups"] = result.Groups;
+                }
+            }
+        }).DisableAntiforgery();
+        app.MapGet("/edge-auth/return", async (
+            string? target,
+            IEdgeGatewayService edgeGatewayService,
+            CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(target) ||
+                !await edgeGatewayService.IsSafeReturnTargetAsync(target, cancellationToken))
+            {
+                return Results.Redirect("/");
+            }
+
+            return Results.Redirect(target);
+        });
+        app.MapPost("/auth/login", async (
+            HttpContext context,
+            ISecurityAuthenticationService authenticationService,
+            PasskeyAuthenticationService passkeyAuthenticationService) =>
         {
             var form = await context.Request.ReadFormAsync(context.RequestAborted);
-            var identifier = form["identifier"].ToString();
+            var email = form["email"].ToString();
+            if (string.IsNullOrWhiteSpace(email))
+            {
+                email = form["identifier"].ToString();
+            }
+
             var otpCode = form["otpCode"].ToString();
             var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
 
-            var result = await authenticationService.ValidateOtpAsync(identifier, otpCode, context.RequestAborted);
+            var result = await authenticationService.ValidateOtpAsync(email, otpCode, context.RequestAborted);
             if (!result.Succeeded || !result.UserId.HasValue || string.IsNullOrWhiteSpace(result.Email))
             {
-                context.Response.Redirect(BuildLoginRedirectTarget(returnUrl, result.FailureMessage, identifier));
+                context.Response.Redirect(BuildLoginRedirectTarget(returnUrl, result.FailureMessage, email));
                 return;
             }
 
@@ -209,19 +326,37 @@ public class Program
             [
                 new Claim(ClaimTypes.NameIdentifier, result.UserId.Value.ToString()),
                 new Claim(ClaimTypes.Name, result.Email),
-                new Claim(ClaimTypes.Email, result.Email)
+                new Claim(ClaimTypes.Email, result.Email),
+                new Claim("lms:mfa", "true"),
+                new Claim("amr", "otp")
             ];
 
             var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme));
+            var sessionLifetime = TimeSpan.FromMinutes(
+                SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(result.SessionLifetimeMinutes));
+            var issuedAtUtc = DateTimeOffset.UtcNow;
+            ((ClaimsIdentity)principal.Identity!).AddClaim(new Claim(
+                "auth_time",
+                issuedAtUtc.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture)));
             await context.SignInAsync(
                 CookieAuthenticationDefaults.AuthenticationScheme,
                 principal,
                 new AuthenticationProperties
                 {
                     IsPersistent = false,
-                    AllowRefresh = true,
-                    ExpiresUtc = DateTimeOffset.UtcNow.AddHours(12)
+                    AllowRefresh = false,
+                    IssuedUtc = issuedAtUtc,
+                    ExpiresUtc = issuedAtUtc.Add(sessionLifetime)
                 });
+
+            if (IsEdgeGatewayReturnUrl(returnUrl) ||
+                await passkeyAuthenticationService.ShouldOfferPasskeySetupAsync(
+                    result.UserId.Value,
+                    context.RequestAborted))
+            {
+                context.Response.Redirect(BuildPasskeySetupRedirectTarget(returnUrl));
+                return;
+            }
 
             context.Response.Redirect(returnUrl);
         }).DisableAntiforgery();
@@ -229,6 +364,173 @@ public class Program
         {
             await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
             context.Response.Redirect("/login");
+        }).DisableAntiforgery();
+        app.MapGet("/api/passkeys", async (
+            HttpContext context,
+            PasskeyAuthenticationService passkeyAuthenticationService) =>
+        {
+            var passkeys = await passkeyAuthenticationService.ListForPrincipalAsync(
+                context.User,
+                context.RequestAborted);
+
+            return Results.Json(passkeys.Select(passkey => new
+            {
+                passkey.Id,
+                passkey.FriendlyName,
+                passkey.CreatedAtUtc,
+                passkey.LastUsedAtUtc
+            }));
+        });
+        app.MapDelete("/api/passkeys/{passkeyId:guid}", async (
+            HttpContext context,
+            Guid passkeyId,
+            PasskeyAuthenticationService passkeyAuthenticationService) =>
+        {
+            var result = await passkeyAuthenticationService.DeleteAsync(
+                context.User,
+                passkeyId,
+                context.RequestAborted);
+            return Results.Json(new { result.Succeeded, result.Message });
+        });
+        app.MapPost("/api/passkeys/enroll/options", async (
+            HttpContext context,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var request = await context.Request.ReadFromJsonAsync<PasskeyEnrollmentOptionsRequest>(
+                    cancellationToken: context.RequestAborted) ?? new PasskeyEnrollmentOptionsRequest(null);
+                var result = await passkeyAuthenticationService.BuildAuthenticatedRegistrationOptionsAsync(
+                    context.User,
+                    request.FriendlyName ?? string.Empty,
+                    context.Request,
+                    context.RequestAborted);
+
+                return BuildPasskeyOptionsResponse(result);
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Passkey MFA enrollment options request failed.");
+                return Results.Json(
+                    new { succeeded = false, message = "Passkey setup could not start." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }).DisableAntiforgery();
+        app.MapPost("/api/passkeys/register/complete", async (
+            HttpContext context,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var (stateId, credentialJson, error) = await ReadPasskeyCeremonyRequestAsync(context);
+                if (!string.IsNullOrWhiteSpace(error))
+                {
+                    return Results.BadRequest(new { succeeded = false, message = error });
+                }
+
+                var result = await passkeyAuthenticationService.CompleteRegistrationAsync(
+                    context.User,
+                    stateId,
+                    credentialJson,
+                    context.Request,
+                    context.RequestAborted);
+                return Results.Json(new { result.Succeeded, result.Message });
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Passkey registration completion request failed.");
+                return Results.Json(
+                    new { succeeded = false, message = "Passkey setup failed." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }).DisableAntiforgery();
+        app.MapPost("/api/passkeys/login/options", async (
+            HttpContext context,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var request = await context.Request.ReadFromJsonAsync<PasskeyLoginOptionsRequest>(
+                    cancellationToken: context.RequestAborted) ?? new PasskeyLoginOptionsRequest(null);
+                var result = await passkeyAuthenticationService.BuildLoginOptionsAsync(
+                    request.Email ?? string.Empty,
+                    context.Request,
+                    context.RequestAborted);
+
+                return BuildPasskeyOptionsResponse(result);
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Passkey sign-in options request failed.");
+                return Results.Json(
+                    new { succeeded = false, message = "Passkey sign-in could not start." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }).DisableAntiforgery();
+        app.MapPost("/api/passkeys/login/complete", async (
+            HttpContext context,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var (stateId, credentialJson, error) = await ReadPasskeyCeremonyRequestAsync(context);
+                if (!string.IsNullOrWhiteSpace(error))
+                {
+                    return Results.BadRequest(new { succeeded = false, message = error });
+                }
+
+                var returnUrl = NormalizeReturnUrl(context.Request.Query["returnUrl"].ToString());
+                var result = await passkeyAuthenticationService.CompleteLoginAsync(
+                    stateId,
+                    credentialJson,
+                    context.Request,
+                    context.RequestAborted);
+                if (!result.Succeeded || result.User is null)
+                {
+                    return Results.Json(new { succeeded = false, message = result.ErrorMessage });
+                }
+
+                Claim[] claims =
+                [
+                    new Claim(ClaimTypes.NameIdentifier, result.User.Id.ToString()),
+                    new Claim(ClaimTypes.Name, result.User.Email),
+                    new Claim(ClaimTypes.Email, result.User.Email),
+                    new Claim("lms:mfa", "true"),
+                    new Claim("lms:passkey", "true"),
+                    new Claim("amr", "passkey"),
+                    new Claim(
+                        "auth_time",
+                        DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture))
+                ];
+
+                var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme));
+                var sessionLifetime = TimeSpan.FromMinutes(
+                    SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(result.User.SessionLifetimeMinutes));
+                var issuedAtUtc = DateTimeOffset.UtcNow;
+                await context.SignInAsync(
+                    CookieAuthenticationDefaults.AuthenticationScheme,
+                    principal,
+                    new AuthenticationProperties
+                    {
+                        IsPersistent = false,
+                        AllowRefresh = false,
+                        IssuedUtc = issuedAtUtc,
+                        ExpiresUtc = issuedAtUtc.Add(sessionLifetime)
+                    });
+
+                return Results.Json(new { succeeded = true, redirectUrl = returnUrl });
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Passkey sign-in completion request failed.");
+                return Results.Json(
+                    new { succeeded = false, message = "Passkey sign-in failed." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
         }).DisableAntiforgery();
         app.MapPost("/internal/scheduler/tasks/{taskId:guid}/run", async (
             HttpContext context,
@@ -298,13 +600,45 @@ public class Program
             await browserFileTransferService.CancelUploadAsync(token, request?.Reason, cancellationToken);
             return Results.Ok();
         }).DisableAntiforgery();
-        app.MapGet("/internal/file-actions/downloads/{token}/content", (
+        app.MapGet("/internal/file-actions/downloads/{token}/content", async (
+            HttpContext context,
             string token,
-            BrowserFileTransferService browserFileTransferService) =>
+            BrowserFileTransferService browserFileTransferService,
+            FileActionQueueService fileActionQueueService) =>
         {
-            var artifact = browserFileTransferService.GetDownloadArtifact(token);
-            var stream = new FileStream(artifact.LocalFilePath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 128, useAsync: true);
-            return Results.File(stream, artifact.ContentType, artifact.DownloadFileName);
+            if (!browserFileTransferService.TryGetDownloadArtifact(token, out var artifact) ||
+                !File.Exists(artifact.LocalFilePath))
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+
+            context.Response.ContentType = artifact.ContentType;
+            context.Response.ContentLength = artifact.TotalBytes;
+            context.Response.Headers["Content-Disposition"] = BuildAttachmentContentDisposition(artifact.DownloadFileName);
+            context.Response.Headers["Cache-Control"] = "no-store";
+            context.Response.Headers["Pragma"] = "no-cache";
+            context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+
+            var progress = new ActionProgress<BrowserDownloadProgressResult>(result =>
+                fileActionQueueService.ReportBrowserDownloadProgress(
+                    result.WorkspaceId,
+                    result.JobId,
+                    result.ItemId,
+                    result.BytesTransferred,
+                    result.TotalBytes));
+
+            try
+            {
+                await browserFileTransferService.StreamDownloadToAsync(
+                    token,
+                    context.Response.Body,
+                    progress,
+                    context.RequestAborted);
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            {
+            }
         });
         app.MapPost("/internal/file-actions/downloads/{token}/progress", (
             string token,
@@ -312,7 +646,11 @@ public class Program
             BrowserFileTransferService browserFileTransferService,
             FileActionQueueService fileActionQueueService) =>
         {
-            var result = browserFileTransferService.ReportDownloadProgress(token, request.BytesTransferred);
+            if (!browserFileTransferService.TryReportDownloadProgress(token, request.BytesTransferred, out var result))
+            {
+                return Results.Ok();
+            }
+
             fileActionQueueService.ReportBrowserDownloadProgress(result.WorkspaceId, result.JobId, result.ItemId, result.BytesTransferred, result.TotalBytes);
             return Results.Ok();
         }).DisableAntiforgery();
@@ -322,7 +660,11 @@ public class Program
             FileActionQueueService fileActionQueueService,
             CancellationToken cancellationToken) =>
         {
-            var result = await browserFileTransferService.CompleteDownloadAsync(token, cancellationToken);
+            if (!browserFileTransferService.TryCompleteDownload(token, out var result))
+            {
+                return Results.Ok();
+            }
+
             fileActionQueueService.ReportBrowserDownloadProgress(result.WorkspaceId, result.JobId, result.ItemId, result.BytesTransferred, result.TotalBytes);
             return Results.Ok();
         }).DisableAntiforgery();
@@ -401,12 +743,7 @@ public class Program
     }
 
     private static string ResolveProductVersion()
-    {
-        var assembly = typeof(Program).Assembly;
-        return assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ??
-               assembly.GetName().Version?.ToString() ??
-               "unknown";
-    }
+        => LinuxMadeSaneBuildVersion.GetCurrent(typeof(Program).Assembly);
 
     private static async Task UnlockSecurityAsync(IServiceProvider services)
     {
@@ -477,6 +814,8 @@ public class Program
 
         if (path.StartsWithSegments("/access-denied") ||
             path.StartsWithSegments("/healthz") ||
+            path.StartsWithSegments("/edge-auth/check") ||
+            path.StartsWithSegments("/api/passkeys/login") ||
             path.StartsWithSegments("/api/integrations/media-library") ||
             path.StartsWithSegments("/internal/scheduler") ||
             path.StartsWithSegments("/_framework") ||
@@ -502,12 +841,113 @@ public class Program
                value.EndsWith(".woff2", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static async Task<TrustedNetworkAccessResult?> TryEvaluateNoAccessCloudflareLocalExposureAsync(
+        HttpContext context,
+        ITrustedNetworkAccessService trustedNetworkAccessService)
+    {
+        if (context.Items[OriginalConnectionRemoteIpAddressItemKey] is not IPAddress originalRemoteIpAddress ||
+            !IsLoopbackRequest(originalRemoteIpAddress))
+        {
+            return null;
+        }
+
+        var requestHost = context.Request.Host.Host.Trim().TrimEnd('.').ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(requestHost))
+        {
+            return null;
+        }
+
+        var exposureStore = context.RequestServices.GetRequiredService<ICloudflareExposureStore>();
+        var exposure = await exposureStore.GetConfigByHostnameAsync(
+            AiLocalMachine.ManagedHostId,
+            requestHost,
+            context.RequestAborted);
+
+        if (exposure is null ||
+            exposure.DisabledAtUtc.HasValue ||
+            exposure.AccessMode != ExposedServiceAccessMode.NoAccessProtection ||
+            !IsLoopbackServiceTarget(exposure.LocalServiceUrl))
+        {
+            return null;
+        }
+
+        return await trustedNetworkAccessService.EvaluateAsync(
+            originalRemoteIpAddress,
+            context.Request.Host.Host,
+            context.RequestAborted);
+    }
+
+    private static bool IsLoopbackServiceTarget(string localServiceUrl)
+    {
+        if (!Uri.TryCreate(localServiceUrl?.Trim(), UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        if (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return IPAddress.TryParse(uri.Host, out var address) && IPAddress.IsLoopback(address);
+    }
+
     private static bool IsMediaLibraryApiPath(PathString path) =>
         path.StartsWithSegments("/api/integrations/media-library");
+
+    private static bool IsEdgeAuthCheckPath(PathString path) =>
+        path.StartsWithSegments("/edge-auth/check");
 
     private static bool IsAuthenticationEntryPath(PathString path) =>
         path.StartsWithSegments("/login") ||
         path.StartsWithSegments("/auth");
+
+    private static string BuildPasskeySetupRedirectTarget(string returnUrl) =>
+        $"/auth/setup-passkey?returnUrl={Uri.EscapeDataString(NormalizeReturnUrl(returnUrl))}";
+
+    private static bool IsEdgeGatewayReturnUrl(string? returnUrl) =>
+        NormalizeReturnUrl(returnUrl).StartsWith("/edge-auth/return", StringComparison.OrdinalIgnoreCase);
+
+    private static IResult BuildPasskeyOptionsResponse(PasskeyOptionsResult result)
+    {
+        if (!result.Succeeded || string.IsNullOrWhiteSpace(result.StateId) || string.IsNullOrWhiteSpace(result.OptionsJson))
+        {
+            return Results.Json(new { succeeded = false, message = result.ErrorMessage });
+        }
+
+        return Results.Content(
+            $$"""{"succeeded":true,"stateId":"{{result.StateId}}","options":{{result.OptionsJson}}}""",
+            "application/json",
+            Encoding.UTF8);
+    }
+
+    private static async Task<(string StateId, string CredentialJson, string? Error)> ReadPasskeyCeremonyRequestAsync(
+        HttpContext context)
+    {
+        try
+        {
+            using var document = await JsonDocument.ParseAsync(
+                context.Request.Body,
+                cancellationToken: context.RequestAborted);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("stateId", out var stateIdElement) ||
+                string.IsNullOrWhiteSpace(stateIdElement.GetString()))
+            {
+                return (string.Empty, string.Empty, "The passkey state was missing.");
+            }
+
+            if (!root.TryGetProperty("credential", out var credentialElement))
+            {
+                return (string.Empty, string.Empty, "The passkey credential response was missing.");
+            }
+
+            return (stateIdElement.GetString()!, credentialElement.GetRawText(), null);
+        }
+        catch (JsonException)
+        {
+            return (string.Empty, string.Empty, "The passkey request was not valid JSON.");
+        }
+    }
 
     private static bool IsLoopbackRequest(IPAddress? remoteIpAddress) =>
         remoteIpAddress is not null && IPAddress.IsLoopback(remoteIpAddress);
@@ -533,6 +973,83 @@ public class Program
         }
 
         return $"/login?{string.Join("&", queryParts)}";
+    }
+
+    private static async Task ValidateRemoteSessionAsync(CookieValidatePrincipalContext context)
+    {
+        var userIdValue = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdValue, out var userId))
+        {
+            await RejectRemoteSessionAsync(context);
+            return;
+        }
+
+        var userStore = context.HttpContext.RequestServices.GetRequiredService<ISecurityUserStore>();
+        var user = await userStore.GetAsync(userId, context.HttpContext.RequestAborted);
+        if (user is null || !user.IsEnabled)
+        {
+            await RejectRemoteSessionAsync(context);
+            return;
+        }
+
+        if (context.Properties.IssuedUtc is not DateTimeOffset issuedAtUtc)
+        {
+            await RejectRemoteSessionAsync(context);
+            return;
+        }
+
+        var lifetime = TimeSpan.FromMinutes(
+            SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(user.SessionLifetimeMinutes));
+        if (DateTimeOffset.UtcNow >= issuedAtUtc.Add(lifetime))
+        {
+            await RejectRemoteSessionAsync(context);
+            return;
+        }
+
+        context.ShouldRenew = false;
+    }
+
+    private static async Task RejectRemoteSessionAsync(CookieValidatePrincipalContext context)
+    {
+        context.RejectPrincipal();
+        await context.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+    }
+
+    private static string BuildAttachmentContentDisposition(string fileName)
+    {
+        var safeFileName = string.IsNullOrWhiteSpace(fileName)
+            ? "download.bin"
+            : fileName.Trim();
+        var fallbackFileName = BuildAsciiFileNameFallback(safeFileName);
+
+        return $"attachment; filename=\"{EscapeHeaderQuotedString(fallbackFileName)}\"; filename*=UTF-8''{Uri.EscapeDataString(safeFileName)}";
+    }
+
+    private static string BuildAsciiFileNameFallback(string fileName)
+    {
+        var builder = new StringBuilder(fileName.Length);
+        foreach (var character in fileName)
+        {
+            builder.Append(character is >= ' ' and <= '~' and not '"' and not '\\'
+                ? character
+                : '_');
+        }
+
+        var fallback = builder.ToString().Trim();
+        return string.IsNullOrWhiteSpace(fallback) ? "download.bin" : fallback;
+    }
+
+    private static string EscapeHeaderQuotedString(string value) =>
+        value.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal);
+
+    private sealed record PasskeyEnrollmentOptionsRequest(string? FriendlyName);
+
+    private sealed record PasskeyLoginOptionsRequest(string? Email);
+
+    private sealed class ActionProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
     }
 
     private static string NormalizeReturnUrl(string? returnUrl)

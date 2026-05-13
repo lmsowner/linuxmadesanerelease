@@ -1,8 +1,11 @@
+using System.Net;
 using LinuxMadeSane.Application.Contracts.Security;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
+using LinuxMadeSane.Core.Models.Messaging;
+using QRCoder;
 
 namespace LinuxMadeSane.Application.Services;
 
@@ -10,7 +13,9 @@ public sealed class SecuritySettingsService(
     ISecurityUserStore securityUserStore,
     ITrustedNetworkStore trustedNetworkStore,
     ISecretStore secretStore,
-    IRemoteAccessSystemService remoteAccessSystemService) : ISecuritySettingsService
+    IRemoteAccessSystemService remoteAccessSystemService,
+    IMessagingEmailSettingsStore messagingEmailSettingsStore,
+    IEmailDeliveryService emailDeliveryService) : ISecuritySettingsService
 {
     public async Task<SecuritySettingsPageViewModel> GetPageAsync(CancellationToken cancellationToken = default)
     {
@@ -27,11 +32,13 @@ public sealed class SecuritySettingsService(
             users
                 .OrderBy(user => user.Email, StringComparer.OrdinalIgnoreCase)
                 .Select(MapUser)
-                .ToArray());
+                .ToArray(),
+            MapMessaging(await messagingEmailSettingsStore.GetAsync(cancellationToken)));
     }
 
     public async Task<SecurityUserProvisioningViewModel> CreateUserAsync(
         SecurityUserEditor editor,
+        string? lmsLoginUrl = null,
         CancellationToken cancellationToken = default)
     {
         var normalizedEmail = NormalizeEmail(editor.Email);
@@ -42,10 +49,12 @@ public sealed class SecuritySettingsService(
         }
 
         ValidateAuthorizedKeys(editor.SshAuthenticationMode, editor.AuthorizedKeyEntries);
+        var sessionLifetimeMinutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(editor.SessionLifetimeMinutes);
 
         var secret = TotpAuthenticator.GenerateSecret();
         var secretReference = await secretStore.StoreSecretAsync(secret, $"security-user-otp:{normalizedEmail}", cancellationToken);
         var now = DateTimeOffset.UtcNow;
+        SecurityUser user;
 
         try
         {
@@ -54,11 +63,12 @@ public sealed class SecuritySettingsService(
                 editor.LinuxUsername,
                 cancellationToken);
 
-            var user = new SecurityUser(
+            user = new SecurityUser(
                 Guid.NewGuid(),
                 normalizedEmail,
                 linuxUsername,
                 true,
+                sessionLifetimeMinutes,
                 editor.SshAuthenticationMode,
                 NormalizeAuthorizedKeyEntries(editor.AuthorizedKeyEntries),
                 isLocalAccountManaged,
@@ -70,13 +80,19 @@ public sealed class SecuritySettingsService(
 
             await securityUserStore.SaveAsync(user, cancellationToken);
             await ApplyRemoteAccessConfigurationAsync(cancellationToken);
-            return BuildProvisioningResult(user, secret);
         }
         catch
         {
             await secretStore.DeleteSecretAsync(secretReference, cancellationToken);
             throw;
         }
+
+        return await BuildProvisioningResultAsync(
+            user,
+            secret,
+            lmsLoginUrl,
+            LoginSetupEmailKind.Created,
+            cancellationToken);
     }
 
     public async Task<SecurityUserAccessEditor> GetUserEditorAsync(Guid userId, CancellationToken cancellationToken = default)
@@ -88,6 +104,7 @@ public sealed class SecuritySettingsService(
             Email = user.Email,
             LinuxUsername = ResolveLinuxUsername(user),
             IsEnabled = user.IsEnabled,
+            SessionLifetimeMinutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(user.SessionLifetimeMinutes),
             SshAuthenticationMode = user.SshAuthenticationMode,
             AuthorizedKeyEntries = user.AuthorizedKeyEntries
         };
@@ -121,6 +138,7 @@ public sealed class SecuritySettingsService(
         {
             LinuxUsername = linuxUsername,
             IsEnabled = editor.IsEnabled,
+            SessionLifetimeMinutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(editor.SessionLifetimeMinutes),
             SshAuthenticationMode = editor.SshAuthenticationMode,
             AuthorizedKeyEntries = NormalizeAuthorizedKeyEntries(editor.AuthorizedKeyEntries),
             IsLocalAccountManaged = user.IsLocalAccountManaged || createdLocalAccount,
@@ -131,7 +149,20 @@ public sealed class SecuritySettingsService(
         await ApplyRemoteAccessConfigurationAsync(cancellationToken);
     }
 
-    public async Task<SecurityUserProvisioningViewModel> ResetUserOtpAsync(Guid userId, CancellationToken cancellationToken = default)
+    public async Task SetUserSessionLifetimeAsync(Guid userId, int sessionLifetimeMinutes, CancellationToken cancellationToken = default)
+    {
+        var user = await GetRequiredUserAsync(userId, cancellationToken);
+        await securityUserStore.SaveAsync(user with
+        {
+            SessionLifetimeMinutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(sessionLifetimeMinutes),
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        }, cancellationToken);
+    }
+
+    public async Task<SecurityUserProvisioningViewModel> ResetUserOtpAsync(
+        Guid userId,
+        string? lmsLoginUrl = null,
+        CancellationToken cancellationToken = default)
     {
         var user = await GetRequiredUserAsync(userId, cancellationToken);
 
@@ -149,7 +180,12 @@ public sealed class SecuritySettingsService(
         };
 
         await securityUserStore.SaveAsync(updated, cancellationToken);
-        return BuildProvisioningResult(updated, secret);
+        return await BuildProvisioningResultAsync(
+            updated,
+            secret,
+            lmsLoginUrl,
+            LoginSetupEmailKind.Reset,
+            cancellationToken);
     }
 
     public async Task<SecurityUserPasswordResetViewModel> BuildPasswordResetAsync(Guid userId, CancellationToken cancellationToken = default)
@@ -217,6 +253,103 @@ public sealed class SecuritySettingsService(
 
         await securityUserStore.DeleteAsync(userId, cancellationToken);
         await ApplyRemoteAccessConfigurationAsync(cancellationToken);
+    }
+
+    public async Task<SecurityMessagingSettingsEditor> GetMessagingEditorAsync(CancellationToken cancellationToken = default)
+    {
+        var settings = await messagingEmailSettingsStore.GetAsync(cancellationToken);
+        return new SecurityMessagingSettingsEditor
+        {
+            IsEnabled = settings.IsEnabled,
+            Provider = settings.Provider,
+            SenderAddress = settings.SenderAddress,
+            SenderDisplayName = settings.SenderDisplayName,
+            SmtpHost = settings.SmtpHost,
+            SmtpPort = settings.SmtpPort,
+            SmtpUseStartTls = settings.SmtpUseStartTls,
+            SmtpUsername = settings.SmtpUsername ?? string.Empty,
+            HasSmtpPassword = !string.IsNullOrWhiteSpace(settings.SmtpPasswordSecretReference),
+            GraphTenantId = settings.GraphTenantId,
+            GraphClientId = settings.GraphClientId,
+            HasGraphClientSecret = !string.IsNullOrWhiteSpace(settings.GraphClientSecretReference),
+            GraphAuthority = settings.GraphAuthority,
+            GraphBaseUrl = settings.GraphBaseUrl,
+            GraphSaveToSentItems = settings.GraphSaveToSentItems
+        };
+    }
+
+    public async Task SaveMessagingSettingsAsync(
+        SecurityMessagingSettingsEditor editor,
+        CancellationToken cancellationToken = default)
+    {
+        var existing = await messagingEmailSettingsStore.GetAsync(cancellationToken);
+        var provider = editor.IsEnabled ? editor.Provider : MessagingEmailProvider.Disabled;
+        var now = DateTimeOffset.UtcNow;
+        var smtpPasswordSecretReference = await ResolveMessagingSecretReferenceAsync(
+            existing.SmtpPasswordSecretReference,
+            editor.SmtpPassword,
+            "messaging:smtp-password",
+            provider == MessagingEmailProvider.Smtp,
+            cancellationToken);
+        var graphClientSecretReference = await ResolveMessagingSecretReferenceAsync(
+            existing.GraphClientSecretReference,
+            editor.GraphClientSecret,
+            "messaging:graph-client-secret",
+            provider == MessagingEmailProvider.MicrosoftGraph,
+            cancellationToken);
+
+        var settings = existing with
+        {
+            IsEnabled = editor.IsEnabled,
+            Provider = provider,
+            SenderAddress = NormalizeOptional(editor.SenderAddress),
+            SenderDisplayName = string.IsNullOrWhiteSpace(editor.SenderDisplayName)
+                ? "Linux Made Sane"
+                : editor.SenderDisplayName.Trim(),
+            SmtpHost = NormalizeOptional(editor.SmtpHost),
+            SmtpPort = Math.Clamp(editor.SmtpPort, 1, 65535),
+            SmtpUseStartTls = editor.SmtpUseStartTls,
+            SmtpUsername = NormalizeOptional(editor.SmtpUsername),
+            SmtpPasswordSecretReference = smtpPasswordSecretReference,
+            GraphTenantId = NormalizeOptional(editor.GraphTenantId),
+            GraphClientId = NormalizeOptional(editor.GraphClientId),
+            GraphClientSecretReference = graphClientSecretReference,
+            GraphAuthority = NormalizeAbsoluteUrlOrDefault(editor.GraphAuthority, "https://login.microsoftonline.com/"),
+            GraphBaseUrl = NormalizeAbsoluteUrlOrDefault(editor.GraphBaseUrl, "https://graph.microsoft.com/v1.0"),
+            GraphSaveToSentItems = editor.GraphSaveToSentItems,
+            LastVerifiedAtUtc = null,
+            UpdatedAtUtc = now
+        };
+
+        ValidateMessagingSettings(settings);
+        await messagingEmailSettingsStore.SaveAsync(settings, cancellationToken);
+    }
+
+    public async Task<SecurityMessagingTestResult> SendMessagingTestAsync(
+        string recipientAddress,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await emailDeliveryService.SendHtmlAsync(
+            recipientAddress,
+            "Linux Made Sane email test",
+            """
+            <p>Linux Made Sane email delivery is configured and working.</p>
+            <p>This message was sent from the LMS Security messaging settings test.</p>
+            """,
+            cancellationToken);
+
+        if (result.Succeeded)
+        {
+            var settings = await messagingEmailSettingsStore.GetAsync(cancellationToken);
+            var now = DateTimeOffset.UtcNow;
+            await messagingEmailSettingsStore.SaveAsync(settings with
+            {
+                LastVerifiedAtUtc = now,
+                UpdatedAtUtc = now
+            }, cancellationToken);
+        }
+
+        return new SecurityMessagingTestResult(result.Succeeded, result.Attempted, result.Message);
     }
 
     public async Task<Guid> SaveTrustedNetworkAsync(TrustedNetworkEntryEditor editor, CancellationToken cancellationToken = default)
@@ -311,6 +444,81 @@ public sealed class SecuritySettingsService(
     private static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
 
     private static string NormalizeLinuxUsername(string value) => value.Trim().ToLowerInvariant();
+
+    private static string NormalizeOptional(string? value) => value?.Trim() ?? string.Empty;
+
+    private static string NormalizeAbsoluteUrlOrDefault(string? value, string fallback)
+    {
+        var candidate = string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+        if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+        {
+            throw new InvalidOperationException($"Enter a valid absolute URL for {candidate}.");
+        }
+
+        return uri.ToString().TrimEnd('/');
+    }
+
+    private async Task<string?> ResolveMessagingSecretReferenceAsync(
+        string? existingSecretReference,
+        string? newSecretValue,
+        string purpose,
+        bool keepForActiveProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!keepForActiveProvider)
+        {
+            if (!string.IsNullOrWhiteSpace(existingSecretReference))
+            {
+                await secretStore.DeleteSecretAsync(existingSecretReference, cancellationToken);
+            }
+
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(newSecretValue))
+        {
+            return existingSecretReference;
+        }
+
+        var nextReference = await secretStore.StoreSecretAsync(newSecretValue.Trim(), purpose, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(existingSecretReference))
+        {
+            await secretStore.DeleteSecretAsync(existingSecretReference, cancellationToken);
+        }
+
+        return nextReference;
+    }
+
+    private static void ValidateMessagingSettings(MessagingEmailSettings settings)
+    {
+        if (!settings.IsEnabled || settings.Provider == MessagingEmailProvider.Disabled)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(settings.SenderAddress))
+        {
+            throw new InvalidOperationException("Sender email address is required.");
+        }
+
+        if (settings.Provider == MessagingEmailProvider.Smtp)
+        {
+            if (string.IsNullOrWhiteSpace(settings.SmtpHost))
+            {
+                throw new InvalidOperationException("SMTP host is required.");
+            }
+
+            return;
+        }
+
+        if (settings.Provider == MessagingEmailProvider.MicrosoftGraph &&
+            (string.IsNullOrWhiteSpace(settings.GraphTenantId) ||
+             string.IsNullOrWhiteSpace(settings.GraphClientId) ||
+             string.IsNullOrWhiteSpace(settings.GraphClientSecretReference)))
+        {
+            throw new InvalidOperationException("Microsoft Graph needs tenant id, client id, and client secret.");
+        }
+    }
 
     private static string ResolveLinuxUsername(SecurityUser user) =>
         string.IsNullOrWhiteSpace(user.LinuxUsername)
@@ -424,16 +632,149 @@ public sealed class SecuritySettingsService(
             Environment.NewLine,
             value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
 
-    private static SecurityUserProvisioningViewModel BuildProvisioningResult(SecurityUser user, string secret)
+    private async Task<SecurityUserProvisioningViewModel> BuildProvisioningResultAsync(
+        SecurityUser user,
+        string secret,
+        string? lmsLoginUrl,
+        LoginSetupEmailKind emailKind,
+        CancellationToken cancellationToken)
     {
         var manualEntryKey = TotpAuthenticator.FormatManualEntryKey(secret);
+        var otpUri = TotpAuthenticator.BuildOtpUri(user.Email, secret);
+        var emailResult = await SendLoginSetupEmailIfAvailableAsync(
+            user,
+            manualEntryKey,
+            otpUri,
+            lmsLoginUrl,
+            emailKind,
+            cancellationToken);
+
         return new SecurityUserProvisioningViewModel(
             user.Id,
             user.Email,
             ResolveLinuxUsername(user),
             user.SshAuthenticationMode,
             manualEntryKey,
-            TotpAuthenticator.BuildOtpUri(user.Email, secret));
+            otpUri,
+            emailResult.Attempted,
+            emailResult.Succeeded,
+            emailResult.Message);
+    }
+
+    private async Task<EmailDeliveryResult> SendLoginSetupEmailIfAvailableAsync(
+        SecurityUser user,
+        string manualEntryKey,
+        string otpUri,
+        string? lmsLoginUrl,
+        LoginSetupEmailKind emailKind,
+        CancellationToken cancellationToken)
+    {
+        var settings = await messagingEmailSettingsStore.GetAsync(cancellationToken);
+        if (!CanSendLoginSetupEmail(settings))
+        {
+            return new EmailDeliveryResult(false, false, "Messaging is not enabled and verified.");
+        }
+
+        try
+        {
+            var subject = emailKind == LoginSetupEmailKind.Reset
+                ? "Your Linux Made Sane MFA code was reset"
+                : "Your Linux Made Sane login is ready";
+            var html = BuildLoginSetupEmailHtml(user, manualEntryKey, otpUri, lmsLoginUrl, emailKind);
+            return await emailDeliveryService.SendHtmlAsync(user.Email, subject, html, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return new EmailDeliveryResult(false, true, $"Setup email failed: {exception.Message}");
+        }
+    }
+
+    private static string BuildLoginSetupEmailHtml(
+        SecurityUser user,
+        string manualEntryKey,
+        string otpUri,
+        string? lmsLoginUrl,
+        LoginSetupEmailKind emailKind)
+    {
+        var loginUrl = NormalizeLoginUrl(lmsLoginUrl);
+        var qrCodeDataUri = BuildQrCodeDataUri(otpUri);
+        var heading = emailKind == LoginSetupEmailKind.Reset
+            ? "Your LMS MFA code was reset"
+            : "Your LMS login is ready";
+        var intro = emailKind == LoginSetupEmailKind.Reset
+            ? "Your authenticator setup has been rotated. Scan the new QR code below and remove the old LMS entry from your authenticator app."
+            : "An LMS account has been created for you. Scan the QR code below with your authenticator app, then open Linux Made Sane and sign in with your email and MFA code.";
+
+        var encodedEmail = WebUtility.HtmlEncode(user.Email);
+        var encodedLinuxUsername = WebUtility.HtmlEncode(ResolveLinuxUsername(user));
+        var encodedManualEntryKey = WebUtility.HtmlEncode(manualEntryKey);
+        var encodedLoginUrl = WebUtility.HtmlEncode(loginUrl);
+        var encodedQrCodeDataUri = WebUtility.HtmlEncode(qrCodeDataUri);
+
+        return $$"""
+            <!doctype html>
+            <html lang="en">
+            <body style="margin:0;padding:0;background:#f4f7fb;font-family:Inter,Segoe UI,Arial,sans-serif;color:#142033;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f7fb;padding:28px 12px;">
+                <tr>
+                  <td align="center">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #dbe4ef;border-radius:18px;overflow:hidden;">
+                      <tr>
+                        <td style="background:#07111f;padding:28px 32px;color:#ffffff;">
+                          <div style="font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#94f0c4;font-weight:700;">Linux Made Sane</div>
+                          <h1 style="margin:10px 0 0;font-size:28px;line-height:1.2;font-weight:800;">{{WebUtility.HtmlEncode(heading)}}</h1>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding:30px 32px 18px;">
+                          <p style="margin:0 0 18px;font-size:16px;line-height:1.55;color:#314158;">{{WebUtility.HtmlEncode(intro)}}</p>
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                            <tr>
+                              <td style="width:236px;vertical-align:top;padding:0 24px 20px 0;">
+                                <div style="background:#ffffff;border:1px solid #d7e0ec;border-radius:16px;padding:14px;text-align:center;">
+                                  <img src="{{encodedQrCodeDataUri}}" width="208" height="208" alt="Linux Made Sane authenticator QR code" style="display:block;width:208px;height:208px;border:0;" />
+                                </div>
+                              </td>
+                              <td style="vertical-align:top;padding:0 0 20px;">
+                                <p style="margin:0 0 6px;font-size:13px;color:#607089;font-weight:700;text-transform:uppercase;">Account</p>
+                                <p style="margin:0 0 16px;font-size:16px;color:#142033;font-weight:700;">{{encodedEmail}}</p>
+                                <p style="margin:0 0 6px;font-size:13px;color:#607089;font-weight:700;text-transform:uppercase;">Linux runner</p>
+                                <p style="margin:0 0 16px;font-size:16px;color:#142033;font-weight:700;">{{encodedLinuxUsername}}</p>
+                                <p style="margin:0 0 8px;font-size:13px;color:#607089;font-weight:700;text-transform:uppercase;">Manual key</p>
+                                <p style="margin:0 0 18px;padding:12px;border-radius:10px;background:#edf3fa;color:#142033;font-family:Consolas,Menlo,monospace;font-size:14px;line-height:1.4;word-break:break-all;">{{encodedManualEntryKey}}</p>
+                                <a href="{{encodedLoginUrl}}" style="display:inline-block;background:#0f7b57;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:800;">Open Linux Made Sane</a>
+                              </td>
+                            </tr>
+                          </table>
+                          <p style="margin:4px 0 0;font-size:13px;line-height:1.5;color:#607089;">This QR code contains your MFA setup secret. Do not forward this email. If you did not request this account change, contact the person who manages your LMS instance.</p>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </body>
+            </html>
+            """;
+    }
+
+    private static string BuildQrCodeDataUri(string payload)
+    {
+        using var generator = new QRCodeGenerator();
+        using var data = generator.CreateQrCode(payload.Trim(), QRCodeGenerator.ECCLevel.Q);
+        var qrCode = new PngByteQRCode(data);
+        return $"data:image/png;base64,{Convert.ToBase64String(qrCode.GetGraphic(8))}";
+    }
+
+    private static string NormalizeLoginUrl(string? lmsLoginUrl)
+    {
+        if (Uri.TryCreate(lmsLoginUrl?.Trim(), UriKind.Absolute, out var uri) &&
+            uri.Scheme is "http" or "https")
+        {
+            return uri.ToString();
+        }
+
+        return "http://localhost:5080/login";
     }
 
     private static SecurityUserViewModel MapUser(SecurityUser user) =>
@@ -442,12 +783,44 @@ public sealed class SecuritySettingsService(
             user.Email,
             ResolveLinuxUsername(user),
             user.IsEnabled,
+            SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(user.SessionLifetimeMinutes),
             user.SshAuthenticationMode,
             !string.IsNullOrWhiteSpace(user.AuthorizedKeyEntries),
             user.IsLocalAccountManaged,
             !string.IsNullOrWhiteSpace(user.OtpSecretReference),
             user.LastLoginAtUtc,
             user.PasswordChangedAtUtc);
+
+    private static SecurityMessagingSettingsViewModel MapMessaging(MessagingEmailSettings settings) =>
+        new(
+            settings.IsEnabled,
+            settings.Provider,
+            settings.SenderAddress,
+            settings.SenderDisplayName,
+            settings.SmtpHost,
+            settings.SmtpPort,
+            settings.SmtpUseStartTls,
+            settings.SmtpUsername ?? string.Empty,
+            !string.IsNullOrWhiteSpace(settings.SmtpPasswordSecretReference),
+            settings.GraphTenantId,
+            settings.GraphClientId,
+            !string.IsNullOrWhiteSpace(settings.GraphClientSecretReference),
+            settings.GraphAuthority,
+            settings.GraphBaseUrl,
+            settings.GraphSaveToSentItems,
+            settings.LastVerifiedAtUtc,
+            CanSendLoginSetupEmail(settings));
+
+    private static bool CanSendLoginSetupEmail(MessagingEmailSettings settings) =>
+        settings.IsEnabled &&
+        settings.Provider != MessagingEmailProvider.Disabled &&
+        settings.LastVerifiedAtUtc.HasValue;
+
+    private enum LoginSetupEmailKind
+    {
+        Created,
+        Reset
+    }
 
     private static TrustedNetworkEntryViewModel MapTrustedNetwork(TrustedNetworkEntry entry) =>
         new(

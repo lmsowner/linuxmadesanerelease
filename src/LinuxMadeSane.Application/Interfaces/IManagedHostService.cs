@@ -35,6 +35,18 @@ public interface IManagedHostService
 
     Task<ManagedHostDetailsViewModel?> GetDetailsAsync(Guid id, CancellationToken cancellationToken = default);
 
+    Task<ManagedHostLmsInstallResult> InstallLmsAsync(
+        Guid id,
+        ManagedHostLmsInstallOptions options,
+        IProgress<ManagedHostLmsInstallProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    Task<ManagedHostLmsInstallResult> UninstallLmsAsync(
+        Guid id,
+        ManagedHostLmsUninstallOptions options,
+        IProgress<ManagedHostLmsInstallProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default);
+
     Task<ServerHealthSnapshot> GetHealthSnapshotAsync(Guid id, CancellationToken cancellationToken = default);
 
     Task<ServerHealthSnapshot> GetHealthSnapshotAsync(ManagedHost host, CancellationToken cancellationToken = default);

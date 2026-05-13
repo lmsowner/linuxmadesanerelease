@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 
 namespace LinuxMadeSane.Web.Services;
 
@@ -190,7 +192,7 @@ public sealed class BrowserFileTransferService
         long totalBytes)
     {
         var token = Guid.NewGuid().ToString("N");
-        downloads[token] = new BrowserDownloadTransfer(
+        var transfer = new BrowserDownloadTransfer(
             token,
             workspaceId,
             jobId,
@@ -200,12 +202,13 @@ public sealed class BrowserFileTransferService
             string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
             totalBytes);
 
-        return new BrowserDownloadRegistration(token, downloadFileName, contentType, totalBytes);
+        downloads[token] = transfer;
+        return new BrowserDownloadRegistration(token, transfer.DownloadFileName, transfer.ContentType, totalBytes);
     }
 
     public BrowserDownloadArtifact GetDownloadArtifact(string token)
     {
-        if (!downloads.TryGetValue(token, out var transfer))
+        if (!TryGetDownload(token, out var transfer))
         {
             throw new InvalidOperationException("The requested download is no longer available.");
         }
@@ -221,18 +224,60 @@ public sealed class BrowserFileTransferService
             transfer.BytesTransferred);
     }
 
+    public bool TryGetDownloadArtifact(
+        string token,
+        [NotNullWhen(true)] out BrowserDownloadArtifact? artifact)
+    {
+        artifact = null;
+        if (!TryGetDownload(token, out var transfer))
+        {
+            return false;
+        }
+
+        artifact = new BrowserDownloadArtifact(
+            transfer.WorkspaceId,
+            transfer.JobId,
+            transfer.ItemId,
+            transfer.LocalFilePath,
+            transfer.DownloadFileName,
+            transfer.ContentType,
+            transfer.TotalBytes,
+            transfer.BytesTransferred);
+        return true;
+    }
+
     public BrowserDownloadProgressResult ReportDownloadProgress(string token, long bytesTransferred)
     {
-        var transfer = GetDownload(token);
+        if (!TryReportDownloadProgress(token, bytesTransferred, out var result))
+        {
+            throw new InvalidOperationException("The requested download is no longer available.");
+        }
+
+        return result;
+    }
+
+    public bool TryReportDownloadProgress(
+        string token,
+        long bytesTransferred,
+        [NotNullWhen(true)] out BrowserDownloadProgressResult? result)
+    {
+        result = null;
+        if (!TryGetDownload(token, out var transfer) ||
+            transfer.State is BrowserTransferState.Completed or BrowserTransferState.Cancelled or BrowserTransferState.Failed)
+        {
+            return false;
+        }
+
         transfer.BytesTransferred = Math.Clamp(bytesTransferred, 0, transfer.TotalBytes);
         transfer.State = BrowserTransferState.Running;
 
-        return new BrowserDownloadProgressResult(
+        result = new BrowserDownloadProgressResult(
             transfer.WorkspaceId,
             transfer.JobId,
             transfer.ItemId,
             transfer.BytesTransferred,
             transfer.TotalBytes);
+        return true;
     }
 
     public Task<BrowserDownloadReadyFile> WaitForDownloadCompletionAsync(string token, CancellationToken cancellationToken)
@@ -242,27 +287,107 @@ public sealed class BrowserFileTransferService
         return transfer.Completion.Task;
     }
 
-    public Task<BrowserDownloadCompletionResult> CompleteDownloadAsync(string token, CancellationToken cancellationToken = default)
+    public async Task<BrowserDownloadCompletionResult> StreamDownloadToAsync(
+        string token,
+        Stream destination,
+        IProgress<BrowserDownloadProgressResult>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         var transfer = GetDownload(token);
-        transfer.BytesTransferred = transfer.TotalBytes;
-        transfer.State = BrowserTransferState.Completed;
-        transfer.Completion.TrySetResult(
-            new BrowserDownloadReadyFile(
-                transfer.WorkspaceId,
-                transfer.JobId,
-                transfer.ItemId,
-                transfer.DownloadFileName,
-                transfer.LocalFilePath,
-                transfer.TotalBytes));
+        var buffer = new byte[1024 * 128];
+        var stopwatch = Stopwatch.StartNew();
+        long totalBytesTransferred = 0;
+        long lastReportedBytes = -1;
+        var lastReportedAt = TimeSpan.Zero;
 
-        return Task.FromResult(
-            new BrowserDownloadCompletionResult(
-                transfer.WorkspaceId,
-                transfer.JobId,
-                transfer.ItemId,
-                transfer.BytesTransferred,
-                transfer.TotalBytes));
+        try
+        {
+            transfer.State = BrowserTransferState.Running;
+
+            await using var sourceStream = new FileStream(
+                transfer.LocalFilePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                buffer.Length,
+                useAsync: true);
+
+            while (true)
+            {
+                var bytesRead = await sourceStream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+
+                await destination.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
+                totalBytesTransferred += bytesRead;
+                ReportDownloadProgress(
+                    transfer,
+                    totalBytesTransferred,
+                    progress,
+                    force: false,
+                    stopwatch.Elapsed,
+                    ref lastReportedBytes,
+                    ref lastReportedAt);
+            }
+
+            await destination.FlushAsync(cancellationToken);
+
+            if (totalBytesTransferred != transfer.TotalBytes)
+            {
+                throw new IOException(
+                    $"Browser download streamed {totalBytesTransferred} byte(s), but {transfer.TotalBytes} byte(s) were expected.");
+            }
+
+            ReportDownloadProgress(
+                transfer,
+                totalBytesTransferred,
+                progress,
+                force: true,
+                stopwatch.Elapsed,
+                ref lastReportedBytes,
+                ref lastReportedAt);
+
+            return CompleteDownloadTransfer(transfer);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            transfer.State = BrowserTransferState.Cancelled;
+            transfer.Completion.TrySetCanceled(cancellationToken);
+            throw;
+        }
+        catch (Exception exception)
+        {
+            transfer.State = BrowserTransferState.Failed;
+            transfer.Completion.TrySetException(exception);
+            throw;
+        }
+    }
+
+    public Task<BrowserDownloadCompletionResult> CompleteDownloadAsync(string token, CancellationToken cancellationToken = default)
+    {
+        if (!TryCompleteDownload(token, out var result))
+        {
+            throw new InvalidOperationException("The requested download is no longer available.");
+        }
+
+        return Task.FromResult(result);
+    }
+
+    public bool TryCompleteDownload(
+        string token,
+        [NotNullWhen(true)] out BrowserDownloadCompletionResult? result)
+    {
+        result = null;
+        if (!TryGetDownload(token, out var transfer) ||
+            transfer.State is BrowserTransferState.Cancelled or BrowserTransferState.Failed)
+        {
+            return false;
+        }
+
+        result = CompleteDownloadTransfer(transfer);
+        return true;
     }
 
     public Task FailDownloadAsync(string token, string? reason, CancellationToken cancellationToken = default)
@@ -299,13 +424,18 @@ public sealed class BrowserFileTransferService
 
     private BrowserDownloadTransfer GetDownload(string token)
     {
-        if (!downloads.TryGetValue(token, out var transfer))
+        if (!TryGetDownload(token, out var transfer))
         {
             throw new InvalidOperationException("The requested download is no longer available.");
         }
 
         return transfer;
     }
+
+    private bool TryGetDownload(
+        string token,
+        [NotNullWhen(true)] out BrowserDownloadTransfer? transfer) =>
+        downloads.TryGetValue(token, out transfer);
 
     private static async Task<long> CopyRequestBodyAsync(Stream source, Stream destination, CancellationToken cancellationToken)
     {
@@ -328,8 +458,66 @@ public sealed class BrowserFileTransferService
         return totalBytesWritten;
     }
 
+    private static BrowserDownloadCompletionResult CompleteDownloadTransfer(BrowserDownloadTransfer transfer)
+    {
+        transfer.BytesTransferred = transfer.TotalBytes;
+        transfer.State = BrowserTransferState.Completed;
+        transfer.Completion.TrySetResult(
+            new BrowserDownloadReadyFile(
+                transfer.WorkspaceId,
+                transfer.JobId,
+                transfer.ItemId,
+                transfer.DownloadFileName,
+                transfer.LocalFilePath,
+                transfer.TotalBytes));
+
+        return new BrowserDownloadCompletionResult(
+            transfer.WorkspaceId,
+            transfer.JobId,
+            transfer.ItemId,
+            transfer.BytesTransferred,
+            transfer.TotalBytes);
+    }
+
+    private static void ReportDownloadProgress(
+        BrowserDownloadTransfer transfer,
+        long bytesTransferred,
+        IProgress<BrowserDownloadProgressResult>? progress,
+        bool force,
+        TimeSpan elapsed,
+        ref long lastReportedBytes,
+        ref TimeSpan lastReportedAt)
+    {
+        transfer.BytesTransferred = Math.Clamp(bytesTransferred, 0, transfer.TotalBytes);
+
+        if (!force &&
+            transfer.BytesTransferred < transfer.TotalBytes &&
+            transfer.BytesTransferred - lastReportedBytes < 1024 * 1024 &&
+            elapsed - lastReportedAt < TimeSpan.FromMilliseconds(180))
+        {
+            return;
+        }
+
+        lastReportedBytes = transfer.BytesTransferred;
+        lastReportedAt = elapsed;
+        progress?.Report(
+            new BrowserDownloadProgressResult(
+                transfer.WorkspaceId,
+                transfer.JobId,
+                transfer.ItemId,
+                transfer.BytesTransferred,
+                transfer.TotalBytes));
+    }
+
     private static string SanitizeFileName(string fileName)
     {
+        fileName = fileName.Trim().Replace('\\', '/');
+        var lastSeparator = fileName.LastIndexOf('/');
+        if (lastSeparator >= 0)
+        {
+            fileName = fileName[(lastSeparator + 1)..];
+        }
+
         var invalid = Path.GetInvalidFileNameChars();
         var sanitized = string.Create(fileName.Length, (fileName, invalid), static (span, state) =>
         {

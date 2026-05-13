@@ -258,13 +258,25 @@ public sealed class RdpOptimizationService(
                 return missingSnapshotResult;
             }
 
-            if (request.RestoreRemovedPackages && plan.PackageActions.Count > 0)
+            var packageActionsBeforeServiceRestore = plan.PackageActions
+                .Where(action => action.Action is not PackageActionKind.Remove)
+                .ToArray();
+            var packageActionsAfterServiceRestore = plan.PackageActions
+                .Where(action => action.Action is PackageActionKind.Remove)
+                .ToArray();
+
+            if (packageActionsBeforeServiceRestore.Length > 0)
             {
-                logs.AddRange(await packageManagementService.ApplyActionsAsync(plan.PackageActions, dryRun: false, cancellationToken));
+                logs.AddRange(await packageManagementService.ApplyActionsAsync(packageActionsBeforeServiceRestore, dryRun: false, cancellationToken));
             }
 
             logs.AddRange(await sessionConfigurationService.RestoreAsync(snapshot, dryRun: false, cancellationToken));
             logs.AddRange(await serviceManagementService.ApplyActionsAsync(plan.ServiceActions, dryRun: false, cancellationToken));
+
+            if (packageActionsAfterServiceRestore.Length > 0)
+            {
+                logs.AddRange(await packageManagementService.ApplyActionsAsync(packageActionsAfterServiceRestore, dryRun: false, cancellationToken));
+            }
         }
         else
         {
@@ -274,7 +286,7 @@ public sealed class RdpOptimizationService(
         }
 
         var postInspection = await desktopInspectionService.InspectAsync(cancellationToken);
-        if (snapshot is not null)
+        if (snapshot is not null && plan.Profile is not RdpOptimizationProfile.RestoreFullDesktop)
         {
             var updatedSnapshot = snapshot with
             {
@@ -492,17 +504,20 @@ public sealed class RdpOptimizationService(
                 false);
         }
 
-        var packageActions = request.RestoreRemovedPackages
-            ? snapshot.RemovedPackages
+        var packageActions = new List<PackageAction>();
+        if (request.RestoreRemovedPackages)
+        {
+            packageActions.AddRange(snapshot.RemovedPackages
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Select(packageName => new PackageAction(
                     PackageActionKind.Reinstall,
                     packageName,
                     "This package was removed by the desktop mode switch and is being restored.",
                     false,
-                    $"apt-get install --reinstall -y {packageName}"))
-                .ToArray()
-            : Array.Empty<PackageAction>();
+                    $"apt-get install --reinstall -y {packageName}")));
+        }
+
+        packageActions.AddRange(BuildPackageRemovalActionsForSnapshotRestore(snapshot.RelevantPackages, inspection.Packages));
 
         var serviceActions = BuildRestoreServiceActions(snapshot.RelevantServices, inspection.Services);
         var sessionChanges = snapshot.FileBackups
@@ -521,12 +536,33 @@ public sealed class RdpOptimizationService(
             request.DryRun,
             false,
             inspection,
-            packageActions,
+            packageActions.ToArray(),
             serviceActions,
             sessionChanges,
             Array.Empty<string>(),
             warnings,
-            packageActions.Length > 0 || serviceActions.Any(action => action.IsDestructive));
+            packageActions.Count > 0 || serviceActions.Any(action => action.IsDestructive));
+    }
+
+    private static IReadOnlyList<PackageAction> BuildPackageRemovalActionsForSnapshotRestore(
+        IReadOnlyList<PackageState> snapshotPackages,
+        IReadOnlyList<PackageState> currentPackages)
+    {
+        var snapshotByName = snapshotPackages
+            .GroupBy(package => package.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+        return currentPackages
+            .Where(package => package.IsInstalled &&
+                              snapshotByName.TryGetValue(package.Name, out var snapshotPackage) &&
+                              !snapshotPackage.IsInstalled)
+            .Select(package => new PackageAction(
+                PackageActionKind.Remove,
+                package.Name,
+                "This package was not installed when the restore snapshot was captured, so restore removes it.",
+                true,
+                $"apt-get remove -y {package.Name}"))
+            .ToArray();
     }
 
     private static RdpOptimizationPlan BuildInspectOnlyPlan(
@@ -822,9 +858,10 @@ public sealed class RdpOptimizationService(
             {
                 actions.Add(new ServiceAction(ServiceActionKind.Unmask, current.Name, "Restore original unmasked service state.", false, $"systemctl unmask {current.Name}"));
             }
-            else if (snapshotService.IsMasked && !current.IsMasked)
+
+            if (!snapshotService.IsActive && current.IsActive)
             {
-                actions.Add(new ServiceAction(ServiceActionKind.Mask, current.Name, "Restore original masked service state.", true, $"systemctl mask {current.Name}"));
+                actions.Add(new ServiceAction(ServiceActionKind.Stop, current.Name, "Restore stopped service state.", true, $"systemctl stop {current.Name}"));
             }
 
             if (snapshotService.IsEnabled && !current.IsEnabled)
@@ -840,9 +877,10 @@ public sealed class RdpOptimizationService(
             {
                 actions.Add(new ServiceAction(ServiceActionKind.Start, current.Name, "Restore running service state.", false, $"systemctl start {current.Name}"));
             }
-            else if (!snapshotService.IsActive && current.IsActive)
+
+            if (snapshotService.IsMasked && !current.IsMasked)
             {
-                actions.Add(new ServiceAction(ServiceActionKind.Stop, current.Name, "Restore stopped service state.", true, $"systemctl stop {current.Name}"));
+                actions.Add(new ServiceAction(ServiceActionKind.Mask, current.Name, "Restore original masked service state.", true, $"systemctl mask {current.Name}"));
             }
         }
 

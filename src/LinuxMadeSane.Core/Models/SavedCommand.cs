@@ -14,7 +14,8 @@ public sealed record SavedCommand(
     Guid? TemplateSourceId = null,
     Guid? LinkGroupId = null,
     IReadOnlyList<RunbookParameterDefinition>? ParameterDefinitions = null,
-    IReadOnlyDictionary<string, string>? ParameterValueSnapshot = null)
+    IReadOnlyDictionary<string, string>? ParameterValueSnapshot = null,
+    bool IsGlobalFavorite = false)
 {
     public bool IsScript =>
         CommandText.Contains('\n') || CommandText.Contains('\r');

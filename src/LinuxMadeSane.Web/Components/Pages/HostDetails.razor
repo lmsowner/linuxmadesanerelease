@@ -4,6 +4,7 @@
 @using LinuxMadeSane.Core.Models
 @inject IManagedHostService HostService
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+@inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
 
 <PageTitle>Host Details | Linux Made Sane</PageTitle>
 
@@ -27,6 +28,36 @@ else
                 <ManagedHostKindIndicator Profile="@details.Capabilities" />
             </div>
             <div class="hero-actions">
+                @if (CanConnectToRemoteLmsHost)
+                {
+                    <UiCommandButton Label="Connect"
+                                     Glyph="UiIconGlyph.Connect"
+                                     Variant="UiButtonVariant.PrimaryMuted"
+                                     Href="@BuildRemoteLmsUrl(details.Host, "/")"
+                                     Target="_blank"
+                                     Rel="noreferrer" />
+                }
+                @if (CanInstallLmsHost)
+                {
+                    <UiCommandButton Label="Install LMS"
+                                     Glyph="UiIconGlyph.Download"
+                                     Variant="UiButtonVariant.PrimaryMuted"
+                                     OnClick="ShowLmsInstallPrompt"
+                                     Disabled="@isInstallingLms" />
+                }
+                @if (CanUpdateLmsHost)
+                {
+                    <UiCommandButton Label="Update LMS"
+                                     Glyph="UiIconGlyph.Download"
+                                     Variant="UiButtonVariant.PrimaryMuted"
+                                     OnClick="ShowLmsUpdatePrompt"
+                                     Disabled="@isInstallingLms" />
+                    <UiCommandButton Label="Uninstall LMS"
+                                     Glyph="UiIconGlyph.Delete"
+                                     Variant="UiButtonVariant.Ghost"
+                                     OnClick="ShowLmsUninstallPrompt"
+                                     Disabled="@isInstallingLms" />
+                }
                 <UiCommandButton Label="Open terminal"
                                  Glyph="UiIconGlyph.Run"
                                  Href="@($"/hosts/{details.Host.Id}/terminal")"
@@ -49,6 +80,10 @@ else
                                 <h2>@details.ConnectionTest.Summary</h2>
                                 <p class="meta-text">@details.ConnectionTest.Detail</p>
                                 <p class="meta-text">Current live checks use the stored SSH credentials and verify that Linux Made Sane can open a real shell session.</p>
+                                @if (ShouldShowRemoteLmsWebAccessNote)
+                                {
+                                    <p class="callout warning">@remoteLmsWebAccess!.Detail</p>
+                                }
                                 <p class="meta-text">Checked @details.ConnectionTest.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</p>
                             </section>
 
@@ -87,6 +122,110 @@ else
                                 <p class="callout warning">This host is still using a legacy SSH auth mode. Edit it and move it to `Password`, `Password + public key`, or `Public key`.</p>
                             }
                         </section>
+
+                        @if (ShouldShowLmsInstallPanel)
+                        {
+                            <section class="surface-card lms-install-panel">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">@LmsOperationEyebrow</p>
+                                        <h2>@LmsInstallPanelTitle</h2>
+                                    </div>
+                                </div>
+
+                                <p class="meta-text">
+                                    @LmsInstallPanelDescription
+                                </p>
+                                <p class="callout warning">@LmsInstallPanelWarning</p>
+
+                                @if ((CanInstallLmsHost || CanUpdateLmsHost || CanUninstallLmsHost) && showLmsInstallPrompt)
+                                {
+                                    @if (details is not null && !HasStoredCredentials(details.Host))
+                                    {
+                                        <p class="callout warning">Save SSH credentials for this host before running this remote operation.</p>
+                                    }
+
+                                    @if (isLmsUninstallMode)
+                                    {
+                                        <div class="lms-install-options">
+                                            <UiCheckboxField @bind-Value="lmsUninstallOptions.RemoveData"
+                                                             Label="Remove LMS data and config"
+                                                             Helper="Also removes the remote LMS data and config directories. Leave this off when testing reinstall or update behaviour."
+                                                             Card="true"
+                                                             Disabled="@isInstallingLms" />
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="lms-install-options">
+                                            <UiCheckboxField @bind-Value="lmsInstallOptions.StartService"
+                                                             Label="Start service after install"
+                                                             Helper="Leaves the remote LMS web service running when the installer finishes."
+                                                             Card="true"
+                                                             Disabled="@isInstallingLms" />
+                                            <UiCheckboxField @bind-Value="lmsInstallOptions.ConfigureLocalSshRunner"
+                                                             Label="Prepare local SSH runner"
+                                                             Helper="Creates the key-only localhost runner used by terminals, runbooks, and scheduled jobs."
+                                                             Card="true"
+                                                             Disabled="@isInstallingLms" />
+                                            <UiCheckboxField @bind-Value="lmsInstallOptions.EnableLocalSudo"
+                                                             Label="Allow runner sudo"
+                                                             Helper="Lets the LMS runner perform local admin tasks without password prompts."
+                                                             Card="true"
+                                                             Disabled="@(!lmsInstallOptions.ConfigureLocalSshRunner || isInstallingLms)" />
+                                        </div>
+                                    }
+
+                                    <div class="lms-install-actions">
+                                        <UiCommandButton Label="Cancel"
+                                                         Glyph="UiIconGlyph.Clear"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         OnClick="HideLmsInstallPrompt"
+                                                         Disabled="@isInstallingLms" />
+                                        <UiCommandButton Label="@GetLmsInstallRunButtonLabel()"
+                                                         Glyph="UiIconGlyph.Run"
+                                                         Variant="UiButtonVariant.Primary"
+                                                         OnClick="RunLmsHostOperationAsync"
+                                                         Disabled="@(!CanRunLmsInstaller || isInstallingLms)" />
+                                    </div>
+                                }
+
+                                @if (lmsInstallResult is not null)
+                                {
+                                    <p class="@GetLmsInstallResultClass()">
+                                        <strong>@lmsInstallResult.Summary</strong>
+                                        @lmsInstallResult.Detail
+                                    </p>
+                                }
+
+                                @if (lmsInstallResult?.Success == true && details is not null && !isLmsUninstallMode && RemoteLmsWebUiIsDirectlyReachable)
+                                {
+                                    <div class="lms-install-actions">
+                                        <UiCommandButton Label="Open remote LMS"
+                                                         Glyph="UiIconGlyph.PopOut"
+                                                         Variant="UiButtonVariant.PrimaryMuted"
+                                                         Href="@BuildRemoteLmsUrl(details.Host, "/")"
+                                                         Target="_blank"
+                                                         Rel="noreferrer" />
+                                        <UiCommandButton Label="Local AI setup"
+                                                         Glyph="UiIconGlyph.Ai"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Href="@BuildRemoteLmsUrl(details.Host, "/ai/engine")"
+                                                         Target="_blank"
+                                                         Rel="noreferrer" />
+                                    </div>
+                                }
+                                else if (lmsInstallResult?.Success == true && details is not null && !isLmsUninstallMode && ShouldShowRemoteLmsWebAccessNote)
+                                {
+                                    <p class="callout warning">@remoteLmsWebAccess!.Detail</p>
+                                }
+
+                                @if (lmsInstallProgress.Count > 0)
+                                {
+                                    <pre class="lms-install-log">@GetLmsInstallProgressLog()</pre>
+                                }
+                            </section>
+                        }
 
                     </ChildContent>
                 </TabPage>
@@ -141,12 +280,131 @@ else
     [Parameter]
     public Guid HostId { get; set; }
 
+    [SupplyParameterFromQuery(Name = "install")]
+    public string? InstallAction { get; set; }
+
+    [SupplyParameterFromQuery(Name = "update")]
+    public string? UpdateAction { get; set; }
+
+    [SupplyParameterFromQuery(Name = "uninstall")]
+    public string? UninstallAction { get; set; }
+
     private ManagedHostDetailsViewModel? details;
     private string activeTab = OverviewTabValue;
     private string activeIntegrationTab = CaddyTabValue;
+    private ManagedHostLmsInstallOptions lmsInstallOptions = new();
+    private ManagedHostLmsUninstallOptions lmsUninstallOptions = new();
+    private ManagedHostLmsInstallResult? lmsInstallResult;
+    private readonly List<ManagedHostLmsInstallProgressUpdate> lmsInstallProgress = [];
+    private bool showLmsInstallPrompt;
+    private bool isLmsUpdateMode;
+    private bool isLmsUninstallMode;
+    private bool isInstallingLms;
+    private Guid? installQueryHandledForHostId;
+    private Guid? updateQueryHandledForHostId;
+    private Guid? uninstallQueryHandledForHostId;
+    private LmsHostWebAccessStatus? remoteLmsWebAccess;
+
+    private bool CanInstallLmsHost => details is { Capabilities.IsLmsHost: false };
+
+    private bool CanUpdateLmsHost => details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false };
+
+    private bool CanUninstallLmsHost => details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false };
+
+    private bool CanConnectToRemoteLmsHost =>
+        details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false } &&
+        RemoteLmsWebUiIsDirectlyReachable;
+
+    private bool RemoteLmsWebUiIsDirectlyReachable =>
+        remoteLmsWebAccess?.IsDirectWebAvailable == true;
+
+    private bool ShouldShowRemoteLmsWebAccessNote =>
+        details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false } &&
+        remoteLmsWebAccess is { IsDirectWebAvailable: false };
+
+    private bool CanRunLmsInstaller => details is not null && HasStoredCredentials(details.Host);
+
+    private bool ShouldShowLmsInstallPanel =>
+        showLmsInstallPrompt || isInstallingLms || lmsInstallResult is not null;
+
+    private string LmsOperationEyebrow => isLmsUninstallMode
+        ? "Host uninstall"
+        : isLmsUpdateMode
+            ? "Host update"
+            : "Host conversion";
+
+    private string LmsInstallPanelTitle => isLmsUninstallMode
+        ? "Uninstall Linux Made Sane from this LMS host"
+        : isLmsUpdateMode
+            ? "Update Linux Made Sane on this LMS host"
+            : "Install Linux Made Sane on this SSH host";
+
+    private string LmsInstallPanelDescription => isLmsUninstallMode
+        ? "Runs the public Community Edition installer over the saved SSH connection with uninstall mode. The remote account must be root or have non-interactive sudo."
+        : isLmsUpdateMode
+            ? "Runs the public Community Edition installer over the saved SSH connection, updates the existing remote LMS install, and restarts the service. The remote account must be root or have non-interactive sudo."
+            : "Runs the public Community Edition installer over the saved SSH connection, updates an existing install when one is present, and marks the host as an LMS host after a successful run. The remote account must be root or have non-interactive sudo.";
+
+    private string LmsInstallPanelWarning => isLmsUninstallMode
+        ? "This stops and removes the remote LMS service and application files. Data and config are kept unless you explicitly choose to remove them."
+        : isLmsUpdateMode
+            ? "This updates the remote LMS service over SSH. The UI on that remote host may restart while the installer swaps the release."
+            : "Community Edition can install and convert this SSH host. Managing multiple LMS instances from one LMS box remains a Pro or Enterprise capability.";
+
+    private string GetLmsInstallRunButtonLabel()
+    {
+        if (isInstallingLms)
+        {
+            return isLmsUninstallMode
+                ? "Uninstalling..."
+                : isLmsUpdateMode ? "Updating..." : "Installing...";
+        }
+
+        return isLmsUninstallMode
+            ? "Run uninstall"
+            : isLmsUpdateMode ? "Run update" : "Run installer";
+    }
 
     protected override async Task OnParametersSetAsync()
     {
+        await LoadDetailsAsync();
+        if (details is not null &&
+            !isInstallingLms &&
+            !showLmsInstallPrompt &&
+            installQueryHandledForHostId != HostId &&
+            string.Equals(InstallAction, "lms", StringComparison.OrdinalIgnoreCase) &&
+            CanInstallLmsHost)
+        {
+            installQueryHandledForHostId = HostId;
+            ShowLmsInstallPrompt();
+        }
+
+        if (details is not null &&
+            !isInstallingLms &&
+            !showLmsInstallPrompt &&
+            updateQueryHandledForHostId != HostId &&
+            string.Equals(UpdateAction, "lms", StringComparison.OrdinalIgnoreCase) &&
+            CanUpdateLmsHost)
+        {
+            updateQueryHandledForHostId = HostId;
+            ShowLmsUpdatePrompt();
+        }
+
+        if (details is not null &&
+            !isInstallingLms &&
+            !showLmsInstallPrompt &&
+            uninstallQueryHandledForHostId != HostId &&
+            string.Equals(UninstallAction, "lms", StringComparison.OrdinalIgnoreCase) &&
+            CanUninstallLmsHost)
+        {
+            uninstallQueryHandledForHostId = HostId;
+            ShowLmsUninstallPrompt();
+        }
+    }
+
+    private async Task LoadDetailsAsync()
+    {
+        remoteLmsWebAccess = null;
         details = await HostService.GetDetailsAsync(HostId);
         if (details is null)
         {
@@ -157,6 +415,124 @@ else
             string.Equals(activeIntegrationTab, CaddyTabValue, StringComparison.Ordinal))
         {
             activeIntegrationTab = CloudflareTabValue;
+        }
+
+        remoteLmsWebAccess = details.Capabilities is { IsLmsHost: true, IsLocalLmsHost: false }
+            ? await LmsUpdateAvailabilityService.CheckDirectWebAccessAsync(details.Host)
+            : null;
+    }
+
+    private void ShowLmsInstallPrompt()
+    {
+        lmsInstallOptions = new ManagedHostLmsInstallOptions();
+        lmsUninstallOptions = new ManagedHostLmsUninstallOptions();
+        lmsInstallResult = null;
+        lmsInstallProgress.Clear();
+        isLmsUpdateMode = false;
+        isLmsUninstallMode = false;
+        showLmsInstallPrompt = true;
+        activeTab = OverviewTabValue;
+    }
+
+    private void ShowLmsUpdatePrompt()
+    {
+        lmsInstallOptions = new ManagedHostLmsInstallOptions
+        {
+            StartService = true,
+            ConfigureLocalSshRunner = true,
+            EnableLocalSudo = true,
+            UpdateExistingInstall = true,
+            MarkAsLmsHostOnSuccess = true
+        };
+        lmsUninstallOptions = new ManagedHostLmsUninstallOptions();
+        lmsInstallResult = null;
+        lmsInstallProgress.Clear();
+        isLmsUpdateMode = true;
+        isLmsUninstallMode = false;
+        showLmsInstallPrompt = true;
+        activeTab = OverviewTabValue;
+    }
+
+    private void ShowLmsUninstallPrompt()
+    {
+        lmsInstallOptions = new ManagedHostLmsInstallOptions();
+        lmsUninstallOptions = new ManagedHostLmsUninstallOptions
+        {
+            RemoveData = false,
+            MarkAsSshHostOnSuccess = true
+        };
+        lmsInstallResult = null;
+        lmsInstallProgress.Clear();
+        isLmsUpdateMode = false;
+        isLmsUninstallMode = true;
+        showLmsInstallPrompt = true;
+        activeTab = OverviewTabValue;
+    }
+
+    private void HideLmsInstallPrompt()
+    {
+        if (isInstallingLms)
+        {
+            return;
+        }
+
+        showLmsInstallPrompt = false;
+        isLmsUpdateMode = false;
+        isLmsUninstallMode = false;
+    }
+
+    private async Task RunLmsHostOperationAsync()
+    {
+        if (details is null || isInstallingLms)
+        {
+            return;
+        }
+
+        isInstallingLms = true;
+        lmsInstallResult = null;
+        lmsInstallProgress.Clear();
+
+        var progress = new Progress<ManagedHostLmsInstallProgressUpdate>(update =>
+        {
+            lmsInstallProgress.Add(update);
+            _ = InvokeAsync(StateHasChanged);
+        });
+
+        try
+        {
+            lmsInstallResult = isLmsUninstallMode
+                ? await HostService.UninstallLmsAsync(details.Host.Id, lmsUninstallOptions, progress)
+                : await HostService.InstallLmsAsync(details.Host.Id, lmsInstallOptions, progress);
+            if (lmsInstallResult.Success)
+            {
+                showLmsInstallPrompt = false;
+                await LoadDetailsAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            var now = DateTimeOffset.UtcNow;
+            lmsInstallProgress.Add(new ManagedHostLmsInstallProgressUpdate(
+                ManagedHostLmsInstallProgressState.Failed,
+                ex.Message,
+                now));
+            lmsInstallResult = new ManagedHostLmsInstallResult(
+                false,
+                isLmsUninstallMode
+                    ? "Linux Made Sane uninstall failed."
+                    : "Linux Made Sane install failed.",
+                ex.Message,
+                string.Empty,
+                null,
+                string.Empty,
+                ex.ToString(),
+                now,
+                now);
+        }
+        finally
+        {
+            isInstallingLms = false;
+            await InvokeAsync(StateHasChanged);
         }
     }
 
@@ -201,6 +577,30 @@ else
     private static bool HasLegacyAuthentication(ManagedHost host) =>
         !ManagedHostAuthenticationPolicy.IsOperatorSelectable(host.PrimaryAuthenticationType) ||
         (host.FallbackAuthenticationType.HasValue && !ManagedHostAuthenticationPolicy.IsOperatorSelectable(host.FallbackAuthenticationType.Value));
+
+    private string GetLmsInstallProgressLog() =>
+        string.Join(Environment.NewLine, lmsInstallProgress.Select(FormatLmsInstallProgressUpdate));
+
+    private static string FormatLmsInstallProgressUpdate(ManagedHostLmsInstallProgressUpdate update)
+    {
+        var channel = update.Channel switch
+        {
+            CommandExecutionOutputChannel.StandardError => "stderr",
+            CommandExecutionOutputChannel.StandardOutput => "stdout",
+            _ => update.State.ToString().ToLowerInvariant()
+        };
+
+        return $"[{update.OccurredAtUtc.ToLocalTime():HH:mm:ss}] {channel}: {update.Message}";
+    }
+
+    private string GetLmsInstallResultClass() =>
+        lmsInstallResult?.Success == true ? "callout success" : "callout error";
+
+    private static string BuildRemoteLmsUrl(ManagedHost host, string path)
+    {
+        var builder = new UriBuilder(Uri.UriSchemeHttp, host.Hostname, 5080, path.TrimStart('/'));
+        return builder.Uri.ToString();
+    }
 
     private static string FormatMemorySummary(ServerHealthSnapshot snapshot)
     {

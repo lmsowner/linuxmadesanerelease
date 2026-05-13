@@ -5,7 +5,9 @@ using LinuxMadeSane.Core.Models;
 
 namespace LinuxMadeSane.Infrastructure.Services;
 
-public sealed class TrustedNetworkAccessService(ITrustedNetworkStore trustedNetworkStore) : ITrustedNetworkAccessService
+public sealed class TrustedNetworkAccessService(
+    ITrustedNetworkStore trustedNetworkStore,
+    ISecurityUserStore securityUserStore) : ITrustedNetworkAccessService
 {
     public async Task<TrustedNetworkAccessResult> EvaluateAsync(
         IPAddress? remoteAddress,
@@ -22,7 +24,10 @@ public sealed class TrustedNetworkAccessService(ITrustedNetworkStore trustedNetw
         var entries = await trustedNetworkStore.ListAsync(cancellationToken);
         var match = TrustedNetworkMatcher.Match(remoteAddress, entries);
         var isLocalRequestTarget = LocalRequestTargetEvaluator.IsLocal(normalizedRequestHost);
-        var isAuthenticationEnabled = match?.IsEnabled == true && match.IsAuthenticationEnabled;
+        var isBootstrapAccess = await IsBootstrapAccessAsync(match, cancellationToken);
+        var isAuthenticationEnabled = match?.IsEnabled == true &&
+                                      match.IsAuthenticationEnabled &&
+                                      !isBootstrapAccess;
         var isTrusted = match?.IsEnabled == true && !isAuthenticationEnabled;
         var requiresAuthentication = isAuthenticationEnabled;
         var isAllowed = match?.IsEnabled == true;
@@ -38,5 +43,18 @@ public sealed class TrustedNetworkAccessService(ITrustedNetworkStore trustedNetw
             isAllowed,
             isTrustedAccessEnabled,
             isAuthenticationEnabled);
+    }
+
+    private async Task<bool> IsBootstrapAccessAsync(
+        TrustedNetworkEntry? match,
+        CancellationToken cancellationToken)
+    {
+        if (match is not { IsEnabled: true, IsAuthenticationEnabled: true, IsBuiltIn: true })
+        {
+            return false;
+        }
+
+        var users = await securityUserStore.ListAsync(cancellationToken);
+        return users.All(user => !user.IsEnabled);
     }
 }

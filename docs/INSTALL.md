@@ -6,6 +6,12 @@
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
 ```
 
+Short link:
+
+```bash
+curl -fsSL https://bit.ly/4tCQKCN | sudo bash
+```
+
 The public installer:
 
 - detects `linux-x64`, `linux-arm64`, or `linux-arm`
@@ -28,7 +34,7 @@ See [Security model](SECURITY.md) before changing runner, SSH, or sudo defaults.
 
 ```bash
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 5095
-curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=2026.05.08.0 bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=v2026.05.13.10.08 bash
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env RID=linux-arm64 bash
 ```
 

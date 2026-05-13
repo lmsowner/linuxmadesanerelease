@@ -7,6 +7,7 @@ public sealed record SecurityUserViewModel(
     string Email,
     string LinuxUsername,
     bool IsEnabled,
+    int SessionLifetimeMinutes,
     RemoteAccessSshAuthenticationMode SshAuthenticationMode,
     bool HasAuthorizedKeys,
     bool IsLocalAccountManaged,

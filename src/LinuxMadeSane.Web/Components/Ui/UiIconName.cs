@@ -7,6 +7,7 @@ public enum UiIconName
     Hosts,
     Integrations,
     Scheduling,
+    Updates,
     Runbooks,
     RdpOptimizer,
     IdentitySection,

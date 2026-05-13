@@ -57,6 +57,7 @@ public sealed class SqliteSavedCommandStore(LinuxMadeSaneDbContext dbContext) : 
                 Description = command.Description,
                 RequiresSudo = command.RequiresSudo,
                 IsQuickAccess = command.IsQuickAccess,
+                IsGlobalFavorite = command.IsGlobalFavorite,
                 IsTemplate = command.IsTemplate,
                 TemplateSourceId = command.TemplateSourceId,
                 LinkGroupId = command.LinkGroupId,
@@ -72,6 +73,7 @@ public sealed class SqliteSavedCommandStore(LinuxMadeSaneDbContext dbContext) : 
             entity.Description = command.Description;
             entity.RequiresSudo = command.RequiresSudo;
             entity.IsQuickAccess = command.IsQuickAccess;
+            entity.IsGlobalFavorite = command.IsGlobalFavorite;
             entity.IsTemplate = command.IsTemplate;
             entity.TemplateSourceId = command.TemplateSourceId;
             entity.LinkGroupId = command.LinkGroupId;
@@ -109,7 +111,8 @@ public sealed class SqliteSavedCommandStore(LinuxMadeSaneDbContext dbContext) : 
             entity.TemplateSourceId,
             entity.LinkGroupId,
             DeserializeDefinitions(entity.ParameterDefinitionsJson),
-            DeserializeValues(entity.ParameterValueSnapshotJson));
+            DeserializeValues(entity.ParameterValueSnapshotJson),
+            entity.IsGlobalFavorite);
 
     private static string Serialize<T>(T value) =>
         JsonSerializer.Serialize(value, SerializerOptions);

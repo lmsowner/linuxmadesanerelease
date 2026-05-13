@@ -477,7 +477,9 @@ else
                  data-context-x="@contextMenuRequest.ClientX"
                  data-context-y="@contextMenuRequest.ClientY"
                  style="@ContextMenuStyle"
-                 @onclick:stopPropagation="true">
+                 @onclick:stopPropagation="true"
+                 @oncontextmenu:preventDefault="true"
+                 @oncontextmenu:stopPropagation="true">
                 <UiContextMenuButton Label="Copy" Glyph="UiIconGlyph.Copy" OnClick="CopyFromContextMenuAsync" Disabled="@(!CanCopyOrCutContextTarget || isBusy)" />
                 <UiContextMenuButton Label="Cut" Glyph="UiIconGlyph.Cut" OnClick="CutFromContextMenuAsync" Disabled="@(!CanCopyOrCutContextTarget || isBusy)" />
                 <UiContextMenuButton Label="Paste" Glyph="UiIconGlyph.Paste" OnClick="PasteFromContextMenuAsync" Disabled="@(!CanPasteIntoContextTarget || isBusy)" />
@@ -541,7 +543,9 @@ else
                  data-context-x="@shortcutContextX"
                  data-context-y="@shortcutContextY"
                  style="@ShortcutContextMenuStyle"
-                 @onclick:stopPropagation="true">
+                 @onclick:stopPropagation="true"
+                 @oncontextmenu:preventDefault="true"
+                 @oncontextmenu:stopPropagation="true">
                 <UiContextMenuButton Label="Rename" Glyph="UiIconGlyph.Edit" OnClick="OpenRenameShortcutDialogAsync" />
                 <UiContextMenuButton Label="Move up" Glyph="UiIconGlyph.SidebarExpand" OnClick="MoveShortcutUpAsync" Disabled="@(!CanMoveShortcutUp)" />
                 <UiContextMenuButton Label="Move down" Glyph="UiIconGlyph.SidebarCollapse" OnClick="MoveShortcutDownAsync" Disabled="@(!CanMoveShortcutDown)" />
@@ -1758,12 +1762,13 @@ else
         catch (Exception exception)
         {
             var isAccessDenied = IsAccessDeniedFailure(exception);
+            var isPathNotFound = IsPathNotFoundFailure(exception);
             if (isAccessDenied)
             {
                 blockedDirectoryPaths.Add(normalizedPath);
             }
 
-            errorMessage = BuildBrowseFailureMessage(normalizedPath, exception, isAccessDenied);
+            errorMessage = BuildBrowseFailureMessage(normalizedPath, exception, isAccessDenied, isPathNotFound);
             if (preserveSessionOnFailure && previousCanBrowse)
             {
                 items = previousItems;
@@ -1778,6 +1783,8 @@ else
             {
                 browserStatus = isAccessDenied
                     ? (IsLocalBrowser ? "Folder not accessible" : "Remote path not accessible")
+                    : isPathNotFound
+                        ? "Folder not found"
                     : (IsLocalBrowser ? "Browse failed" : "Connection failed");
                 canBrowse = false;
                 directoryNodes = Array.Empty<FileBrowserDirectoryNode>();
@@ -2209,12 +2216,26 @@ else
 
     private async Task RefreshCurrentListingPreserveSelectionAsync(string selectedPath)
     {
-        directoryItemCache.Clear();
-        items = await ListItemsForPathAsync(currentPath);
-        directoryItemCache[currentPath] = items;
-        selectedItem = FindItemByPath(items, selectedPath);
-        await ExpandCurrentBranchAsync(currentPath);
-        RebuildDirectoryTree();
+        try
+        {
+            directoryItemCache.Clear();
+            items = await ListItemsForPathAsync(currentPath);
+            directoryItemCache[currentPath] = items;
+            selectedItem = FindItemByPath(items, selectedPath);
+            await ExpandCurrentBranchAsync(currentPath);
+            RebuildDirectoryTree();
+        }
+        catch (Exception exception)
+        {
+            SetOperationMessage(
+                BuildBrowseFailureMessage(
+                    currentPath,
+                    exception,
+                    IsAccessDeniedFailure(exception),
+                    IsPathNotFoundFailure(exception)),
+                "warning");
+            await LoadItemsAsync(GetParentDirectory(currentPath), preserveSessionOnFailure: canBrowse, updatePathInputOnSuccess: true);
+        }
     }
 
     private void ResetPreviewState(bool keepPanelOpen)
@@ -2546,7 +2567,7 @@ else
         }
     }
 
-    private async Task OpenContextMenuAsync(FileBrowserContextMenuRequest request)
+    private Task OpenContextMenuAsync(FileBrowserContextMenuRequest request)
     {
         shortcutContextShortcut = null;
         var normalizedTargetPath = ResolveBrowserPath(request.TargetPath);
@@ -2566,10 +2587,7 @@ else
             selectedItem = FindItemByPath(items, normalizedTargetPath) ?? selectedItem;
         }
 
-        if (selectedItem is not null)
-        {
-            await LoadPreviewAsync(selectedItem, preservePanelState: true);
-        }
+        return Task.CompletedTask;
     }
 
     private Task OpenShortcutContextMenuAsync(MouseEventArgs args, FileBrowserShortcut shortcut)
@@ -4025,7 +4043,24 @@ else
             return;
         }
 
-        var refreshedItems = await ListItemsForPathAsync(currentPath);
+        IReadOnlyList<SftpItem> refreshedItems;
+        try
+        {
+            refreshedItems = await ListItemsForPathAsync(currentPath);
+        }
+        catch (Exception exception)
+        {
+            SetOperationMessage(
+                BuildBrowseFailureMessage(
+                    currentPath,
+                    exception,
+                    IsAccessDeniedFailure(exception),
+                    IsPathNotFoundFailure(exception)),
+                "warning");
+            await LoadItemsAsync(GetParentDirectory(currentPath), preserveSessionOnFailure: canBrowse, updatePathInputOnSuccess: true);
+            return;
+        }
+
         var previouslySelectedPaths = selectedPaths.ToHashSet(StringComparer.Ordinal);
 
         items = refreshedItems;
@@ -4893,11 +4928,43 @@ else
         return false;
     }
 
-    private static string BuildBrowseFailureMessage(string path, Exception exception, bool isAccessDenied)
+    private static bool IsPathNotFoundFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is FileAccessPathNotFoundException)
+            {
+                return true;
+            }
+
+            var message = current.Message;
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                continue;
+            }
+
+            if (message.Contains("No such file", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("Path not found", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("does not exist", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("was not found", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string BuildBrowseFailureMessage(string path, Exception exception, bool isAccessDenied, bool isPathNotFound)
     {
         if (isAccessDenied)
         {
             return $"{path} is not accessible with the current credentials or filesystem permissions.";
+        }
+
+        if (isPathNotFound)
+        {
+            return $"{path} does not exist. Check the path, use a saved shortcut, or open the parent folder.";
         }
 
         return $"Could not open {path}. {exception.Message}";
@@ -5558,7 +5625,15 @@ else
         while (pending.Count > 0)
         {
             var currentPath = pending.Pop();
-            var children = await ListItemsForPathAsync(currentPath);
+            IReadOnlyList<SftpItem> children;
+            try
+            {
+                children = await ListItemsForPathAsync(currentPath);
+            }
+            catch
+            {
+                continue;
+            }
 
             foreach (var child in children)
             {

@@ -295,6 +295,10 @@ public sealed class TerminalTabState
 
     public string Username { get; set; } = string.Empty;
 
+    public AuthenticationType PrimaryAuthenticationType { get; private set; } = AuthenticationType.Password;
+
+    public AuthenticationType? FallbackAuthenticationType { get; private set; }
+
     public Guid? SecretHandle { get; set; }
 
     public bool PreferStoredCredentials { get; set; }
@@ -357,10 +361,18 @@ public sealed class TerminalTabState
         HostAddress = host.Hostname;
         HostEnvironment = host.Environment;
         DefaultWorkingDirectory = workingDirectoryOverride ?? host.DefaultWorkingDirectory;
+        PrimaryAuthenticationType = host.PrimaryAuthenticationType;
+        FallbackAuthenticationType = host.FallbackAuthenticationType;
 
         if (string.IsNullOrWhiteSpace(Username))
         {
             Username = host.Username;
         }
+    }
+
+    public void ApplyAuthentication(AuthenticationType primaryAuthenticationType, AuthenticationType? fallbackAuthenticationType)
+    {
+        PrimaryAuthenticationType = primaryAuthenticationType;
+        FallbackAuthenticationType = fallbackAuthenticationType;
     }
 }

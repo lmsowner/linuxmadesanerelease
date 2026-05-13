@@ -14,6 +14,11 @@ public interface IExposedServiceManager
         string? apiToken,
         CancellationToken cancellationToken = default);
 
+    Task<ExposedServiceConnectorSetupResult> EnsureConnectorAsync(
+        Guid hostId,
+        CloudflareExposeServiceEditor editor,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<CloudflareDnsRecord>> ListZoneRecordsAsync(
         Guid hostId,
         string zoneId,

@@ -23,5 +23,7 @@ public interface IRunbookService
 
     Task SetCommandQuickAccessAsync(Guid commandId, bool isQuickAccess, CancellationToken cancellationToken = default);
 
+    Task SetCommandGlobalFavoriteAsync(Guid commandId, bool isGlobalFavorite, CancellationToken cancellationToken = default);
+
     Task<StarterRunbookImportResult> ImportStarterRunbooksAsync(CancellationToken cancellationToken = default);
 }

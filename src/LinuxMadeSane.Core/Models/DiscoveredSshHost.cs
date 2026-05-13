@@ -8,4 +8,7 @@ public sealed record DiscoveredSshHost(
     string ScopeLabel,
     string SourceLabel,
     string? Platform,
-    string? SshBanner);
+    string? SshBanner,
+    bool IsLinuxMadeSaneHost = false,
+    string? LinuxMadeSaneBaseUrl = null,
+    string? LinuxMadeSaneVersion = null);

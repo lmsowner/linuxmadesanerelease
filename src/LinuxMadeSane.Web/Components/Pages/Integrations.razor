@@ -15,10 +15,59 @@
     <UiHeroPanel Title="Integrations"
                  Compact="true" />
 
-    <TabControl ActiveValue="@activeIntegrationTab"
-                ActiveValueChanged="HandleIntegrationTabChangedAsync"
-                Class="page-tab-control integrations-page-tab-control"
-                PanelClass="page-tab-panel integrations-page-tab-panel">
+    @if (ShouldOpenRemoteLmsIntegrations && requestedIntegrationHost is not null)
+    {
+        <section class="surface-card integrations-remote-card">
+            <div class="table-header">
+                <div>
+                    <p class="eyebrow">Remote LMS integrations</p>
+                    <h2>@requestedIntegrationHost.Name</h2>
+                    <p class="meta-text">Integration settings belong to the LMS server that runs them. Open this host's own LMS UI so you do not edit the local server by mistake.</p>
+                </div>
+                <span>@($"{requestedIntegrationHost.Hostname}:5080")</span>
+            </div>
+
+            <div class="integrations-remote-actions">
+                <UiCommandButton Label="Open remote integrations"
+                                 Glyph="UiIconGlyph.PopOut"
+                                 Href="@BuildRemoteLmsUrl(requestedIntegrationHost, "/integrations")"
+                                 Target="_blank"
+                                 Rel="noreferrer" />
+                <UiCommandButton Label="Host details"
+                                 Glyph="UiIconGlyph.Info"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Href="@($"/hosts/{requestedIntegrationHost.Id}")" />
+            </div>
+        </section>
+    }
+    else if (ShouldShowInvalidIntegrationTarget)
+    {
+        <section class="surface-card integrations-remote-card">
+            <div class="table-header">
+                <div>
+                    <p class="eyebrow">Integration target</p>
+                    <h2>@InvalidIntegrationTargetTitle</h2>
+                    <p class="meta-text">@InvalidIntegrationTargetMessage</p>
+                </div>
+            </div>
+
+            <div class="integrations-remote-actions">
+                <UiCommandButton Label="Return to hosts"
+                                 Glyph="UiIconGlyph.FolderOpen"
+                                 Href="/hosts" />
+                <UiCommandButton Label="Open local integrations"
+                                 Glyph="UiIconGlyph.Connection"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Href="/integrations" />
+            </div>
+        </section>
+    }
+    else
+    {
+        <TabControl ActiveValue="@activeIntegrationTab"
+                    ActiveValueChanged="HandleIntegrationTabChangedAsync"
+                    Class="page-tab-control integrations-page-tab-control"
+                    PanelClass="page-tab-panel integrations-page-tab-panel">
             <ChildContent>
                 @if (PortalTabAvailable)
                 {
@@ -87,15 +136,24 @@
                         }
                         else
                         {
-                            <section class="surface-subcard integrations-cloudflare-card">
-                                <CloudflareExposeServicePage HostId="@localLmsHost.Id"
-                                                            OnOpenSetupGuide="OpenCloudflareSetupGuide" />
+                            <section class="surface-subcard integrations-edge-gateway-card">
+                                <div>
+                                    <p class="eyebrow">Edge Gateway</p>
+                                    <h2>Use Cloudflare as transport with LMS auth</h2>
+                                    <p class="meta-text">For wildcard domains, Caddy forward_auth, and per-host LMS MFA/passkey policies, use Edge Gateway. It reuses the saved Cloudflare token and domain list from this integration.</p>
+                                </div>
+                                <UiCommandButton Label="Open Edge Gateway"
+                                                 Glyph="UiIconGlyph.Connect"
+                                                 Href="/edge-gateway" />
                             </section>
+                            <CloudflareExposeServicePage HostId="@localLmsHost.Id"
+                                                        OnOpenSetupGuide="OpenCloudflareSetupGuide" />
                         }
                     </ChildContent>
                 </TabPage>
             </ChildContent>
-    </TabControl>
+        </TabControl>
+    }
 
     <UiModal IsOpen="@showCloudflareSetupGuide"
              Title="Cloudflare setup guide"
@@ -107,7 +165,7 @@
                 <section class="surface-subcard integrations-cloudflare-guide-section">
                     <div class="integrations-cloudflare-guide-header">
                         <h3>How to create the Cloudflare API token</h3>
-                        <p class="meta-text">Linux Made Sane only needs a scoped Bearer token here. The simplest option is usually a <strong>user token</strong> from the user’s Cloudflare profile. Paste the token into LMS, then click <strong>Validate token</strong> to load the Cloudflare accounts and zones that token can actually use.</p>
+                        <p class="meta-text">Linux Made Sane only needs a scoped Bearer token here. The simplest option is usually a <strong>user token</strong> from the user’s Cloudflare profile. Paste the token into LMS, then click <strong>Validate and set up</strong> to load the Cloudflare accounts/zones and attach this box as the connector.</p>
                     </div>
 
                     <ol class="integrations-cloudflare-guide-steps">
@@ -118,7 +176,7 @@
                         <li>In <strong>Account Resources</strong>, include the specific Cloudflare account that owns the Zero Trust tunnel.</li>
                         <li>In <strong>Zone Resources</strong>, include the specific public zone/domain that will hold the hostname, for example <strong>example.com</strong>.</li>
                         <li>Leave <strong>TTL</strong> and <strong>Client IP Address Filtering</strong> empty the first time unless you have a specific reason to restrict them. Over-restricting the token is a common cause of confusing failures.</li>
-                        <li>Create the token, copy it immediately, paste it into LMS, and click <strong>Validate token</strong>. Cloudflare only shows the full token once.</li>
+                        <li>Create the token, copy it immediately, paste it into LMS, and click <strong>Validate and set up</strong>. Cloudflare only shows the full token once.</li>
                     </ol>
 
                     <div class="integrations-cloudflare-guide-points">
@@ -158,9 +216,9 @@
                     </div>
 
                     <ol class="integrations-cloudflare-guide-steps">
-                        <li>Pick an existing tunnel when this machine already has one. A single Cloudflare tunnel can front multiple applications, so reuse is usually the sane option.</li>
-                        <li>If you choose <strong>Create new tunnel</strong>, LMS will create the remote tunnel in Cloudflare during apply.</li>
-                        <li>If <strong>Run cloudflared install on this managed host after apply</strong> stays enabled, LMS will also execute the connector install command over SSH on this managed host.</li>
+                        <li>If this host is not a connector yet, token setup creates or reuses a Cloudflare Tunnel before any application is added.</li>
+                        <li>A single Cloudflare tunnel can front multiple applications, so reuse is usually the sane option.</li>
+                        <li>If <strong>Install or attach cloudflared automatically</strong> stays enabled, LMS will execute the connector install command on this managed host during setup.</li>
                         <li>If you leave that disabled, or if Cloudflare does not return the install token, LMS will still show the exact <code>cloudflared service install ...</code> command so you can run it manually.</li>
                     </ol>
 
@@ -279,6 +337,7 @@
 
     private IReadOnlyList<ManagedHost> hosts = [];
     private ManagedHost? localLmsHost;
+    private ManagedHost? requestedIntegrationHost;
     private string activeIntegrationTab = PortalTabValue;
     private bool showCloudflareSetupGuide;
     private bool showPortalSetupGuide;
@@ -287,6 +346,22 @@
     private bool PortalTabAvailable =>
         ConnectClientFeature.IsAvailable &&
         ConnectClientFeature.IntegrationPageComponentType is not null;
+    private bool HasTargetedHostRequest => HostId.HasValue && HostId.Value != Guid.Empty;
+    private bool ShouldOpenRemoteLmsIntegrations =>
+        requestedIntegrationHost is not null &&
+        ManagedHostCapabilities.Describe(requestedIntegrationHost) is { IsLmsHost: true, IsLocalLmsHost: false };
+    private bool ShouldShowInvalidIntegrationTarget =>
+        HasTargetedHostRequest &&
+        !ShouldOpenRemoteLmsIntegrations &&
+        (requestedIntegrationHost is null || !ManagedHostCapabilities.IsLmsHost(requestedIntegrationHost));
+    private string InvalidIntegrationTargetTitle =>
+        requestedIntegrationHost is null
+            ? "Host not found"
+            : $"{requestedIntegrationHost.Name} is not an LMS host";
+    private string InvalidIntegrationTargetMessage =>
+        requestedIntegrationHost is null
+            ? "The requested integration host is not registered on this LMS server."
+            : "This host is registered as an SSH host. Use terminal and files for SSH hosts, or install LMS on it before opening LMS integrations.";
 
     private IDictionary<string, object> portalIntegrationParameters =>
         new Dictionary<string, object>
@@ -320,6 +395,9 @@
         hosts = await HostService.ListHostsAsync();
         localLmsHost = hosts.FirstOrDefault(host => AiLocalMachine.IsLocalMachine(host.Id))
             ?? hosts.FirstOrDefault(ManagedHostCapabilities.SupportsCaddyIntegration);
+        requestedIntegrationHost = HasTargetedHostRequest
+            ? hosts.FirstOrDefault(host => host.Id == HostId!.Value)
+            : null;
         activeIntegrationTab = ResolveSelectedIntegrationTab();
     }
 
@@ -405,6 +483,12 @@
         string.Equals(value, CaddyTabValue, StringComparison.Ordinal) ||
         string.Equals(value, MediaLibraryTabValue, StringComparison.Ordinal) ||
         (PortalTabAvailable && string.Equals(value, PortalTabValue, StringComparison.Ordinal));
+
+    private static string BuildRemoteLmsUrl(ManagedHost host, string path)
+    {
+        var builder = new UriBuilder(Uri.UriSchemeHttp, host.Hostname, 5080, path.TrimStart('/'));
+        return builder.Uri.ToString();
+    }
 
     private static UiPillTone GetStatusTone(HostOperatingStatus status) => status switch
     {

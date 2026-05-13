@@ -1,5 +1,9 @@
+// Copyright (c) Openplan Software.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Application.Services;
+using LinuxMadeSane.Application.Services.EdgeGateway;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace LinuxMadeSane.Application;
@@ -25,6 +29,8 @@ public static class DependencyInjection
         services.AddScoped<IManagedHostService, ManagedHostService>();
         services.AddScoped<IRunbookService, RunbookService>();
         services.AddScoped<ICaddyIntegrationService, CaddyIntegrationService>();
+        services.AddScoped<EdgeGatewayCaddyfileGenerator>();
+        services.AddScoped<IEdgeGatewayService, EdgeGatewayService>();
         services.AddScoped<IMediaLibraryIntegrationService, MediaLibraryIntegrationService>();
         services.AddScoped<ISftpServerManagerService, SftpServerManagerService>();
         services.AddScoped<IExposedServiceManager, ExposedServiceManager>();

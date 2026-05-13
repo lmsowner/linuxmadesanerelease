@@ -296,6 +296,16 @@ lms_create_tarball() {
 }
 
 lms_resolve_version_date() {
+  if [[ -n "${LINUX_MADE_SANE_VERSION:-}" ]]; then
+    lms_extract_version_date "$LINUX_MADE_SANE_VERSION"
+    return
+  fi
+
+  if [[ -n "${VERSION:-}" ]]; then
+    lms_extract_version_date "$VERSION"
+    return
+  fi
+
   if [[ -n "${LINUX_MADE_SANE_VERSION_DATE:-}" ]]; then
     printf '%s\n' "$LINUX_MADE_SANE_VERSION_DATE"
     return
@@ -306,10 +316,20 @@ lms_resolve_version_date() {
     return
   fi
 
-  date -u +%Y.%m.%d
+  date -u +%Y.%m.%d.%H.%M
 }
 
 lms_resolve_version_revision() {
+  if [[ -n "${LINUX_MADE_SANE_VERSION:-}" ]]; then
+    lms_extract_version_revision "$LINUX_MADE_SANE_VERSION"
+    return
+  fi
+
+  if [[ -n "${VERSION:-}" ]]; then
+    lms_extract_version_revision "$VERSION"
+    return
+  fi
+
   if [[ -n "${LINUX_MADE_SANE_VERSION_REVISION:-}" ]]; then
     printf '%s\n' "$LINUX_MADE_SANE_VERSION_REVISION"
     return
@@ -334,13 +354,79 @@ lms_resolve_version() {
     return
   fi
 
-  printf '%s.%s\n' "$(lms_resolve_version_date)" "$(lms_resolve_version_revision)"
+  printf 'v%s\n' "$(lms_resolve_version_date)"
+}
+
+lms_extract_version_date() {
+  local version="$1"
+  if [[ "$version" =~ ^v([0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2})$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return
+  fi
+
+  if [[ "$version" =~ ^([0-9]{4}\.[0-9]{2}\.[0-9]{2})\.([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return
+  fi
+
+  lms_die "version must match vyyyy.MM.dd.HH.mm, got: $version"
+}
+
+lms_extract_version_revision() {
+  local version="$1"
+  if [[ "$version" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]]; then
+    printf '0\n'
+    return
+  fi
+
+  if [[ "$version" =~ ^([0-9]{4}\.[0-9]{2}\.[0-9]{2})\.([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    return
+  fi
+
+  lms_die "version must match vyyyy.MM.dd.HH.mm, got: $version"
+}
+
+lms_resolve_next_version_revision() {
+  local version_date="$1"
+  local repo_root package_dir public_site_root date_regex max_revision path base revision
+
+  repo_root="${REPO_ROOT:-$(lms_repo_root)}"
+  package_dir="${PACKAGE_DIR:-$repo_root/artifacts/packages}"
+  public_site_root="$repo_root/artifacts/public-site"
+  date_regex="${version_date//./\\.}"
+  max_revision=-1
+
+  shopt -s nullglob
+  for path in \
+    "$package_dir"/release-manifest-"$version_date".*.json \
+    "$package_dir"/linux-made-sane-*-"$version_date".*-*.tar.gz \
+    "$public_site_root"/community/"$version_date".* \
+    "$public_site_root"/pro/"$version_date".*
+  do
+    base="$(basename "$path")"
+    if [[ "$base" =~ $date_regex\.([0-9]+) ]]; then
+      revision="${BASH_REMATCH[1]}"
+      if (( revision > max_revision )); then
+        max_revision="$revision"
+      fi
+    fi
+  done
+  shopt -u nullglob
+
+  if (( max_revision < 0 )); then
+    printf '0\n'
+    return
+  fi
+
+  printf '%s\n' "$((max_revision + 1))"
 }
 
 lms_validate_version() {
   local version="$1"
-  [[ "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]] ||
-    lms_die "version must match yyyy.MM.dd.revision, got: $version"
+  [[ "$version" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ||
+     "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]] ||
+    lms_die "version must match vyyyy.MM.dd.HH.mm, got: $version"
 }
 
 lms_find_latest_artifact() {

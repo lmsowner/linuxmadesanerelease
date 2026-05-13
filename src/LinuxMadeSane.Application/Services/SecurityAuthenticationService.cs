@@ -8,12 +8,12 @@ public sealed class SecurityAuthenticationService(
     ISecurityUserStore securityUserStore,
     ISecretStore secretStore) : ISecurityAuthenticationService
 {
-    public async Task<SecurityAuthenticationResult> ValidateOtpAsync(string identifier, string otpCode, CancellationToken cancellationToken = default)
+    public async Task<SecurityAuthenticationResult> ValidateOtpAsync(string email, string otpCode, CancellationToken cancellationToken = default)
     {
-        var normalizedIdentifier = identifier.Trim();
-        if (string.IsNullOrWhiteSpace(normalizedIdentifier))
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalizedEmail))
         {
-            return SecurityAuthenticationResult.Failure("Enter the username or email registered for this LMS account.");
+            return SecurityAuthenticationResult.Failure("Enter the email registered for this LMS account.");
         }
 
         var users = await securityUserStore.ListAsync(cancellationToken);
@@ -22,11 +22,10 @@ public sealed class SecurityAuthenticationService(
             return SecurityAuthenticationResult.Failure("No LMS accounts are registered yet. Provision one from an enabled interface first.");
         }
 
-        var user = await securityUserStore.FindByEmailAsync(normalizedIdentifier.ToLowerInvariant(), cancellationToken)
-            ?? await securityUserStore.FindByLinuxUsernameAsync(normalizedIdentifier.ToLowerInvariant(), cancellationToken);
+        var user = await securityUserStore.FindByEmailAsync(normalizedEmail, cancellationToken);
         if (user is null)
         {
-            return SecurityAuthenticationResult.Failure("That username or email is not registered for an LMS account.");
+            return SecurityAuthenticationResult.Failure("That email is not registered for an LMS account.");
         }
 
         if (!user.IsEnabled)
@@ -51,6 +50,6 @@ public sealed class SecurityAuthenticationService(
             UpdatedAtUtc = DateTimeOffset.UtcNow
         }, cancellationToken);
 
-        return SecurityAuthenticationResult.Success(user.Id, user.Email);
+        return SecurityAuthenticationResult.Success(user.Id, user.Email, user.SessionLifetimeMinutes);
     }
 }

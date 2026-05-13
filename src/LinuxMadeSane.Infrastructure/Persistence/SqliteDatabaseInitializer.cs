@@ -1,13 +1,19 @@
+using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Infrastructure.Persistence.Seed;
 using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models;
 using LinuxMadeSane.Core.Models.Ai;
 using LinuxMadeSane.Infrastructure.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using System.Data;
 
 namespace LinuxMadeSane.Infrastructure.Persistence;
 
-public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
+public sealed class SqliteDatabaseInitializer(
+    LinuxMadeSaneDbContext dbContext,
+    IConfiguration? configuration = null,
+    ISecretStore? secretStore = null)
 {
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -19,9 +25,11 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
         await EnsureAiTablesAsync(cancellationToken);
         await EnsureLocalAiTablesAsync(cancellationToken);
         await EnsureSecurityTablesAsync(cancellationToken);
+        await EnsureMessagingTablesAsync(cancellationToken);
         await EnsureCloudflareTablesAsync(cancellationToken);
         await EnsurePortalTablesAsync(cancellationToken);
         await EnsureCaddyTablesAsync(cancellationToken);
+        await EnsureEdgeGatewayTablesAsync(cancellationToken);
         await EnsureMediaLibraryTablesAsync(cancellationToken);
         await EnsureSftpTablesAsync(cancellationToken);
         await EnsureUserDisplayPreferenceTablesAsync(cancellationToken);
@@ -49,6 +57,7 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
         }
 
         await EnsureLocalManagedHostAsync(cancellationToken);
+        await EnsureLocalManagedHostBootstrapAsync(cancellationToken);
         await EnsureBuiltInTrustedNetworksAsync(cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
     }
@@ -122,8 +131,10 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
     private async Task EnsureLocalManagedHostAsync(CancellationToken cancellationToken)
     {
         var localHost = AiLocalMachine.CreateManagedHost();
-        var entity = await dbContext.ManagedHosts
-            .SingleOrDefaultAsync(host => host.Id == AiLocalMachine.ManagedHostId, cancellationToken);
+        var entity = dbContext.ManagedHosts.Local.SingleOrDefault(host => host.Id == AiLocalMachine.ManagedHostId)
+            ?? await dbContext.ManagedHosts.SingleOrDefaultAsync(
+                host => host.Id == AiLocalMachine.ManagedHostId,
+                cancellationToken);
 
         if (entity is null)
         {
@@ -136,7 +147,9 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
         entity.Port = entity.Port > 0 ? entity.Port : localHost.Port;
         entity.Environment = localHost.Environment;
         entity.Description = localHost.Description;
-        entity.DefaultWorkingDirectory = localHost.DefaultWorkingDirectory;
+        entity.DefaultWorkingDirectory = string.IsNullOrWhiteSpace(entity.DefaultWorkingDirectory)
+            ? localHost.DefaultWorkingDirectory
+            : entity.DefaultWorkingDirectory;
         entity.OperatingStatus = (int)localHost.OperatingStatus;
         entity.PrimaryAuthenticationType = entity.PrimaryAuthenticationType == default
             ? (int)localHost.PrimaryAuthenticationType
@@ -146,6 +159,207 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
         entity.LastConnectionTestStatus = (int)localHost.LastConnectionTestStatus;
         entity.Platform = localHost.Platform;
         entity.Kind = (int)localHost.Kind;
+    }
+
+    private async Task EnsureLocalManagedHostBootstrapAsync(CancellationToken cancellationToken)
+    {
+        var bootstrap = ReadLocalManagedHostBootstrap();
+        if (!bootstrap.Enabled || secretStore is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(bootstrap.Username) ||
+            string.IsNullOrWhiteSpace(bootstrap.PrivateKeyPath) ||
+            !File.Exists(bootstrap.PrivateKeyPath))
+        {
+            return;
+        }
+
+        var entity = dbContext.ManagedHosts.Local.SingleOrDefault(host => host.Id == AiLocalMachine.ManagedHostId)
+            ?? await dbContext.ManagedHosts.SingleOrDefaultAsync(
+                host => host.Id == AiLocalMachine.ManagedHostId,
+                cancellationToken);
+        if (entity is null)
+        {
+            entity = MapLocalManagedHost(AiLocalMachine.CreateManagedHost());
+            dbContext.ManagedHosts.Add(entity);
+        }
+
+        if (!ShouldApplyLocalManagedHostBootstrap(entity, bootstrap))
+        {
+            return;
+        }
+
+        var privateKey = await File.ReadAllTextAsync(bootstrap.PrivateKeyPath, cancellationToken);
+        if (string.IsNullOrWhiteSpace(privateKey))
+        {
+            return;
+        }
+
+        await ReplaceLocalManagedHostPrivateKeyIfNeededAsync(entity, privateKey, cancellationToken);
+
+        var existingPasswordSecretReference = entity.PasswordSecretReference;
+        var existingPassphraseSecretReference = entity.PrivateKeyPassphraseSecretReference;
+        entity.Name = AiLocalMachine.Name;
+        entity.Hostname = AiLocalMachine.Hostname;
+        entity.Port = bootstrap.Port;
+        entity.Environment = AiLocalMachine.EnvironmentLabel;
+        entity.Description = AiLocalMachine.Description;
+        entity.DefaultWorkingDirectory = bootstrap.DefaultWorkingDirectory;
+        entity.PrimaryAuthenticationType = (int)AuthenticationType.PrivateKey;
+        entity.FallbackAuthenticationType = null;
+        entity.Username = bootstrap.Username;
+        entity.PasswordSecretReference = null;
+        entity.PrivateKeyPassphraseSecretReference = null;
+        entity.UseKeyboardInteractiveFallback = false;
+        entity.LastConnectionTestStatus = (int)ConnectionTestStatus.Succeeded;
+        entity.Kind = (int)ManagedHostKind.LmsHost;
+
+        await DeleteSecretIfPresentAsync(existingPasswordSecretReference, cancellationToken);
+        await DeleteSecretIfPresentAsync(existingPassphraseSecretReference, cancellationToken);
+    }
+
+    private LocalManagedHostBootstrap ReadLocalManagedHostBootstrap()
+    {
+        if (configuration is null)
+        {
+            return LocalManagedHostBootstrap.Disabled;
+        }
+
+        var section = configuration.GetSection("LocalHostBootstrap");
+        var privateKeyPath = section["PrivateKeyPath"]?.Trim() ?? string.Empty;
+        var username = section["Username"]?.Trim() ?? string.Empty;
+        var defaultWorkingDirectory = section["DefaultWorkingDirectory"]?.Trim();
+        var portValue = section["Port"];
+
+        var enabled = ReadBoolean(section["Enabled"], !string.IsNullOrWhiteSpace(privateKeyPath));
+        if (!enabled)
+        {
+            return LocalManagedHostBootstrap.Disabled;
+        }
+
+        if (!int.TryParse(portValue, out var port) || port is < 1 or > 65535)
+        {
+            port = AiLocalMachine.DefaultPort;
+        }
+
+        if (!string.IsNullOrWhiteSpace(privateKeyPath) && !Path.IsPathRooted(privateKeyPath))
+        {
+            privateKeyPath = Path.GetFullPath(privateKeyPath);
+        }
+
+        if (string.IsNullOrWhiteSpace(defaultWorkingDirectory))
+        {
+            defaultWorkingDirectory = username.Length == 0
+                ? "/home"
+                : $"/home/{username}";
+        }
+
+        return new LocalManagedHostBootstrap(
+            enabled,
+            username,
+            privateKeyPath,
+            port,
+            defaultWorkingDirectory,
+            ReadBoolean(section["ForceUpdate"], false));
+    }
+
+    private static bool ShouldApplyLocalManagedHostBootstrap(
+        ManagedHostEntity entity,
+        LocalManagedHostBootstrap bootstrap)
+    {
+        if (bootstrap.ForceUpdate)
+        {
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(entity.PrivateKeySecretReference))
+        {
+            return true;
+        }
+
+        return IsInstallerManagedLocalUsername(entity.Username, bootstrap.Username);
+    }
+
+    private static bool IsInstallerManagedLocalUsername(string? username, string bootstrapUsername)
+    {
+        if (string.IsNullOrWhiteSpace(username))
+        {
+            return true;
+        }
+
+        var trimmed = username.Trim();
+        return trimmed.Equals(bootstrapUsername, StringComparison.OrdinalIgnoreCase) ||
+               trimmed.Equals("linuxmadesane", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.Equals(Environment.UserName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task ReplaceLocalManagedHostPrivateKeyIfNeededAsync(
+        ManagedHostEntity entity,
+        string privateKey,
+        CancellationToken cancellationToken)
+    {
+        var existingPrivateKeySecretReference = entity.PrivateKeySecretReference;
+        var existingPrivateKey = await TryResolveSecretAsync(existingPrivateKeySecretReference, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(existingPrivateKey) &&
+            string.Equals(existingPrivateKey.Trim(), privateKey.Trim(), StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        entity.PrivateKeySecretReference = await secretStore!.StoreSecretAsync(
+            privateKey,
+            "local-managed-host-private-key",
+            cancellationToken);
+
+        await DeleteSecretIfPresentAsync(existingPrivateKeySecretReference, cancellationToken);
+    }
+
+    private async Task<string?> TryResolveSecretAsync(string? secretReference, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(secretReference))
+        {
+            return null;
+        }
+
+        try
+        {
+            return await secretStore!.ResolveSecretAsync(secretReference, cancellationToken);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private async Task DeleteSecretIfPresentAsync(string? secretReference, CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(secretReference))
+        {
+            await secretStore!.DeleteSecretAsync(secretReference, cancellationToken);
+        }
+    }
+
+    private static bool ReadBoolean(string? value, bool defaultValue)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return defaultValue;
+        }
+
+        return value.Trim() switch
+        {
+            "1" => true,
+            "0" => false,
+            var text when text.Equals("true", StringComparison.OrdinalIgnoreCase) => true,
+            var text when text.Equals("yes", StringComparison.OrdinalIgnoreCase) => true,
+            var text when text.Equals("on", StringComparison.OrdinalIgnoreCase) => true,
+            var text when text.Equals("false", StringComparison.OrdinalIgnoreCase) => false,
+            var text when text.Equals("no", StringComparison.OrdinalIgnoreCase) => false,
+            var text when text.Equals("off", StringComparison.OrdinalIgnoreCase) => false,
+            _ => defaultValue
+        };
     }
 
     private async Task EnsureSavedCommandColumnsAsync(CancellationToken cancellationToken)
@@ -172,6 +386,13 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
         {
             await dbContext.Database.ExecuteSqlRawAsync(
                 "ALTER TABLE saved_commands ADD COLUMN IsQuickAccess INTEGER NOT NULL DEFAULT 0;",
+                cancellationToken);
+        }
+
+        if (!columns.Contains("IsGlobalFavorite"))
+        {
+            await dbContext.Database.ExecuteSqlRawAsync(
+                "ALTER TABLE saved_commands ADD COLUMN IsGlobalFavorite INTEGER NOT NULL DEFAULT 0;",
                 cancellationToken);
         }
 
@@ -400,6 +621,114 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(caddyRoutesSql, cancellationToken);
+    }
+
+    private async Task EnsureEdgeGatewayTablesAsync(CancellationToken cancellationToken)
+    {
+        const string settingsSql = """
+            CREATE TABLE IF NOT EXISTS edge_gateway_settings (
+                Id INTEGER NOT NULL PRIMARY KEY,
+                GatewaySubdomain TEXT NOT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(settingsSql, cancellationToken);
+
+        const string routesSql = """
+            CREATE TABLE IF NOT EXISTS edge_gateway_routes (
+                Id TEXT NOT NULL PRIMARY KEY,
+                Enabled INTEGER NOT NULL,
+                DisplayName TEXT NOT NULL,
+                Hostname TEXT NOT NULL,
+                DomainName TEXT NOT NULL,
+                TargetScheme INTEGER NOT NULL,
+                TargetHost TEXT NOT NULL,
+                TargetPort INTEGER NOT NULL,
+                TargetPathPrefix TEXT NOT NULL,
+                AuthMode INTEGER NOT NULL,
+                AllowedUsers TEXT NOT NULL,
+                AllowedGroups TEXT NOT NULL,
+                AllowLanOnly INTEGER NOT NULL,
+                AllowKnownIps TEXT NOT NULL,
+                Notes TEXT NOT NULL,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL,
+                LastTestStatus INTEGER NOT NULL,
+                LastTestMessage TEXT NOT NULL
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(routesSql, cancellationToken);
+
+        const string auditSql = """
+            CREATE TABLE IF NOT EXISTS edge_gateway_audit_entries (
+                Id TEXT NOT NULL PRIMARY KEY,
+                TimestampUtc TEXT NOT NULL,
+                Hostname TEXT NOT NULL,
+                RouteId TEXT NULL,
+                RequestedPath TEXT NOT NULL,
+                SourceIp TEXT NOT NULL,
+                UserEmail TEXT NOT NULL,
+                Decision INTEGER NOT NULL,
+                Reason TEXT NOT NULL,
+                AuthMode INTEGER NOT NULL
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(auditSql, cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE UNIQUE INDEX IF NOT EXISTS IX_edge_gateway_routes_Hostname ON edge_gateway_routes (Hostname);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_routes_DomainName ON edge_gateway_routes (DomainName);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_routes_Enabled ON edge_gateway_routes (Enabled);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_audit_entries_TimestampUtc ON edge_gateway_audit_entries (TimestampUtc);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_audit_entries_Hostname ON edge_gateway_audit_entries (Hostname);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_audit_entries_UserEmail ON edge_gateway_audit_entries (UserEmail);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_audit_entries_Decision ON edge_gateway_audit_entries (Decision);",
+            cancellationToken);
+    }
+
+    private async Task EnsureMessagingTablesAsync(CancellationToken cancellationToken)
+    {
+        const string emailSettingsSql = """
+            CREATE TABLE IF NOT EXISTS messaging_email_settings (
+                Id INTEGER NOT NULL PRIMARY KEY,
+                IsEnabled INTEGER NOT NULL,
+                Provider INTEGER NOT NULL,
+                SenderAddress TEXT NOT NULL,
+                SenderDisplayName TEXT NOT NULL,
+                SmtpHost TEXT NOT NULL,
+                SmtpPort INTEGER NOT NULL,
+                SmtpUseStartTls INTEGER NOT NULL,
+                SmtpUsername TEXT NULL,
+                SmtpPasswordSecretReference TEXT NULL,
+                GraphTenantId TEXT NOT NULL,
+                GraphClientId TEXT NOT NULL,
+                GraphClientSecretReference TEXT NULL,
+                GraphAuthority TEXT NOT NULL,
+                GraphBaseUrl TEXT NOT NULL,
+                GraphSaveToSentItems INTEGER NOT NULL,
+                LastVerifiedAtUtc TEXT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(emailSettingsSql, cancellationToken);
+        await EnsureColumnExistsAsync("messaging_email_settings", "LastVerifiedAtUtc", "TEXT NULL", cancellationToken);
     }
 
     private async Task EnsureMediaLibraryTablesAsync(CancellationToken cancellationToken)
@@ -1192,13 +1521,14 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
 
     private async Task EnsureSecurityTablesAsync(CancellationToken cancellationToken)
     {
-        const string securityUsersSql = """
+        var securityUsersSql = $"""
             CREATE TABLE IF NOT EXISTS security_users (
                 Id TEXT NOT NULL PRIMARY KEY,
                 Email TEXT NOT NULL,
                 NormalizedEmail TEXT NOT NULL,
                 LinuxUsername TEXT NOT NULL DEFAULT '',
                 IsEnabled INTEGER NOT NULL,
+                SessionLifetimeMinutes INTEGER NOT NULL DEFAULT {SecuritySessionPolicy.DefaultSessionLifetimeMinutes},
                 SshAuthenticationMode INTEGER NOT NULL DEFAULT 0,
                 AuthorizedKeyEntries TEXT NOT NULL DEFAULT '',
                 IsLocalAccountManaged INTEGER NOT NULL DEFAULT 0,
@@ -1241,9 +1571,63 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
             cancellationToken);
         await EnsureColumnExistsAsync(
             "security_users",
+            "SessionLifetimeMinutes",
+            $"INTEGER NOT NULL DEFAULT {SecuritySessionPolicy.DefaultSessionLifetimeMinutes}",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "security_users",
             "PasswordChangedAtUtc",
             "TEXT NULL",
             cancellationToken);
+
+        const string securityPasskeysSql = """
+            CREATE TABLE IF NOT EXISTS security_passkey_credentials (
+                Id TEXT NOT NULL PRIMARY KEY,
+                UserId TEXT NOT NULL,
+                CredentialId TEXT NOT NULL,
+                PublicKey TEXT NOT NULL,
+                UserHandle TEXT NOT NULL,
+                SignatureCounter INTEGER NOT NULL,
+                FriendlyName TEXT NOT NULL,
+                IsBackedUp INTEGER NOT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL,
+                LastUsedAtUtc TEXT NULL,
+                FOREIGN KEY (UserId) REFERENCES security_users (Id) ON DELETE CASCADE
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(securityPasskeysSql, cancellationToken);
+
+        const string securityPasskeysCredentialIndexSql = """
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_security_passkey_credentials_CredentialId
+            ON security_passkey_credentials (CredentialId);
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(securityPasskeysCredentialIndexSql, cancellationToken);
+
+        const string securityPasskeysUserIndexSql = """
+            CREATE INDEX IF NOT EXISTS IX_security_passkey_credentials_UserId
+            ON security_passkey_credentials (UserId);
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(securityPasskeysUserIndexSql, cancellationToken);
+
+        const string localInstanceIdentitySql = """
+            CREATE TABLE IF NOT EXISTS local_instance_identity (
+                Id INTEGER NOT NULL PRIMARY KEY,
+                InstanceId TEXT NOT NULL,
+                DisplayName TEXT NOT NULL,
+                PrivateKeySecretReference TEXT NOT NULL,
+                PublicKey TEXT NOT NULL,
+                PublicKeyFingerprint TEXT NOT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL,
+                RegisteredWithPublicSiteAtUtc TEXT NULL
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(localInstanceIdentitySql, cancellationToken);
 
         const string localUserAccessPoliciesSql = """
             CREATE TABLE IF NOT EXISTS local_user_access_policies (
@@ -1449,6 +1833,17 @@ public sealed class SqliteDatabaseInitializer(LinuxMadeSaneDbContext dbContext)
     ];
 
     private sealed record BuiltInTrustedNetworkDefinition(Guid Id, string Label, string AddressOrCidr, string Description);
+
+    private sealed record LocalManagedHostBootstrap(
+        bool Enabled,
+        string Username,
+        string PrivateKeyPath,
+        int Port,
+        string DefaultWorkingDirectory,
+        bool ForceUpdate)
+    {
+        public static LocalManagedHostBootstrap Disabled { get; } = new(false, string.Empty, string.Empty, 22, "/home", false);
+    }
 
     private void EnsureDatabaseDirectoryExists()
     {

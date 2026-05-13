@@ -1,9 +1,11 @@
 @using System.Text
 @using LinuxMadeSane.Application.Contracts.Caddy
+@using LinuxMadeSane.Application.Contracts.EdgeGateway
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Models.Ai
 @using LinuxMadeSane.Core.Models.RdpOptimizer
 @inject ICaddyIntegrationService CaddyIntegrationService
+@inject IEdgeGatewayService EdgeGatewayService
 
 @if (!IsLocalHost)
 {
@@ -105,6 +107,13 @@ else
                     <code>@dashboard.ManagedConfigPath</code>
                 </div>
             </div>
+
+            @if (edgeGatewayDashboard?.Routes.Count > 0)
+            {
+                <p class="callout info">
+                    Edge Gateway has @edgeGatewayDashboard.Routes.Count route(s). They are written to <code>/etc/caddy/linuxmadesane/edge-gateway.caddy</code>, not this manual route list.
+                </p>
+            }
         </section>
 
         @if (!dashboard.IsInstalled)
@@ -145,7 +154,7 @@ else
             {
                 <div class="empty-state caddy-empty-state">
                     <p>No Caddy routes yet.</p>
-                    <p class="meta-text">Add the first hostname once Caddy is installed and LMS will generate the managed reverse proxy include for you.</p>
+                    <p class="meta-text">Add the first manual Caddy route here, or use Edge Gateway for Cloudflare Tunnel publishing.</p>
                 </div>
             }
             else
@@ -400,6 +409,7 @@ else
     public Guid HostId { get; set; }
 
     private CaddyIntegrationDashboardViewModel? dashboard;
+    private EdgeGatewayDashboardViewModel? edgeGatewayDashboard;
     private CaddyProxyRouteEditor editor = new();
     private CaddyProxyRouteListItem? routePendingDelete;
     private Guid? loadedHostId;
@@ -439,6 +449,7 @@ else
         if (!IsLocalHost)
         {
             dashboard = null;
+            edgeGatewayDashboard = null;
             isLoaded = true;
             return;
         }
@@ -457,6 +468,7 @@ else
         }
 
         dashboard = await CaddyIntegrationService.GetDashboardAsync();
+        edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
         isLoaded = true;
     }
 

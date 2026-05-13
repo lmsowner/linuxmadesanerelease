@@ -7,6 +7,7 @@
 @inject IManagedHostService HostService
 @inject IServiceScopeFactory ServiceScopeFactory
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+@inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
 
 <PageTitle>Hosts | Linux Made Sane</PageTitle>
 
@@ -43,6 +44,7 @@
                             <th><span class="hosts-column-heading">Environment</span></th>
                             <th><span class="hosts-column-heading">Status</span></th>
                             <th><span class="hosts-column-heading">Auth</span></th>
+                            <th><span class="hosts-column-heading">Version</span></th>
                             <th><span class="hosts-column-heading">Last seen</span></th>
                             <th></th>
                         </tr>
@@ -51,7 +53,7 @@
                         @if (LmsHostRows.Count == 0)
                         {
                             <tr>
-                                <td colspan="6" class="hosts-loading-cell">
+                                <td colspan="7" class="hosts-loading-cell">
                                     <span class="meta-text">No LMS hosts registered yet.</span>
                                 </td>
                             </tr>
@@ -81,9 +83,38 @@
                                         </div>
                                     </td>
                                     <td><span class="hosts-row-value">@FormatAuthentication(row.Host.PrimaryAuthenticationType)</span></td>
+                                    <td>
+                                        <div class="stack-tight hosts-version-stack">
+                                            <UiPill Tone="@GetLmsUpdateTone(row)" Class="hosts-version-pill">@GetLmsVersionLabel(row)</UiPill>
+                                            <span class="meta-text hosts-row-meta">@GetLmsVersionDetail(row)</span>
+                                        </div>
+                                    </td>
                                     <td><span class="hosts-row-value">@FormatLastSeen(row)</span></td>
                                     <td class="actions-cell">
                                         <div class="row-action-cluster">
+                                            @if (ShouldShowLmsConnectAction(row))
+                                            {
+                                                <UiCommandButton Label="Connect"
+                                                                 Glyph="UiIconGlyph.Connect"
+                                                                 Href="@BuildLmsConnectHref(row.Host)"
+                                                                 Target="_blank"
+                                                                 Rel="noreferrer"
+                                                                 Variant="UiButtonVariant.Action" />
+                                            }
+                                            @if (ShouldShowLmsUpdateAction(row))
+                                            {
+                                                <UiCommandButton Label="Update"
+                                                                 Glyph="UiIconGlyph.Download"
+                                                                 Href="@BuildLmsUpdateHref(row.Host)"
+                                                                 Variant="UiButtonVariant.Action" />
+                                            }
+                                            @if (ShouldShowLmsUninstallAction(row))
+                                            {
+                                                <UiCommandButton Label="Uninstall"
+                                                                 Glyph="UiIconGlyph.Delete"
+                                                                 Href="@BuildLmsUninstallHref(row.Host)"
+                                                                 Variant="UiButtonVariant.Action" />
+                                            }
                                             <UiCommandButton Label="Details" Glyph="UiIconGlyph.Info" Href="@($"/hosts/{row.Host.Id}")" Variant="UiButtonVariant.Action" />
                                             <UiCommandButton Label="Terminal"
                                                              Glyph="UiIconGlyph.Run"
@@ -157,6 +188,7 @@
                                                              Variant="UiButtonVariant.Action"
                                                              SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
                                             <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
+                                            <UiCommandButton Label="Install LMS" Glyph="UiIconGlyph.Download" Href="@($"/hosts/{row.Host.Id}?install=lms")" Variant="UiButtonVariant.Action" />
                                             <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Href="@($"/hosts/{row.Host.Id}/edit")" Variant="UiButtonVariant.Action" />
                                         </div>
                                     </td>
@@ -176,6 +208,7 @@
     private IReadOnlyList<HostRowState> hostRows = [];
     private CancellationTokenSource? statusRefreshCancellationTokenSource;
     private bool isStatusRefreshInProgress;
+    private bool isLmsUpdateRefreshInProgress;
     private string activeHostTab = LmsHostsTabValue;
 
     private IReadOnlyList<HostRowState> LmsHostRows =>
@@ -231,6 +264,7 @@
         {
             statusRefreshCancellationTokenSource = new CancellationTokenSource();
             _ = RefreshStatusesAsync(statusRefreshCancellationTokenSource.Token);
+            _ = RefreshLmsUpdateStatusesAsync(statusRefreshCancellationTokenSource.Token);
         }
 
         return Task.CompletedTask;
@@ -283,7 +317,8 @@
                         {
                             Host = row.Host,
                             ConnectionTest = BuildLiveSessionConnectionResult(),
-                            IsStatusLoading = false
+                            IsStatusLoading = false,
+                            LmsUpdate = row.LmsUpdate
                         };
                     }
 
@@ -293,7 +328,8 @@
                             ? ApplyConnectionResult(row.Host, result.Connection)
                             : row.Host,
                         ConnectionTest = resultMap.GetValueOrDefault(row.Host.Id)?.Connection ?? row.ConnectionTest,
-                        IsStatusLoading = false
+                        IsStatusLoading = false,
+                        LmsUpdate = row.LmsUpdate
                     };
                 })
                 .ToArray();
@@ -304,6 +340,63 @@
         finally
         {
             isStatusRefreshInProgress = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RefreshLmsUpdateStatusesAsync(CancellationToken cancellationToken)
+    {
+        var lmsHosts = hostRows
+            .Where(row => ManagedHostCapabilities.IsLmsHost(row.Host))
+            .Select(row => row.Host)
+            .ToArray();
+
+        if (lmsHosts.Length == 0)
+        {
+            return;
+        }
+
+        isLmsUpdateRefreshInProgress = true;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var updates = await LmsUpdateAvailabilityService.CheckHostsAsync(lmsHosts, cancellationToken);
+            hostRows = hostRows
+                .Select(row => new HostRowState
+                {
+                    Host = row.Host,
+                    ConnectionTest = row.ConnectionTest,
+                    IsStatusLoading = row.IsStatusLoading,
+                    LmsUpdate = updates.GetValueOrDefault(row.Host.Id) ?? row.LmsUpdate
+                })
+                .ToArray();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            hostRows = hostRows
+                .Select(row => new HostRowState
+                {
+                    Host = row.Host,
+                    ConnectionTest = row.ConnectionTest,
+                    IsStatusLoading = row.IsStatusLoading,
+                    LmsUpdate = ManagedHostCapabilities.IsLmsHost(row.Host)
+                        ? new LmsHostUpdateAvailability(
+                            row.Host.Id,
+                            LmsHostUpdateAvailabilityState.Unknown,
+                            "Unknown",
+                            "Unknown",
+                            ex.Message)
+                        : row.LmsUpdate
+                })
+                .ToArray();
+        }
+        finally
+        {
+            isLmsUpdateRefreshInProgress = false;
             await InvokeAsync(StateHasChanged);
         }
     }
@@ -405,6 +498,79 @@
     {
         var count = TerminalWorkspaceRegistry.GetOpenSessionCount(hostId);
         return count > 0 ? count.ToString() : null;
+    }
+
+    private bool ShouldShowLmsUpdateAction(HostRowState row) =>
+        row.LmsUpdate?.IsUpdateAvailable == true;
+
+    private static bool ShouldShowLmsConnectAction(HostRowState row)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(row.Host);
+        return capabilities is { IsLmsHost: true, IsLocalLmsHost: false } &&
+               row.LmsUpdate?.IsDirectWebAvailable == true;
+    }
+
+    private static bool ShouldShowLmsUninstallAction(HostRowState row)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(row.Host);
+        return capabilities.IsLmsHost && !capabilities.IsLocalLmsHost;
+    }
+
+    private static string BuildLmsUpdateHref(ManagedHost host) =>
+        ManagedHostCapabilities.Describe(host).IsLocalLmsHost
+            ? "/updates"
+            : $"/hosts/{host.Id}?update=lms";
+
+    private static string BuildLmsUninstallHref(ManagedHost host) =>
+        $"/hosts/{host.Id}?uninstall=lms";
+
+    private static string BuildLmsConnectHref(ManagedHost host) =>
+        BuildRemoteLmsUrl(host, "/");
+
+    private static string BuildRemoteLmsUrl(ManagedHost host, string path)
+    {
+        var builder = new UriBuilder(Uri.UriSchemeHttp, host.Hostname, 5080, path.TrimStart('/'));
+        return builder.Uri.ToString();
+    }
+
+    private string GetLmsVersionLabel(HostRowState row)
+    {
+        if (row.LmsUpdate is null)
+        {
+            return isLmsUpdateRefreshInProgress ? "Checking" : "Unknown";
+        }
+
+        return row.LmsUpdate.State switch
+        {
+            LmsHostUpdateAvailabilityState.UpdateAvailable => "Update available",
+            LmsHostUpdateAvailabilityState.Current => "Current",
+            _ => "Unknown"
+        };
+    }
+
+    private static string GetLmsVersionDetail(HostRowState row)
+    {
+        if (row.LmsUpdate is null)
+        {
+            return "Version check pending.";
+        }
+
+        return row.LmsUpdate.Detail;
+    }
+
+    private UiPillTone GetLmsUpdateTone(HostRowState row)
+    {
+        if (row.LmsUpdate is null)
+        {
+            return isLmsUpdateRefreshInProgress ? UiPillTone.Warning : UiPillTone.Neutral;
+        }
+
+        return row.LmsUpdate.State switch
+        {
+            LmsHostUpdateAvailabilityState.UpdateAvailable => UiPillTone.Warning,
+            LmsHostUpdateAvailabilityState.Current => UiPillTone.Success,
+            _ => UiPillTone.Neutral
+        };
     }
 
     private static string FormatEnvironment(string? environment) =>
@@ -517,6 +683,7 @@
         public required ManagedHost Host { get; init; }
         public HostConnectionTestResult? ConnectionTest { get; set; }
         public bool IsStatusLoading { get; set; }
+        public LmsHostUpdateAvailability? LmsUpdate { get; init; }
     }
 
     private sealed record HostStatusProbeResult(

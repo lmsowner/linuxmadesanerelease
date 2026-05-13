@@ -63,6 +63,71 @@ public sealed class ExposedServiceManager(
             zones);
     }
 
+    public async Task<ExposedServiceConnectorSetupResult> EnsureConnectorAsync(
+        Guid hostId,
+        CloudflareExposeServiceEditor editor,
+        CancellationToken cancellationToken = default)
+    {
+        var host = await GetHostAsync(hostId, cancellationToken);
+        var storedSettings = await exposureStore.GetSettingsAsync(hostId, cancellationToken);
+        var apiToken = await ResolveApiTokenAsync(hostId, editor.ApiTokenInput, storedSettings, cancellationToken);
+        var accounts = await zoneService.ListAccountsAsync(apiToken, cancellationToken);
+        var zones = await zoneService.ListZonesAsync(apiToken, cancellationToken);
+        var zone = ResolveConnectorZone(zones, editor.ZoneId, storedSettings);
+        if (zone is null)
+        {
+            throw new InvalidOperationException("The Cloudflare token is valid, but it did not return any zones/domains LMS can use.");
+        }
+
+        var account = ResolveAccount(accounts, zone, editor.AccountId);
+        if (account is null)
+        {
+            throw new InvalidOperationException($"Cloudflare did not return an account that owns {zone.Name}.");
+        }
+
+        await SaveSettingsCoreAsync(hostId, editor, storedSettings, account, zone, cancellationToken);
+
+        var connectorStatus = await TryInspectCloudflaredConnectorAsync(host, cancellationToken);
+        var tunnels = await tunnelService.ListTunnelsAsync(apiToken, account.Id, cancellationToken);
+        var defaultTunnelName = BuildTunnelName(host.Name, host.Id);
+        var tunnel = ResolveConnectorSetupTunnel(tunnels, connectorStatus, editor, defaultTunnelName);
+        if (tunnel is null)
+        {
+            tunnel = await tunnelService.CreateTunnelAsync(
+                apiToken,
+                account.Id,
+                EnsureUniqueTunnelName(defaultTunnelName, tunnels),
+                cancellationToken);
+        }
+
+        await EnsureTunnelHasFallbackRouteAsync(apiToken, account.Id, tunnel.Id, cancellationToken);
+
+        var tunnelToken = await TryGetTunnelTokenAsync(apiToken, account.Id, tunnel.Id, cancellationToken);
+        var connectorInstallCommand = string.IsNullOrWhiteSpace(tunnelToken)
+            ? null
+            : BuildConnectorInstallCommand(tunnelToken);
+        var connectorDeployment = await ResolveConnectorDeploymentAsync(
+            host,
+            connectorStatus,
+            tunnel,
+            connectorInstallCommand,
+            editor.RunConnectorInstallOnHost,
+            cancellationToken);
+        var succeeded = connectorDeployment is { Succeeded: true };
+
+        return new ExposedServiceConnectorSetupResult(
+            succeeded,
+            tunnel,
+            succeeded
+                ? "Cloudflare connector is ready."
+                : "Cloudflare tunnel is ready, but the local connector needs attention.",
+            BuildConnectorSetupNextStep(connectorStatus, tunnel, connectorInstallCommand, connectorDeployment),
+            connectorInstallCommand,
+            connectorDeployment,
+            "sudo systemctl status cloudflared --no-pager",
+            "sudo journalctl -u cloudflared -n 50 --no-pager");
+    }
+
     public async Task<IReadOnlyList<CloudflareDnsRecord>> ListZoneRecordsAsync(
         Guid hostId,
         string zoneId,
@@ -129,12 +194,13 @@ public sealed class ExposedServiceManager(
     {
         var prepared = await PrepareAsync(hostId, editor, currentUserEmail, cancellationToken);
 
-        if (prepared.DnsConflict.Kind == CloudflareDnsConflictKind.Conflict)
+        if (prepared.DnsConflict.Kind == CloudflareDnsConflictKind.Conflict &&
+            !editor.ConfirmDnsRecordReplacement)
         {
-            throw new InvalidOperationException(prepared.DnsConflict.Reason);
+            throw new InvalidOperationException("Review the DNS conflict and confirm deleting/replacing the existing Cloudflare DNS record before applying changes.");
         }
 
-        if (prepared.Plan.RequiresConfirmation && !editor.ConfirmDangerousExposure)
+        if (RequiresDangerousExposureConfirmation(prepared.Plan) && !editor.ConfirmDangerousExposure)
         {
             throw new InvalidOperationException("Review and confirm the exposure warnings before applying changes.");
         }
@@ -161,21 +227,16 @@ public sealed class ExposedServiceManager(
                     },
                     cancellationToken);
                 break;
-            default:
-                dnsRecord = await dnsService.CreateRecordAsync(
+            case CloudflareDnsConflictKind.Conflict:
+                await dnsService.DeleteRecordAsync(
                     prepared.ApiToken,
                     prepared.Zone.Id,
-                    new CloudflareDnsRecord(
-                        string.Empty,
-                        prepared.Zone.Id,
-                        prepared.Hostname,
-                        "CNAME",
-                        dnsTarget,
-                        true,
-                        1,
-                        integrationOptions.ManagedRecordComment,
-                        null),
+                    prepared.DnsConflict.ExistingRecord!.Id,
                     cancellationToken);
+                dnsRecord = await CreateManagedDnsRecordAsync(prepared, dnsTarget, cancellationToken);
+                break;
+            default:
+                dnsRecord = await CreateManagedDnsRecordAsync(prepared, dnsTarget, cancellationToken);
                 break;
         }
 
@@ -312,6 +373,25 @@ public sealed class ExposedServiceManager(
             "sudo systemctl status cloudflared --no-pager",
             "sudo journalctl -u cloudflared -n 50 --no-pager");
     }
+
+    private async Task<CloudflareDnsRecord> CreateManagedDnsRecordAsync(
+        PreparedExposureContext prepared,
+        string dnsTarget,
+        CancellationToken cancellationToken) =>
+        await dnsService.CreateRecordAsync(
+            prepared.ApiToken,
+            prepared.Zone.Id,
+            new CloudflareDnsRecord(
+                string.Empty,
+                prepared.Zone.Id,
+                prepared.Hostname,
+                "CNAME",
+                dnsTarget,
+                true,
+                1,
+                integrationOptions.ManagedRecordComment,
+                null),
+            cancellationToken);
 
     public async Task RemoveAsync(
         Guid hostId,
@@ -511,8 +591,8 @@ public sealed class ExposedServiceManager(
                 [
                     new ExposureWarning(
                         "dns-conflict",
-                        dnsConflict.Reason,
-                        false)
+                        $"{dnsConflict.Reason} Confirm replacement to delete that Cloudflare DNS record and create a proxied CNAME for this LMS tunnel.",
+                        true)
                 ])
                 .ToArray();
         }
@@ -611,9 +691,23 @@ public sealed class ExposedServiceManager(
         Guid hostId,
         CloudflareExposeServiceEditor editor,
         PreparedExposureContext prepared,
+        CancellationToken cancellationToken) =>
+        await SaveSettingsCoreAsync(
+            hostId,
+            editor,
+            prepared.StoredSettings,
+            prepared.Account,
+            prepared.Zone,
+            cancellationToken);
+
+    private async Task<CloudflareSettings> SaveSettingsCoreAsync(
+        Guid hostId,
+        CloudflareExposeServiceEditor editor,
+        CloudflareSettings? existingSettings,
+        CloudflareAccount account,
+        CloudflareZone zone,
         CancellationToken cancellationToken)
     {
-        var existingSettings = prepared.StoredSettings;
         var now = DateTimeOffset.UtcNow;
         var secretReference = existingSettings?.ApiTokenSecretReference;
         var newSecretReference = string.Empty;
@@ -636,10 +730,10 @@ public sealed class ExposedServiceManager(
 
         var settings = new CloudflareSettings(
             hostId,
-            prepared.Account.Id,
-            prepared.Account.Name,
-            prepared.Zone.Id,
-            prepared.Zone.Name,
+            account.Id,
+            account.Name,
+            zone.Id,
+            zone.Name,
             secretReference,
             existingSettings?.CreatedAtUtc ?? now,
             now);
@@ -655,6 +749,11 @@ public sealed class ExposedServiceManager(
 
         return settings;
     }
+
+    private static bool RequiresDangerousExposureConfirmation(ExposedServiceDryRunPlan plan) =>
+        plan.Warnings.Any(warning =>
+            warning.RequiresConfirmation &&
+            !warning.Code.Equals("dns-conflict", StringComparison.OrdinalIgnoreCase));
 
     private async Task<string> ResolveApiTokenAsync(
         Guid hostId,
@@ -843,16 +942,13 @@ public sealed class ExposedServiceManager(
 
             if (hasStored && hasDiscovered)
             {
-                var isOutOfSync = AreConfigsOutOfSync(stored!, discovered!);
                 entries.Add(
                     new CloudflareExposedServiceListItemViewModel(
                         MergeWorkspaceConfig(stored!, discovered!),
                         true,
                         true,
-                        isOutOfSync,
-                        isOutOfSync
-                            ? "Linux Made Sane found this service in Cloudflare, but the LMS record does not fully match the live Cloudflare state."
-                            : "Tracked in Linux Made Sane and confirmed in Cloudflare."));
+                        false,
+                        "Live in Cloudflare."));
                 continue;
             }
 
@@ -863,8 +959,8 @@ public sealed class ExposedServiceManager(
                         discovered!,
                         false,
                         true,
-                        true,
-                        "Found in Cloudflare, but missing from the LMS service store."));
+                        false,
+                        "Live in Cloudflare."));
                 continue;
             }
 
@@ -873,12 +969,12 @@ public sealed class ExposedServiceManager(
                     stored!,
                     true,
                     false,
-                    true,
-                    "Tracked in the LMS service store, but not currently found in Cloudflare."));
+                    false,
+                    "Saved in Linux Made Sane. Cloudflare live state was not matched; use the external link to test the route."));
         }
 
         var warnings = entries
-            .Where(item => item.IsOutOfSync)
+            .Where(item => item.IsOutOfSync && !item.ExistsInCloudflare)
             .Select(item => $"{item.Config.Hostname}: {item.SyncSummary}")
             .ToArray();
 
@@ -1002,6 +1098,97 @@ public sealed class ExposedServiceManager(
             : (resolvedTunnel, resolvedTunnel.Name);
     }
 
+    private static CloudflareZone? ResolveConnectorZone(
+        IReadOnlyList<CloudflareZone> zones,
+        string selectedZoneId,
+        CloudflareSettings? storedSettings)
+    {
+        var trimmedSelectedZoneId = selectedZoneId.Trim();
+        if (!string.IsNullOrWhiteSpace(trimmedSelectedZoneId))
+        {
+            var selectedZone = zones.FirstOrDefault(item =>
+                item.Id.Equals(trimmedSelectedZoneId, StringComparison.Ordinal));
+            if (selectedZone is not null)
+            {
+                return selectedZone;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(storedSettings?.ZoneId))
+        {
+            var storedZone = zones.FirstOrDefault(item =>
+                item.Id.Equals(storedSettings.ZoneId, StringComparison.Ordinal));
+            if (storedZone is not null)
+            {
+                return storedZone;
+            }
+        }
+
+        return zones
+            .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+    }
+
+    private static CloudflareTunnel? ResolveConnectorSetupTunnel(
+        IReadOnlyList<CloudflareTunnel> tunnels,
+        CloudflaredConnectorStatus? connectorStatus,
+        CloudflareExposeServiceEditor editor,
+        string defaultTunnelName)
+    {
+        if (connectorStatus is { IsInstalled: true } &&
+            !string.IsNullOrWhiteSpace(connectorStatus.TunnelId))
+        {
+            var connectorTunnel = tunnels.FirstOrDefault(item =>
+                !item.IsDeleted &&
+                item.Id.Equals(connectorStatus.TunnelId, StringComparison.OrdinalIgnoreCase));
+            if (connectorTunnel is not null)
+            {
+                return connectorTunnel;
+            }
+        }
+
+        if (!editor.CreateNewTunnel && !string.IsNullOrWhiteSpace(editor.TunnelId))
+        {
+            var selectedTunnel = tunnels.FirstOrDefault(item =>
+                !item.IsDeleted &&
+                item.Id.Equals(editor.TunnelId.Trim(), StringComparison.Ordinal));
+            if (selectedTunnel is not null)
+            {
+                return selectedTunnel;
+            }
+        }
+
+        return tunnels.FirstOrDefault(item =>
+                !item.IsDeleted &&
+                item.Name.Equals(defaultTunnelName, StringComparison.OrdinalIgnoreCase))
+            ?? tunnels.FirstOrDefault(item => !item.IsDeleted && item.IsManagedByLinuxMadeSane);
+    }
+
+    private async Task EnsureTunnelHasFallbackRouteAsync(
+        string apiToken,
+        string accountId,
+        string tunnelId,
+        CancellationToken cancellationToken)
+    {
+        var configuration = await tunnelService.GetConfigurationAsync(apiToken, accountId, tunnelId, cancellationToken);
+        if (configuration.Routes.Any(route => string.IsNullOrWhiteSpace(route.Hostname)))
+        {
+            return;
+        }
+
+        var routes = configuration.Routes
+            .Where(route => !string.IsNullOrWhiteSpace(route.Hostname))
+            .ToList();
+        routes.Add(new CloudflareTunnelRoute(string.Empty, "http_status:404"));
+
+        await tunnelService.UpdateConfigurationAsync(
+            apiToken,
+            accountId,
+            tunnelId,
+            new CloudflareTunnelConfiguration(routes),
+            cancellationToken);
+    }
+
     private static string EnsureUniqueTunnelName(string baseTunnelName, IReadOnlyList<CloudflareTunnel> tunnels)
     {
         var usedNames = tunnels
@@ -1060,6 +1247,37 @@ public sealed class ExposedServiceManager(
         return prepared.Editor.RunConnectorInstallOnHost
             ? "Linux Made Sane did not run the connector install because Cloudflare did not return a tunnel token. Run the install command manually on the target host."
             : "Run the connector install command on the managed host when you are ready to attach or reattach cloudflared to this tunnel.";
+    }
+
+    private static string BuildConnectorSetupNextStep(
+        CloudflaredConnectorStatus? connectorStatus,
+        CloudflareTunnel tunnel,
+        string? connectorInstallCommand,
+        ExposedServiceConnectorDeploymentResult? connectorDeployment)
+    {
+        if (connectorStatus is { IsInstalled: true, IsRunning: true })
+        {
+            return "This host is already running cloudflared. You can add applications against this connector now.";
+        }
+
+        if (connectorStatus is { IsInstalled: true })
+        {
+            return "cloudflared is installed but not running. Start or inspect the service, then refresh this page before publishing applications.";
+        }
+
+        if (connectorDeployment is { Succeeded: true })
+        {
+            return $"LMS created or reused tunnel {tunnel.Name}, attached cloudflared, and the host is ready for applications.";
+        }
+
+        if (connectorDeployment is { Succeeded: false })
+        {
+            return "LMS created or reused the Cloudflare tunnel, but could not attach cloudflared on this host. Check that cloudflared is installed and sudo is available, then run setup again.";
+        }
+
+        return string.IsNullOrWhiteSpace(connectorInstallCommand)
+            ? "LMS created or reused the Cloudflare tunnel, but Cloudflare did not return a connector token. Check the token has Cloudflare Tunnel edit permission."
+            : "LMS created or reused the Cloudflare tunnel. Run the connector install command on this host, then refresh.";
     }
 
     private async Task<string?> TryGetTunnelTokenAsync(
@@ -1125,9 +1343,24 @@ public sealed class ExposedServiceManager(
         PreparedExposureContext prepared,
         CloudflareTunnel tunnel,
         string? connectorInstallCommand,
+        CancellationToken cancellationToken) =>
+        await ResolveConnectorDeploymentAsync(
+            prepared.Host,
+            prepared.ConnectorStatus,
+            tunnel,
+            connectorInstallCommand,
+            prepared.Editor.RunConnectorInstallOnHost,
+            cancellationToken);
+
+    private async Task<ExposedServiceConnectorDeploymentResult?> ResolveConnectorDeploymentAsync(
+        ManagedHost host,
+        CloudflaredConnectorStatus? connectorStatus,
+        CloudflareTunnel tunnel,
+        string? connectorInstallCommand,
+        bool runConnectorInstallOnHost,
         CancellationToken cancellationToken)
     {
-        if (prepared.ConnectorStatus is { IsInstalled: true } connectorStatus)
+        if (connectorStatus is { IsInstalled: true })
         {
             return new ExposedServiceConnectorDeploymentResult(
                 true,
@@ -1144,9 +1377,9 @@ public sealed class ExposedServiceManager(
         }
 
         return await TryDeployConnectorAsync(
-            prepared.Host,
+            host,
             connectorInstallCommand,
-            prepared.Editor.RunConnectorInstallOnHost,
+            runConnectorInstallOnHost,
             cancellationToken);
     }
 
@@ -1296,16 +1529,61 @@ public sealed class ExposedServiceManager(
         var script = string.Join(
             '\n',
             [
-                "if ! command -v cloudflared >/dev/null 2>&1; then",
-                "  echo 'cloudflared is not installed on this host.' >&2",
-                "  exit 127",
-                "fi",
+                BuildEnsureCloudflaredInstalledScript(),
                 connectorInstallCommand,
-                "sudo systemctl is-active cloudflared"
+                "sudo systemctl enable --now cloudflared.service >/dev/null 2>&1 || sudo systemctl start cloudflared.service",
+                "systemctl is-active cloudflared.service"
             ]);
 
         return WrapShellCommand(script);
     }
+
+    private static string BuildEnsureCloudflaredInstalledScript() =>
+        string.Join(
+            '\n',
+            [
+                "download_file() {",
+                "  url=\"$1\"",
+                "  destination=\"$2\"",
+                "  if command -v curl >/dev/null 2>&1; then",
+                "    curl -fsSL \"$url\" -o \"$destination\"",
+                "  elif command -v wget >/dev/null 2>&1; then",
+                "    wget -qO \"$destination\" \"$url\"",
+                "  else",
+                "    echo 'curl or wget is required to download cloudflared.' >&2",
+                "    return 127",
+                "  fi",
+                "}",
+                "install_cloudflared() {",
+                "  if command -v cloudflared >/dev/null 2>&1; then",
+                "    return 0",
+                "  fi",
+                "  echo 'cloudflared is not installed; installing it now.'",
+                "  arch=$(uname -m)",
+                "  case \"$arch\" in",
+                "    x86_64|amd64) deb_arch='amd64'; rpm_arch='x86_64' ;;",
+                "    aarch64|arm64) deb_arch='arm64'; rpm_arch='aarch64' ;;",
+                "    armv7l|armhf) deb_arch='armhf'; rpm_arch='' ;;",
+                "    *) echo \"Unsupported cloudflared architecture: $arch\" >&2; return 127 ;;",
+                "  esac",
+                "  tmp_dir=$(mktemp -d)",
+                "  trap 'rm -rf \"$tmp_dir\"' EXIT",
+                "  if command -v dpkg >/dev/null 2>&1; then",
+                "    package=\"$tmp_dir/cloudflared.deb\"",
+                "    download_file \"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${deb_arch}.deb\" \"$package\"",
+                "    sudo dpkg -i \"$package\"",
+                "  elif command -v rpm >/dev/null 2>&1 && [ -n \"$rpm_arch\" ]; then",
+                "    package=\"$tmp_dir/cloudflared.rpm\"",
+                "    download_file \"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${rpm_arch}.rpm\" \"$package\"",
+                "    sudo rpm -Uvh \"$package\"",
+                "  else",
+                "    echo 'This Linux distribution cannot be auto-configured for cloudflared by LMS yet.' >&2",
+                "    return 127",
+                "  fi",
+                "  command -v cloudflared >/dev/null 2>&1",
+                "}",
+                "install_cloudflared"
+            ]);
 
     private static string WrapShellCommand(string script) =>
         $"/bin/sh -lc {QuoteShellArgument(script)}";
@@ -1519,56 +1797,6 @@ public sealed class ExposedServiceManager(
             OriginRequestSettings = discovered.OriginRequestSettings ?? stored.OriginRequestSettings,
             UpdatedAtUtc = Max(stored.UpdatedAtUtc, discovered.UpdatedAtUtc)
         };
-
-    private static bool AreConfigsOutOfSync(ExposedServiceConfig stored, ExposedServiceConfig discovered) =>
-        !string.Equals(stored.TunnelId, discovered.TunnelId, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(stored.DnsRecordId, discovered.DnsRecordId, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(stored.AccessApplicationId ?? string.Empty, discovered.AccessApplicationId ?? string.Empty, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(stored.AccessPolicyId ?? string.Empty, discovered.AccessPolicyId ?? string.Empty, StringComparison.OrdinalIgnoreCase) ||
-        !string.Equals(NormalizeUrl(stored.LocalServiceUrl), NormalizeUrl(discovered.LocalServiceUrl), StringComparison.OrdinalIgnoreCase) ||
-        !OriginRequestSettingsEqual(stored.OriginRequestSettings, discovered.OriginRequestSettings) ||
-        stored.AccessMode != discovered.AccessMode ||
-        !SetEquals(stored.AllowedEmails, discovered.AllowedEmails) ||
-        !SetEquals(stored.AllowedEmailDomains, discovered.AllowedEmailDomains);
-
-    private static bool SetEquals(IReadOnlyList<string> left, IReadOnlyList<string> right) =>
-        left
-            .Where(static value => !string.IsNullOrWhiteSpace(value))
-            .Select(static value => value.Trim())
-            .ToHashSet(StringComparer.OrdinalIgnoreCase)
-            .SetEquals(
-                right
-                    .Where(static value => !string.IsNullOrWhiteSpace(value))
-                    .Select(static value => value.Trim()));
-
-    private static bool OriginRequestSettingsEqual(
-        CloudflareOriginRequestSettings? left,
-        CloudflareOriginRequestSettings? right) =>
-        NormalizeOriginRequestSettings(left) == NormalizeOriginRequestSettings(right);
-
-    private static CloudflareOriginRequestSettings NormalizeOriginRequestSettings(CloudflareOriginRequestSettings? settings)
-    {
-        settings ??= CloudflareOriginRequestSettings.Default;
-
-        return new CloudflareOriginRequestSettings(
-            settings.OriginServerName.Trim(),
-            settings.CertificateAuthorityPool.Trim(),
-            settings.NoTlsVerify,
-            Math.Max(1, settings.TlsTimeoutSeconds),
-            settings.Http2Origin,
-            settings.MatchSniToHost,
-            settings.HttpHostHeader.Trim(),
-            settings.DisableChunkedEncoding,
-            Math.Max(1, settings.ConnectTimeoutSeconds),
-            settings.NoHappyEyeballs,
-            settings.ProxyType.Trim(),
-            Math.Max(1, settings.KeepAliveTimeoutSeconds),
-            Math.Max(0, settings.KeepAliveConnections),
-            Math.Max(1, settings.TcpKeepAliveSeconds));
-    }
-
-    private static string NormalizeUrl(string? value) =>
-        string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim().TrimEnd('/');
 
     private static DateTimeOffset Max(DateTimeOffset left, DateTimeOffset right) =>
         left >= right ? left : right;

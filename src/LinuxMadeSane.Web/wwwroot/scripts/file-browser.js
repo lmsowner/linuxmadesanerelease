@@ -517,14 +517,12 @@ window.lmsFileBrowser = (() => {
     }
 
     async function startManagedDownload(request) {
-        if (!request || !request.contentUrl || !request.completeUrl || !request.cancelUrl) {
+        if (!request || !request.contentUrl || !request.cancelUrl) {
             throw new Error("Download request is incomplete.");
         }
 
-        let progressState = null;
         let writable = null;
         try {
-            progressState = createProgressReporter(request.progressUrl, request.totalBytes);
             const requestedContentType = request.contentType || "";
             const fileName = request.fileName || "download.bin";
 
@@ -539,26 +537,21 @@ window.lmsFileBrowser = (() => {
 
                 const handle = await window.showSaveFilePicker(saveOptions);
                 writable = await handle.createWritable();
+
+                const response = await fetch(request.contentUrl, {
+                    method: "GET",
+                    credentials: "same-origin"
+                });
+
+                if (!response.ok || !response.body) {
+                    throw new Error(await tryReadError(response, "Download failed."));
+                }
+
+                await streamDownloadToWritable(response.body, writable);
+                return true;
             }
 
-            const response = await fetch(request.contentUrl, {
-                method: "GET",
-                credentials: "same-origin"
-            });
-
-            if (!response.ok || !response.body) {
-                throw new Error(await tryReadError(response, "Download failed."));
-            }
-
-            const contentType = requestedContentType || response.headers.get("content-type") || "application/octet-stream";
-            if (writable) {
-                await streamDownloadToWritable(response.body, writable, progressState);
-            } else {
-                await streamDownloadToBlob(response.body, fileName, contentType, progressState);
-            }
-
-            await progressState.flush(true);
-            await postJson(request.completeUrl, {});
+            startNativeDownload(request.contentUrl, fileName);
             return true;
         } catch (error) {
             if (writable && typeof writable.abort === "function") {
@@ -642,7 +635,8 @@ window.lmsFileBrowser = (() => {
         }
     }
 
-    async function streamDownloadToWritable(stream, writable, progressState) {
+    async function streamDownloadToWritable(stream, writable) {
+        let completed = false;
         try {
             const reader = stream.getReader();
             while (true) {
@@ -652,10 +646,15 @@ window.lmsFileBrowser = (() => {
                 }
 
                 await writable.write(value);
-                progressState.add(value?.byteLength || 0);
             }
+
+            completed = true;
         } finally {
-            await writable.close();
+            if (completed) {
+                await writable.close();
+            } else if (typeof writable.abort === "function") {
+                await writable.abort();
+            }
         }
     }
 
@@ -679,69 +678,15 @@ window.lmsFileBrowser = (() => {
         ];
     }
 
-    async function streamDownloadToBlob(stream, fileName, contentType, progressState) {
-        const reader = stream.getReader();
-        const chunks = [];
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-                break;
-            }
-
-            if (value) {
-                chunks.push(value);
-                progressState.add(value.byteLength || 0);
-            }
-        }
-
-        const blob = new Blob(chunks, { type: contentType || "application/octet-stream" });
-        const objectUrl = URL.createObjectURL(blob);
-        try {
-            const anchor = document.createElement("a");
-            anchor.href = objectUrl;
-            anchor.download = fileName;
-            anchor.style.display = "none";
-            document.body.appendChild(anchor);
-            anchor.click();
-            anchor.remove();
-        } finally {
-            setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
-        }
-    }
-
-    function createProgressReporter(progressUrl, totalBytes) {
-        let bytesTransferred = 0;
-        let lastReportedBytes = 0;
-        let lastReportTime = 0;
-
-        return {
-            add(bytes) {
-                bytesTransferred += bytes;
-                void this.flush(false);
-            },
-            async flush(force) {
-                if (!progressUrl) {
-                    return;
-                }
-
-                const now = Date.now();
-                if (!force &&
-                    bytesTransferred === lastReportedBytes &&
-                    bytesTransferred < (totalBytes || 0)) {
-                    return;
-                }
-
-                if (!force &&
-                    now - lastReportTime < 180 &&
-                    bytesTransferred < (totalBytes || 0)) {
-                    return;
-                }
-
-                lastReportedBytes = bytesTransferred;
-                lastReportTime = now;
-                await postJson(progressUrl, { bytesTransferred });
-            }
-        };
+    function startNativeDownload(url, fileName) {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = fileName || "";
+        anchor.rel = "noopener";
+        anchor.style.display = "none";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
     }
 
     async function postJson(url, payload) {

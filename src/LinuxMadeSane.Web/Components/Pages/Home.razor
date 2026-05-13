@@ -12,6 +12,7 @@
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
 @inject FileBrowserWorkspaceRegistry FileBrowserWorkspaceRegistry
+@inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
 
 <PageTitle>Overview | Linux Made Sane</PageTitle>
 
@@ -55,11 +56,36 @@
                             {
                                 <span class="meta-text">@BuildConnectionSummary(details.ConnectionTest)</span>
                             }
+                            @if (ShouldShowRemoteLmsWebAccessNote(details))
+                            {
+                                <span class="meta-text">@details.LmsWebAccess!.Detail</span>
+                            }
                         </div>
                         <div class="row-action-cluster">
-                            @if (TryGetIntegrationsHref(details.Host) is { } integrationsHref)
+                            @if (TryGetLmsConnectLink(details) is { } connectLink)
                             {
-                                <UiCommandButton Label="Integrations" Glyph="UiIconGlyph.Connection" Href="@integrationsHref" Variant="UiButtonVariant.Action" />
+                                <UiCommandButton Label="Connect"
+                                                 Glyph="UiIconGlyph.Connect"
+                                                 Href="@connectLink.Href"
+                                                 Target="@connectLink.Target"
+                                                 Rel="@connectLink.Rel"
+                                                 Variant="UiButtonVariant.Action" />
+                            }
+                            @if (TryGetIntegrationsLink(details) is { } integrationsLink)
+                            {
+                                <UiCommandButton Label="Integrations"
+                                                 Glyph="UiIconGlyph.Connection"
+                                                 Href="@integrationsLink.Href"
+                                                 Target="@integrationsLink.Target"
+                                                 Rel="@integrationsLink.Rel"
+                                                 Variant="UiButtonVariant.Action" />
+                            }
+                            @if (TryGetLmsLifecycleLink(details.Host) is { } lifecycleLink)
+                            {
+                                <UiCommandButton Label="@lifecycleLink.Label"
+                                                 Glyph="UiIconGlyph.Download"
+                                                 Href="@lifecycleLink.Href"
+                                                 Variant="UiButtonVariant.Action" />
                             }
                             <UiCommandButton Label="Terminal" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.Action" OnClick="@(() => OpenTerminalPopupAsync(details.Host.Id))" />
                             <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Variant="UiButtonVariant.Action" OnClick="@(() => OpenFilesPopupAsync(details.Host))" />
@@ -114,6 +140,7 @@
     private IReadOnlyList<DashboardHostRow> hostRows = [];
     private CancellationTokenSource? healthLoadCancellationTokenSource;
     private Task? healthLoadTask;
+    private Task? lmsWebAccessLoadTask;
 
     protected override async Task OnInitializedAsync()
     {
@@ -128,6 +155,7 @@
 
         healthLoadCancellationTokenSource = new CancellationTokenSource();
         healthLoadTask = LoadHealthSnapshotsAsync(healthLoadCancellationTokenSource.Token);
+        lmsWebAccessLoadTask = LoadLmsWebAccessAsync(healthLoadCancellationTokenSource.Token);
     }
 
     private static string BuildConnectionSummary(HostConnectionTestResult connection) =>
@@ -144,17 +172,54 @@
             IsHealthLoading = ShouldLoadHealth(host)
         };
 
-    private static string? TryGetIntegrationsHref(ManagedHost host)
+    private static DashboardLink? TryGetLmsConnectLink(DashboardHostRow row)
     {
-        var capabilities = ManagedHostCapabilities.Describe(host);
+        var capabilities = ManagedHostCapabilities.Describe(row.Host);
+        return capabilities is { IsLmsHost: true, IsLocalLmsHost: false } &&
+               row.LmsWebAccess?.IsDirectWebAvailable == true
+            ? new DashboardLink(BuildRemoteLmsUrl(row.Host, "/"), "_blank", "noreferrer")
+            : null;
+    }
+
+    private static bool ShouldShowRemoteLmsWebAccessNote(DashboardHostRow row)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(row.Host);
+        return capabilities is { IsLmsHost: true, IsLocalLmsHost: false } &&
+               row.LmsWebAccess is { IsDirectWebAvailable: false };
+    }
+
+    private static DashboardLink? TryGetIntegrationsLink(DashboardHostRow row)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(row.Host);
         if (!capabilities.IsLmsHost)
         {
             return null;
         }
 
         return capabilities.IsLocalLmsHost
-            ? "/integrations?tab=caddy"
-            : $"/integrations?tab=cloudflare&hostId={host.Id}";
+            ? new DashboardLink("/integrations?tab=caddy")
+            : row.LmsWebAccess?.IsDirectWebAvailable == true
+                ? new DashboardLink(BuildRemoteLmsUrl(row.Host, "/integrations"), "_blank", "noreferrer")
+                : null;
+    }
+
+    private static DashboardLifecycleLink? TryGetLmsLifecycleLink(ManagedHost host)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(host);
+        if (!capabilities.IsLmsHost)
+        {
+            return new DashboardLifecycleLink("Install LMS", $"/hosts/{host.Id}?install=lms");
+        }
+
+        return capabilities.IsLocalLmsHost
+            ? new DashboardLifecycleLink("Update LMS", "/updates")
+            : new DashboardLifecycleLink("Update LMS", $"/hosts/{host.Id}?update=lms");
+    }
+
+    private static string BuildRemoteLmsUrl(ManagedHost host, string path)
+    {
+        var builder = new UriBuilder(Uri.UriSchemeHttp, host.Hostname, 5080, path.TrimStart('/'));
+        return builder.Uri.ToString();
     }
 
     private Task OpenTerminalPopupAsync(Guid hostId)
@@ -343,6 +408,43 @@
         });
     }
 
+    private async Task LoadLmsWebAccessAsync(CancellationToken cancellationToken)
+    {
+        var hostsToRefresh = hostRows
+            .Where(row => ManagedHostCapabilities.Describe(row.Host) is { IsLmsHost: true, IsLocalLmsHost: false })
+            .Select(row => row.Host)
+            .ToArray();
+
+        if (hostsToRefresh.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var results = await LmsUpdateAvailabilityService.CheckDirectWebAccessAsync(hostsToRefresh, cancellationToken);
+            await InvokeAsync(() =>
+            {
+                foreach (var row in hostRows)
+                {
+                    if (results.TryGetValue(row.Host.Id, out var result))
+                    {
+                        row.LmsWebAccess = result;
+                    }
+                }
+
+                StateHasChanged();
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            await TryRefreshAsync();
+        }
+    }
+
     private async Task<HostHealthProbeResult> LoadHealthSnapshotCoreAsync(
         ManagedHost host,
         CancellationToken cancellationToken)
@@ -476,6 +578,17 @@
             }
         }
 
+        if (lmsWebAccessLoadTask is not null)
+        {
+            try
+            {
+                await lmsWebAccessLoadTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
         healthLoadCancellationTokenSource.Dispose();
     }
 
@@ -488,6 +601,8 @@
         public required ServerHealthSnapshot HealthSnapshot { get; set; }
 
         public bool IsHealthLoading { get; set; }
+
+        public LmsHostWebAccessStatus? LmsWebAccess { get; set; }
     }
 
     private sealed record HostHealthProbeResult(
@@ -495,4 +610,8 @@
         ServerHealthSnapshot Snapshot);
 
     private sealed record DashboardQuickLink(string Label, string Href, UiIconName Icon);
+
+    private sealed record DashboardLink(string Href, string? Target = null, string? Rel = null);
+
+    private sealed record DashboardLifecycleLink(string Label, string Href);
 }

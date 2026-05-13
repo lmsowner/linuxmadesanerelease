@@ -8,4 +8,7 @@ public sealed record SecurityUserProvisioningViewModel(
     string LinuxUsername,
     RemoteAccessSshAuthenticationMode SshAuthenticationMode,
     string ManualEntryKey,
-    string OtpUri);
+    string OtpUri,
+    bool EmailAttempted,
+    bool EmailSucceeded,
+    string EmailMessage);

@@ -12,16 +12,32 @@ namespace LinuxMadeSane.Infrastructure.Services;
 public sealed class ManagedHostCommandExecutionService(
     ManagedHostSshConnectionFactory sshConnectionFactory,
     ILinuxCommandRunner linuxCommandRunner,
-    ILogger<ManagedHostCommandExecutionService> logger) : ICommandExecutionService
+    ILogger<ManagedHostCommandExecutionService> logger) : ICommandExecutionService, ICommandExecutionInputService
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(15);
 
-    public async Task<CommandExecutionResult> ExecuteAsync(
+    public Task<CommandExecutionResult> ExecuteAsync(
         ManagedHost host,
         string commandText,
         IProgress<CommandExecutionUpdate>? progress = null,
         CancellationToken cancellationToken = default)
+        => ExecuteCoreAsync(host, commandText, null, progress, cancellationToken);
+
+    public async Task<CommandExecutionResult> ExecuteAsync(
+        ManagedHost host,
+        string commandText,
+        CommandExecutionInput input,
+        IProgress<CommandExecutionUpdate>? progress = null,
+        CancellationToken cancellationToken = default)
+        => await ExecuteCoreAsync(host, commandText, input, progress, cancellationToken);
+
+    private async Task<CommandExecutionResult> ExecuteCoreAsync(
+        ManagedHost host,
+        string commandText,
+        CommandExecutionInput? input,
+        IProgress<CommandExecutionUpdate>? progress,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -32,10 +48,15 @@ public sealed class ManagedHostCommandExecutionService(
 
         if (AiLocalMachine.IsLocalMachine(host.Id))
         {
+            if (input is not null)
+            {
+                throw new InvalidOperationException("Command input is only supported for SSH host execution.");
+            }
+
             return await ExecuteLocalAsync(host, commandText, progress, cancellationToken);
         }
 
-        return await ExecuteRemoteAsync(host, commandText, progress, cancellationToken);
+        return await ExecuteRemoteAsync(host, commandText, input, progress, cancellationToken);
     }
 
     private async Task<CommandExecutionResult> ExecuteLocalAsync(
@@ -90,6 +111,7 @@ public sealed class ManagedHostCommandExecutionService(
     private async Task<CommandExecutionResult> ExecuteRemoteAsync(
         ManagedHost host,
         string commandText,
+        CommandExecutionInput? input,
         IProgress<CommandExecutionUpdate>? progress,
         CancellationToken cancellationToken)
     {
@@ -122,6 +144,9 @@ public sealed class ManagedHostCommandExecutionService(
             });
 
             var asyncResult = command.BeginExecute();
+            var inputTask = input is null
+                ? Task.CompletedTask
+                : WriteInputAsync(command.CreateInputStream(), input, cancellationToken);
             var stdoutTask = PumpStreamAsync(
                 command.OutputStream,
                 CommandExecutionOutputChannel.StandardOutput,
@@ -136,7 +161,7 @@ public sealed class ManagedHostCommandExecutionService(
                 cancellationToken);
 
             await Task.Run(() => command.EndExecute(asyncResult), cancellationToken);
-            await Task.WhenAll(stdoutTask, stderrTask);
+            await Task.WhenAll(stdoutTask, stderrTask, inputTask);
 
             var output = outputBuilder.ToString();
             var error = errorBuilder.ToString();
@@ -191,6 +216,19 @@ public sealed class ManagedHostCommandExecutionService(
                 chunk,
                 false,
                 DateTimeOffset.UtcNow));
+        }
+    }
+
+    private static async Task WriteInputAsync(
+        Stream stream,
+        CommandExecutionInput input,
+        CancellationToken cancellationToken)
+    {
+        using (stream)
+        {
+            var bytes = Encoding.UTF8.GetBytes(input.Content);
+            await stream.WriteAsync(bytes.AsMemory(0, bytes.Length), cancellationToken);
+            await stream.FlushAsync(cancellationToken);
         }
     }
 }

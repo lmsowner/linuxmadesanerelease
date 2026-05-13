@@ -29,7 +29,9 @@ public sealed class LocalFileBrowsingService(
         var directory = new DirectoryInfo(normalizedPath);
         if (!directory.Exists)
         {
-            throw new InvalidOperationException($"Directory {normalizedPath} was not found on the local machine.");
+            throw new FileAccessPathNotFoundException(
+                normalizedPath,
+                $"Folder {normalizedPath} does not exist on the local machine.");
         }
 
         logger.LogInformation("Listing local filesystem items for path {Path}", normalizedPath);
@@ -84,7 +86,9 @@ public sealed class LocalFileBrowsingService(
         var fileInfo = new FileInfo(normalizedPath);
         if (!fileInfo.Exists)
         {
-            throw new InvalidOperationException($"File {normalizedPath} was not found on the local machine.");
+            throw new FileAccessPathNotFoundException(
+                normalizedPath,
+                $"File {normalizedPath} does not exist on the local machine.");
         }
 
         var safeMaxBytes = Math.Clamp(maxBytes, 1, 1_048_576);
@@ -118,7 +122,9 @@ public sealed class LocalFileBrowsingService(
         var fileInfo = new FileInfo(normalizedPath);
         if (!fileInfo.Exists)
         {
-            throw new InvalidOperationException($"File {normalizedPath} was not found on the local machine.");
+            throw new FileAccessPathNotFoundException(
+                normalizedPath,
+                $"File {normalizedPath} does not exist on the local machine.");
         }
 
         var safeMaxBytes = Math.Clamp(maxBytes, 1, 67_108_864);

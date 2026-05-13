@@ -43,5 +43,7 @@ public enum UiIconGlyph
     Repair = 38,
     Search = 39,
     Upload = 40,
-    Download = 41
+    Download = 41,
+    Lock = 42,
+    Unlock = 43
 }

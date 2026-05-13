@@ -1,0 +1,164 @@
+@page "/updates"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@inject ApplicationUpdateService UpdateService
+
+<PageTitle>Updates | Linux Made Sane</PageTitle>
+
+<div class="page-shell application-updates-shell">
+    <UiHeroPanel Title="Updates" Compact="true">
+        <Actions>
+            <UiCommandButton Label="Check now"
+                             Glyph="UiIconGlyph.Refresh"
+                             Variant="UiButtonVariant.Ghost"
+                             OnClick="CheckNowAsync"
+                             Disabled="@IsBusy" />
+            <UiCommandButton Label="@(status.IsUpdateAvailable ? "Install update" : "Install latest")"
+                             Glyph="UiIconGlyph.Download"
+                             Variant="UiButtonVariant.PrimaryMuted"
+                             OnClick="InstallLatestAsync"
+                             Disabled="@(!CanInstall)" />
+        </Actions>
+    </UiHeroPanel>
+
+    <section class="surface-card update-summary-card">
+        <div class="table-header">
+            <div>
+                <p class="eyebrow">Application update</p>
+                <h2>@status.Summary</h2>
+                <p class="meta-text">@status.Detail</p>
+            </div>
+            <UiPill Tone="@GetStateTone()">@GetStateLabel()</UiPill>
+        </div>
+
+        <div class="update-metric-grid">
+            <ServiceMetricComponent TagName="div" Label="Running" Value="@status.CurrentVersion" />
+            <ServiceMetricComponent TagName="div" Label="Latest" Value="@status.LatestVersion" />
+            <ServiceMetricComponent TagName="div" Label="Edition" Value="@status.Edition" />
+            <ServiceMetricComponent TagName="div" Label="Runtime" Value="@status.Rid" />
+        </div>
+
+        <div class="update-progress-shell" aria-label="Update progress">
+            <div class="update-progress-bar" style="@($"width: {ProgressPercent}%;")"></div>
+        </div>
+
+        <div class="token-row compact-token-row">
+            <span class="status-pill neutral">Manifest: @status.ManifestUrl</span>
+            <span class="status-pill neutral">Installer: @status.InstallScriptUrl</span>
+            <span class="status-pill @(status.ScheduledChecksEnabled ? "success" : "neutral")">
+                @(status.ScheduledChecksEnabled ? $"Scheduled every {status.CheckIntervalMinutes} min" : "Scheduled checks off")
+            </span>
+            <span class="status-pill @(status.InstallAutomatically ? "warning" : "neutral")">
+                @(status.InstallAutomatically ? "Auto-install on" : "Manual install")
+            </span>
+        </div>
+    </section>
+
+    <section class="surface-card">
+        <div class="table-header">
+            <div>
+                <p class="eyebrow">Updater log</p>
+                <h2>Latest activity</h2>
+            </div>
+        </div>
+
+        @if (status.LogLines.Count == 0)
+        {
+            <p class="meta-text">No update activity has been recorded yet.</p>
+        }
+        else
+        {
+            <pre class="update-log">@string.Join(Environment.NewLine, status.LogLines)</pre>
+        }
+    </section>
+</div>
+
+@code {
+    private ApplicationUpdateStatus status = null!;
+    private CancellationTokenSource? pollingCancellationTokenSource;
+
+    private bool IsBusy =>
+        status.State is ApplicationUpdateState.Checking or ApplicationUpdateState.Installing;
+
+    private bool CanInstall =>
+        !IsBusy &&
+        (status.IsUpdateAvailable || status.State is ApplicationUpdateState.Failed or ApplicationUpdateState.Idle);
+
+    private int ProgressPercent => Math.Clamp(status.ProgressPercent, 0, 100);
+
+    protected override void OnInitialized()
+    {
+        status = UpdateService.GetStatus();
+        pollingCancellationTokenSource = new CancellationTokenSource();
+        _ = PollStatusAsync(pollingCancellationTokenSource.Token);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (pollingCancellationTokenSource is null)
+        {
+            return;
+        }
+
+        await pollingCancellationTokenSource.CancelAsync();
+        pollingCancellationTokenSource.Dispose();
+    }
+
+    private Task CheckNowAsync()
+    {
+        _ = UpdateService.CheckForUpdatesAsync(CancellationToken.None);
+        RefreshStatus();
+        return Task.CompletedTask;
+    }
+
+    private Task InstallLatestAsync()
+    {
+        _ = UpdateService.InstallLatestAsync(CancellationToken.None);
+        RefreshStatus();
+        return Task.CompletedTask;
+    }
+
+    private async Task PollStatusAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                await InvokeAsync(() =>
+                {
+                    RefreshStatus();
+                    StateHasChanged();
+                });
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+        }
+    }
+
+    private void RefreshStatus()
+    {
+        status = UpdateService.GetStatus();
+    }
+
+    private string GetStateLabel() => status.State switch
+    {
+        ApplicationUpdateState.Checking => "Checking",
+        ApplicationUpdateState.UpToDate => "Current",
+        ApplicationUpdateState.UpdateAvailable => "Update available",
+        ApplicationUpdateState.Installing => "Installing",
+        ApplicationUpdateState.Completed => "Installed",
+        ApplicationUpdateState.Failed => "Failed",
+        _ => "Not checked"
+    };
+
+    private UiPillTone GetStateTone() => status.State switch
+    {
+        ApplicationUpdateState.UpToDate or ApplicationUpdateState.Completed => UiPillTone.Success,
+        ApplicationUpdateState.UpdateAvailable or ApplicationUpdateState.Checking or ApplicationUpdateState.Installing => UiPillTone.Warning,
+        ApplicationUpdateState.Failed => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+}
