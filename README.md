@@ -10,6 +10,12 @@ Current Community downloads are served by the public website:
 https://www.linuxmadesane.com
 ```
 
+Public links:
+
+- Website: https://www.linuxmadesane.com
+- LinkedIn: https://www.linkedin.com/in/richardkiernan/
+- Public Community Edition repository: https://github.com/lmsowner/linuxmadesanerelease
+
 Do not put the public website project, Pro/Enterprise packages, portal packages, private manifests, license secrets, private configuration, databases, credentials, or proprietary implementation details in this repository.
 
 ## Quick Install
@@ -99,3 +105,13 @@ dotnet build src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj
 - [Release assets](docs/RELEASES.md)
 - [CE source](docs/SOURCE.md)
 - [Distro and Raspberry Pi testing](docs/TESTING.md)
+
+## License
+
+Linux Made Sane Community Edition is source-available under the Business Source License 1.1.
+
+It is free for personal, homelab, educational, non-profit, and internal commercial use.
+
+A commercial license from Richard D. Kiernan is required for hosted, MSP, SaaS, white-label, resale, or third-party managed-service use.
+
+See [LICENSE.md](LICENSE.md).
