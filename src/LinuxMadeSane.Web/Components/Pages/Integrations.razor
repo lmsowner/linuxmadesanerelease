@@ -7,7 +7,11 @@
 @using Microsoft.Extensions.DependencyInjection
 @inject IManagedHostService HostService
 @inject ILmsConnectClientFeature ConnectClientFeature
+@inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
 @inject IServiceProvider Services
+@inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
+@inject NavigationManager NavigationManager
+@inject IJSRuntime JSRuntime
 
 <PageTitle>Integrations | Linux Made Sane</PageTitle>
 
@@ -22,17 +26,21 @@
                 <div>
                     <p class="eyebrow">Remote LMS integrations</p>
                     <h2>@requestedIntegrationHost.Name</h2>
-                    <p class="meta-text">Integration settings belong to the LMS server that runs them. Open this host's own LMS UI so you do not edit the local server by mistake.</p>
+                    <p class="meta-text">Integration settings belong to the LMS server that runs them. Linux Made Sane opens local/LAN LMS hosts directly and uses the SSH/Caddy relay only when port 5080 is not reachable.</p>
                 </div>
-                <span>@($"{requestedIntegrationHost.Hostname}:5080")</span>
+                <span>Direct or relay</span>
             </div>
+
+            @if (!string.IsNullOrWhiteSpace(remoteIntegrationStatus))
+            {
+                <p class="@($"callout {remoteIntegrationTone}")">@remoteIntegrationStatus</p>
+            }
 
             <div class="integrations-remote-actions">
                 <UiCommandButton Label="Open remote integrations"
-                                 Glyph="UiIconGlyph.PopOut"
-                                 Href="@BuildRemoteLmsUrl(requestedIntegrationHost, "/integrations")"
-                                 Target="_blank"
-                                 Rel="noreferrer" />
+                                 Glyph="UiIconGlyph.Connect"
+                                 Disabled="@(!CanOpenRequestedRemoteIntegrations || isOpeningRemoteIntegrations)"
+                                 OnClick="OpenRequestedRemoteIntegrationsAsync" />
                 <UiCommandButton Label="Host details"
                                  Glyph="UiIconGlyph.Info"
                                  Variant="UiButtonVariant.Ghost"
@@ -91,28 +99,7 @@
                         }
                         else
                         {
-                            <section class="surface-subcard integrations-host-card">
-                                <div class="table-header">
-                                    <div>
-                                        <p class="eyebrow">Caddy</p>
-                                        <h2>@localLmsHost.Name</h2>
-                                        <p class="meta-text">Caddy route management is local LMS-host only. Remote SSH hosts do not expose this workflow here.</p>
-                                    </div>
-                                    <span>@localLmsHost.Hostname</span>
-                                </div>
-
-                                <div class="integrations-host-grid">
-                                    <div class="integrations-host-summary">
-                                        <UiPill Tone="@GetStatusTone(localLmsHost.OperatingStatus)">@localLmsHost.OperatingStatus</UiPill>
-                                        <ManagedHostKindIndicator Host="@localLmsHost" />
-                                        <UiPill Tone="UiPillTone.Neutral">@($"{localLmsHost.Hostname}:{localLmsHost.Port}")</UiPill>
-                                    </div>
-                                </div>
-                            </section>
-
-                            <section class="surface-subcard integrations-caddy-card">
-                                <CaddyIntegrationWorkspace HostId="@localLmsHost.Id" @key="localLmsHost.Id" />
-                            </section>
+                            <CaddyIntegrationWorkspace HostId="@localLmsHost.Id" @key="localLmsHost.Id" />
                         }
                     </ChildContent>
                 </TabPage>
@@ -342,6 +329,9 @@
     private bool showCloudflareSetupGuide;
     private bool showPortalSetupGuide;
     private bool isRotatingPortalPairingCode;
+    private bool isOpeningRemoteIntegrations;
+    private string remoteIntegrationStatus = string.Empty;
+    private string remoteIntegrationTone = "info";
     private int portalComponentVersion;
     private bool PortalTabAvailable =>
         ConnectClientFeature.IsAvailable &&
@@ -350,6 +340,8 @@
     private bool ShouldOpenRemoteLmsIntegrations =>
         requestedIntegrationHost is not null &&
         ManagedHostCapabilities.Describe(requestedIntegrationHost) is { IsLmsHost: true, IsLocalLmsHost: false };
+    private bool CanOpenRequestedRemoteIntegrations =>
+        requestedIntegrationHost is not null;
     private bool ShouldShowInvalidIntegrationTarget =>
         HasTargetedHostRequest &&
         !ShouldOpenRemoteLmsIntegrations &&
@@ -410,6 +402,128 @@
                 : CaddyTabValue;
         return Task.CompletedTask;
     }
+
+    private async Task OpenRequestedRemoteIntegrationsAsync()
+    {
+        if (requestedIntegrationHost is null || !CanOpenRequestedRemoteIntegrations || isOpeningRemoteIntegrations)
+        {
+            return;
+        }
+
+        isOpeningRemoteIntegrations = true;
+        remoteIntegrationStatus = $"Checking LMS web access for {requestedIntegrationHost.Name}...";
+        remoteIntegrationTone = "info";
+        var popupName = BuildRemoteLmsPopupName(requestedIntegrationHost);
+        var popupPrepared = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.preparePopup", popupName, 1280, 900);
+        if (popupPrepared)
+        {
+            _ = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.setPreparedPopupStatus",
+                popupName,
+                $"Connecting to {requestedIntegrationHost.Name}",
+                "Checking direct LMS web access before using the SSH/Caddy relay.");
+        }
+
+        try
+        {
+            var directAccess = await LmsUpdateAvailabilityService.CheckDirectWebAccessAsync(requestedIntegrationHost);
+            if (directAccess.IsDirectWebAvailable)
+            {
+                var directUrl = BuildDirectLmsUrl(requestedIntegrationHost, "/integrations");
+                if (popupPrepared)
+                {
+                    _ = await JSRuntime.InvokeAsync<bool>(
+                        "lmsTerminalWindow.setPreparedPopupStatus",
+                        popupName,
+                        $"Opening {requestedIntegrationHost.Name}",
+                        "LMS port 5080 is directly reachable. Opening the local/LAN web UI.");
+                }
+
+                var directOpened = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.openPopupAfterDelay",
+                    directUrl,
+                    popupName,
+                    1280,
+                    900,
+                    500);
+                if (!directOpened)
+                {
+                    NavigationManager.NavigateTo(directUrl, forceLoad: true);
+                }
+
+                return;
+            }
+
+            if (!HasStoredCredentials(requestedIntegrationHost))
+            {
+                throw new InvalidOperationException(
+                    "Port 5080 is not directly reachable. Save SSH credentials for this host before opening its LMS integrations through the relay.");
+            }
+
+            remoteIntegrationStatus = $"Opening an SSH tunnel to {requestedIntegrationHost.Name}...";
+            var connection = await RemoteLmsSshTunnelService.ConnectAsync(requestedIntegrationHost.Id, "/integrations");
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Opening {requestedIntegrationHost.Name}",
+                    "Caddy relay is ready. Opening the remote LMS.");
+            }
+
+            var opened = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.openPopupAfterDelay",
+                connection.Url,
+                popupName,
+                1280,
+                900,
+                1200);
+            if (!opened)
+            {
+                NavigationManager.NavigateTo(connection.Url, forceLoad: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            remoteIntegrationStatus = $"Could not open remote integrations through SSH: {ex.Message}";
+            remoteIntegrationTone = "error";
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Could not open {requestedIntegrationHost.Name}",
+                    ex.Message,
+                    "error");
+            }
+        }
+        finally
+        {
+            isOpeningRemoteIntegrations = false;
+        }
+    }
+
+    private static bool HasStoredCredentials(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private static string BuildDirectLmsUrl(ManagedHost host, string path)
+    {
+        var endpoint = host.Hostname.Trim();
+        var scheme = Uri.UriSchemeHttp;
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+        {
+            endpoint = uri.Host;
+            scheme = uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                ? Uri.UriSchemeHttps
+                : Uri.UriSchemeHttp;
+        }
+
+        return new UriBuilder(scheme, endpoint, 5080, path.TrimStart('/')).Uri.ToString();
+    }
+
+    private static string BuildRemoteLmsPopupName(ManagedHost host) =>
+        $"lms-remote-{host.Id:N}-{Guid.NewGuid():N}";
 
     private Task OpenCloudflareSetupGuide()
     {
@@ -484,17 +598,4 @@
         string.Equals(value, MediaLibraryTabValue, StringComparison.Ordinal) ||
         (PortalTabAvailable && string.Equals(value, PortalTabValue, StringComparison.Ordinal));
 
-    private static string BuildRemoteLmsUrl(ManagedHost host, string path)
-    {
-        var builder = new UriBuilder(Uri.UriSchemeHttp, host.Hostname, 5080, path.TrimStart('/'));
-        return builder.Uri.ToString();
-    }
-
-    private static UiPillTone GetStatusTone(HostOperatingStatus status) => status switch
-    {
-        HostOperatingStatus.Online => UiPillTone.Success,
-        HostOperatingStatus.Degraded => UiPillTone.Warning,
-        HostOperatingStatus.Offline => UiPillTone.Failure,
-        _ => UiPillTone.Neutral
-    };
 }

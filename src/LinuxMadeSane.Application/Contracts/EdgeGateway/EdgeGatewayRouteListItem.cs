@@ -8,6 +8,7 @@ public sealed record EdgeGatewayRouteListItem(
     string DisplayName,
     string Hostname,
     string DomainName,
+    string TargetPathPrefix,
     string TargetUrl,
     EdgeGatewayAuthMode AuthMode,
     EdgeGatewayDiagnosticStatus LastTestStatus,

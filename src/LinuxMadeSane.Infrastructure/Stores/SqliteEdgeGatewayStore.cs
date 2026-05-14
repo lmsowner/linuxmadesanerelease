@@ -28,11 +28,15 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
     public async Task<EdgeGatewayRoute?> FindRouteByHostnameAsync(string hostname, CancellationToken cancellationToken = default)
     {
         var normalizedHostname = hostname.Trim().TrimEnd('.').ToLowerInvariant();
-        var entity = await dbContext.EdgeGatewayRoutes
+        var entities = await dbContext.EdgeGatewayRoutes
             .AsNoTracking()
-            .SingleOrDefaultAsync(route => route.Hostname == normalizedHostname, cancellationToken);
+            .Where(route => route.Hostname == normalizedHostname)
+            .ToListAsync(cancellationToken);
 
-        return entity is null ? null : Map(entity);
+        return entities
+            .OrderBy(static route => route.TargetPathPrefix.Length)
+            .Select(Map)
+            .FirstOrDefault();
     }
 
     public async Task SaveRouteAsync(EdgeGatewayRoute route, CancellationToken cancellationToken = default)

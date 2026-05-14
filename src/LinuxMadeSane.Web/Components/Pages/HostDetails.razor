@@ -5,6 +5,9 @@
 @inject IManagedHostService HostService
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
+@inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
+@inject NavigationManager NavigationManager
+@inject IJSRuntime JSRuntime
 
 <PageTitle>Host Details | Linux Made Sane</PageTitle>
 
@@ -30,12 +33,25 @@ else
             <div class="hero-actions">
                 @if (CanConnectToRemoteLmsHost)
                 {
-                    <UiCommandButton Label="Connect"
-                                     Glyph="UiIconGlyph.Connect"
-                                     Variant="UiButtonVariant.PrimaryMuted"
-                                     Href="@BuildRemoteLmsUrl(details.Host, "/")"
-                                     Target="_blank"
-                                     Rel="noreferrer" />
+                    @if (CanOpenRemoteLmsDirectly)
+                    {
+                        <UiCommandButton Label="Connect"
+                                         Glyph="UiIconGlyph.Connect"
+                                         Variant="UiButtonVariant.PrimaryMuted"
+                                         Title="@RemoteLmsConnectTitle"
+                                         Href="@BuildDirectLmsRootUrl(details.Host)"
+                                         Target="_blank"
+                                         Rel="noreferrer" />
+                    }
+                    else
+                    {
+                        <UiCommandButton Label="Connect"
+                                         Glyph="UiIconGlyph.Connect"
+                                         Variant="UiButtonVariant.PrimaryMuted"
+                                         Title="@RemoteLmsConnectTitle"
+                                         Disabled="@(!CanRunRemoteLmsTunnel || isRemoteLmsConnectBusy)"
+                                         OnClick="@(() => ConnectToRemoteLmsAsync("/"))" />
+                    }
                 }
                 @if (CanInstallLmsHost)
                 {
@@ -67,6 +83,11 @@ else
             </div>
         </section>
 
+        @if (!string.IsNullOrWhiteSpace(remoteLmsConnectStatus))
+        {
+            <p class="@($"callout {remoteLmsConnectTone}")">@remoteLmsConnectStatus</p>
+        }
+
         <TabControl ActiveValue="@activeTab"
                     ActiveValueChanged="HandleTabChangedAsync"
                     Class="page-tab-control host-details-tab-control"
@@ -82,7 +103,7 @@ else
                                 <p class="meta-text">Current live checks use the stored SSH credentials and verify that Linux Made Sane can open a real shell session.</p>
                                 @if (ShouldShowRemoteLmsWebAccessNote)
                                 {
-                                    <p class="callout warning">@remoteLmsWebAccess!.Detail</p>
+                                    <p class="callout info">Direct port 5080 is not reachable from this LMS session. Connect uses the saved SSH login to open a local tunnel.</p>
                                 }
                                 <p class="meta-text">Checked @details.ConnectionTest.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</p>
                             </section>
@@ -198,26 +219,38 @@ else
                                     </p>
                                 }
 
-                                @if (lmsInstallResult?.Success == true && details is not null && !isLmsUninstallMode && RemoteLmsWebUiIsDirectlyReachable)
+                                @if (lmsInstallResult?.Success == true && details is not null && !isLmsUninstallMode)
                                 {
                                     <div class="lms-install-actions">
-                                        <UiCommandButton Label="Open remote LMS"
-                                                         Glyph="UiIconGlyph.PopOut"
-                                                         Variant="UiButtonVariant.PrimaryMuted"
-                                                         Href="@BuildRemoteLmsUrl(details.Host, "/")"
-                                                         Target="_blank"
-                                                         Rel="noreferrer" />
-                                        <UiCommandButton Label="Local AI setup"
-                                                         Glyph="UiIconGlyph.Ai"
-                                                         Variant="UiButtonVariant.Ghost"
-                                                         Href="@BuildRemoteLmsUrl(details.Host, "/ai/engine")"
-                                                         Target="_blank"
-                                                         Rel="noreferrer" />
+                                        @if (CanOpenRemoteLmsDirectly)
+                                        {
+                                            <UiCommandButton Label="Open remote LMS"
+                                                             Glyph="UiIconGlyph.Connect"
+                                                             Variant="UiButtonVariant.PrimaryMuted"
+                                                             Href="@BuildDirectLmsRootUrl(details.Host)"
+                                                             Target="_blank"
+                                                             Rel="noreferrer" />
+                                            <UiCommandButton Label="Local AI setup"
+                                                             Glyph="UiIconGlyph.Ai"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Href="@BuildDirectLmsAiSetupUrl(details.Host)"
+                                                             Target="_blank"
+                                                             Rel="noreferrer" />
+                                        }
+                                        else
+                                        {
+                                            <UiCommandButton Label="Open remote LMS"
+                                                             Glyph="UiIconGlyph.Connect"
+                                                             Variant="UiButtonVariant.PrimaryMuted"
+                                                             Disabled="@(!CanRunRemoteLmsTunnel || isRemoteLmsConnectBusy)"
+                                                             OnClick="@(() => ConnectToRemoteLmsAsync("/"))" />
+                                            <UiCommandButton Label="Local AI setup"
+                                                             Glyph="UiIconGlyph.Ai"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@(!CanRunRemoteLmsTunnel || isRemoteLmsConnectBusy)"
+                                                             OnClick="@(() => ConnectToRemoteLmsAsync("/ai/engine"))" />
+                                        }
                                     </div>
-                                }
-                                else if (lmsInstallResult?.Success == true && details is not null && !isLmsUninstallMode && ShouldShowRemoteLmsWebAccessNote)
-                                {
-                                    <p class="callout warning">@remoteLmsWebAccess!.Detail</p>
                                 }
 
                                 @if (lmsInstallProgress.Count > 0)
@@ -304,6 +337,9 @@ else
     private Guid? updateQueryHandledForHostId;
     private Guid? uninstallQueryHandledForHostId;
     private LmsHostWebAccessStatus? remoteLmsWebAccess;
+    private bool isRemoteLmsConnectBusy;
+    private string remoteLmsConnectStatus = string.Empty;
+    private string remoteLmsConnectTone = "info";
 
     private bool CanInstallLmsHost => details is { Capabilities.IsLmsHost: false };
 
@@ -312,17 +348,47 @@ else
     private bool CanUninstallLmsHost => details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false };
 
     private bool CanConnectToRemoteLmsHost =>
-        details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false } &&
-        RemoteLmsWebUiIsDirectlyReachable;
-
-    private bool RemoteLmsWebUiIsDirectlyReachable =>
-        remoteLmsWebAccess?.IsDirectWebAvailable == true;
+        details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false };
 
     private bool ShouldShowRemoteLmsWebAccessNote =>
         details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false } &&
         remoteLmsWebAccess is { IsDirectWebAvailable: false };
 
+    private bool CanOpenRemoteLmsDirectly =>
+        remoteLmsWebAccess?.IsDirectWebAvailable == true;
+
+    private bool CanRunRemoteLmsTunnel =>
+        details is not null && HasStoredCredentials(details.Host);
+
+    private string RemoteLmsConnectTitle =>
+        CanOpenRemoteLmsDirectly
+            ? "Open the directly reachable LMS web UI on port 5080."
+            : CanRunRemoteLmsTunnel
+                ? "Port 5080 is not directly reachable. Use saved SSH credentials to open the remote LMS through the Caddy relay."
+                : "Save SSH credentials for this host before opening its LMS UI through the relay.";
+
     private bool CanRunLmsInstaller => details is not null && HasStoredCredentials(details.Host);
+
+    private static string BuildDirectLmsRootUrl(ManagedHost host) =>
+        BuildDirectLmsUrl(host, "/");
+
+    private static string BuildDirectLmsAiSetupUrl(ManagedHost host) =>
+        BuildDirectLmsUrl(host, "/ai/engine");
+
+    private static string BuildDirectLmsUrl(ManagedHost host, string path)
+    {
+        var endpoint = host.Hostname.Trim();
+        var scheme = Uri.UriSchemeHttp;
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+        {
+            endpoint = uri.Host;
+            scheme = uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                ? Uri.UriSchemeHttps
+                : Uri.UriSchemeHttp;
+        }
+
+        return new UriBuilder(scheme, endpoint, 5080, path.TrimStart('/')).Uri.ToString();
+    }
 
     private bool ShouldShowLmsInstallPanel =>
         showLmsInstallPrompt || isInstallingLms || lmsInstallResult is not null;
@@ -349,7 +415,7 @@ else
         ? "This stops and removes the remote LMS service and application files. Data and config are kept unless you explicitly choose to remove them."
         : isLmsUpdateMode
             ? "This updates the remote LMS service over SSH. The UI on that remote host may restart while the installer swaps the release."
-            : "Community Edition can install and convert this SSH host. Managing multiple LMS instances from one LMS box remains a Pro or Enterprise capability.";
+            : "Community Edition can install and convert this SSH host. Once installed, Connect opens that LMS through an SSH tunnel even when port 5080 is not directly reachable.";
 
     private string GetLmsInstallRunButtonLabel()
     {
@@ -558,6 +624,74 @@ else
         return Task.CompletedTask;
     }
 
+    private async Task ConnectToRemoteLmsAsync(string path)
+    {
+        if (details is null || !CanRunRemoteLmsTunnel || isRemoteLmsConnectBusy)
+        {
+            return;
+        }
+
+        isRemoteLmsConnectBusy = true;
+        remoteLmsConnectStatus = $"Opening an SSH tunnel to {details.Host.Name}...";
+        remoteLmsConnectTone = "info";
+        var popupName = BuildRemoteLmsPopupName(details.Host);
+        var popupPrepared = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.preparePopup", popupName, 1280, 900);
+        if (popupPrepared)
+        {
+            _ = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.setPreparedPopupStatus",
+                popupName,
+                $"Connecting to {details.Host.Name}",
+                "Opening the SSH tunnel and preparing the Caddy relay.");
+        }
+
+        try
+        {
+            var connection = await RemoteLmsSshTunnelService.ConnectAsync(details.Host.Id, path);
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Opening {details.Host.Name}",
+                    "Caddy relay is ready. Opening the remote LMS.");
+            }
+
+            var opened = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.openPopupAfterDelay",
+                connection.Url,
+                popupName,
+                1280,
+                900,
+                1200);
+            if (!opened)
+            {
+                NavigationManager.NavigateTo(connection.Url, forceLoad: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            remoteLmsConnectStatus = $"Could not connect to {details.Host.Name} through SSH: {ex.Message}";
+            remoteLmsConnectTone = "error";
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Could not open {details.Host.Name}",
+                    ex.Message,
+                    "error");
+            }
+        }
+        finally
+        {
+            isRemoteLmsConnectBusy = false;
+        }
+    }
+
+    private static string BuildRemoteLmsPopupName(ManagedHost host) =>
+        $"lms-remote-{host.Id:N}-{Guid.NewGuid():N}";
+
     private static string FormatEnvironment(string? environment) =>
         string.IsNullOrWhiteSpace(environment) ? "Unlabeled" : environment;
 
@@ -595,12 +729,6 @@ else
 
     private string GetLmsInstallResultClass() =>
         lmsInstallResult?.Success == true ? "callout success" : "callout error";
-
-    private static string BuildRemoteLmsUrl(ManagedHost host, string path)
-    {
-        var builder = new UriBuilder(Uri.UriSchemeHttp, host.Hostname, 5080, path.TrimStart('/'));
-        return builder.Uri.ToString();
-    }
 
     private static string FormatMemorySummary(ServerHealthSnapshot snapshot)
     {

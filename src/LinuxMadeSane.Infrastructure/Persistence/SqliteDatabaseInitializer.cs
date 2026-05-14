@@ -571,6 +571,24 @@ public sealed class SqliteDatabaseInitializer(
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(remoteShareMountsSql, cancellationToken);
+
+        const string sshfsMountsSql = """
+            CREATE TABLE IF NOT EXISTS sshfs_mounts (
+                Id TEXT NOT NULL PRIMARY KEY,
+                HostId TEXT NOT NULL,
+                HostDisplayName TEXT NOT NULL,
+                HostAddress TEXT NOT NULL,
+                Port INTEGER NOT NULL,
+                UserName TEXT NOT NULL,
+                RemotePath TEXT NOT NULL,
+                LocalMountPath TEXT NOT NULL,
+                IdentityFilePath TEXT NOT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                LastMountedAtUtc TEXT NULL
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(sshfsMountsSql, cancellationToken);
     }
 
     private async Task EnsurePortalTablesAsync(CancellationToken cancellationToken)
@@ -679,7 +697,13 @@ public sealed class SqliteDatabaseInitializer(
 
         await dbContext.Database.ExecuteSqlRawAsync(auditSql, cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(
-            "CREATE UNIQUE INDEX IF NOT EXISTS IX_edge_gateway_routes_Hostname ON edge_gateway_routes (Hostname);",
+            "DROP INDEX IF EXISTS IX_edge_gateway_routes_Hostname;",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_routes_Hostname ON edge_gateway_routes (Hostname);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE UNIQUE INDEX IF NOT EXISTS IX_edge_gateway_routes_Hostname_TargetPathPrefix ON edge_gateway_routes (Hostname, TargetPathPrefix);",
             cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(
             "CREATE INDEX IF NOT EXISTS IX_edge_gateway_routes_DomainName ON edge_gateway_routes (DomainName);",

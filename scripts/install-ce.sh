@@ -79,7 +79,7 @@ EXECUTABLE_PATH="$CURRENT_DIR/LinuxMadeSane.Web"
 
 mkdir -p "$RELEASE_DIR" "$DATA_ROOT_ABS" "$CONFIG_ROOT_ABS" "$SYSTEMD_ROOT_ABS"
 
-lms_install_host_packages sudo openssh-server openssh-client ffmpeg samba-common-bin smbclient cifs-utils
+lms_install_host_packages sudo openssh-server openssh-client caddy ffmpeg samba-common-bin smbclient cifs-utils
 
 if [[ "$LMS_DEST_ROOT" == "" ]]; then
   lms_prepare_live_service_user "$SERVICE_USER" "$SERVICE_GROUP" "$INSTALL_ROOT"

@@ -13,6 +13,7 @@
 @inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
 @inject FileBrowserWorkspaceRegistry FileBrowserWorkspaceRegistry
 @inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
+@inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
 
 <PageTitle>Overview | Linux Made Sane</PageTitle>
 
@@ -22,6 +23,11 @@
             <UiDisplayPreferenceToolbar />
         </Actions>
     </UiHeroPanel>
+
+    @if (!string.IsNullOrWhiteSpace(lmsConnectStatus))
+    {
+        <p class="@($"callout {lmsConnectTone}")">@lmsConnectStatus</p>
+    }
 
     <div class="dashboard-columns">
         <UiPanel>
@@ -58,18 +64,31 @@
                             }
                             @if (ShouldShowRemoteLmsWebAccessNote(details))
                             {
-                                <span class="meta-text">@details.LmsWebAccess!.Detail</span>
+                                <span class="meta-text">Direct LMS web access is closed; Connect will use an SSH tunnel.</span>
                             }
                         </div>
                         <div class="row-action-cluster">
-                            @if (TryGetLmsConnectLink(details) is { } connectLink)
+                            @if (ShouldShowLmsConnectAction(details))
                             {
-                                <UiCommandButton Label="Connect"
-                                                 Glyph="UiIconGlyph.Connect"
-                                                 Href="@connectLink.Href"
-                                                 Target="@connectLink.Target"
-                                                 Rel="@connectLink.Rel"
-                                                 Variant="UiButtonVariant.Action" />
+                                @if (CanOpenLmsDirectly(details))
+                                {
+                                    <UiCommandButton Label="Connect"
+                                                     Glyph="UiIconGlyph.Connect"
+                                                     Title="Open the directly reachable LMS web UI on port 5080."
+                                                     Variant="UiButtonVariant.Action"
+                                                     Href="@BuildDirectLmsRootUrl(details.Host)"
+                                                     Target="_blank"
+                                                     Rel="noreferrer" />
+                                }
+                                else
+                                {
+                                    <UiCommandButton Label="Connect"
+                                                     Glyph="UiIconGlyph.Connect"
+                                                     Title="@GetLmsTunnelConnectTitle(details.Host)"
+                                                     Variant="UiButtonVariant.Action"
+                                                     Disabled="@(!CanConnectRemoteLmsHostThroughSsh(details.Host) || IsLmsConnectBusyFor(details.Host))"
+                                                     OnClick="@(() => ConnectToRemoteLmsAsync(details.Host, "/"))" />
+                                }
                             }
                             @if (TryGetIntegrationsLink(details) is { } integrationsLink)
                             {
@@ -141,6 +160,9 @@
     private CancellationTokenSource? healthLoadCancellationTokenSource;
     private Task? healthLoadTask;
     private Task? lmsWebAccessLoadTask;
+    private Guid? lmsConnectHostId;
+    private string lmsConnectStatus = string.Empty;
+    private string lmsConnectTone = "info";
 
     protected override async Task OnInitializedAsync()
     {
@@ -172,14 +194,26 @@
             IsHealthLoading = ShouldLoadHealth(host)
         };
 
-    private static DashboardLink? TryGetLmsConnectLink(DashboardHostRow row)
+    private static bool ShouldShowLmsConnectAction(DashboardHostRow row)
     {
         var capabilities = ManagedHostCapabilities.Describe(row.Host);
-        return capabilities is { IsLmsHost: true, IsLocalLmsHost: false } &&
-               row.LmsWebAccess?.IsDirectWebAvailable == true
-            ? new DashboardLink(BuildRemoteLmsUrl(row.Host, "/"), "_blank", "noreferrer")
-            : null;
+        return capabilities is { IsLmsHost: true, IsLocalLmsHost: false };
     }
+
+    private static bool CanOpenLmsDirectly(DashboardHostRow row) =>
+        row.LmsWebAccess?.IsDirectWebAvailable == true;
+
+    private static bool CanConnectRemoteLmsHostThroughSsh(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private bool IsLmsConnectBusyFor(ManagedHost host) =>
+        lmsConnectHostId == host.Id;
+
+    private static string GetLmsTunnelConnectTitle(ManagedHost host) =>
+        CanConnectRemoteLmsHostThroughSsh(host)
+            ? "Port 5080 is not directly reachable. Use saved SSH credentials to open the remote LMS through the Caddy relay."
+            : "Save SSH credentials for this host before opening its LMS UI through the relay.";
 
     private static bool ShouldShowRemoteLmsWebAccessNote(DashboardHostRow row)
     {
@@ -198,9 +232,7 @@
 
         return capabilities.IsLocalLmsHost
             ? new DashboardLink("/integrations?tab=caddy")
-            : row.LmsWebAccess?.IsDirectWebAvailable == true
-                ? new DashboardLink(BuildRemoteLmsUrl(row.Host, "/integrations"), "_blank", "noreferrer")
-                : null;
+            : new DashboardLink($"/integrations?hostId={row.Host.Id}");
     }
 
     private static DashboardLifecycleLink? TryGetLmsLifecycleLink(ManagedHost host)
@@ -216,10 +248,22 @@
             : new DashboardLifecycleLink("Update LMS", $"/hosts/{host.Id}?update=lms");
     }
 
-    private static string BuildRemoteLmsUrl(ManagedHost host, string path)
+    private static string BuildDirectLmsRootUrl(ManagedHost host) =>
+        BuildDirectLmsUrl(host, "/");
+
+    private static string BuildDirectLmsUrl(ManagedHost host, string path)
     {
-        var builder = new UriBuilder(Uri.UriSchemeHttp, host.Hostname, 5080, path.TrimStart('/'));
-        return builder.Uri.ToString();
+        var endpoint = host.Hostname.Trim();
+        var scheme = Uri.UriSchemeHttp;
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+        {
+            endpoint = uri.Host;
+            scheme = uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                ? Uri.UriSchemeHttps
+                : Uri.UriSchemeHttp;
+        }
+
+        return new UriBuilder(scheme, endpoint, 5080, path.TrimStart('/')).Uri.ToString();
     }
 
     private Task OpenTerminalPopupAsync(Guid hostId)
@@ -253,6 +297,74 @@
             $"/terminal-window/{tab.Id}?autoconnect=true",
             $"lms-dashboard-terminal-{hostId:N}");
     }
+
+    private async Task ConnectToRemoteLmsAsync(ManagedHost host, string path)
+    {
+        if (!CanConnectRemoteLmsHostThroughSsh(host) || IsLmsConnectBusyFor(host))
+        {
+            return;
+        }
+
+        lmsConnectHostId = host.Id;
+        lmsConnectStatus = $"Opening an SSH tunnel to {host.Name}...";
+        lmsConnectTone = "info";
+        var popupName = BuildRemoteLmsPopupName(host);
+        var popupPrepared = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.preparePopup", popupName, 1280, 900);
+        if (popupPrepared)
+        {
+            _ = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.setPreparedPopupStatus",
+                popupName,
+                $"Connecting to {host.Name}",
+                "Opening the SSH tunnel and preparing the Caddy relay.");
+        }
+
+        try
+        {
+            var connection = await RemoteLmsSshTunnelService.ConnectAsync(host.Id, path);
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Opening {host.Name}",
+                    "Caddy relay is ready. Opening the remote LMS.");
+            }
+
+            var opened = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.openPopupAfterDelay",
+                connection.Url,
+                popupName,
+                1280,
+                900,
+                1200);
+            if (!opened)
+            {
+                NavigationManager.NavigateTo(connection.Url, forceLoad: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            lmsConnectStatus = $"Could not connect to {host.Name} through SSH: {ex.Message}";
+            lmsConnectTone = "error";
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Could not open {host.Name}",
+                    ex.Message,
+                    "error");
+            }
+        }
+        finally
+        {
+            lmsConnectHostId = null;
+        }
+    }
+
+    private static string BuildRemoteLmsPopupName(ManagedHost host) =>
+        $"lms-remote-{host.Id:N}-{Guid.NewGuid():N}";
 
     private Task OpenFilesPopupAsync(ManagedHost host)
     {

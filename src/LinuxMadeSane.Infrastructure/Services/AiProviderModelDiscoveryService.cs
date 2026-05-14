@@ -24,6 +24,7 @@ public sealed class AiProviderModelDiscoveryService(
             AiProviderType.OpenAi => DiscoverOpenAiModelsAsync(settings, apiKeyOverride, cancellationToken),
             AiProviderType.Anthropic => DiscoverAnthropicModelsAsync(settings, apiKeyOverride, cancellationToken),
             AiProviderType.Gemini => DiscoverGeminiModelsAsync(settings, apiKeyOverride, cancellationToken),
+            AiProviderType.Groq => DiscoverGroqModelsAsync(settings, apiKeyOverride, cancellationToken),
             AiProviderType.Ollama => DiscoverOllamaModelsAsync(cancellationToken),
             _ => Task.FromResult<IReadOnlyList<AiProviderModelOption>>([])
         };
@@ -139,6 +140,39 @@ public sealed class AiProviderModelDiscoveryService(
             .ToArray();
     }
 
+    private async Task<IReadOnlyList<AiProviderModelOption>> DiscoverGroqModelsAsync(
+        AiProviderSettings settings,
+        string? apiKeyOverride,
+        CancellationToken cancellationToken)
+    {
+        var apiKey = await ResolveApiKeyAsync(settings, apiKeyOverride, "Groq", cancellationToken);
+        using var httpClient = httpClientFactory.CreateClient();
+        using var message = new HttpRequestMessage(HttpMethod.Get, ResolveGroqModelsEndpoint(settings));
+        message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
+
+        using var response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        EnsureResponseSucceeded(response, body, "Groq");
+
+        var data = JsonNode.Parse(body)?["data"] as JsonArray ?? [];
+        return data
+            .OfType<JsonObject>()
+            .Select(item => item["id"]?.GetValue<string>() ?? string.Empty)
+            .Where(IsGroqTextModel)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(IsLikelyRecommendedGroqModel)
+            .ThenBy(id => id, StringComparer.OrdinalIgnoreCase)
+            .Select(id => new AiProviderModelOption(
+                AiProviderType.Groq,
+                id,
+                BuildDisplayName(id),
+                "Discovered from the Groq models API for this API key.",
+                true,
+                false))
+            .ToArray();
+    }
+
     private async Task<IReadOnlyList<AiProviderModelOption>> DiscoverOllamaModelsAsync(CancellationToken cancellationToken)
     {
         var installedModels = await ollamaRuntimeService.ListInstalledModelsAsync(cancellationToken);
@@ -194,6 +228,11 @@ public sealed class AiProviderModelDiscoveryService(
         var separator = string.IsNullOrEmpty(endpoint.Query) ? "?" : "&";
         return new Uri($"{endpoint}{separator}key={Uri.EscapeDataString(apiKey.Trim())}", UriKind.Absolute);
     }
+
+    private static Uri ResolveGroqModelsEndpoint(AiProviderSettings settings) =>
+        string.IsNullOrWhiteSpace(settings.BaseUrl)
+            ? new Uri("https://api.groq.com/openai/v1/models", UriKind.Absolute)
+            : GroqAiProvider.ResolveOpenAiCompatibleEndpoint(settings.BaseUrl, "models");
 
     private static void EnsureResponseSucceeded(HttpResponseMessage response, string responseBody, string providerName)
     {
@@ -292,10 +331,32 @@ public sealed class AiProviderModelDiscoveryService(
                !normalized.Contains("tts", StringComparison.Ordinal);
     }
 
+    private static bool IsGroqTextModel(string modelId)
+    {
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return false;
+        }
+
+        var normalized = modelId.Trim().ToLowerInvariant();
+        return !normalized.Contains("audio", StringComparison.Ordinal) &&
+               !normalized.Contains("embedding", StringComparison.Ordinal) &&
+               !normalized.Contains("guard", StringComparison.Ordinal) &&
+               !normalized.Contains("image", StringComparison.Ordinal) &&
+               !normalized.Contains("moderation", StringComparison.Ordinal) &&
+               !normalized.Contains("tts", StringComparison.Ordinal) &&
+               !normalized.Contains("whisper", StringComparison.Ordinal);
+    }
+
+    private static bool IsLikelyRecommendedGroqModel(string modelId) =>
+        modelId.Equals("llama-3.3-70b-versatile", StringComparison.OrdinalIgnoreCase) ||
+        modelId.Equals("openai/gpt-oss-120b", StringComparison.OrdinalIgnoreCase);
+
     private static string BuildDisplayName(string modelId) =>
         string.Join(
             ' ',
             modelId
+                .Replace('/', '-')
                 .Replace(':', '-')
                 .Split('-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(part => part.Length <= 3 ? part.ToUpperInvariant() : char.ToUpperInvariant(part[0]) + part[1..]));

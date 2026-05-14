@@ -12,9 +12,27 @@ public sealed class ShareManagementService(
     ILinuxShareModuleDataService shareDataService,
     IPackageManagementService packageManagementService,
     IServiceManagementService serviceManagementService,
-    IManagedHostStore managedHostStore) : IShareManagementService
+    IManagedHostStore managedHostStore,
+    ISshfsMountService? sshfsMountService = null) : IShareManagementService
 {
     private static readonly string[] SambaServerPackageNames = ["samba"];
+    private static readonly ShareToolingDefinition[] SshfsToolingDefinitions =
+    [
+        new(
+            "sshfs",
+            "Lets LMS mount registered SSH hosts directly into the local filesystem.",
+            ["sshfs"],
+            EnablesNetworkScan: false,
+            EnablesRemoteBrowse: false,
+            EnablesRemoteMount: true),
+        new(
+            "fuse3",
+            "Provides the FUSE runtime used by modern SSHFS mounts.",
+            ["fusermount3"],
+            EnablesNetworkScan: false,
+            EnablesRemoteBrowse: false,
+            EnablesRemoteMount: true)
+    ];
     private static readonly ShareToolingDefinition[] ShareToolingDefinitions =
     [
         new(
@@ -331,6 +349,18 @@ public sealed class ShareManagementService(
         return new NetworkShareMountExplorerViewModel(tooling, discovery, currentMounts, managedMounts);
     }
 
+    public async Task<SshfsMountExplorerViewModel> GetSshfsMountExplorerAsync(CancellationToken cancellationToken = default)
+    {
+        var tooling = await GetSshfsToolingStatusAsync(cancellationToken);
+        var service = GetRequiredSshfsMountService();
+
+        return new SshfsMountExplorerViewModel(
+            tooling,
+            await service.ListHostCandidatesAsync(cancellationToken),
+            await service.ListCurrentMountsAsync(cancellationToken),
+            await service.ListManagedMountsAsync(cancellationToken));
+    }
+
     public async Task<RemoteShareBrowseResult> BrowseRemoteSharesAsync(
         RemoteShareConnectionEditor editor,
         CancellationToken cancellationToken = default)
@@ -411,6 +441,26 @@ public sealed class ShareManagementService(
             cancellationToken);
     }
 
+    public async Task<SshfsMountResult> CreateSshfsMountAsync(
+        SshfsMountEditor editor,
+        CancellationToken cancellationToken = default)
+    {
+        var tooling = await GetSshfsToolingStatusAsync(cancellationToken);
+        if (!tooling.CanCreateSshfsMounts)
+        {
+            throw new InvalidOperationException(
+                "SSHFS mounts are unavailable until the Ubuntu `sshfs` and `fuse3` packages are installed on this LMS host.");
+        }
+
+        return await GetRequiredSshfsMountService().CreateMountAsync(
+            new SshfsMountRequest(
+                editor.HostId,
+                editor.RemotePath.Trim(),
+                editor.LocalMountPath.Trim(),
+                editor.PersistOnServer),
+            cancellationToken);
+    }
+
     public async Task<ShareToolingInstallResult> InstallMissingShareToolingAsync(CancellationToken cancellationToken = default)
     {
         var tooling = await GetShareToolingStatusAsync(cancellationToken);
@@ -448,6 +498,47 @@ public sealed class ShareManagementService(
             success
                 ? $"Installed {tooling.MissingPackageNames.Count} missing share package(s) on {tooling.LocalHostName}."
                 : $"Package installation on {tooling.LocalHostName} needs review. Check the operation log.",
+            tooling.MissingPackageNames,
+            logs);
+    }
+
+    public async Task<ShareToolingInstallResult> InstallMissingSshfsToolingAsync(CancellationToken cancellationToken = default)
+    {
+        var tooling = await GetSshfsToolingStatusAsync(cancellationToken);
+        if (!tooling.IsLocalHostRegistered || string.IsNullOrWhiteSpace(tooling.LocalHostName))
+        {
+            throw new InvalidOperationException(
+                "Auto-install is unavailable because the LMS local machine is not registered in host inventory.");
+        }
+
+        if (tooling.MissingPackageNames.Count == 0)
+        {
+            return new ShareToolingInstallResult(
+                true,
+                tooling.LocalHostName,
+                "The registered LMS local machine already has SSHFS and FUSE installed.",
+                Array.Empty<string>(),
+                []);
+        }
+
+        var actions = tooling.MissingPackageNames
+            .Select(packageName => new PackageAction(
+                PackageActionKind.Install,
+                packageName,
+                "Required for LMS SSHFS host mounts.",
+                IsDestructive: false,
+                $"apt-get install -y {packageName}"))
+            .ToArray();
+
+        var logs = await packageManagementService.ApplyActionsAsync(actions, dryRun: false, cancellationToken);
+        var success = logs.All(log => log.Level != OperationLogLevel.Error);
+
+        return new ShareToolingInstallResult(
+            success,
+            tooling.LocalHostName,
+            success
+                ? $"Installed {tooling.MissingPackageNames.Count} missing SSHFS package(s) on {tooling.LocalHostName}."
+                : $"SSHFS package installation on {tooling.LocalHostName} needs review. Check the operation log.",
             tooling.MissingPackageNames,
             logs);
     }
@@ -505,6 +596,9 @@ public sealed class ShareManagementService(
 
     public Task DeleteManagedRemoteMountAsync(Guid id, CancellationToken cancellationToken = default) =>
         shareDataService.DeleteManagedRemoteMountAsync(id, cancellationToken);
+
+    public Task DeleteManagedSshfsMountAsync(Guid id, CancellationToken cancellationToken = default) =>
+        GetRequiredSshfsMountService().DeleteManagedMountAsync(id, cancellationToken);
 
     public Task CleanupTemporaryRemoteMountsAsync(CancellationToken cancellationToken = default) =>
         shareDataService.CleanupTemporaryRemoteMountsAsync(cancellationToken);
@@ -831,6 +925,64 @@ public sealed class ShareManagementService(
         await shareDataService.GetUserAsync(id, cancellationToken)
         ?? throw new InvalidOperationException("The selected Linux user no longer exists.");
 
+    private ISshfsMountService GetRequiredSshfsMountService() =>
+        sshfsMountService ?? throw new InvalidOperationException("SSHFS mount support is not available in this LMS build.");
+
+    private async Task<SshfsToolingStatusViewModel> GetSshfsToolingStatusAsync(CancellationToken cancellationToken)
+    {
+        var packageStates = await packageManagementService.InspectAsync(
+            SshfsToolingDefinitions.Select(item => item.PackageName).ToArray(),
+            cancellationToken);
+
+        var packageStatesByName = packageStates.ToDictionary(item => item.Name, StringComparer.OrdinalIgnoreCase);
+        var packages = SshfsToolingDefinitions
+            .Select(definition =>
+            {
+                var packageState = packageStatesByName.GetValueOrDefault(definition.PackageName);
+                return new ShareToolingPackageViewModel(
+                    definition.PackageName,
+                    definition.Purpose,
+                    definition.Commands,
+                    packageState?.IsInstalled == true,
+                    packageState?.Version ?? "-");
+            })
+            .ToArray();
+
+        var missingPackageNames = packages
+            .Where(item => !item.IsInstalled)
+            .Select(item => item.PackageName)
+            .ToArray();
+        var canCreateSshfsMounts = IsFeatureEnabled(SshfsToolingDefinitions, packages, definition => definition.EnablesRemoteMount);
+        var notes = new List<string>();
+        if (!canCreateSshfsMounts)
+        {
+            notes.Add("SSHFS mounts stay disabled until `sshfs` and `fuse3` are installed on the LMS host.");
+        }
+
+        notes.Add("Only registered hosts with stored public key authentication are available for SSHFS mounts.");
+        notes.Add("Automated SSHFS mounts require a non-interactive private key. Use a dedicated mount key if the normal admin key has a passphrase.");
+
+        var installPackages = missingPackageNames.Length == 0
+            ? SshfsToolingDefinitions.Select(item => item.PackageName).ToArray()
+            : missingPackageNames;
+
+        var localHost = await managedHostStore.GetAsync(AiLocalMachine.ManagedHostId, cancellationToken);
+        var statusMessage = missingPackageNames.Length == 0
+            ? "The LMS host has SSHFS and FUSE installed for registered SSH host mounts."
+            : $"This LMS host is missing {missingPackageNames.Length} package(s) required for SSHFS mounts.";
+
+        return new SshfsToolingStatusViewModel(
+            missingPackageNames.Length == 0,
+            canCreateSshfsMounts,
+            localHost is not null,
+            localHost?.Name,
+            statusMessage,
+            $"sudo apt-get update && sudo apt-get install -y -- {string.Join(' ', installPackages)}",
+            missingPackageNames,
+            notes,
+            packages);
+    }
+
     private async Task<ShareToolingStatusViewModel> GetShareToolingStatusAsync(CancellationToken cancellationToken)
     {
         var packageStates = await packageManagementService.InspectAsync(
@@ -856,9 +1008,9 @@ public sealed class ShareManagementService(
             .Select(item => item.PackageName)
             .ToArray();
 
-        var canScanNetwork = IsFeatureEnabled(packages, definition => definition.EnablesNetworkScan);
-        var canBrowseRemoteShares = IsFeatureEnabled(packages, definition => definition.EnablesRemoteBrowse);
-        var canCreateRemoteMounts = IsFeatureEnabled(packages, definition => definition.EnablesRemoteMount);
+        var canScanNetwork = IsFeatureEnabled(ShareToolingDefinitions, packages, definition => definition.EnablesNetworkScan);
+        var canBrowseRemoteShares = IsFeatureEnabled(ShareToolingDefinitions, packages, definition => definition.EnablesRemoteBrowse);
+        var canCreateRemoteMounts = IsFeatureEnabled(ShareToolingDefinitions, packages, definition => definition.EnablesRemoteMount);
 
         var notes = new List<string>();
         if (!packages.Any(item => item.PackageName.Equals("samba-common-bin", StringComparison.OrdinalIgnoreCase) && item.IsInstalled))
@@ -905,9 +1057,10 @@ public sealed class ShareManagementService(
     }
 
     private static bool IsFeatureEnabled(
+        IReadOnlyList<ShareToolingDefinition> definitions,
         IReadOnlyList<ShareToolingPackageViewModel> packages,
         Func<ShareToolingDefinition, bool> selector) =>
-        ShareToolingDefinitions
+        definitions
             .Where(selector)
             .All(definition => packages.Any(item =>
                 item.PackageName.Equals(definition.PackageName, StringComparison.OrdinalIgnoreCase) &&

@@ -74,7 +74,7 @@ public static partial class EdgeGatewayRouteValidator
             normalized.Contains('\\') ||
             normalized.Contains("..", StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("Target path prefix must start with / and cannot contain traversal segments.");
+            throw new InvalidOperationException("Route path prefix must start with / and cannot contain traversal segments.");
         }
 
         return normalized.TrimEnd('/');

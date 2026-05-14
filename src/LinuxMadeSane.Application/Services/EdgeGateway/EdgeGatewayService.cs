@@ -121,6 +121,8 @@ public sealed class EdgeGatewayService(
         var existing = editor.Id.HasValue ? await store.GetRouteAsync(editor.Id.Value, cancellationToken) : null;
         var domainName = EdgeGatewayRouteValidator.NormalizeDomainName(editor.DomainName);
         var hostname = NormalizeHostnameOrSubdomain(editor.Hostname, domainName);
+        var targetPathPrefix = EdgeGatewayRouteValidator.NormalizePathPrefix(editor.TargetPathPrefix);
+        await EnsureRoutePathIsAvailableAsync(routeId, hostname, targetPathPrefix, cancellationToken);
         var route = new EdgeGatewayRoute(
             routeId,
             editor.Enabled,
@@ -130,7 +132,7 @@ public sealed class EdgeGatewayService(
             editor.TargetScheme,
             EdgeGatewayRouteValidator.NormalizeTargetHost(editor.TargetHost),
             EdgeGatewayRouteValidator.NormalizeTargetPort(editor.TargetPort),
-            EdgeGatewayRouteValidator.NormalizePathPrefix(editor.TargetPathPrefix),
+            targetPathPrefix,
             NormalizePublicAuthMode(editor.AuthMode),
             NormalizeCsvOrLines(editor.AllowedUsers),
             NormalizeCsvOrLines(editor.AllowedGroups),
@@ -145,6 +147,26 @@ public sealed class EdgeGatewayService(
         EdgeGatewayRouteValidator.ValidateRoute(route);
         await store.SaveRouteAsync(route, cancellationToken);
         return route.Id;
+    }
+
+    private async Task EnsureRoutePathIsAvailableAsync(
+        Guid routeId,
+        string hostname,
+        string targetPathPrefix,
+        CancellationToken cancellationToken)
+    {
+        var routes = await store.ListRoutesAsync(cancellationToken);
+        var duplicate = routes.FirstOrDefault(route =>
+            route.Id != routeId &&
+            route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase) &&
+            EdgeGatewayRouteValidator.NormalizePathPrefix(route.TargetPathPrefix)
+                .Equals(targetPathPrefix, StringComparison.OrdinalIgnoreCase));
+
+        if (duplicate is not null)
+        {
+            var path = string.IsNullOrWhiteSpace(targetPathPrefix) ? "/" : targetPathPrefix;
+            throw new InvalidOperationException($"An Edge Gateway route already exists for {hostname}{path}.");
+        }
     }
 
     private async Task<EdgeGatewayCloudflareStatus> BuildCloudflareStatusAsync(
@@ -924,7 +946,7 @@ public sealed class EdgeGatewayService(
                 cancellationToken);
         }
 
-        var route = await store.FindRouteByHostnameAsync(requestedHost, cancellationToken);
+        var route = await FindRouteForRequestAsync(requestedHost, requestedPath, enabledOnly: true, cancellationToken);
         if (route is null || !route.Enabled)
         {
             return await AuditAndReturnAsync(
@@ -1059,7 +1081,7 @@ public sealed class EdgeGatewayService(
             return false;
         }
 
-        var route = await store.FindRouteByHostnameAsync(uri.Host, cancellationToken);
+        var route = await FindRouteForRequestAsync(uri.Host, uri.AbsolutePath, enabledOnly: true, cancellationToken);
         return route is { Enabled: true };
     }
 
@@ -1122,6 +1144,50 @@ public sealed class EdgeGatewayService(
     {
         await AddAuditAsync(route, requestedHost, requestedPath, sourceIp, userEmail, decision, reason, authMode, cancellationToken);
         return new EdgeGatewayAuthCheckResult(statusCode, decision, reason);
+    }
+
+    private async Task<EdgeGatewayRoute?> FindRouteForRequestAsync(
+        string requestedHost,
+        string requestedPath,
+        bool enabledOnly,
+        CancellationToken cancellationToken)
+    {
+        var normalizedHost = NormalizeForwardedHost(requestedHost, requestedHost);
+        var pathOnly = ExtractPathOnly(requestedPath);
+        var routes = await store.ListRoutesAsync(cancellationToken);
+
+        return routes
+            .Where(route =>
+                route.Hostname.Equals(normalizedHost, StringComparison.OrdinalIgnoreCase) &&
+                (!enabledOnly || route.Enabled) &&
+                RoutePathMatches(route.TargetPathPrefix, pathOnly))
+            .OrderByDescending(route => EdgeGatewayRouteValidator.NormalizePathPrefix(route.TargetPathPrefix).Length)
+            .FirstOrDefault();
+    }
+
+    private static bool RoutePathMatches(string? routePathPrefix, string requestedPath)
+    {
+        var prefix = EdgeGatewayRouteValidator.NormalizePathPrefix(routePathPrefix);
+        if (string.IsNullOrWhiteSpace(prefix))
+        {
+            return true;
+        }
+
+        var normalizedPath = ExtractPathOnly(requestedPath);
+        return normalizedPath.Equals(prefix, StringComparison.OrdinalIgnoreCase) ||
+               normalizedPath.StartsWith($"{prefix}/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ExtractPathOnly(string? requestedPath)
+    {
+        var normalized = string.IsNullOrWhiteSpace(requestedPath) ? "/" : requestedPath.Trim();
+        if (!normalized.StartsWith("/", StringComparison.Ordinal))
+        {
+            normalized = $"/{normalized}";
+        }
+
+        var queryIndex = normalized.IndexOf('?', StringComparison.Ordinal);
+        return queryIndex < 0 ? normalized : normalized[..queryIndex];
     }
 
     private Task AddAuditAsync(
@@ -2076,6 +2142,7 @@ public sealed class EdgeGatewayService(
             route.DisplayName,
             route.Hostname,
             route.DomainName,
+            route.TargetPathPrefix,
             EdgeGatewayRouteValidator.BuildTargetUrl(route),
             NormalizePublicAuthMode(route.AuthMode),
             route.LastTestStatus,

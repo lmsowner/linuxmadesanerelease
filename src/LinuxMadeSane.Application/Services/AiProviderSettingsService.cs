@@ -513,6 +513,7 @@ public sealed class AiProviderSettingsService(
             AiProviderType.Ollama => "local-ollama",
             AiProviderType.RemoteLmsAiEngine => "remote-ai-engine",
             AiProviderType.Gemini => "gemini",
+            AiProviderType.Groq => "groq",
             _ => "provider"
         };
 

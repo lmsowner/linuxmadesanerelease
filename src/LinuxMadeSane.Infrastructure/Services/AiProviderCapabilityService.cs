@@ -17,7 +17,7 @@ public sealed class AiProviderCapabilityService(
         var effectiveModelId = string.IsNullOrWhiteSpace(modelId) ? settings.DefaultModelId : modelId.Trim();
         var report = settings.ProviderType switch
         {
-            AiProviderType.OpenAi or AiProviderType.Anthropic or AiProviderType.Gemini => BuildManagedCloudReport(settings.DisplayName, effectiveModelId),
+            AiProviderType.OpenAi or AiProviderType.Anthropic or AiProviderType.Gemini or AiProviderType.Groq => BuildManagedCloudReport(settings.DisplayName, effectiveModelId),
             AiProviderType.Ollama => modelManagementService.BuildCapabilityReport(settings.DisplayName, effectiveModelId, settings.ToolUseEnabled),
             AiProviderType.RemoteLmsAiEngine => BuildRemoteReport(settings, effectiveModelId),
             _ => new LocalAiCapabilityReport(

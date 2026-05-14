@@ -64,6 +64,8 @@ public interface IShareManagementService
         NetworkShareDiscoveryScope discoveryScope = NetworkShareDiscoveryScope.Lan,
         CancellationToken cancellationToken = default);
 
+    Task<SshfsMountExplorerViewModel> GetSshfsMountExplorerAsync(CancellationToken cancellationToken = default);
+
     Task<RemoteShareBrowseResult> BrowseRemoteSharesAsync(
         RemoteShareConnectionEditor editor,
         CancellationToken cancellationToken = default);
@@ -77,7 +79,13 @@ public interface IShareManagementService
         RemoteShareMountEditor editor,
         CancellationToken cancellationToken = default);
 
+    Task<SshfsMountResult> CreateSshfsMountAsync(
+        SshfsMountEditor editor,
+        CancellationToken cancellationToken = default);
+
     Task<ShareToolingInstallResult> InstallMissingShareToolingAsync(CancellationToken cancellationToken = default);
+
+    Task<ShareToolingInstallResult> InstallMissingSshfsToolingAsync(CancellationToken cancellationToken = default);
 
     Task<SambaSystemActionResult> RunSambaSystemActionAsync(
         SambaSystemAction action,
@@ -90,4 +98,6 @@ public interface IShareManagementService
     Task<bool> DisconnectCurrentRemoteMountAsync(string localMountPath, CancellationToken cancellationToken = default);
 
     Task DeleteManagedRemoteMountAsync(Guid id, CancellationToken cancellationToken = default);
+
+    Task DeleteManagedSshfsMountAsync(Guid id, CancellationToken cancellationToken = default);
 }

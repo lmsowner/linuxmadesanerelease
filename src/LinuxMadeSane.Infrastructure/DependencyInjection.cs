@@ -60,6 +60,7 @@ public static class DependencyInjection
         services.AddSingleton(new RdpOptimizerStorageSettings(Path.Combine(contentRootPath, "data", "rdp-optimizer")));
         services.AddSingleton(new ShareMountStorageSettings(Path.Combine(contentRootPath, "data", "share-mounts")));
         services.AddSingleton(new SftpBackupStorageSettings(Path.Combine(contentRootPath, "data", "sftp-backups")));
+        services.AddSingleton(new HttpServiceDiscoveryStorageSettings(Path.Combine(contentRootPath, "data", "http-service-discovery")));
         services.AddHostedService<TemporaryShareMountCleanupService>();
         services.AddScoped<IAiConversationStore, SqliteAiConversationStore>();
         services.AddScoped<IAiProviderSettingsStore, SqliteAiProviderSettingsStore>();
@@ -94,6 +95,7 @@ public static class DependencyInjection
         services.AddScoped<IManagedHostHealthProbe, ManagedHostHealthProbe>();
         services.AddScoped<ISavedCommandStore, SqliteSavedCommandStore>();
         services.AddScoped<ILinuxShareModuleDataService, SqliteLinuxShareModuleDataService>();
+        services.AddScoped<ISshfsMountService, SshfsRemoteMountService>();
         services.AddScoped<ILinuxServiceModuleDataService, SqliteLinuxServiceModuleDataService>();
         services.AddScoped<ILinuxSchedulingModuleDataService, SqliteLinuxSchedulingModuleDataService>();
         services.AddScoped<ICaddyIntegrationDataService, SqliteCaddyIntegrationDataService>();

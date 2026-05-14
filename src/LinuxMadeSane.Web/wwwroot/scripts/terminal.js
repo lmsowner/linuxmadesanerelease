@@ -363,6 +363,133 @@ window.lmsTerminalWindow = (() => {
         return popup;
     }
 
+    function escapeHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, char => ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            "\"": "&quot;",
+            "'": "&#39;"
+        }[char]));
+    }
+
+    function writePopupStatus(popup, title, message, tone = "info") {
+        if (!popup || popup.closed) {
+            return false;
+        }
+
+        const safeTitle = escapeHtml(title || "Opening Linux Made Sane");
+        const safeMessage = escapeHtml(message || "Preparing the connection.");
+        const accent = tone === "error" ? "var(--error)" : "var(--accent)";
+
+        try {
+            popup.document.open();
+            popup.document.write(`<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${safeTitle}</title>
+    <style>
+        :root {
+            color-scheme: dark light;
+            --bg: #101820;
+            --panel: #17232e;
+            --line: rgba(255,255,255,.14);
+            --text: #edf6f4;
+            --muted: #aab8b6;
+            --accent: #47d7ac;
+            --error: #ff7b7b;
+        }
+        body {
+            align-items: center;
+            background:
+                radial-gradient(circle at 30% 10%, rgba(71, 215, 172, .14), transparent 34rem),
+                var(--bg);
+            color: var(--text);
+            display: flex;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            justify-content: center;
+            margin: 0;
+            min-height: 100vh;
+        }
+        main {
+            background: color-mix(in srgb, var(--panel) 92%, transparent);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            box-shadow: 0 24px 70px rgba(0,0,0,.34);
+            display: grid;
+            gap: .75rem;
+            max-width: 34rem;
+            padding: 1.4rem;
+            width: min(calc(100vw - 2rem), 34rem);
+        }
+        .brand {
+            align-items: center;
+            display: flex;
+            gap: .6rem;
+            font-size: .72rem;
+            font-weight: 800;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+        }
+        .mark {
+            align-items: center;
+            background: var(--accent);
+            border-radius: 9px;
+            color: #07130f;
+            display: inline-flex;
+            font-weight: 900;
+            height: 1.8rem;
+            justify-content: center;
+            width: 1.8rem;
+        }
+        h1 {
+            font-size: 1.12rem;
+            line-height: 1.25;
+            margin: .2rem 0 0;
+        }
+        p {
+            color: var(--muted);
+            font-size: .88rem;
+            line-height: 1.45;
+            margin: 0;
+        }
+        .spinner {
+            animation: spin .9s linear infinite;
+            border: 3px solid rgba(255,255,255,.16);
+            border-radius: 999px;
+            border-top-color: ${accent};
+            height: 1.7rem;
+            width: 1.7rem;
+        }
+        .status {
+            align-items: center;
+            display: flex;
+            gap: .75rem;
+            margin-top: .25rem;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <main>
+        <div class="brand"><span class="mark">L</span><span>Linux Made Sane</span></div>
+        <h1>${safeTitle}</h1>
+        <div class="status">
+            <div class="spinner" aria-hidden="true"></div>
+            <p>${safeMessage}</p>
+        </div>
+    </main>
+</body>
+</html>`);
+            popup.document.close();
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     function preparePopup(name, width = 1180, height = 860) {
         if (!name) {
             return false;
@@ -373,8 +500,14 @@ window.lmsTerminalWindow = (() => {
             return false;
         }
 
+        writePopupStatus(popup, "Opening Linux Made Sane", "Preparing the window.");
         preparedPopups.set(name, popup);
         return true;
+    }
+
+    function setPreparedPopupStatus(name, title, message, tone = "info") {
+        const popup = preparedPopups.get(name);
+        return writePopupStatus(popup, title, message, tone);
     }
 
     function openPopup(url, name, width = 1180, height = 860) {
@@ -388,6 +521,59 @@ window.lmsTerminalWindow = (() => {
                 return true;
             } catch {
             }
+        }
+
+        preparedPopups.delete(name);
+        return !!openPopupWindow(url, name, width, height);
+    }
+
+    function openPopupAfterDelay(
+        url,
+        name,
+        width = 1180,
+        height = 860,
+        delayMs = 3000,
+        refreshUrl = "",
+        refreshDelayMs = 3000) {
+        const preparedPopup = preparedPopups.get(name);
+        const normalizedDelay = Math.max(0, Number(delayMs) || 0);
+        const normalizedRefreshDelay = Math.max(0, Number(refreshDelayMs) || 0);
+        if (preparedPopup && !preparedPopup.closed) {
+            preparedPopups.delete(name);
+            window.setTimeout(() => {
+                if (preparedPopup.closed) {
+                    return;
+                }
+
+                try {
+                    preparedPopup.location.href = url;
+                    preparedPopup.focus();
+                    preparedPopup.resizeTo(width, height);
+                } catch {
+                    try {
+                        preparedPopup.location.replace(url);
+                    } catch {
+                    }
+                }
+
+                if (refreshUrl) {
+                    window.setTimeout(() => {
+                        if (preparedPopup.closed) {
+                            return;
+                        }
+
+                        try {
+                            preparedPopup.location.href = refreshUrl;
+                        } catch {
+                            try {
+                                preparedPopup.location.replace(refreshUrl);
+                            } catch {
+                            }
+                        }
+                    }, normalizedRefreshDelay);
+                }
+            }, normalizedDelay);
+            return true;
         }
 
         preparedPopups.delete(name);
@@ -415,7 +601,9 @@ window.lmsTerminalWindow = (() => {
 
     return {
         preparePopup,
+        setPreparedPopupStatus,
         openPopup,
+        openPopupAfterDelay,
         handleReattachToMain,
         closeSelf
     };

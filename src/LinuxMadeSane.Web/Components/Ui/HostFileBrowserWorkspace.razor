@@ -142,11 +142,22 @@ else
                                             IsLoadingSuggestions="@isPathSuggestionsLoading"
                                             EscapeValue="@currentPath" />
 
-                            @if (ShowInlineAuthenticationEditor)
+                            @if (ShowConnectionIdentityEditor)
                             {
-                                <details class="host-file-address-auth">
-                                    <summary title="Authentication details">Auth</summary>
+                                <div class="host-file-address-auth @(connectionIdentityEditorOpen ? "open" : null)">
+                                    <button type="button"
+                                            class="host-file-address-auth-summary"
+                                            title="Choose the Linux account this file browser connects as"
+                                            disabled="@isBusy"
+                                            @onclick="ToggleConnectionIdentityEditorAsync">
+                                        <UiGlyphIcon Glyph="UiIconGlyph.User" />
+                                        <span>@ConnectionIdentitySummary</span>
+                                    </button>
+                                    @if (connectionIdentityEditorOpen)
+                                    {
                                     <div class="host-file-address-auth-panel">
+                                        <p class="host-file-address-auth-help">Choose the Linux account used by this file browser. Saved host credentials are used unless you enter a password or private key here.</p>
+
                                         <UiTextField @bind-Value="connectionUsername"
                                                      Label="User"
                                                      Compact="true"
@@ -174,8 +185,22 @@ else
                                                          Label="Use saved credentials"
                                                          Compact="true"
                                                          Class="host-file-checkbox-row" />
+
+                                        <div class="host-file-address-auth-actions">
+                                            <UiCommandButton Label="Apply"
+                                                             Glyph="UiIconGlyph.Connect"
+                                                             Variant="UiButtonVariant.PrimaryMuted"
+                                                             Disabled="@isBusy"
+                                                             OnClick="ApplyConnectionIdentityAsync" />
+                                            <UiCommandButton Label="Host default"
+                                                             Glyph="UiIconGlyph.Key"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@isBusy"
+                                                             OnClick="ResetConnectionIdentityAsync" />
+                                        </div>
                                     </div>
-                                </details>
+                                    }
+                                </div>
                             }
 
                             <span class="host-file-address-status">@browserStatus</span>
@@ -199,6 +224,43 @@ else
                         @if (!string.IsNullOrWhiteSpace(errorMessage))
                         {
                             <p class="callout @(canBrowse ? "warning" : "error") terminal-callout">@errorMessage</p>
+                        }
+
+                        @if (ShowAccessDeniedGuidance)
+                        {
+                            var suggestedAccessUser = SuggestedAccessUser;
+                            <section class="host-file-access-guidance" aria-label="Folder access guidance">
+                                <div class="host-file-access-guidance-copy">
+                                    <strong>Use the right Linux identity for this folder.</strong>
+                                    <span>@BuildAccessGuidanceMessage(accessDeniedPath, suggestedAccessUser)</span>
+                                </div>
+                                <div class="host-file-access-guidance-actions">
+                                    @if (CanUseSuggestedAccessUser)
+                                    {
+                                        <UiCommandButton Label="@($"Connect as {suggestedAccessUser}")"
+                                                         Title="@($"Switch this browser to the {suggestedAccessUser} SSH account and enter that account's credentials.")"
+                                                         Glyph="UiIconGlyph.User"
+                                                         Variant="UiButtonVariant.PrimaryMuted"
+                                                         OnClick="@(() => UseSuggestedAccessUserAsync(accessDeniedPath))" />
+                                    }
+                                    @if (browser is not null && !IsLocalBrowser)
+                                    {
+                                        <UiCommandButton Label="Edit credentials"
+                                                         Title="Open this host's saved SSH credentials."
+                                                         Glyph="UiIconGlyph.Key"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Href="@($"/hosts/{browser.Host.Id}/edit")" />
+                                    }
+                                    @if (browser is not null)
+                                    {
+                                        <UiCommandButton Label="Open terminal"
+                                                         Title="Use a terminal when you need explicit sudo or ACL changes."
+                                                         Glyph="UiIconGlyph.Run"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Href="@($"/hosts/{browser.Host.Id}/terminal")" />
+                                    }
+                                </div>
+                            </section>
                         }
 
                         @if (!string.IsNullOrWhiteSpace(operationMessage))
@@ -354,10 +416,44 @@ else
                             }
                             else if (item.ItemType == SftpItemType.Folder)
                             {
-                                <div class="empty-state host-file-preview-empty host-file-preview-main">
-                                    <h3>Folder selected</h3>
-                                    <p>Preview and editing are available for text files. Pick a file to inspect or edit it here.</p>
-                                </div>
+                                @if (IsBlockedDirectoryItem(item))
+                                {
+                                    var suggestedItemUser = GetSuggestedAccessUser(item.FullPath);
+                                    <div class="empty-state host-file-preview-empty host-file-preview-main host-file-access-detail">
+                                        <h3>Folder needs a different identity</h3>
+                                        <p>@BuildAccessGuidanceMessage(item.FullPath, suggestedItemUser)</p>
+                                        <div class="host-file-access-guidance-actions">
+                                            @if (CanUseSuggestedAccessUserForPath(item.FullPath))
+                                            {
+                                                <UiCommandButton Label="@($"Connect as {suggestedItemUser}")"
+                                                                 Glyph="UiIconGlyph.User"
+                                                                 Variant="UiButtonVariant.PrimaryMuted"
+                                                                 OnClick="@(() => UseSuggestedAccessUserAsync(item.FullPath))" />
+                                            }
+                                            @if (browser is not null && !IsLocalBrowser)
+                                            {
+                                                <UiCommandButton Label="Edit credentials"
+                                                                 Glyph="UiIconGlyph.Key"
+                                                                 Variant="UiButtonVariant.Ghost"
+                                                                 Href="@($"/hosts/{browser.Host.Id}/edit")" />
+                                            }
+                                            @if (browser is not null)
+                                            {
+                                                <UiCommandButton Label="Open terminal"
+                                                                 Glyph="UiIconGlyph.Run"
+                                                                 Variant="UiButtonVariant.Ghost"
+                                                                 Href="@($"/hosts/{browser.Host.Id}/terminal")" />
+                                            }
+                                        </div>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="empty-state host-file-preview-empty host-file-preview-main">
+                                        <h3>Folder selected</h3>
+                                        <p>Preview and editing are available for text files. Pick a file to inspect or edit it here.</p>
+                                    </div>
+                                }
                             }
                             else if (HasMediaPreview && mediaPreview is not null)
                             {
@@ -485,9 +581,17 @@ else
                 <UiContextMenuButton Label="Paste" Glyph="UiIconGlyph.Paste" OnClick="PasteFromContextMenuAsync" Disabled="@(!CanPasteIntoContextTarget || isBusy)" />
                 <UiContextMenuButton Label="Upload here" Glyph="UiIconGlyph.Upload" OnClientClick="@BuildContextUploadPickerScript()" Disabled="@(!CanUploadIntoContextTarget || isBusy)" />
                 <UiContextMenuButton Label="Download" Glyph="UiIconGlyph.Download" OnClick="DownloadFromContextMenuAsync" Disabled="@(!CanDownloadContextTarget || isBusy)" />
-                <UiContextMenuButton Label="New folder" Glyph="UiIconGlyph.NewFolder" OnClick="CreateFolderFromContextMenuAsync" Disabled="@(!canBrowse || isBusy || !contextMenuRequest.IsDirectory)" />
+                <UiContextMenuButton Label="New folder" Glyph="UiIconGlyph.NewFolder" OnClick="CreateFolderFromContextMenuAsync" Disabled="@(!CanCreateFolderFromContextMenu || isBusy)" />
                 <UiContextMenuButton Label="Find files" Glyph="UiIconGlyph.Search" OnClick="OpenFileSearchFromContextMenuAsync" Disabled="@(!CanOpenFileSearchFromContextMenu || isBusy)" />
                 <UiContextMenuButton Label="Open Terminal Here" Glyph="UiIconGlyph.Run" OnClick="OpenTerminalHereFromContextMenuAsync" Disabled="@(!CanOpenTerminalFromContextMenu || isBusy)" />
+                @if (CanBrowseAsContextSuggestedUser)
+                {
+                    <UiContextMenuButton Label="@BrowseAsContextSuggestedUserLabel"
+                                         Title="Switch this browser to that Linux account and enter that account's credentials."
+                                         Glyph="UiIconGlyph.User"
+                                         OnClick="UseContextSuggestedUserAsync"
+                                         Disabled="@isBusy" />
+                }
                 @if (CanCreateShortcutFromContextMenu)
                 {
                     <UiContextMenuButton Label="Create shortcut" Glyph="UiIconGlyph.FolderClosed" OnClick="CreateShortcutFromContextMenuAsync" Disabled="@isBusy" />
@@ -1064,6 +1168,7 @@ else
     private readonly HashSet<string> blockedDirectoryPaths = new(StringComparer.Ordinal);
     private readonly HashSet<string> expandedDirectoryPaths = new(StringComparer.Ordinal);
     private readonly HashSet<string> selectedPaths = new(StringComparer.Ordinal);
+    private string accessDeniedPath = string.Empty;
     private FileBrowserContextMenuRequest? contextMenuRequest;
     private FileBrowserShortcut? shortcutContextShortcut;
     private SftpItem? ownershipPermissionsTargetItem;
@@ -1104,6 +1209,7 @@ else
     private bool isDeletingShareFolder;
     private bool previewPanelOpen;
     private bool previewPanelFocused;
+    private bool connectionIdentityEditorOpen;
     private bool previewIsLoading;
     private bool previewIsSaving;
     private bool previewIsText;
@@ -1177,9 +1283,17 @@ else
         HasScopedRoot ||
         HasSavedCredentials ||
         HasInlineBrowseCredentials;
-    private bool ShowInlineAuthenticationEditor => !IsLocalBrowser &&
-        (!HasSavedCredentials || HasInlineCredentialOverrides || HasBrowseFailure);
+    private bool ShowConnectionIdentityEditor => !IsLocalBrowser;
+    private string ConnectionIdentityDisplayName =>
+        string.IsNullOrWhiteSpace(connectionUsername) ? "the selected account" : connectionUsername.Trim();
+    private string ConnectionIdentitySummary =>
+        string.IsNullOrWhiteSpace(connectionUsername)
+            ? "Connect as..."
+            : $"Connect as {ConnectionIdentityDisplayName}";
     private bool HasBrowseFailure => !string.IsNullOrWhiteSpace(errorMessage) && !canBrowse;
+    private bool ShowAccessDeniedGuidance => !string.IsNullOrWhiteSpace(accessDeniedPath);
+    private string? SuggestedAccessUser => GetSuggestedAccessUser(accessDeniedPath);
+    private bool CanUseSuggestedAccessUser => CanUseSuggestedAccessUserForPath(accessDeniedPath);
     private bool CanShowPopout => AllowPopout && !DetachedBrowserId.HasValue && !DetachedSearchId.HasValue;
     private bool ShouldOpenFileSearchInline => DetachedSearchId.HasValue || !AllowPopout;
     private string ResolvedExplorerTitle => string.IsNullOrWhiteSpace(Title) ? "Filesystem explorer" : Title.Trim();
@@ -1287,6 +1401,9 @@ else
         !IsScopedRootContextTarget;
     private bool CanDeleteContextTarget => CanCopyOrCutContextTarget;
     private bool CanUploadIntoContextTarget => contextMenuRequest is not null && contextMenuRequest.IsDirectory;
+    private bool CanCreateFolderFromContextMenu => canBrowse &&
+        contextMenuRequest is not null &&
+        !string.IsNullOrWhiteSpace(contextMenuRequest.ActionDirectoryPath);
     private bool CanDownloadContextTarget => CanCopyOrCutContextTarget;
     private string DeleteConfirmTitle => deleteConfirmItems.Count switch
     {
@@ -1340,6 +1457,16 @@ else
         contextMenuRequest.Item.ItemType is SftpItemType.File or SftpItemType.Folder;
     private bool CanOpenOwnershipPermissionsFromContextMenu => contextMenuRequest?.Item is not null &&
         contextMenuRequest.Item.ItemType is SftpItemType.File or SftpItemType.Folder;
+    private string? ContextSuggestedAccessUser => contextMenuRequest is null
+        ? null
+        : GetSuggestedAccessUser(contextMenuRequest.TargetPath);
+    private bool CanBrowseAsContextSuggestedUser =>
+        contextMenuRequest is not null &&
+        contextMenuRequest.IsDirectory &&
+        CanUseSuggestedAccessUserForPath(contextMenuRequest.TargetPath);
+    private string BrowseAsContextSuggestedUserLabel => string.IsNullOrWhiteSpace(ContextSuggestedAccessUser)
+        ? "Connect as user"
+        : $"Connect as {ContextSuggestedAccessUser}";
     private bool CanUseOwnershipPermissionSelectors => IsLocalBrowser && ownershipPermissionsIdentities is not null;
     private IReadOnlyList<string> OwnershipPermissionOwnerOptions => BuildOwnershipPermissionOwnerOptions();
     private IReadOnlyList<string> OwnershipPermissionGroupOptions => BuildOwnershipPermissionGroupOptions();
@@ -1437,6 +1564,7 @@ else
         blockedDirectoryPaths.Clear();
         expandedDirectoryPaths.Clear();
         selectedPaths.Clear();
+        accessDeniedPath = string.Empty;
 
         DetachedFileBrowserState? detachedState = null;
         DetachedFileSearchState? detachedSearchState = null;
@@ -1742,6 +1870,11 @@ else
         {
             var nextItems = await ListItemsForPathAsync(normalizedPath);
             blockedDirectoryPaths.Remove(normalizedPath);
+            if (string.Equals(accessDeniedPath, normalizedPath, StringComparison.Ordinal))
+            {
+                accessDeniedPath = string.Empty;
+            }
+
             items = nextItems;
             currentPath = normalizedPath;
             directoryItemCache[currentPath] = items;
@@ -1766,6 +1899,11 @@ else
             if (isAccessDenied)
             {
                 blockedDirectoryPaths.Add(normalizedPath);
+                accessDeniedPath = normalizedPath;
+            }
+            else if (string.Equals(accessDeniedPath, normalizedPath, StringComparison.Ordinal))
+            {
+                accessDeniedPath = string.Empty;
             }
 
             errorMessage = BuildBrowseFailureMessage(normalizedPath, exception, isAccessDenied, isPathNotFound);
@@ -1856,6 +1994,11 @@ else
             if (didCacheDirectory)
             {
                 expandedDirectoryPaths.Add(normalizedPath);
+            }
+            else if (blockedDirectoryPaths.Contains(normalizedPath))
+            {
+                accessDeniedPath = normalizedPath;
+                SetOperationMessage(BuildBrowseFailureMessage(normalizedPath, new UnauthorizedAccessException(), isAccessDenied: true, isPathNotFound: false), "warning");
             }
         }
 
@@ -2590,6 +2733,93 @@ else
         return Task.CompletedTask;
     }
 
+    private Task UseContextSuggestedUserAsync()
+    {
+        if (contextMenuRequest is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        return UseSuggestedAccessUserAsync(contextMenuRequest.TargetPath);
+    }
+
+    private Task ToggleConnectionIdentityEditorAsync()
+    {
+        connectionIdentityEditorOpen = !connectionIdentityEditorOpen;
+        return Task.CompletedTask;
+    }
+
+    private async Task ApplyConnectionIdentityAsync()
+    {
+        if (browser is null)
+        {
+            return;
+        }
+
+        DismissContextMenu();
+        ClearOperationMessage();
+        ResetConnectionScopedBrowserState();
+        browserStatus = $"Connecting as {ConnectionIdentityDisplayName}";
+        PersistDetachedBrowserState();
+
+        var targetPath = ResolveAddressInputPath(string.IsNullOrWhiteSpace(pathInput) ? currentPath : pathInput);
+        await LoadItemsAsync(targetPath, preserveSessionOnFailure: false, updatePathInputOnSuccess: true);
+    }
+
+    private async Task ResetConnectionIdentityAsync()
+    {
+        if (browser is null)
+        {
+            return;
+        }
+
+        connectionUsername = browser.Host.Username.Trim();
+        connectionSecretHandle = null;
+        preferStoredCredentials = true;
+        connectionIdentityEditorOpen = false;
+        DismissContextMenu();
+        ClearOperationMessage();
+        ResetConnectionScopedBrowserState();
+        await RefreshStoredBrowseCredentialStateAsync();
+        PersistDetachedBrowserState();
+
+        var targetPath = ResolveAddressInputPath(string.IsNullOrWhiteSpace(pathInput) ? currentPath : pathInput);
+        await LoadItemsAsync(targetPath, preserveSessionOnFailure: false, updatePathInputOnSuccess: true);
+    }
+
+    private Task UseSuggestedAccessUserAsync(string path)
+    {
+        var suggestedUser = GetSuggestedAccessUser(path);
+        if (string.IsNullOrWhiteSpace(suggestedUser))
+        {
+            return Task.CompletedTask;
+        }
+
+        DismissContextMenu();
+        ClearOperationMessage();
+        connectionUsername = suggestedUser;
+        preferStoredCredentials = false;
+        connectionSecretHandle = null;
+        connectionIdentityEditorOpen = true;
+        ResetConnectionScopedBrowserState();
+        pathInput = ResolveBrowserPath(path);
+        browserStatus = "Credentials required";
+        errorMessage = $"Using {suggestedUser}. Enter that account's password or private key, or save key-based credentials for that user.";
+        QueuePathSuggestionsRefresh(pathInput);
+        PersistDetachedBrowserState();
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private void ResetConnectionScopedBrowserState()
+    {
+        directoryItemCache.Clear();
+        blockedDirectoryPaths.Clear();
+        accessDeniedPath = string.Empty;
+        selectedPaths.Clear();
+        selectedItem = null;
+        ResetPreviewState(keepPanelOpen: previewPanelOpen);
+    }
+
     private Task OpenShortcutContextMenuAsync(MouseEventArgs args, FileBrowserShortcut shortcut)
     {
         contextMenuRequest = null;
@@ -3236,7 +3466,9 @@ else
         CreateFolderAsync(currentPath);
 
     private Task CreateFolderFromContextMenuAsync() =>
-        contextMenuRequest is null ? Task.CompletedTask : CreateFolderAsync(contextMenuRequest.ActionDirectoryPath);
+        !CanCreateFolderFromContextMenu || contextMenuRequest is null
+            ? Task.CompletedTask
+            : CreateFolderAsync(contextMenuRequest.ActionDirectoryPath);
 
     private Task RenameFromContextMenuAsync() =>
         contextMenuRequest?.Item is null
@@ -3245,14 +3477,13 @@ else
 
     private async Task CreateFolderAsync(string destinationDirectoryPath)
     {
-        if (browser is null)
+        if (browser is null || isBusy)
         {
             return;
         }
 
         DismissContextMenu();
         ClearOperationMessage();
-        await EnsureFileActionsPopupAsync();
 
         var folderName = await JSRuntime.InvokeAsync<string?>("prompt", "Folder name", "New folder");
         if (string.IsNullOrWhiteSpace(folderName))
@@ -3260,18 +3491,45 @@ else
             return;
         }
 
-        var destinationPath = CombineBrowserPath(destinationDirectoryPath, folderName.Trim());
-        FileActionQueueService.QueueCreateFolder(
-            workspaceId,
-            new FileActionCreateFolderRequest(
-                browser.Host,
-                destinationDirectoryPath,
-                destinationPath,
-                folderName.Trim(),
-                BuildFileActionExecutionContext()));
+        if (!TryNormalizeLeafName(folderName, out var normalizedName, out var validationMessage))
+        {
+            SetOperationMessage(validationMessage, "warning");
+            return;
+        }
 
-        SetOperationMessage($"Queued folder creation for {folderName.Trim()}. Manage progress in File actions.", "success");
+        var normalizedDestinationDirectoryPath = ResolveBrowserPath(destinationDirectoryPath);
+        var destinationPath = CombineBrowserPath(normalizedDestinationDirectoryPath, normalizedName);
+
+        isBusy = true;
+        SetOperationMessage($"Creating folder {normalizedName}...", "info");
         await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            await CreateDirectoryAsync(destinationPath);
+
+            if (string.Equals(normalizedDestinationDirectoryPath, currentPath, StringComparison.Ordinal))
+            {
+                await RefreshCurrentListingPreserveSelectionAsync(destinationPath);
+                selectedPaths.Clear();
+                selectedPaths.Add(destinationPath);
+            }
+            else
+            {
+                QueueDirectoryTreeRefresh(currentPath);
+            }
+
+            SetOperationMessage($"Created folder {normalizedName}.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetOperationMessage($"Create folder failed: {exception.Message}", "error");
+        }
+        finally
+        {
+            isBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     private Task SetRenameEntryNameAsync(string? value)
@@ -4900,6 +5158,59 @@ else
             NormalizeBrowserPath(item.FullPath),
             NormalizeBrowserPath(path),
             StringComparison.Ordinal));
+
+    private bool IsBlockedDirectoryItem(SftpItem item) =>
+        item.ItemType == SftpItemType.Folder &&
+        blockedDirectoryPaths.Contains(ResolveBrowserPath(item.FullPath));
+
+    private bool CanUseSuggestedAccessUserForPath(string path)
+    {
+        if (IsLocalBrowser)
+        {
+            return false;
+        }
+
+        var suggestedUser = GetSuggestedAccessUser(path);
+        return !string.IsNullOrWhiteSpace(suggestedUser) &&
+               !string.Equals(suggestedUser, connectionUsername, StringComparison.Ordinal);
+    }
+
+    private static string? GetSuggestedAccessUser(string path)
+    {
+        var normalizedPath = NormalizeBrowserPath(path);
+        const string homePrefix = "/home/";
+        if (!normalizedPath.StartsWith(homePrefix, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var remainder = normalizedPath[homePrefix.Length..];
+        var separatorIndex = remainder.IndexOf('/');
+        var userName = separatorIndex < 0 ? remainder : remainder[..separatorIndex];
+        if (string.IsNullOrWhiteSpace(userName) ||
+            userName is "." or ".." ||
+            userName.Contains(' ', StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return userName;
+    }
+
+    private string BuildAccessGuidanceMessage(string path, string? suggestedUser)
+    {
+        var normalizedPath = ResolveBrowserPath(path);
+        if (!string.IsNullOrWhiteSpace(suggestedUser) && !IsLocalBrowser)
+        {
+            return string.Equals(suggestedUser, connectionUsername, StringComparison.Ordinal)
+                ? $"{normalizedPath} looks like {suggestedUser}'s home folder, but the current SSH account still cannot read it. Check that account's permissions or use an explicit terminal/sudo action."
+                : $"{normalizedPath} looks like {suggestedUser}'s home folder. Switch to that SSH account and use password or public key auth for that user.";
+        }
+
+        return IsLocalBrowser
+            ? $"{normalizedPath} is blocked by local filesystem permissions. Use Owner / permissions from a readable parent, or open a terminal and run sudo explicitly."
+            : $"{normalizedPath} is blocked by the SSH account currently in use. Use the owning Linux account, save key-based credentials for that account, or open a terminal for explicit sudo/ACL work.";
+    }
 
     private static bool IsAccessDeniedFailure(Exception exception)
     {

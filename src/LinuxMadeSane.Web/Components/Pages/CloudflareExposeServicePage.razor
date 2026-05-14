@@ -337,11 +337,11 @@ else
                                                              ValueChanged="HandleLocalServiceUrlChangedAsync"
                                                              ValueExpression="@(() => editor.LocalServiceUrl)"
                                                              Label="Local service URL"
-                                                             Helper="Origin URL only. Use Find to discover localhost HTTP services."
+                                                             Helper="Origin URL only. Use Find to pick from cached localhost, LAN, or Tailscale services."
                                                              Placeholder="http://localhost:5080"
                                                              Class="cloudflare-route-field" />
                                                 <UiCommandButton Label="Find"
-                                                                 Title="Find localhost HTTP and HTTPS services"
+                                                                 Title="Find cached or scanned internal HTTP and HTTPS services"
                                                                  Glyph="UiIconGlyph.Search"
                                                                  Variant="UiButtonVariant.Ghost"
                                                                  Class="cloudflare-local-service-find-button"
@@ -686,8 +686,8 @@ else
     </div>
 
     <UiModal IsOpen="@isLocalServicePickerOpen"
-             Title="Local service lookup"
-             Subtitle="Detected HTTP and HTTPS services listening on localhost or wildcard addresses."
+             Title="HTTP/S service lookup"
+             Subtitle="Cached internal services from localhost, LAN, and optional Tailscale peers."
              Class="cloudflare-local-service-modal"
              OnClose="CloseLocalServicePickerAsync">
         <ChildContent>
@@ -695,13 +695,17 @@ else
                 <div class="table-header cloudflare-local-service-picker-header">
                     <div>
                         <strong>Available origins</strong>
-                        <p class="meta-text">Pick one to fill the Local service URL field.</p>
+                        <p class="meta-text">Cached results are shown first. Run a scan to refresh localhost, private LAN and optional Tailscale services.</p>
                     </div>
-                    <UiCommandButton Label="@(isDiscoveringLocalServices ? "Scanning..." : "Refresh")"
-                                     Glyph="UiIconGlyph.Refresh"
-                                     Variant="UiButtonVariant.Ghost"
-                                     Disabled="@isDiscoveringLocalServices"
-                                     OnClick="DiscoverLocalServicesAsync" />
+                    <div class="cloudflare-local-service-actions">
+                        <UiCheckboxField @bind-Value="includeLanLocalServiceScan" Label="LAN" Compact="true" />
+                        <UiCheckboxField @bind-Value="includeTailnetLocalServiceScan" Label="Tailscale" Compact="true" />
+                        <UiCommandButton Label="@(isDiscoveringLocalServices ? "Scanning..." : "Scan")"
+                                         Glyph="UiIconGlyph.Search"
+                                         Variant="UiButtonVariant.Primary"
+                                         Disabled="@isDiscoveringLocalServices"
+                                         OnClick="DiscoverLocalServicesAsync" />
+                    </div>
                 </div>
 
                 @if (isDiscoveringLocalServices)
@@ -710,14 +714,15 @@ else
                         <span class="cloudflare-loading-progress">
                             <span class="cloudflare-loading-progress-fill"></span>
                         </span>
-                        <span>Scanning localhost listeners and probing HTTP/HTTPS.</span>
+                        <span>@BuildLocalServiceScanSummary()</span>
                     </section>
                 }
-                else if (localServiceSuggestions.Count == 0)
+
+                @if (localServiceSuggestions.Count == 0)
                 {
                     <section class="empty-state cloudflare-local-service-empty">
-                        <h3>No HTTP services found</h3>
-                        <p>@(localServiceDiscoveryMessage ?? "No localhost HTTP or HTTPS responses were detected from listening TCP ports.")</p>
+                        <h3>No HTTP/S services found</h3>
+                        <p>@(localServiceDiscoveryMessage ?? "No cached services yet. Click Scan to search localhost and the private LAN.")</p>
                     </section>
                 }
                 else
@@ -725,26 +730,14 @@ else
                     <div class="cloudflare-local-service-list" role="list">
                         @foreach (var service in localServiceSuggestions)
                         {
-                            <section class="surface-subcard cloudflare-local-service-row" role="listitem">
-                                <div class="cloudflare-local-service-copy">
-                                    <div class="cloudflare-local-service-title-line">
-                                        <strong>@service.Url</strong>
-                                        <UiPill Tone="@GetLocalServiceTone(service)">@service.Scheme.ToUpperInvariant()</UiPill>
-                                        <UiPill Tone="UiPillTone.Neutral">@service.StatusCode</UiPill>
-                                    </div>
-                                    <span>@GetLocalServiceDescription(service)</span>
-                                </div>
-                                <UiCommandButton Label="Use"
-                                                 Glyph="UiIconGlyph.Connect"
-                                                 OnClick="@(() => SelectLocalServiceAsync(service))" />
-                            </section>
+                            <HttpServiceLookupRow Service="service" OnUse="SelectLocalServiceAsync" />
                         }
                     </div>
                 }
 
                 @if (!string.IsNullOrWhiteSpace(localServiceDiscoveryMessage) && localServiceSuggestions.Count > 0)
                 {
-                    <p class="meta-text">@localServiceDiscoveryMessage</p>
+                    <p class="meta-text cloudflare-local-service-message">@localServiceDiscoveryMessage</p>
                 }
             </div>
         </ChildContent>
@@ -800,6 +793,8 @@ else
     private bool statusIsError;
     private bool connectorInstallPreferenceTouched;
     private bool noTlsVerifyPreferenceTouched;
+    private bool includeLanLocalServiceScan = true;
+    private bool includeTailnetLocalServiceScan;
     private List<string> validationMessages = [];
     private bool previewPanelExpanded = true;
     private CancellationTokenSource? statusMessageCts;
@@ -811,6 +806,10 @@ else
     private string initialLoadStep = "Opening Cloudflare integration";
     private string initialLoadDetail = "Loading this LMS host configuration.";
     private string? localServiceDiscoveryMessage;
+    private string localServiceDiscoveryStatus = string.Empty;
+    private int localServiceScanFoundCount;
+    private int localServiceScanProbedCount;
+    private int localServiceScanTotalCount;
     private const string CreateNewTunnelOptionValue = "__create_new_tunnel__";
     private const string SetupTabValue = "setup";
     private const string ApplicationsTabValue = "applications";
@@ -939,25 +938,36 @@ else
             ? "Recommended for local HTTPS services with self-signed certificates."
             : "Only applies when the local service URL starts with https://.";
 
-    private static UiPillTone GetLocalServiceTone(LocalHttpServiceEndpoint service) =>
-        service.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-            ? UiPillTone.Success
-            : UiPillTone.Neutral;
-
-    private static string GetLocalServiceDescription(LocalHttpServiceEndpoint service)
+    private string BuildLocalServiceScanSummary()
     {
-        if (!string.IsNullOrWhiteSpace(service.Title))
-        {
-            return service.Title;
-        }
+        var status = string.IsNullOrWhiteSpace(localServiceDiscoveryStatus)
+            ? "Scanning HTTP/S services..."
+            : localServiceDiscoveryStatus;
 
-        if (!string.IsNullOrWhiteSpace(service.ServerHeader))
-        {
-            return service.ServerHeader;
-        }
+        var progress = localServiceScanTotalCount > 0
+            ? $"{localServiceScanProbedCount}/{localServiceScanTotalCount} checked"
+            : "Preparing";
 
-        return $"Listening on localhost:{service.Port}";
+        return $"{status} {progress}, {localServiceScanFoundCount} found. You can close this dialog and come back.";
     }
+
+    private static IReadOnlyList<LocalHttpServiceEndpoint> SortLocalServiceSuggestions(IEnumerable<LocalHttpServiceEndpoint> services) =>
+        services
+            .DistinctBy(BuildLocalServiceKey, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(service => service.Scope switch
+            {
+                "Localhost" => 0,
+                "LAN" => 1,
+                "Tailnet" => 2,
+                _ => 3
+            })
+            .ThenBy(service => service.Host, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(service => service.Port)
+            .ThenBy(service => service.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ToArray();
+
+    private static string BuildLocalServiceKey(LocalHttpServiceEndpoint service) =>
+        $"{service.Scope}|{service.Scheme}|{service.Host}|{service.Port}";
 
     private string ApplicationEditorHeading =>
         editor.ConfigId.HasValue
@@ -1457,9 +1467,9 @@ else
     private async Task OpenLocalServicePickerAsync()
     {
         isLocalServicePickerOpen = true;
-        if (localServiceSuggestions.Count == 0)
+        if (!isDiscoveringLocalServices)
         {
-            await DiscoverLocalServicesAsync();
+            await LoadCachedLocalServicesAsync();
         }
     }
 
@@ -1469,38 +1479,107 @@ else
         return Task.CompletedTask;
     }
 
-    private async Task DiscoverLocalServicesAsync()
+    private Task DiscoverLocalServicesAsync()
     {
         if (isDiscoveringLocalServices)
         {
-            return;
+            return Task.CompletedTask;
         }
 
         isDiscoveringLocalServices = true;
-        localServiceDiscoveryMessage = null;
+        localServiceDiscoveryMessage = "Scan running in the background. Cached services stay visible while new services are added.";
+        localServiceDiscoveryStatus = "Starting HTTP/S discovery...";
+        localServiceScanFoundCount = 0;
+        localServiceScanProbedCount = 0;
+        localServiceScanTotalCount = 0;
 
+        var request = new LocalHttpServiceDiscoveryRequest(
+            IncludeLocalhost: true,
+            IncludeLan: includeLanLocalServiceScan,
+            IncludeTailnet: includeTailnetLocalServiceScan);
+        _ = RunLocalServicesScanAsync(request);
+        return Task.CompletedTask;
+    }
+
+    private async Task RunLocalServicesScanAsync(LocalHttpServiceDiscoveryRequest request)
+    {
         try
         {
-            localServiceSuggestions = await LocalHttpServiceDiscovery.DiscoverAsync();
-            localServiceDiscoveryMessage = localServiceSuggestions.Count == 0
-                ? "No localhost HTTP or HTTPS responses were detected from listening TCP ports."
-                : $"{localServiceSuggestions.Count} localhost HTTP service(s) found.";
+            await Task.Yield();
+            var progress = new Progress<LocalHttpServiceDiscoveryProgressUpdate>(update =>
+            {
+                _ = InvokeAsync(() =>
+                {
+                    ApplyLocalServiceProgress(update);
+                    StateHasChanged();
+                });
+            });
+
+            var results = await LocalHttpServiceDiscovery.DiscoverAsync(request, progress);
+            await InvokeAsync(() =>
+            {
+                localServiceSuggestions = SortLocalServiceSuggestions(results);
+                localServiceDiscoveryMessage = localServiceSuggestions.Count == 0
+                    ? "No HTTP/S services responded. Cached results were updated for the selected scan scopes."
+                    : $"{localServiceSuggestions.Count} HTTP/S service(s) available from cache and the latest scan.";
+                isDiscoveringLocalServices = false;
+                StateHasChanged();
+            });
         }
         catch (Exception exception)
         {
-            localServiceSuggestions = [];
-            localServiceDiscoveryMessage = $"Local service lookup failed: {exception.Message}";
+            await InvokeAsync(() =>
+            {
+                localServiceDiscoveryMessage = $"Local service lookup failed: {exception.Message}";
+                localServiceDiscoveryStatus = "HTTP/S lookup failed.";
+                isDiscoveringLocalServices = false;
+                StateHasChanged();
+            });
         }
-        finally
+    }
+
+    private void ApplyLocalServiceProgress(LocalHttpServiceDiscoveryProgressUpdate update)
+    {
+        localServiceDiscoveryStatus = update.Message;
+        localServiceScanProbedCount = update.ProbedCount;
+        localServiceScanTotalCount = update.TotalProbeCount;
+        localServiceScanFoundCount = update.FoundCount;
+
+        if (update.FoundEndpoint is not null)
+        {
+            MergeLocalServiceSuggestion(update.FoundEndpoint);
+        }
+
+        if (update.IsCompleted)
         {
             isDiscoveringLocalServices = false;
         }
+    }
+
+    private void MergeLocalServiceSuggestion(LocalHttpServiceEndpoint endpoint)
+    {
+        localServiceSuggestions = SortLocalServiceSuggestions(
+            localServiceSuggestions
+                .Where(service => !BuildLocalServiceKey(service).Equals(BuildLocalServiceKey(endpoint), StringComparison.OrdinalIgnoreCase))
+                .Append(endpoint));
     }
 
     private async Task SelectLocalServiceAsync(LocalHttpServiceEndpoint service)
     {
         await HandleLocalServiceUrlChangedAsync(service.Url);
         isLocalServicePickerOpen = false;
+    }
+
+    private async Task LoadCachedLocalServicesAsync()
+    {
+        localServiceSuggestions = await LocalHttpServiceDiscovery.GetCachedAsync();
+        localServiceDiscoveryMessage = localServiceSuggestions.Count == 0
+            ? "No cached HTTP/S services yet. Run Scan to search localhost and private LAN services."
+            : $"Showing {localServiceSuggestions.Count} cached HTTP/S service(s). Run Scan to refresh.";
+        localServiceDiscoveryStatus = string.Empty;
+        localServiceScanFoundCount = 0;
+        localServiceScanProbedCount = 0;
+        localServiceScanTotalCount = 0;
     }
 
     private Task HandleNoTlsVerifyChangedAsync(bool value)

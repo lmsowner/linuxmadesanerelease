@@ -9,5 +9,6 @@ public enum AiProviderType
     AzureOpenAi = 4,
     Custom = 5,
     Gemini = 6,
-    RemoteLmsAiEngine = 7
+    RemoteLmsAiEngine = 7,
+    Groq = 8
 }

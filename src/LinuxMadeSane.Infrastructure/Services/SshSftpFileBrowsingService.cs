@@ -359,14 +359,30 @@ public sealed class SshSftpFileBrowsingService(
         cancellationToken.ThrowIfCancellationRequested();
 
         var normalizedPath = NormalizePath(path);
-        await ExecuteShellCommandAsync(
-            host,
-            username,
-            password,
-            privateKey,
-            privateKeyPassphrase,
-            preferStoredCredentials,
-            $"mkdir -p -- {QuoteShellArgument(normalizedPath)}",
+        EnsureMutablePath(normalizedPath);
+        var credentials = await ResolveCredentialsAsync(host, username, password, privateKey, privateKeyPassphrase, preferStoredCredentials, cancellationToken);
+
+        await RunBlockingRemoteOperationAsync(
+            () =>
+            {
+                using var client = Connect(host, credentials);
+                if (client.Exists(normalizedPath))
+                {
+                    var attributes = client.GetAttributes(normalizedPath);
+                    if (!attributes.IsDirectory)
+                    {
+                        throw new InvalidOperationException($"{normalizedPath} already exists and is not a folder.");
+                    }
+
+                    client.Disconnect();
+                    return 0;
+                }
+
+                EnsureDirectoryExists(client, GetDirectoryName(normalizedPath));
+                client.CreateDirectory(normalizedPath);
+                client.Disconnect();
+                return 0;
+            },
             cancellationToken);
 
         return normalizedPath;

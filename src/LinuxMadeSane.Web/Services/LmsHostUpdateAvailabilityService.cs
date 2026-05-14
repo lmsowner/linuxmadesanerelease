@@ -21,8 +21,7 @@ public sealed record LmsHostUpdateAvailability(
     string Detail)
 {
     public bool IsUpdateAvailable => State == LmsHostUpdateAvailabilityState.UpdateAvailable;
-    public bool IsDirectWebAvailable => State != LmsHostUpdateAvailabilityState.Unknown &&
-                                        !string.IsNullOrWhiteSpace(InstalledVersion) &&
+    public bool IsDirectWebAvailable => !string.IsNullOrWhiteSpace(InstalledVersion) &&
                                         !InstalledVersion.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
 }
 
@@ -31,6 +30,11 @@ public sealed record LmsHostWebAccessStatus(
     bool IsDirectWebAvailable,
     string InstalledVersion,
     string Detail);
+
+public sealed record LmsLatestVersionCheck(string Version, string Failure)
+{
+    public bool HasVersion => !string.IsNullOrWhiteSpace(Version);
+}
 
 public sealed class LmsHostUpdateAvailabilityService(
     HttpClient httpClient,
@@ -50,14 +54,33 @@ public sealed class LmsHostUpdateAvailabilityService(
             return new Dictionary<Guid, LmsHostUpdateAvailability>();
         }
 
-        var latestVersion = await GetLatestVersionAsync(cancellationToken);
+        var latestVersionCheck = await CheckLatestVersionAsync(cancellationToken);
+
         var work = hosts
             .Where(ManagedHostCapabilities.IsLmsHost)
-            .Select(host => CheckHostAsync(host, latestVersion, cancellationToken))
+            .Select(host => CheckHostAsync(host, latestVersionCheck, cancellationToken))
             .ToArray();
 
         var results = await Task.WhenAll(work);
         return results.ToDictionary(result => result.HostId);
+    }
+
+    public async Task<LmsLatestVersionCheck> CheckLatestVersionAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return new LmsLatestVersionCheck(await GetLatestVersionAsync(cancellationToken), string.Empty);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var failure = SimplifyFailureMessage(ex);
+            logger.LogDebug(ex, "LMS release manifest check failed.");
+            return new LmsLatestVersionCheck(string.Empty, failure);
+        }
     }
 
     public async Task<IReadOnlyDictionary<Guid, LmsHostWebAccessStatus>> CheckDirectWebAccessAsync(
@@ -105,23 +128,46 @@ public sealed class LmsHostUpdateAvailabilityService(
                 $"Remote LMS web UI answered on port 5080. Installed version: {installedVersion}.");
     }
 
-    private async Task<LmsHostUpdateAvailability> CheckHostAsync(
+    public async Task<LmsHostUpdateAvailability> CheckHostAsync(
         ManagedHost host,
-        string latestVersion,
+        LmsLatestVersionCheck latestVersionCheck,
         CancellationToken cancellationToken)
     {
         var installedVersion = AiLocalMachine.IsLocalMachine(host.Id)
             ? LinuxMadeSaneBuildVersion.GetCurrent(typeof(Program).Assembly)
             : await ProbeRemoteInstalledVersionAsync(host, cancellationToken);
 
+        return BuildAvailability(
+            host.Id,
+            installedVersion,
+            latestVersionCheck.Version,
+            latestVersionCheck.Failure);
+    }
+
+    public static LmsHostUpdateAvailability BuildAvailability(
+        Guid hostId,
+        string installedVersion,
+        string latestVersion,
+        string latestVersionFailure)
+    {
         if (string.IsNullOrWhiteSpace(installedVersion))
         {
             return new LmsHostUpdateAvailability(
-                host.Id,
+                hostId,
                 LmsHostUpdateAvailabilityState.Unknown,
                 "Unknown",
-                latestVersion,
+                FirstNonBlank(latestVersion, "Unknown") ?? "Unknown",
                 BuildDirectWebUnavailableDetail());
+        }
+
+        if (string.IsNullOrWhiteSpace(latestVersion))
+        {
+            return new LmsHostUpdateAvailability(
+                hostId,
+                LmsHostUpdateAvailabilityState.Unknown,
+                installedVersion,
+                "Unknown",
+                BuildLatestVersionUnavailableDetail(installedVersion, latestVersionFailure));
         }
 
         var state = ApplicationUpdateVersionComparer.IsNewer(latestVersion, installedVersion)
@@ -132,7 +178,7 @@ public sealed class LmsHostUpdateAvailabilityService(
             : installedVersion;
 
         return new LmsHostUpdateAvailability(
-            host.Id,
+            hostId,
             state,
             installedVersion,
             latestVersion,
@@ -272,6 +318,19 @@ public sealed class LmsHostUpdateAvailabilityService(
 
     private static string BuildDirectWebUnavailableDetail() =>
         "LMS is installed and SSH management may still work, but the remote LMS web endpoint on port 5080 is not directly reachable. Use Portal/Pro relay or Edge Gateway for browser access.";
+
+    private static string BuildLatestVersionUnavailableDetail(string installedVersion, string failure) =>
+        string.IsNullOrWhiteSpace(failure)
+            ? $"Installed version: {installedVersion}. Latest version check unavailable."
+            : $"Installed version: {installedVersion}. Latest version check unavailable: {failure}";
+
+    private static string SimplifyFailureMessage(Exception exception)
+    {
+        var message = exception.GetBaseException().Message.Trim();
+        return string.IsNullOrWhiteSpace(message)
+            ? exception.GetType().Name
+            : message;
+    }
 
     private static string NormalizeAbsoluteUrl(string? value, string fallback)
     {

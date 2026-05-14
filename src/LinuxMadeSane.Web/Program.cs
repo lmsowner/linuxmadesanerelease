@@ -79,6 +79,9 @@ public class Program
         builder.Services.AddSingleton<FileActionQueueService>();
         builder.Services.AddSingleton<BrowserFileTransferService>();
         builder.Services.AddSingleton<MediaLibrarySignedUrlService>();
+        builder.Services.AddSingleton<RemoteLmsTunnelAccessService>();
+        builder.Services.AddSingleton<RemoteLmsRelayCaddyService>();
+        builder.Services.AddSingleton<RemoteLmsSshTunnelService>();
         builder.Services.AddScoped<LocalInstanceIdentityService>();
         builder.Services.AddScoped<PasskeyAuthenticationService>();
         builder.Services.Configure<ApplicationUpdateOptions>(builder.Configuration.GetSection("ApplicationUpdates"));
@@ -177,6 +180,25 @@ public class Program
                 return;
             }
 
+            var remoteTunnelAccessService = context.RequestServices.GetRequiredService<RemoteLmsTunnelAccessService>();
+            if (remoteTunnelAccessService.IsAuthorized(
+                    context.Connection.RemoteIpAddress,
+                    context.Request.Cookies[RemoteLmsTunnelAccessService.CookieName]))
+            {
+                context.Items["LmsTrustedNetworkAccess"] = new TrustedNetworkAccessResult(
+                    context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    context.Request.Host.Host,
+                    true,
+                    "LMS SSH tunnel",
+                    true,
+                    false,
+                    true,
+                    true,
+                    false);
+                await next();
+                return;
+            }
+
             var trustedNetworkAccessService = context.RequestServices.GetRequiredService<ITrustedNetworkAccessService>();
             var accessResult = await trustedNetworkAccessService.EvaluateAsync(
                 context.Connection.RemoteIpAddress,
@@ -245,6 +267,50 @@ public class Program
             name = "Linux Made Sane",
             version = ResolveProductVersion()
         }));
+        app.MapPost("/internal/lms-tunnel/grants", async (
+            HttpContext context,
+            RemoteLmsTunnelAccessService tunnelAccessService) =>
+        {
+            if (!IsLoopbackRequest(context.Connection.RemoteIpAddress))
+            {
+                return Results.NotFound();
+            }
+
+            var request = await context.Request.ReadFromJsonAsync<RemoteLmsTunnelGrantRequest>(
+                cancellationToken: context.RequestAborted) ?? new RemoteLmsTunnelGrantRequest("/");
+            var grant = tunnelAccessService.IssueGrant(request.ReturnUrl);
+            return Results.Json(new RemoteLmsTunnelGrantResponse(grant.Token, grant.ExpiresAtUtc));
+        }).DisableAntiforgery();
+        app.MapGet("/internal/lms-tunnel/consume", (
+            HttpContext context,
+            string? token,
+            RemoteLmsTunnelAccessService tunnelAccessService) =>
+        {
+            if (!IsLoopbackRequest(context.Connection.RemoteIpAddress))
+            {
+                return Results.Redirect("/access-denied");
+            }
+
+            var session = tunnelAccessService.ConsumeGrant(token);
+            if (session is null)
+            {
+                return Results.Redirect("/access-denied");
+            }
+
+            context.Response.Cookies.Append(
+                RemoteLmsTunnelAccessService.CookieName,
+                session.SessionToken,
+                new CookieOptions
+                {
+                    HttpOnly = true,
+                    IsEssential = true,
+                    SameSite = SameSiteMode.Lax,
+                    Secure = context.Request.IsHttps,
+                    Expires = session.ExpiresAtUtc
+                });
+
+            return Results.Redirect(session.ReturnUrl);
+        }).DisableAntiforgery();
         app.MapGet("/edge-auth/check", async Task (
             HttpContext context,
             IEdgeGatewayService edgeGatewayService) =>
@@ -816,6 +882,7 @@ public class Program
             path.StartsWithSegments("/healthz") ||
             path.StartsWithSegments("/edge-auth/check") ||
             path.StartsWithSegments("/api/passkeys/login") ||
+            path.StartsWithSegments("/internal/lms-tunnel") ||
             path.StartsWithSegments("/api/integrations/media-library") ||
             path.StartsWithSegments("/internal/scheduler") ||
             path.StartsWithSegments("/_framework") ||

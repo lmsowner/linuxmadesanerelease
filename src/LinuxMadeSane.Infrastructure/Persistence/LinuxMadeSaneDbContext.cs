@@ -25,6 +25,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<SftpAuditEntryEntity> SftpAuditEntries => Set<SftpAuditEntryEntity>();
     public DbSet<SftpBackupSnapshotEntity> SftpBackupSnapshots => Set<SftpBackupSnapshotEntity>();
     public DbSet<RemoteShareMountEntity> RemoteShareMounts => Set<RemoteShareMountEntity>();
+    public DbSet<SshfsMountEntity> SshfsMounts => Set<SshfsMountEntity>();
     public DbSet<AiChatThreadEntity> AiChatThreads => Set<AiChatThreadEntity>();
     public DbSet<AiChatMessageEntity> AiChatMessages => Set<AiChatMessageEntity>();
     public DbSet<AiAttachedServerEntity> AiAttachedServers => Set<AiAttachedServerEntity>();
@@ -339,7 +340,8 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(route => route.AllowKnownIps).HasColumnType("TEXT");
             entity.Property(route => route.Notes).HasColumnType("TEXT");
             entity.Property(route => route.LastTestMessage).HasColumnType("TEXT");
-            entity.HasIndex(route => route.Hostname).IsUnique();
+            entity.HasIndex(route => route.Hostname);
+            entity.HasIndex(route => new { route.Hostname, route.TargetPathPrefix }).IsUnique();
             entity.HasIndex(route => route.DomainName);
             entity.HasIndex(route => route.Enabled);
         });
@@ -458,6 +460,18 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(mount => mount.UserName).HasMaxLength(128);
             entity.Property(mount => mount.Domain).HasMaxLength(128);
             entity.Property(mount => mount.CredentialFilePath).HasMaxLength(512);
+        });
+
+        modelBuilder.Entity<SshfsMountEntity>(entity =>
+        {
+            entity.ToTable("sshfs_mounts");
+            entity.HasKey(mount => mount.Id);
+            entity.Property(mount => mount.HostDisplayName).HasMaxLength(255);
+            entity.Property(mount => mount.HostAddress).HasMaxLength(255);
+            entity.Property(mount => mount.UserName).HasMaxLength(128);
+            entity.Property(mount => mount.RemotePath).HasMaxLength(512);
+            entity.Property(mount => mount.LocalMountPath).HasMaxLength(512);
+            entity.Property(mount => mount.IdentityFilePath).HasMaxLength(512);
         });
 
         modelBuilder.Entity<LinuxShareUserEntity>(entity =>
