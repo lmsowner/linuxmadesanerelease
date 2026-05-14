@@ -113,7 +113,7 @@
                                     <td class="hosts-version-cell">
                                         <div class="stack-tight hosts-version-stack">
                                             <UiPill Tone="@GetLmsUpdateTone(row)" Class="hosts-version-pill">@GetLmsVersionLabel(row)</UiPill>
-                                            <span class="meta-text hosts-row-meta" title="@GetLmsVersionTooltip(row)">@GetLmsVersionDetail(row)</span>
+                                            <span class="meta-text hosts-row-meta" title="@GetLmsVersionTooltip(row)">@GetLmsVersionDetailWithOperation(row)</span>
                                         </div>
                                     </td>
                                     <td><span class="hosts-row-value hosts-last-seen-value">@FormatLastSeen(row)</span></td>
@@ -145,8 +145,9 @@
                                             {
                                                 <UiCommandButton Label="Update"
                                                                  Glyph="UiIconGlyph.Download"
-                                                                 Href="@BuildLmsUpdateHref(row.Host)"
-                                                                 Variant="UiButtonVariant.Action" />
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 Disabled="@IsLmsUpdateActiveFor(row.Host)"
+                                                                 OnClick="@(() => StartLmsHostUpdateAsync(row.Host))" />
                                             }
                                             @if (ShouldShowLmsUninstallAction(row))
                                             {
@@ -392,6 +393,7 @@
     private Guid? lmsConnectHostId;
     private string lmsConnectStatus = string.Empty;
     private string lmsConnectTone = "info";
+    private readonly Dictionary<Guid, LmsHostUpdateOperation> lmsUpdateOperations = [];
 
     private IReadOnlyList<HostRowState> LmsHostRows =>
         hostRows
@@ -765,8 +767,19 @@
         return count > 0 ? count.ToString() : null;
     }
 
-    private bool ShouldShowLmsUpdateAction(HostRowState row) =>
-        row.LmsUpdate?.IsUpdateAvailable == true;
+    private bool ShouldShowLmsUpdateAction(HostRowState row)
+    {
+        var operation = GetLmsUpdateOperation(row.Host.Id);
+        if (operation?.State is LmsHostUpdateOperationState.Started or LmsHostUpdateOperationState.Applying or LmsHostUpdateOperationState.Completed)
+        {
+            return false;
+        }
+
+        return row.LmsUpdate?.IsUpdateAvailable == true;
+    }
+
+    private bool IsLmsUpdateActiveFor(ManagedHost host) =>
+        GetLmsUpdateOperation(host.Id)?.State is LmsHostUpdateOperationState.Started or LmsHostUpdateOperationState.Applying;
 
     private static bool ShouldShowPublicKeySetupAction(ManagedHost host) =>
         !HasPublicKeyAuthenticationEnabled(host);
@@ -806,13 +819,142 @@
         return capabilities.IsLmsHost && !capabilities.IsLocalLmsHost;
     }
 
-    private static string BuildLmsUpdateHref(ManagedHost host) =>
-        ManagedHostCapabilities.Describe(host).IsLocalLmsHost
-            ? "/updates"
-            : $"/hosts/{host.Id}?update=lms";
-
     private static string BuildLmsUninstallHref(ManagedHost host) =>
         $"/hosts/{host.Id}?uninstall=lms";
+
+    private Task StartLmsHostUpdateAsync(ManagedHost host)
+    {
+        if (IsLmsUpdateActiveFor(host) || ManagedHostCapabilities.Describe(host).IsLocalLmsHost)
+        {
+            return Task.CompletedTask;
+        }
+
+        SetLmsUpdateOperation(
+            host.Id,
+            new LmsHostUpdateOperation(
+                LmsHostUpdateOperationState.Started,
+                "Update started.",
+                DateTimeOffset.UtcNow));
+
+        _ = RunLmsHostUpdateInBackgroundAsync(host.Id);
+        return Task.CompletedTask;
+    }
+
+    private async Task RunLmsHostUpdateInBackgroundAsync(Guid hostId)
+    {
+        var progress = new Progress<ManagedHostLmsInstallProgressUpdate>(update =>
+        {
+            _ = ApplyLmsHostUpdateProgressAsync(hostId, update);
+        });
+
+        try
+        {
+            await using var scope = ServiceScopeFactory.CreateAsyncScope();
+            var hostService = scope.ServiceProvider.GetRequiredService<IManagedHostService>();
+            var result = await hostService.InstallLmsAsync(
+                hostId,
+                BuildLmsUpdateOptions(),
+                progress,
+                CancellationToken.None);
+
+            await ApplyLmsHostUpdateResultAsync(hostId, result);
+        }
+        catch (Exception ex)
+        {
+            await ApplyLmsHostUpdateFailureAsync(hostId, ex.Message);
+        }
+    }
+
+    private Task ApplyLmsHostUpdateProgressAsync(Guid hostId, ManagedHostLmsInstallProgressUpdate update) =>
+        SafeInvokeAsync(() =>
+        {
+            var state = update.State switch
+            {
+                ManagedHostLmsInstallProgressState.Starting => LmsHostUpdateOperationState.Started,
+                ManagedHostLmsInstallProgressState.Completed => LmsHostUpdateOperationState.Completed,
+                ManagedHostLmsInstallProgressState.Failed => LmsHostUpdateOperationState.Failed,
+                _ => LmsHostUpdateOperationState.Applying
+            };
+
+            var message = state switch
+            {
+                LmsHostUpdateOperationState.Started => "Update started.",
+                LmsHostUpdateOperationState.Applying => "Applying update.",
+                LmsHostUpdateOperationState.Completed => "Update finished.",
+                LmsHostUpdateOperationState.Failed => FirstNonBlank(update.Message, "Update failed.")!,
+                _ => FirstNonBlank(update.Message, "Update status changed.")!
+            };
+
+            SetLmsUpdateOperation(
+                hostId,
+                new LmsHostUpdateOperation(
+                    state,
+                    message,
+                    update.OccurredAtUtc,
+                    state is LmsHostUpdateOperationState.Completed or LmsHostUpdateOperationState.Failed
+                        ? update.OccurredAtUtc
+                        : null));
+        });
+
+    private Task ApplyLmsHostUpdateResultAsync(Guid hostId, ManagedHostLmsInstallResult result) =>
+        SafeInvokeAsync(() =>
+        {
+            SetLmsUpdateOperation(
+                hostId,
+                new LmsHostUpdateOperation(
+                    result.Success ? LmsHostUpdateOperationState.Completed : LmsHostUpdateOperationState.Failed,
+                    result.Success ? "Update finished." : FirstNonBlank(result.Detail, result.Summary, "Update failed.")!,
+                    result.StartedAtUtc,
+                    result.CompletedAtUtc));
+        });
+
+    private Task ApplyLmsHostUpdateFailureAsync(Guid hostId, string message) =>
+        SafeInvokeAsync(() =>
+        {
+            SetLmsUpdateOperation(
+                hostId,
+                new LmsHostUpdateOperation(
+                    LmsHostUpdateOperationState.Failed,
+                    FirstNonBlank(message, "Update failed.")!,
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow));
+        });
+
+    private static ManagedHostLmsInstallOptions BuildLmsUpdateOptions() =>
+        new()
+        {
+            StartService = true,
+            ConfigureLocalSshRunner = true,
+            EnableLocalSudo = true,
+            UpdateExistingInstall = true,
+            MarkAsLmsHostOnSuccess = true
+        };
+
+    private async Task SafeInvokeAsync(Action action)
+    {
+        try
+        {
+            await InvokeAsync(() =>
+            {
+                action();
+                StateHasChanged();
+            });
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private void SetLmsUpdateOperation(Guid hostId, LmsHostUpdateOperation operation)
+    {
+        lmsUpdateOperations[hostId] = operation;
+    }
+
+    private LmsHostUpdateOperation? GetLmsUpdateOperation(Guid hostId) =>
+        lmsUpdateOperations.TryGetValue(hostId, out var operation) ? operation : null;
 
     private static string BuildDirectLmsRootUrl(ManagedHost host) =>
         BuildDirectLmsUrl(host, "/");
@@ -902,6 +1044,19 @@
 
     private string GetLmsVersionLabel(HostRowState row)
     {
+        var operation = GetLmsUpdateOperation(row.Host.Id);
+        if (operation is not null)
+        {
+            return operation.State switch
+            {
+                LmsHostUpdateOperationState.Started => "Update started",
+                LmsHostUpdateOperationState.Applying => "Applying update",
+                LmsHostUpdateOperationState.Completed => "Update finished",
+                LmsHostUpdateOperationState.Failed => "Update failed",
+                _ => "Updating"
+            };
+        }
+
         if (row.LmsUpdate is null)
         {
             return isLmsUpdateRefreshInProgress ? "Checking" : "Unknown";
@@ -934,11 +1089,33 @@
         };
     }
 
-    private static string GetLmsVersionTooltip(HostRowState row) =>
-        row.LmsUpdate?.Detail ?? "Version check pending.";
+    private string GetLmsVersionDetailWithOperation(HostRowState row)
+    {
+        var operation = GetLmsUpdateOperation(row.Host.Id);
+        if (operation is not null)
+        {
+            return operation.Message;
+        }
+
+        return GetLmsVersionDetail(row);
+    }
+
+    private string GetLmsVersionTooltip(HostRowState row) =>
+        GetLmsUpdateOperation(row.Host.Id)?.Message ?? row.LmsUpdate?.Detail ?? "Version check pending.";
 
     private UiPillTone GetLmsUpdateTone(HostRowState row)
     {
+        var operation = GetLmsUpdateOperation(row.Host.Id);
+        if (operation is not null)
+        {
+            return operation.State switch
+            {
+                LmsHostUpdateOperationState.Completed => UiPillTone.Success,
+                LmsHostUpdateOperationState.Failed => UiPillTone.Failure,
+                _ => UiPillTone.Warning
+            };
+        }
+
         if (row.LmsUpdate is null)
         {
             return isLmsUpdateRefreshInProgress ? UiPillTone.Warning : UiPillTone.Neutral;
@@ -955,6 +1132,9 @@
     private static bool HasKnownInstalledLmsVersion(LmsHostUpdateAvailability update) =>
         !string.IsNullOrWhiteSpace(update.InstalledVersion) &&
         !update.InstalledVersion.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
+
+    private static string? FirstNonBlank(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
 
     private static string FormatEnvironment(string? environment) =>
         string.IsNullOrWhiteSpace(environment) ? "Unlabeled" : environment;
@@ -1401,4 +1581,18 @@
     private sealed record HostStatusProbeResult(
         Guid HostId,
         HostConnectionTestResult Connection);
+
+    private enum LmsHostUpdateOperationState
+    {
+        Started,
+        Applying,
+        Completed,
+        Failed
+    }
+
+    private sealed record LmsHostUpdateOperation(
+        LmsHostUpdateOperationState State,
+        string Message,
+        DateTimeOffset StartedAtUtc,
+        DateTimeOffset? CompletedAtUtc = null);
 }

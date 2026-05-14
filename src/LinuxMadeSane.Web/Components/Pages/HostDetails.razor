@@ -3,6 +3,7 @@
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Models
 @inject IManagedHostService HostService
+@inject IServiceScopeFactory ServiceScopeFactory
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
 @inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
@@ -63,10 +64,10 @@ else
                 }
                 @if (CanUpdateLmsHost)
                 {
-                    <UiCommandButton Label="Update LMS"
+                    <UiCommandButton Label="@LmsUpdateButtonLabel"
                                      Glyph="UiIconGlyph.Download"
                                      Variant="UiButtonVariant.PrimaryMuted"
-                                     OnClick="ShowLmsUpdatePrompt"
+                                     OnClick="StartLmsUpdateAsync"
                                      Disabled="@isInstallingLms" />
                     <UiCommandButton Label="Uninstall LMS"
                                      Glyph="UiIconGlyph.Delete"
@@ -86,6 +87,10 @@ else
         @if (!string.IsNullOrWhiteSpace(remoteLmsConnectStatus))
         {
             <p class="@($"callout {remoteLmsConnectTone}")">@remoteLmsConnectStatus</p>
+        }
+        @if (!string.IsNullOrWhiteSpace(lmsBackgroundUpdateStatus))
+        {
+            <p class="@($"callout {lmsBackgroundUpdateTone}")">@lmsBackgroundUpdateStatus</p>
         }
 
         <TabControl ActiveValue="@activeTab"
@@ -333,6 +338,7 @@ else
     private bool isLmsUpdateMode;
     private bool isLmsUninstallMode;
     private bool isInstallingLms;
+    private bool isBackgroundLmsUpdate;
     private Guid? installQueryHandledForHostId;
     private Guid? updateQueryHandledForHostId;
     private Guid? uninstallQueryHandledForHostId;
@@ -340,6 +346,8 @@ else
     private bool isRemoteLmsConnectBusy;
     private string remoteLmsConnectStatus = string.Empty;
     private string remoteLmsConnectTone = "info";
+    private string lmsBackgroundUpdateStatus = string.Empty;
+    private string lmsBackgroundUpdateTone = "info";
 
     private bool CanInstallLmsHost => details is { Capabilities.IsLmsHost: false };
 
@@ -369,6 +377,9 @@ else
 
     private bool CanRunLmsInstaller => details is not null && HasStoredCredentials(details.Host);
 
+    private string LmsUpdateButtonLabel =>
+        isInstallingLms && isBackgroundLmsUpdate ? "Updating..." : "Update LMS";
+
     private static string BuildDirectLmsRootUrl(ManagedHost host) =>
         BuildDirectLmsUrl(host, "/");
 
@@ -391,7 +402,7 @@ else
     }
 
     private bool ShouldShowLmsInstallPanel =>
-        showLmsInstallPrompt || isInstallingLms || lmsInstallResult is not null;
+        !isBackgroundLmsUpdate && (showLmsInstallPrompt || isInstallingLms || lmsInstallResult is not null);
 
     private string LmsOperationEyebrow => isLmsUninstallMode
         ? "Host uninstall"
@@ -453,7 +464,7 @@ else
             CanUpdateLmsHost)
         {
             updateQueryHandledForHostId = HostId;
-            ShowLmsUpdatePrompt();
+            await StartLmsUpdateAsync();
         }
 
         if (details is not null &&
@@ -496,6 +507,7 @@ else
         lmsInstallProgress.Clear();
         isLmsUpdateMode = false;
         isLmsUninstallMode = false;
+        isBackgroundLmsUpdate = false;
         showLmsInstallPrompt = true;
         activeTab = OverviewTabValue;
     }
@@ -515,6 +527,7 @@ else
         lmsInstallProgress.Clear();
         isLmsUpdateMode = true;
         isLmsUninstallMode = false;
+        isBackgroundLmsUpdate = false;
         showLmsInstallPrompt = true;
         activeTab = OverviewTabValue;
     }
@@ -531,6 +544,7 @@ else
         lmsInstallProgress.Clear();
         isLmsUpdateMode = false;
         isLmsUninstallMode = true;
+        isBackgroundLmsUpdate = false;
         showLmsInstallPrompt = true;
         activeTab = OverviewTabValue;
     }
@@ -545,7 +559,137 @@ else
         showLmsInstallPrompt = false;
         isLmsUpdateMode = false;
         isLmsUninstallMode = false;
+        isBackgroundLmsUpdate = false;
     }
+
+    private Task StartLmsUpdateAsync()
+    {
+        if (details is null || isInstallingLms)
+        {
+            return Task.CompletedTask;
+        }
+
+        isInstallingLms = true;
+        isBackgroundLmsUpdate = true;
+        isLmsUpdateMode = true;
+        isLmsUninstallMode = false;
+        showLmsInstallPrompt = false;
+        lmsInstallResult = null;
+        lmsInstallProgress.Clear();
+        lmsBackgroundUpdateStatus = $"Update started for {details.Host.Name}.";
+        lmsBackgroundUpdateTone = "info";
+
+        _ = RunLmsUpdateInBackgroundAsync(details.Host.Id, details.Host.Name);
+        return Task.CompletedTask;
+    }
+
+    private async Task RunLmsUpdateInBackgroundAsync(Guid hostId, string hostName)
+    {
+        var progress = new Progress<ManagedHostLmsInstallProgressUpdate>(update =>
+        {
+            _ = ApplyBackgroundLmsUpdateProgressAsync(hostName, update);
+        });
+
+        try
+        {
+            await using var scope = ServiceScopeFactory.CreateAsyncScope();
+            var hostService = scope.ServiceProvider.GetRequiredService<IManagedHostService>();
+            var result = await hostService.InstallLmsAsync(
+                hostId,
+                BuildLmsUpdateOptions(),
+                progress,
+                CancellationToken.None);
+
+            await InvokeIfAliveAsync(async () =>
+            {
+                lmsBackgroundUpdateStatus = result.Success
+                    ? $"Update finished for {hostName}."
+                    : $"Update failed for {hostName}: {FirstNonBlank(result.Detail, result.Summary, "remote installer failed")}";
+                lmsBackgroundUpdateTone = result.Success ? "success" : "error";
+                isInstallingLms = false;
+                isBackgroundLmsUpdate = false;
+
+                if (result.Success && details?.Host.Id == hostId)
+                {
+                    await LoadDetailsAsync();
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            await InvokeIfAliveAsync(() =>
+            {
+                lmsBackgroundUpdateStatus = $"Update failed for {hostName}: {ex.Message}";
+                lmsBackgroundUpdateTone = "error";
+                isInstallingLms = false;
+                isBackgroundLmsUpdate = false;
+            });
+        }
+    }
+
+    private Task ApplyBackgroundLmsUpdateProgressAsync(string hostName, ManagedHostLmsInstallProgressUpdate update) =>
+        InvokeIfAliveAsync(() =>
+        {
+            lmsBackgroundUpdateStatus = update.State switch
+            {
+                ManagedHostLmsInstallProgressState.Starting => $"Update started for {hostName}.",
+                ManagedHostLmsInstallProgressState.Completed => $"Update finished for {hostName}.",
+                ManagedHostLmsInstallProgressState.Failed => $"Update failed for {hostName}: {FirstNonBlank(update.Message, "remote installer failed")}",
+                _ => $"Applying update on {hostName}."
+            };
+            lmsBackgroundUpdateTone = update.State switch
+            {
+                ManagedHostLmsInstallProgressState.Completed => "success",
+                ManagedHostLmsInstallProgressState.Failed => "error",
+                _ => "info"
+            };
+        });
+
+    private async Task InvokeIfAliveAsync(Action action)
+    {
+        try
+        {
+            await InvokeAsync(() =>
+            {
+                action();
+                StateHasChanged();
+            });
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private async Task InvokeIfAliveAsync(Func<Task> action)
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                await action();
+                StateHasChanged();
+            });
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private static ManagedHostLmsInstallOptions BuildLmsUpdateOptions() =>
+        new()
+        {
+            StartService = true,
+            ConfigureLocalSshRunner = true,
+            EnableLocalSudo = true,
+            UpdateExistingInstall = true,
+            MarkAsLmsHostOnSuccess = true
+        };
 
     private async Task RunLmsHostOperationAsync()
     {
@@ -555,6 +699,7 @@ else
         }
 
         isInstallingLms = true;
+        isBackgroundLmsUpdate = false;
         lmsInstallResult = null;
         lmsInstallProgress.Clear();
 
@@ -707,6 +852,9 @@ else
     private static bool HasStoredCredentials(ManagedHost host) =>
         !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
         !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private static string? FirstNonBlank(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
 
     private static bool HasLegacyAuthentication(ManagedHost host) =>
         !ManagedHostAuthenticationPolicy.IsOperatorSelectable(host.PrimaryAuthenticationType) ||
