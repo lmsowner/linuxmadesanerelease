@@ -28,6 +28,11 @@
 
 @* Guardrail: this workspace goes through IManagedHostFileAccessService and the transient
    secret store only. It must not reintroduce direct local/SFTP/SSH credential plumbing. *@
+@if (ManagePageTitle)
+{
+    <PageTitle>@BrowserPageTitle</PageTitle>
+}
+
 @if (DetachedWorkspaceUnavailable)
 {
     <section class="surface-card">
@@ -1106,6 +1111,7 @@ else
     [Parameter] public string? InitialPath { get; set; }
     [Parameter] public string Title { get; set; } = "Filesystem explorer";
     [Parameter] public bool AllowPopout { get; set; } = true;
+    [Parameter] public bool ManagePageTitle { get; set; }
     [Parameter] public Guid? DetachedBrowserId { get; set; }
     [Parameter] public Guid? DetachedSearchId { get; set; }
     [Parameter] public string? WorkspaceId { get; set; }
@@ -1297,6 +1303,9 @@ else
     private bool CanShowPopout => AllowPopout && !DetachedBrowserId.HasValue && !DetachedSearchId.HasValue;
     private bool ShouldOpenFileSearchInline => DetachedSearchId.HasValue || !AllowPopout;
     private string ResolvedExplorerTitle => string.IsNullOrWhiteSpace(Title) ? "Filesystem explorer" : Title.Trim();
+    private string BrowserPageTitle => browser is null
+        ? "File Browser | Linux Made Sane"
+        : $"Files - {BuildBrowserTitleHostLabel(browser.Host)} - {FormatBrowserTitlePath(currentPath)} | Linux Made Sane";
     private string AccessMetaText => HasScopedRoot
         ? EffectiveRootPath ?? string.Empty
         : IsLocalBrowser
@@ -1318,6 +1327,19 @@ else
     private IReadOnlyList<SftpItem> SelectedItems => items
         .Where(item => selectedPaths.Contains(ResolveBrowserPath(item.FullPath)))
         .ToArray();
+
+    private static string BuildBrowserTitleHostLabel(ManagedHost host)
+    {
+        var name = string.IsNullOrWhiteSpace(host.Name) ? host.Hostname : host.Name.Trim();
+        var address = host.Hostname.Trim();
+        return string.IsNullOrWhiteSpace(address) || string.Equals(name, address, StringComparison.OrdinalIgnoreCase)
+            ? name
+            : $"{name} ({address})";
+    }
+
+    private static string FormatBrowserTitlePath(string? path) =>
+        string.IsNullOrWhiteSpace(path) ? "/" : path.Trim();
+
     private string ConnectionPassword
     {
         get => ConnectionSecretStore.Get(connectionSecretHandle).Password;

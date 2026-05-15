@@ -13,7 +13,7 @@
 @inject NavigationManager NavigationManager
 @inject IJSRuntime JSRuntime
 
-<PageTitle>Terminal | Linux Made Sane</PageTitle>
+<PageTitle>@TerminalPageTitle</PageTitle>
 
 @* Guardrail: this page is a terminal workspace shell only. Keep SSH transport,
    credential resolution, and command execution in the shared terminal/file-access
@@ -305,6 +305,10 @@
         renderedTabId.HasValue && TerminalWorkspace is not null
             ? TerminalWorkspace.Tabs.FirstOrDefault(tab => tab.Id == renderedTabId.Value)
             : ActiveTab;
+
+    private string TerminalPageTitle => ActiveTab is null
+        ? "Terminal | Linux Made Sane"
+        : $"Terminal - {BuildTerminalTitleHostLabel(ActiveTab)} | Linux Made Sane";
 
     private IReadOnlyList<TerminalTabState> OrderedTabs =>
         TerminalWorkspace?.Tabs
@@ -1175,6 +1179,15 @@
 
     private string GetTabTooltip(TerminalTabState tab) =>
         $"{tab.HostName} · {GetSessionLabel(tab)}{(tab.IsDetached ? " · Popped out" : string.Empty)}";
+
+    private static string BuildTerminalTitleHostLabel(TerminalTabState tab)
+    {
+        var name = string.IsNullOrWhiteSpace(tab.HostName) ? tab.HostAddress : tab.HostName.Trim();
+        var address = tab.HostAddress.Trim();
+        return string.IsNullOrWhiteSpace(address) || string.Equals(name, address, StringComparison.OrdinalIgnoreCase)
+            ? name
+            : $"{name} ({address})";
+    }
 
     private string GetTabStatusClass(TerminalTabState tab) =>
         tab.IsDetached
