@@ -829,6 +829,121 @@ public sealed class EdgeGatewayService(
             warnings);
     }
 
+    public async Task<EdgeGatewayRemoteLmsRelaySetupResult> ProvisionRemoteLmsRelayAsync(
+        string domainName,
+        string hostname,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedDomain = EdgeGatewayRouteValidator.NormalizeDomainName(domainName);
+        var normalizedHostname = EdgeGatewayRouteValidator.NormalizeHostname(hostname);
+        _ = ResolveRelativeHostname(normalizedHostname, normalizedDomain);
+        var gatewaySubdomain = await GetGatewaySubdomainAsync(cancellationToken);
+        var steps = new List<string>();
+        var warnings = new List<string>();
+        var apiToken = await ResolveSavedCloudflareTokenAsync(cancellationToken);
+        var validation = await exposedServiceManager.ValidateTokenAsync(AiLocalMachine.ManagedHostId, null, cancellationToken);
+        var zone = validation.Zones.FirstOrDefault(zone =>
+            zone.Name.Equals(normalizedDomain, StringComparison.OrdinalIgnoreCase));
+        if (zone is null)
+        {
+            throw new InvalidOperationException($"The saved Cloudflare token cannot manage {normalizedDomain}.");
+        }
+
+        var account = ResolveCloudflareAccount(validation.Accounts, zone);
+        if (account is null)
+        {
+            throw new InvalidOperationException($"Cloudflare did not return an account that owns {normalizedDomain}.");
+        }
+
+        var gatewaySetup = await EnsureGatewayTunnelAsync(
+            apiToken,
+            account,
+            zone,
+            normalizedDomain,
+            gatewaySubdomain,
+            replaceExistingDnsRecord: false,
+            installConnector: true,
+            cancellationToken);
+        steps.AddRange(gatewaySetup.Steps);
+        warnings.AddRange(gatewaySetup.Warnings);
+
+        if (!gatewaySetup.Success || gatewaySetup.RequiresDnsReplacement)
+        {
+            return new EdgeGatewayRemoteLmsRelaySetupResult(
+                false,
+                normalizedDomain,
+                normalizedHostname,
+                gatewaySetup.DnsTarget,
+                gatewaySetup.Tunnel.Name,
+                gatewaySetup.Summary,
+                steps,
+                warnings);
+        }
+
+        var existingRecords = await cloudflareDnsService.ListRecordsAsync(apiToken, zone.Id, cancellationToken);
+        var existingRecord = existingRecords.FirstOrDefault(record =>
+            record.Name.Trim().TrimEnd('.').Equals(normalizedHostname, StringComparison.OrdinalIgnoreCase));
+
+        if (existingRecord is null)
+        {
+            await cloudflareDnsService.CreateRecordAsync(
+                apiToken,
+                zone.Id,
+                new CloudflareDnsRecord(
+                    string.Empty,
+                    zone.Id,
+                    normalizedHostname,
+                    "CNAME",
+                    gatewaySetup.DnsTarget,
+                    true,
+                    1,
+                    cloudflareOptions.ManagedRecordComment,
+                    null),
+                cancellationToken);
+            steps.Add($"Created proxied remote LMS DNS record {normalizedHostname} -> {gatewaySetup.DnsTarget}.");
+        }
+        else if (IsSameDnsTarget(existingRecord, gatewaySetup.DnsTarget))
+        {
+            steps.Add($"Remote LMS DNS record already points at {gatewaySetup.DnsTarget}.");
+        }
+        else
+        {
+            return new EdgeGatewayRemoteLmsRelaySetupResult(
+                false,
+                normalizedDomain,
+                normalizedHostname,
+                gatewaySetup.DnsTarget,
+                gatewaySetup.Tunnel.Name,
+                $"DNS already exists for {normalizedHostname} and points at {existingRecord.Content}. Choose a different host name or remove the conflicting DNS record.",
+                steps,
+                [$"Existing DNS record: {existingRecord.Type} {existingRecord.Name} -> {existingRecord.Content}."]);
+        }
+
+        var caddyServiceUrl = ResolveCaddyServiceUrl();
+        var configuration = await cloudflareTunnelService.GetConfigurationAsync(
+            apiToken,
+            account.Id,
+            gatewaySetup.Tunnel.Id,
+            cancellationToken);
+        await cloudflareTunnelService.UpdateConfigurationAsync(
+            apiToken,
+            account.Id,
+            gatewaySetup.Tunnel.Id,
+            new CloudflareTunnelConfiguration(MergeHostnameTunnelRoute(configuration.Routes, normalizedHostname, caddyServiceUrl)),
+            cancellationToken);
+        steps.Add($"Configured tunnel ingress {normalizedHostname} -> {caddyServiceUrl}.");
+
+        return new EdgeGatewayRemoteLmsRelaySetupResult(
+            true,
+            normalizedDomain,
+            normalizedHostname,
+            gatewaySetup.DnsTarget,
+            gatewaySetup.Tunnel.Name,
+            $"{normalizedHostname} is ready for remote LMS SSH relay traffic.",
+            steps,
+            warnings);
+    }
+
     public Task DeleteRouteAsync(Guid routeId, CancellationToken cancellationToken = default) =>
         store.DeleteRouteAsync(routeId, cancellationToken);
 

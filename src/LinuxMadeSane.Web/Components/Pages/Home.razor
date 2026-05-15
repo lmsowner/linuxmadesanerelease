@@ -1,6 +1,9 @@
 @page "/"
 @rendermode @(new InteractiveServerRenderMode(prerender: false))
 @implements IAsyncDisposable
+@using System.Net
+@using System.Net.NetworkInformation
+@using System.Net.Sockets
 @using LinuxMadeSane.Application.Contracts
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Models
@@ -19,6 +22,9 @@
 
 <div class="page-shell">
     <UiHeroPanel Title="Overview" Compact="true">
+        <ChildContent>
+            <p class="overview-instance-meta">@currentInstanceLabel</p>
+        </ChildContent>
         <Actions>
             <UiDisplayPreferenceToolbar />
         </Actions>
@@ -163,6 +169,7 @@
     private Guid? lmsConnectHostId;
     private string lmsConnectStatus = string.Empty;
     private string lmsConnectTone = "info";
+    private string currentInstanceLabel = BuildCurrentInstanceLabel();
 
     protected override async Task OnInitializedAsync()
     {
@@ -184,6 +191,37 @@
         connection.Status == ConnectionTestStatus.Succeeded
             ? "Connected, but live health metrics were unavailable."
             : connection.Summary;
+
+    private static string BuildCurrentInstanceLabel()
+    {
+        var hostname = Dns.GetHostName();
+        var address = GetPrimaryLocalAddress();
+        return string.IsNullOrWhiteSpace(address)
+            ? hostname
+            : $"{hostname} - {address}";
+    }
+
+    private static string GetPrimaryLocalAddress()
+    {
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .Where(static networkInterface =>
+                    networkInterface.OperationalStatus == OperationalStatus.Up &&
+                    networkInterface.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                .SelectMany(static networkInterface => networkInterface.GetIPProperties().UnicastAddresses)
+                .Select(static address => address.Address)
+                .Where(static address =>
+                    address.AddressFamily == AddressFamily.InterNetwork &&
+                    !IPAddress.IsLoopback(address))
+                .Select(static address => address.ToString())
+                .FirstOrDefault() ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
 
     private static DashboardHostRow BuildHostRow(ManagedHost host) =>
         new()

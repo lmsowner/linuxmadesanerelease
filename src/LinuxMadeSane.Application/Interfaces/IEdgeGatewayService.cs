@@ -18,6 +18,7 @@ public interface IEdgeGatewayService
     Task<EdgeGatewayCloudflareSetupResult> ProvisionCloudflareDomainAsync(string domainName, bool replaceExistingDnsRecord, CancellationToken cancellationToken = default);
     Task<EdgeGatewayCloudflareRelayRemovalResult> RemoveCloudflareDomainRelayAsync(string domainName, bool confirmed, CancellationToken cancellationToken = default);
     Task<EdgeGatewayCloudflareRouteSetupResult> ProvisionCloudflareRouteAsync(Guid routeId, bool replaceExistingDnsRecord, CancellationToken cancellationToken = default);
+    Task<EdgeGatewayRemoteLmsRelaySetupResult> ProvisionRemoteLmsRelayAsync(string domainName, string hostname, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<EdgeGatewayAuditEntry>> ListAuditEntriesAsync(EdgeGatewayAuditFilter filter, CancellationToken cancellationToken = default);
     Task<EdgeGatewayAuthCheckResult> EvaluateAuthAsync(EdgeGatewayAuthCheckContext context, CancellationToken cancellationToken = default);
     Task<string> BuildSafeReturnPathAsync(string targetUrl, CancellationToken cancellationToken = default);

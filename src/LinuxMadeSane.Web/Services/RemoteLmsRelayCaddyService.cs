@@ -33,7 +33,7 @@ public sealed class RemoteLmsRelayCaddyService(
     {
         ArgumentNullException.ThrowIfNull(host);
         var relayDomain = await ResolveRelayDomainAsync(cancellationToken);
-        var hostname = BuildRelayHostname(host, relayDomain.GatewayDomainName);
+        var hostname = BuildRelayHostname(host, relayDomain.DomainName, relayDomain.GatewayDomainName);
         var returnPath = RemoteLmsTunnelAccessService.NormalizeReturnUrl(path);
         var route = new RemoteLmsRelayRoute(host.Id, host.Name, hostname, localPort, DateTimeOffset.UtcNow);
 
@@ -44,6 +44,7 @@ public sealed class RemoteLmsRelayCaddyService(
             await EnsureRemoteRelayFileExistsAsync(cancellationToken);
             await EnsureCaddyReadyAsync(cancellationToken);
             await EnsureEdgeGatewayListenerAsync(cancellationToken);
+            await EnsureRemoteLmsCloudflareRouteAsync(relayDomain.DomainName, hostname, cancellationToken);
             await ApplyRoutesUnsafeAsync(cancellationToken);
         }
         catch
@@ -158,6 +159,20 @@ public sealed class RemoteLmsRelayCaddyService(
         {
             throw new InvalidOperationException(
                 $"The Edge Gateway Caddy listener could not be prepared: {apply.Summary}");
+        }
+    }
+
+    private async Task EnsureRemoteLmsCloudflareRouteAsync(
+        string domainName,
+        string hostname,
+        CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var edgeGatewayService = scope.ServiceProvider.GetRequiredService<IEdgeGatewayService>();
+        var result = await edgeGatewayService.ProvisionRemoteLmsRelayAsync(domainName, hostname, cancellationToken);
+        if (!result.Success)
+        {
+            throw new InvalidOperationException($"The remote LMS Cloudflare relay could not be prepared: {result.Summary}");
         }
     }
 
@@ -369,18 +384,35 @@ public sealed class RemoteLmsRelayCaddyService(
     private static async Task<string> ReadTextOrDefaultAsync(string path, CancellationToken cancellationToken) =>
         File.Exists(path) ? await File.ReadAllTextAsync(path, cancellationToken) : string.Empty;
 
-    private static string BuildRelayHostname(ManagedHost host, string gatewayDomainName)
+    private static string BuildRelayHostname(ManagedHost host, string domainName, string gatewayDomainName)
     {
-        var gatewayDomain = NormalizeHostname(gatewayDomainName);
+        var zoneDomain = NormalizeHostname(domainName);
+        var relayLabel = BuildGatewayRelayLabel(gatewayDomainName, zoneDomain);
         var slug = BuildHostSlug(host);
         var shortId = host.Id.ToString("N")[..8];
-        return $"{slug}-{shortId}.{gatewayDomain}";
+        return NormalizeHostname($"{slug}-{shortId}-lms-{relayLabel}.{zoneDomain}");
+    }
+
+    private static string BuildGatewayRelayLabel(string gatewayDomainName, string zoneDomain)
+    {
+        var gatewayDomain = NormalizeHostname(gatewayDomainName);
+        var suffix = $".{zoneDomain}";
+        var label = gatewayDomain.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+            ? gatewayDomain[..^suffix.Length]
+            : gatewayDomain;
+        label = label.Replace('.', '-');
+        return BuildDnsLabelSlug(label, "relay", maxLength: 20);
     }
 
     private static string BuildHostSlug(ManagedHost host)
     {
         var value = string.IsNullOrWhiteSpace(host.Name) ? host.Hostname : host.Name;
         value = string.IsNullOrWhiteSpace(value) ? "remote-lms" : value;
+        return BuildDnsLabelSlug(value, "remote-lms", maxLength: 24);
+    }
+
+    private static string BuildDnsLabelSlug(string value, string fallback, int maxLength)
+    {
         var builder = new StringBuilder(value.Length);
         foreach (var character in value.Trim().ToLowerInvariant())
         {
@@ -390,10 +422,10 @@ public sealed class RemoteLmsRelayCaddyService(
         var slug = RepeatedDashPattern.Replace(builder.ToString(), "-").Trim('-');
         if (string.IsNullOrWhiteSpace(slug))
         {
-            slug = "remote-lms";
+            slug = fallback;
         }
 
-        return slug.Length > 40 ? slug[..40].Trim('-') : slug;
+        return slug.Length > maxLength ? slug[..maxLength].Trim('-') : slug;
     }
 
     private static string NormalizeHostname(string value)
