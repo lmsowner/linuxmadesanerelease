@@ -385,6 +385,57 @@ internal sealed class SambaRemoteMountService(
         }
     }
 
+    public async Task<RemoteShareMountResult?> ReconnectManagedRemoteMountAsync(
+        Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureStorageDirectories();
+
+        var entity = await dbContext.RemoteShareMounts.SingleOrDefaultAsync(mount => mount.Id == id, cancellationToken);
+        if (entity is null)
+        {
+            return null;
+        }
+
+        var remoteUncPath = BuildRemoteUncPath(entity.RemoteHost, entity.ShareName);
+        var currentMounts = await ReadCurrentMountsAsync(cancellationToken);
+        if (currentMounts.Any(mount =>
+                mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.OrdinalIgnoreCase) ||
+                mount.SourcePath.Equals(remoteUncPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            return new RemoteShareMountResult(
+                id,
+                remoteUncPath,
+                entity.LocalMountPath,
+                Persisted: true,
+                $"{remoteUncPath} is already mounted.");
+        }
+
+        await RunRequiredCommandAsync(
+            "mkdir",
+            ["-p", entity.LocalMountPath],
+            $"Create LMS mount path {entity.LocalMountPath}",
+            requiresSudo: true,
+            cancellationToken);
+
+        await RunRequiredCommandAsync(
+            "mount",
+            [entity.LocalMountPath],
+            $"Reconnect LMS mount {entity.LocalMountPath}",
+            requiresSudo: true,
+            cancellationToken);
+
+        entity.LastMountedAtUtc = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return new RemoteShareMountResult(
+            id,
+            remoteUncPath,
+            entity.LocalMountPath,
+            Persisted: true,
+            $"Reconnected {remoteUncPath} on {entity.LocalMountPath}.");
+    }
+
     public async Task CleanupTemporaryMountsAsync(CancellationToken cancellationToken = default)
     {
         EnsureStorageDirectories();

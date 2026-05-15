@@ -82,6 +82,12 @@ public sealed class ShareManagementService(
         return new ShareManagerViewModel(shares, systemCheck);
     }
 
+    public async Task<int> GetShareCountAsync(CancellationToken cancellationToken = default)
+    {
+        var shares = await shareDataService.ListSharesAsync(cancellationToken);
+        return shares.Count;
+    }
+
     public async Task<UsersGroupsManagerViewModel> GetUsersGroupsManagerAsync(CancellationToken cancellationToken = default)
     {
         var users = await shareDataService.ListUsersAsync(cancellationToken);
@@ -334,24 +340,59 @@ public sealed class ShareManagementService(
 
     public async Task<NetworkShareMountExplorerViewModel> GetNetworkShareMountExplorerAsync(
         NetworkShareDiscoveryScope discoveryScope = NetworkShareDiscoveryScope.Lan,
+        bool runDiscovery = true,
         CancellationToken cancellationToken = default)
     {
-        var tooling = await GetShareToolingStatusAsync(cancellationToken);
-        var discovery = tooling.CanScanNetwork
+        var tooling = runDiscovery
+            ? await GetShareToolingStatusAsync(cancellationToken)
+            : BuildDeferredShareToolingStatus();
+        var discovery = runDiscovery && tooling.CanScanNetwork
             ? await shareDataService.DiscoverNetworkShareMachinesAsync(discoveryScope, cancellationToken)
-            : new NetworkShareMachineDiscoveryResult(
-                [],
-                "Network SMB discovery is paused until the required Ubuntu share tooling is installed on this LMS host.",
-                ["Install the missing share packages below, then rescan the network."],
-                discoveryScope);
+            : runDiscovery
+                ? BuildUnavailableDiscovery(discoveryScope)
+                : BuildDeferredDiscovery(discoveryScope);
         var currentMounts = await shareDataService.ListCurrentMountsAsync(cancellationToken);
         var managedMounts = await shareDataService.ListManagedRemoteMountsAsync(cancellationToken);
         return new NetworkShareMountExplorerViewModel(tooling, discovery, currentMounts, managedMounts);
     }
 
-    public async Task<SshfsMountExplorerViewModel> GetSshfsMountExplorerAsync(CancellationToken cancellationToken = default)
+    private static NetworkShareMachineDiscoveryResult BuildDeferredDiscovery(NetworkShareDiscoveryScope discoveryScope) =>
+        new(
+            [],
+            discoveryScope == NetworkShareDiscoveryScope.Tailnet
+                ? "Tailnet discovery has not been run yet. Search the tailnet when you want LMS to look for SMB targets."
+                : "Network discovery has not been run yet. Refresh when you want LMS to scan for SMB targets.",
+            ["Mounted shares are listed without waiting for a network scan."],
+            discoveryScope);
+
+    private static NetworkShareMachineDiscoveryResult BuildUnavailableDiscovery(NetworkShareDiscoveryScope discoveryScope) =>
+        new(
+            [],
+            "Network SMB discovery is paused until the required Ubuntu share tooling is installed on this LMS host.",
+            ["Install the missing share packages below, then rescan the network."],
+            discoveryScope);
+
+    private static ShareToolingStatusViewModel BuildDeferredShareToolingStatus() =>
+        new(
+            HasAllRequiredPackages: true,
+            CanScanNetwork: true,
+            CanBrowseRemoteShares: true,
+            CanCreateRemoteMounts: true,
+            IsLocalHostRegistered: false,
+            LocalHostName: null,
+            StatusMessage: "Saved mount state was loaded without waiting for package inspection.",
+            InstallCommand: string.Empty,
+            MissingPackageNames: [],
+            Notes: ["Package checks run when you refresh discovery or mount a new share."],
+            Packages: []);
+
+    public async Task<SshfsMountExplorerViewModel> GetSshfsMountExplorerAsync(
+        bool inspectTooling = true,
+        CancellationToken cancellationToken = default)
     {
-        var tooling = await GetSshfsToolingStatusAsync(cancellationToken);
+        var tooling = inspectTooling
+            ? await GetSshfsToolingStatusAsync(cancellationToken)
+            : BuildDeferredSshfsToolingStatus();
         var service = GetRequiredSshfsMountService();
 
         return new SshfsMountExplorerViewModel(
@@ -360,6 +401,18 @@ public sealed class ShareManagementService(
             await service.ListCurrentMountsAsync(cancellationToken),
             await service.ListManagedMountsAsync(cancellationToken));
     }
+
+    private static SshfsToolingStatusViewModel BuildDeferredSshfsToolingStatus() =>
+        new(
+            HasAllRequiredPackages: true,
+            CanCreateSshfsMounts: true,
+            IsLocalHostRegistered: false,
+            LocalHostName: null,
+            StatusMessage: "Saved SSHFS mount state was loaded without waiting for package inspection.",
+            InstallCommand: string.Empty,
+            MissingPackageNames: [],
+            Notes: ["Package checks run when you create or refresh SSHFS mounts."],
+            Packages: []);
 
     public async Task<RemoteShareBrowseResult> BrowseRemoteSharesAsync(
         RemoteShareConnectionEditor editor,
@@ -441,6 +494,11 @@ public sealed class ShareManagementService(
             cancellationToken);
     }
 
+    public Task<RemoteShareMountResult?> ReconnectManagedRemoteMountAsync(
+        Guid id,
+        CancellationToken cancellationToken = default) =>
+        shareDataService.ReconnectManagedRemoteMountAsync(id, cancellationToken);
+
     public async Task<SshfsMountResult> CreateSshfsMountAsync(
         SshfsMountEditor editor,
         CancellationToken cancellationToken = default)
@@ -459,6 +517,58 @@ public sealed class ShareManagementService(
                 editor.LocalMountPath.Trim(),
                 editor.PersistOnServer),
             cancellationToken);
+    }
+
+    public Task<SshfsMountResult?> ReconnectManagedSshfsMountAsync(
+        Guid id,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredSshfsMountService().ReconnectManagedMountAsync(id, cancellationToken);
+
+    public async Task<ShareMountReconnectSummary> ReconnectDisconnectedManagedMountsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var networkExplorer = await GetNetworkShareMountExplorerAsync(runDiscovery: false, cancellationToken: cancellationToken);
+        var sshfsExplorer = await GetSshfsMountExplorerAsync(inspectTooling: false, cancellationToken);
+        var reconnectedNetworkMounts = 0;
+        var failedNetworkMounts = 0;
+        var reconnectedSshfsMounts = 0;
+        var failedSshfsMounts = 0;
+
+        foreach (var mount in networkExplorer.ManagedMounts.Where(mount => !mount.IsMounted))
+        {
+            try
+            {
+                if (await ReconnectManagedRemoteMountAsync(mount.Id, cancellationToken) is not null)
+                {
+                    reconnectedNetworkMounts++;
+                }
+            }
+            catch
+            {
+                failedNetworkMounts++;
+            }
+        }
+
+        foreach (var mount in sshfsExplorer.ManagedMounts.Where(mount => !mount.IsMounted))
+        {
+            try
+            {
+                if (await ReconnectManagedSshfsMountAsync(mount.Id, cancellationToken) is not null)
+                {
+                    reconnectedSshfsMounts++;
+                }
+            }
+            catch
+            {
+                failedSshfsMounts++;
+            }
+        }
+
+        return new ShareMountReconnectSummary(
+            reconnectedNetworkMounts,
+            failedNetworkMounts,
+            reconnectedSshfsMounts,
+            failedSshfsMounts);
     }
 
     public async Task<ShareToolingInstallResult> InstallMissingShareToolingAsync(CancellationToken cancellationToken = default)

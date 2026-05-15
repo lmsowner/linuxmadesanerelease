@@ -10,6 +10,8 @@ public interface IShareManagementService
 
     Task<ShareManagerViewModel> GetShareManagerAsync(CancellationToken cancellationToken = default);
 
+    Task<int> GetShareCountAsync(CancellationToken cancellationToken = default);
+
     Task<UsersGroupsManagerViewModel> GetUsersGroupsManagerAsync(CancellationToken cancellationToken = default);
 
     Task<ShareEditor> GetEditorAsync(Guid? id, CancellationToken cancellationToken = default);
@@ -62,9 +64,12 @@ public interface IShareManagementService
 
     Task<NetworkShareMountExplorerViewModel> GetNetworkShareMountExplorerAsync(
         NetworkShareDiscoveryScope discoveryScope = NetworkShareDiscoveryScope.Lan,
+        bool runDiscovery = true,
         CancellationToken cancellationToken = default);
 
-    Task<SshfsMountExplorerViewModel> GetSshfsMountExplorerAsync(CancellationToken cancellationToken = default);
+    Task<SshfsMountExplorerViewModel> GetSshfsMountExplorerAsync(
+        bool inspectTooling = true,
+        CancellationToken cancellationToken = default);
 
     Task<RemoteShareBrowseResult> BrowseRemoteSharesAsync(
         RemoteShareConnectionEditor editor,
@@ -79,8 +84,19 @@ public interface IShareManagementService
         RemoteShareMountEditor editor,
         CancellationToken cancellationToken = default);
 
+    Task<RemoteShareMountResult?> ReconnectManagedRemoteMountAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
+
     Task<SshfsMountResult> CreateSshfsMountAsync(
         SshfsMountEditor editor,
+        CancellationToken cancellationToken = default);
+
+    Task<SshfsMountResult?> ReconnectManagedSshfsMountAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
+
+    Task<ShareMountReconnectSummary> ReconnectDisconnectedManagedMountsAsync(
         CancellationToken cancellationToken = default);
 
     Task<ShareToolingInstallResult> InstallMissingShareToolingAsync(CancellationToken cancellationToken = default);

@@ -12,5 +12,8 @@ public interface ISshfsMountService
 
     Task<SshfsMountResult> CreateMountAsync(SshfsMountRequest request, CancellationToken cancellationToken = default);
 
+    Task<SshfsMountResult?> ReconnectManagedMountAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Task.FromResult<SshfsMountResult?>(null);
+
     Task DeleteManagedMountAsync(Guid id, CancellationToken cancellationToken = default);
 }

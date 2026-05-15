@@ -87,6 +87,11 @@ public interface ILinuxShareModuleDataService
         bool keepSavedPassword,
         CancellationToken cancellationToken = default);
 
+    Task<RemoteShareMountResult?> ReconnectManagedRemoteMountAsync(
+        Guid id,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<RemoteShareMountResult?>(null);
+
     Task CleanupTemporaryRemoteMountsAsync(CancellationToken cancellationToken = default);
 
     Task<bool> ReleaseTemporaryRemoteMountAsync(string localMountPath, CancellationToken cancellationToken = default);

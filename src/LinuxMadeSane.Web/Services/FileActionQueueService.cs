@@ -802,9 +802,7 @@ public sealed class FileActionQueueService(
         CancellationToken cancellationToken,
         Action<string>? reportCurrentDetail)
     {
-        var tempRoot = Path.Combine(
-            Path.GetTempPath(),
-            "linuxmadesane",
+        var tempRoot = LmsTemporaryPaths.Combine(
             "file-actions",
             job.Id.ToString("N"),
             item.Id.ToString("N"));
@@ -1150,7 +1148,7 @@ public sealed class FileActionQueueService(
         ManagedHostConnectionProfile sourceProfile,
         CancellationToken cancellationToken)
     {
-        var stagedRoot = Path.Combine(Path.GetTempPath(), "linuxmadesane", "browser-downloads", job.Id.ToString("N"), item.Id.ToString("N"));
+        var stagedRoot = LmsTemporaryPaths.Combine("browser-downloads", job.Id.ToString("N"), item.Id.ToString("N"));
         Directory.CreateDirectory(stagedRoot);
         var stagedFilePath = Path.Combine(stagedRoot, SanitizeFileName(item.DestinationPath ?? item.DisplayName));
         string? remoteArchivePath = null;

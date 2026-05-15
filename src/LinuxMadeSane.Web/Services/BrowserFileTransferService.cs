@@ -11,7 +11,7 @@ public sealed class BrowserFileTransferService
 {
     private readonly ConcurrentDictionary<string, BrowserUploadTransfer> uploads = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, BrowserDownloadTransfer> downloads = new(StringComparer.Ordinal);
-    private readonly string transferRoot = Path.Combine(Path.GetTempPath(), "linuxmadesane", "browser-transfers");
+    private readonly string transferRoot = LmsTemporaryPaths.Combine("browser-transfers");
 
     public BrowserFileTransferService()
     {
