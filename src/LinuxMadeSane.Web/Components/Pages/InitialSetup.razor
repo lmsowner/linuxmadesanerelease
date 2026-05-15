@@ -1,0 +1,147 @@
+@page "/InitialSetup"
+@page "/initial-setup"
+@layout AuthLayout
+@using LinuxMadeSane.Application.Contracts.Security
+@using LinuxMadeSane.Application.Interfaces
+@inject ISecuritySettingsService SecuritySettingsService
+
+<PageTitle>Initial Setup | Linux Made Sane</PageTitle>
+
+<div class="initial-setup-shell">
+    <section class="initial-setup-showcase">
+        <img class="initial-setup-art" src="/images/lms-auth-panel.png" alt="Linux Made Sane secure access artwork" />
+    </section>
+
+    <section class="initial-setup-panel">
+        <div class="initial-setup-heading">
+            <p class="eyebrow">Linux Made Sane</p>
+            <h1>First access.</h1>
+            <p>Create the first LMS login, prove the MFA code works, then LMS turns authentication on for the built-in interfaces.</p>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(Error))
+        {
+            <p class="initial-setup-callout error">@Error</p>
+        }
+
+        @if (setupState is null)
+        {
+            <p class="initial-setup-callout">Loading setup state...</p>
+        }
+        else if (setupState.IsComplete)
+        {
+            <div class="initial-setup-card">
+                <h2>Initial setup is complete.</h2>
+                <p>Use the normal LMS login screen with your email and MFA code.</p>
+                <a class="initial-setup-primary" href="/login">Open login</a>
+            </div>
+        }
+        else if (setupState.CanStart)
+        {
+            <form method="post" action="/auth/initial-setup/start" class="initial-setup-form">
+                <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+
+                <label class="initial-setup-field">
+                    <span>Email</span>
+                    <input name="email" type="email" value="@Email" autocomplete="email" placeholder="you@example.com" required />
+                </label>
+
+                <button class="initial-setup-primary" type="submit">Register LMS login</button>
+                <p class="initial-setup-footnote">Use an email address you control. LMS uses it for MFA setup, passkeys, and recovery workflows.</p>
+            </form>
+        }
+        else if (setupState.CanVerify && provisioning is not null)
+        {
+            <div class="initial-setup-card">
+                <div class="initial-setup-account">
+                    <div>
+                        <span>Account</span>
+                        <strong>@provisioning.Email</strong>
+                    </div>
+                    <div>
+                        <span>Linux user</span>
+                        <strong>@provisioning.LinuxUsername</strong>
+                    </div>
+                </div>
+
+                <div class="initial-setup-qr-row">
+                    <div class="initial-setup-qr-box">
+                        <UiQrCode Payload="@provisioning.OtpUri"
+                                  AriaLabel="Linux Made Sane MFA setup QR code" />
+                    </div>
+                    <div class="initial-setup-manual-key">
+                        <span>Manual key</span>
+                        <code>@provisioning.ManualEntryKey</code>
+                    </div>
+                </div>
+
+                <form method="post" action="/auth/initial-setup/verify" class="initial-setup-form compact">
+                    <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+                    <input type="hidden" name="userId" value="@provisioning.UserId" />
+                    <input type="hidden" name="email" value="@provisioning.Email" />
+
+                    <label class="initial-setup-field">
+                        <span>MFA code</span>
+                        <input name="otpCode"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="one-time-code"
+                               maxlength="6"
+                               pattern="[0-9]{6}"
+                               placeholder="123456"
+                               required />
+                    </label>
+
+                    <button class="initial-setup-primary" type="submit">Confirm MFA and enable authentication</button>
+                </form>
+
+                <form method="post" action="/auth/initial-setup/reset" class="initial-setup-reset-form">
+                    <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+                    <button class="initial-setup-secondary" type="submit">Rotate setup QR</button>
+                </form>
+            </div>
+        }
+    </section>
+</div>
+
+@code {
+    [SupplyParameterFromQuery]
+    public string? ReturnUrl { get; set; }
+
+    [SupplyParameterFromQuery]
+    public string? Error { get; set; }
+
+    [SupplyParameterFromQuery]
+    public string? Email { get; set; }
+
+    private InitialSetupViewModel? setupState;
+    private SecurityUserProvisioningViewModel? provisioning;
+
+    private string NormalizedReturnUrl => NormalizeReturnUrl(ReturnUrl);
+
+    protected override async Task OnInitializedAsync()
+    {
+        setupState = await SecuritySettingsService.GetInitialSetupAsync();
+        if (setupState.CanVerify)
+        {
+            provisioning = await SecuritySettingsService.GetInitialSetupProvisioningAsync();
+        }
+    }
+
+    private static string NormalizeReturnUrl(string? returnUrl)
+    {
+        if (string.IsNullOrWhiteSpace(returnUrl))
+        {
+            return "/";
+        }
+
+        var trimmed = returnUrl.Trim();
+        return trimmed.StartsWith("/", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("//", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("/\\", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("/InitialSetup", StringComparison.OrdinalIgnoreCase) &&
+               !trimmed.StartsWith("/initial-setup", StringComparison.OrdinalIgnoreCase)
+            ? trimmed
+            : "/";
+    }
+}

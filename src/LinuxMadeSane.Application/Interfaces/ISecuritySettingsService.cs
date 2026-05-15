@@ -5,6 +5,11 @@ namespace LinuxMadeSane.Application.Interfaces;
 public interface ISecuritySettingsService
 {
     Task<SecuritySettingsPageViewModel> GetPageAsync(CancellationToken cancellationToken = default);
+    Task<InitialSetupViewModel> GetInitialSetupAsync(CancellationToken cancellationToken = default);
+    Task<SecurityUserProvisioningViewModel?> GetInitialSetupProvisioningAsync(string? lmsLoginUrl = null, CancellationToken cancellationToken = default);
+    Task<SecurityUserProvisioningViewModel> StartInitialSetupAsync(SecurityUserEditor editor, string? lmsLoginUrl = null, CancellationToken cancellationToken = default);
+    Task<SecurityUserProvisioningViewModel> ResetInitialSetupOtpAsync(string? lmsLoginUrl = null, CancellationToken cancellationToken = default);
+    Task<SecurityAuthenticationResult> ConfirmInitialSetupOtpAsync(Guid userId, string otpCode, CancellationToken cancellationToken = default);
     Task<SecurityUserProvisioningViewModel> CreateUserAsync(SecurityUserEditor editor, string? lmsLoginUrl = null, CancellationToken cancellationToken = default);
     Task<SecurityUserAccessEditor> GetUserEditorAsync(Guid userId, CancellationToken cancellationToken = default);
     Task SaveUserAsync(SecurityUserAccessEditor editor, CancellationToken cancellationToken = default);

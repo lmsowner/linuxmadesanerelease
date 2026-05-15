@@ -36,10 +36,145 @@ public sealed class SecuritySettingsService(
             MapMessaging(await messagingEmailSettingsStore.GetAsync(cancellationToken)));
     }
 
-    public async Task<SecurityUserProvisioningViewModel> CreateUserAsync(
+    public async Task<InitialSetupViewModel> GetInitialSetupAsync(CancellationToken cancellationToken = default)
+    {
+        var users = await securityUserStore.ListAsync(cancellationToken);
+        return BuildInitialSetupViewModel(users);
+    }
+
+    public async Task<SecurityUserProvisioningViewModel?> GetInitialSetupProvisioningAsync(
+        string? lmsLoginUrl = null,
+        CancellationToken cancellationToken = default)
+    {
+        var users = await securityUserStore.ListAsync(cancellationToken);
+        var state = BuildInitialSetupViewModel(users);
+        if (!state.CanVerify || !state.PendingUserId.HasValue)
+        {
+            return null;
+        }
+
+        var pendingUser = users.Single(user => user.Id == state.PendingUserId.Value);
+        var secret = await secretStore.ResolveSecretAsync(pendingUser.OtpSecretReference, cancellationToken);
+        if (string.IsNullOrWhiteSpace(secret))
+        {
+            throw new InvalidOperationException("The pending setup authenticator secret could not be loaded.");
+        }
+
+        return await BuildProvisioningResultAsync(
+            pendingUser,
+            secret,
+            lmsLoginUrl,
+            LoginSetupEmailKind.Created,
+            sendEmail: false,
+            cancellationToken);
+    }
+
+    public async Task<SecurityUserProvisioningViewModel> StartInitialSetupAsync(
         SecurityUserEditor editor,
         string? lmsLoginUrl = null,
         CancellationToken cancellationToken = default)
+    {
+        var state = await GetInitialSetupAsync(cancellationToken);
+        if (!state.CanStart)
+        {
+            throw new InvalidOperationException(state.CanVerify
+                ? "Initial setup has already started. Verify the pending MFA code or reset the setup QR."
+                : "Initial setup is already complete.");
+        }
+
+        return await CreateUserInternalAsync(
+            editor,
+            isEnabled: false,
+            provisionLocalAccount: false,
+            lmsLoginUrl,
+            LoginSetupEmailKind.Created,
+            cancellationToken);
+    }
+
+    public async Task<SecurityUserProvisioningViewModel> ResetInitialSetupOtpAsync(
+        string? lmsLoginUrl = null,
+        CancellationToken cancellationToken = default)
+    {
+        var state = await GetInitialSetupAsync(cancellationToken);
+        if (!state.CanVerify || !state.PendingUserId.HasValue)
+        {
+            throw new InvalidOperationException(state.IsComplete
+                ? "Initial setup is already complete."
+                : "Initial setup has not started yet.");
+        }
+
+        return await ResetUserOtpAsync(state.PendingUserId.Value, lmsLoginUrl, cancellationToken);
+    }
+
+    public async Task<SecurityAuthenticationResult> ConfirmInitialSetupOtpAsync(
+        Guid userId,
+        string otpCode,
+        CancellationToken cancellationToken = default)
+    {
+        var users = await securityUserStore.ListAsync(cancellationToken);
+        var state = BuildInitialSetupViewModel(users);
+        if (!state.CanVerify || state.PendingUserId != userId)
+        {
+            return SecurityAuthenticationResult.Failure(state.IsComplete
+                ? "Initial setup is already complete."
+                : "Initial setup has not started yet.");
+        }
+
+        var user = users.Single(candidate => candidate.Id == userId);
+        var secret = await secretStore.ResolveSecretAsync(user.OtpSecretReference, cancellationToken);
+        if (string.IsNullOrWhiteSpace(secret))
+        {
+            return SecurityAuthenticationResult.Failure("The pending setup authenticator secret could not be loaded.");
+        }
+
+        if (!TotpAuthenticator.ValidateCode(secret, otpCode))
+        {
+            return SecurityAuthenticationResult.Failure("The OTP code was not valid.");
+        }
+
+        var linuxUsername = ResolveLinuxUsername(user);
+        var isLocalAccountManaged = user.IsLocalAccountManaged ||
+                                    await remoteAccessSystemService.EnsureLocalAccountAsync(
+                                        linuxUsername,
+                                        cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        var enabledUser = user with
+        {
+            LinuxUsername = linuxUsername,
+            IsEnabled = true,
+            IsLocalAccountManaged = isLocalAccountManaged,
+            LastLoginAtUtc = now,
+            UpdatedAtUtc = now
+        };
+        await securityUserStore.SaveAsync(enabledUser, cancellationToken);
+        await EnableAuthenticationForBuiltInNetworksAsync(cancellationToken);
+        await ApplyRemoteAccessConfigurationAsync(cancellationToken);
+
+        return SecurityAuthenticationResult.Success(
+            enabledUser.Id,
+            enabledUser.Email,
+            enabledUser.SessionLifetimeMinutes);
+    }
+
+    public async Task<SecurityUserProvisioningViewModel> CreateUserAsync(
+        SecurityUserEditor editor,
+        string? lmsLoginUrl = null,
+        CancellationToken cancellationToken = default) =>
+        await CreateUserInternalAsync(
+            editor,
+            isEnabled: true,
+            provisionLocalAccount: true,
+            lmsLoginUrl,
+            LoginSetupEmailKind.Created,
+            cancellationToken);
+
+    private async Task<SecurityUserProvisioningViewModel> CreateUserInternalAsync(
+        SecurityUserEditor editor,
+        bool isEnabled,
+        bool provisionLocalAccount,
+        string? lmsLoginUrl,
+        LoginSetupEmailKind emailKind,
+        CancellationToken cancellationToken)
     {
         var normalizedEmail = NormalizeEmail(editor.Email);
         var existing = await securityUserStore.FindByEmailAsync(normalizedEmail, cancellationToken);
@@ -61,13 +196,14 @@ public sealed class SecuritySettingsService(
             var (linuxUsername, isLocalAccountManaged) = await ResolveLinuxUsernameForCreateAsync(
                 normalizedEmail,
                 editor.LinuxUsername,
+                provisionLocalAccount,
                 cancellationToken);
 
             user = new SecurityUser(
                 Guid.NewGuid(),
                 normalizedEmail,
                 linuxUsername,
-                true,
+                isEnabled,
                 sessionLifetimeMinutes,
                 editor.SshAuthenticationMode,
                 NormalizeAuthorizedKeyEntries(editor.AuthorizedKeyEntries),
@@ -79,7 +215,10 @@ public sealed class SecuritySettingsService(
                 null);
 
             await securityUserStore.SaveAsync(user, cancellationToken);
-            await ApplyRemoteAccessConfigurationAsync(cancellationToken);
+            if (provisionLocalAccount)
+            {
+                await ApplyRemoteAccessConfigurationAsync(cancellationToken);
+            }
         }
         catch
         {
@@ -91,7 +230,8 @@ public sealed class SecuritySettingsService(
             user,
             secret,
             lmsLoginUrl,
-            LoginSetupEmailKind.Created,
+            emailKind,
+            sendEmail: true,
             cancellationToken);
     }
 
@@ -185,6 +325,7 @@ public sealed class SecuritySettingsService(
             secret,
             lmsLoginUrl,
             LoginSetupEmailKind.Reset,
+            sendEmail: true,
             cancellationToken);
     }
 
@@ -544,6 +685,7 @@ public sealed class SecuritySettingsService(
     private async Task<(string LinuxUsername, bool IsLocalAccountManaged)> ResolveLinuxUsernameForCreateAsync(
         string normalizedEmail,
         string requestedLinuxUsername,
+        bool provisionLocalAccount,
         CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(requestedLinuxUsername))
@@ -555,6 +697,11 @@ public sealed class SecuritySettingsService(
             if (existingLinuxUsername is not null)
             {
                 throw new InvalidOperationException("An LMS account with that Linux username already exists.");
+            }
+
+            if (!provisionLocalAccount)
+            {
+                return (linuxUsername, false);
             }
 
             var isLocalAccountManaged = await remoteAccessSystemService.EnsureLocalAccountAsync(linuxUsername, cancellationToken);
@@ -587,6 +734,11 @@ public sealed class SecuritySettingsService(
             if (existingLinuxUsername is not null)
             {
                 continue;
+            }
+
+            if (!provisionLocalAccount)
+            {
+                return (candidate, false);
             }
 
             var isLocalAccountManaged = await remoteAccessSystemService.EnsureLocalAccountAsync(candidate, cancellationToken);
@@ -637,17 +789,20 @@ public sealed class SecuritySettingsService(
         string secret,
         string? lmsLoginUrl,
         LoginSetupEmailKind emailKind,
+        bool sendEmail,
         CancellationToken cancellationToken)
     {
         var manualEntryKey = TotpAuthenticator.FormatManualEntryKey(secret);
         var otpUri = TotpAuthenticator.BuildOtpUri(user.Email, secret);
-        var emailResult = await SendLoginSetupEmailIfAvailableAsync(
-            user,
-            manualEntryKey,
-            otpUri,
-            lmsLoginUrl,
-            emailKind,
-            cancellationToken);
+        var emailResult = sendEmail
+            ? await SendLoginSetupEmailIfAvailableAsync(
+                user,
+                manualEntryKey,
+                otpUri,
+                lmsLoginUrl,
+                emailKind,
+                cancellationToken)
+            : new EmailDeliveryResult(false, false, "Setup QR is ready on this screen.");
 
         return new SecurityUserProvisioningViewModel(
             user.Id,
@@ -820,6 +975,72 @@ public sealed class SecuritySettingsService(
     {
         Created,
         Reset
+    }
+
+    private static InitialSetupViewModel BuildInitialSetupViewModel(IReadOnlyList<SecurityUser> users)
+    {
+        var orderedUsers = users
+            .OrderBy(user => user.CreatedAtUtc)
+            .ThenBy(user => user.Email, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (orderedUsers.Length == 0)
+        {
+            return new InitialSetupViewModel(
+                false,
+                true,
+                false,
+                null,
+                string.Empty,
+                string.Empty,
+                0,
+                "Create the first LMS login.");
+        }
+
+        var pendingUser = orderedUsers.Length == 1 &&
+                          !orderedUsers[0].IsEnabled &&
+                          !orderedUsers[0].LastLoginAtUtc.HasValue
+            ? orderedUsers[0]
+            : null;
+        if (pendingUser is not null)
+        {
+            return new InitialSetupViewModel(
+                false,
+                false,
+                true,
+                pendingUser.Id,
+                pendingUser.Email,
+                ResolveLinuxUsername(pendingUser),
+                orderedUsers.Length,
+                "Verify the first MFA code to finish setup.");
+        }
+
+        return new InitialSetupViewModel(
+            true,
+            false,
+            false,
+            null,
+            string.Empty,
+            string.Empty,
+            orderedUsers.Length,
+            "Initial setup is complete.");
+    }
+
+    private async Task EnableAuthenticationForBuiltInNetworksAsync(CancellationToken cancellationToken)
+    {
+        var entries = await trustedNetworkStore.ListAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+
+        foreach (var entry in entries.Where(candidate => candidate.IsBuiltIn))
+        {
+            await trustedNetworkStore.SaveAsync(entry with
+            {
+                IsEnabled = true,
+                IsTrustedAccessEnabled = false,
+                IsAuthenticationEnabled = true,
+                UpdatedAtUtc = now
+            }, cancellationToken);
+        }
     }
 
     private static TrustedNetworkEntryViewModel MapTrustedNetwork(TrustedNetworkEntry entry) =>

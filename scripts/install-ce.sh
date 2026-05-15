@@ -138,4 +138,5 @@ lms_log "CE install complete"
 printf 'version: %s\nservice unit: %s\ninstall root: %s\ndata root: %s\nconfig file: %s\nport: %s\n' \
   "$PACKAGE_VERSION" "$SERVICE_UNIT" "$INSTALL_ROOT_ABS" "$DATA_ROOT_ABS" "$ENV_FILE" "$SERVICE_PORT"
 printf 'local SSH runner: %s@localhost:22\n' "$RUNNER_USER"
+lms_print_access_urls "$SERVICE_PORT"
 printf 'update command: sudo %s\n' "$UPDATE_HELPER_PATH"

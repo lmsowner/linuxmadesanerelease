@@ -269,6 +269,50 @@ SUDOERS
   lms_log "Prepared LMS update helper $helper_path"
 }
 
+lms_print_access_urls() {
+  local service_port="${1:-5080}"
+
+  printf '\nOpen LMS from a browser that can reach this machine:\n'
+
+  local seen=" "
+  lms_add_setup_url() {
+    local host="$1"
+    host="${host%% *}"
+    host="${host%/}"
+    [[ -n "$host" ]] || return 0
+    [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "::1" ]] && return 0
+
+    if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+      host="[$host]"
+    fi
+
+    case "$seen" in
+      *" $host "*) return 0 ;;
+    esac
+
+    seen="$seen$host "
+    printf '  http://%s:%s/\n' "$host" "$service_port"
+  }
+
+  lms_add_setup_url "$(hostname -f 2>/dev/null || true)"
+  lms_add_setup_url "$(hostname -s 2>/dev/null || true)"
+  lms_add_setup_url "$(hostname 2>/dev/null || true)"
+
+  if command -v ip >/dev/null 2>&1; then
+    while read -r address; do
+      lms_add_setup_url "$address"
+    done < <(ip -o -4 addr show scope global 2>/dev/null | awk '{ split($4, parts, "/"); print parts[1] }')
+  fi
+
+  if command -v hostname >/dev/null 2>&1; then
+    for address in $(hostname -I 2>/dev/null || true); do
+      lms_add_setup_url "$address"
+    done
+  fi
+
+  printf '  http://127.0.0.1:%s/  (server console only)\n' "$service_port"
+}
+
 lms_reset_dir() {
   local path="$1"
   rm -rf "$path"

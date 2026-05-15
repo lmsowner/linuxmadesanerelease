@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using LinuxMadeSane.Application;
 using LinuxMadeSane.Application.Contracts.EdgeGateway;
+using LinuxMadeSane.Application.Contracts.Security;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
@@ -196,6 +197,13 @@ public class Program
                     true,
                     true,
                     false);
+                if (await ShouldRedirectToInitialSetupAsync(context))
+                {
+                    context.Response.Redirect(BuildInitialSetupRedirectTarget(
+                        NormalizeReturnUrl($"{context.Request.Path}{context.Request.QueryString}")));
+                    return;
+                }
+
                 await next();
                 return;
             }
@@ -213,6 +221,13 @@ public class Program
             if (accessResult.IsTrusted ||
                 (accessResult.RequiresAuthentication && context.User.Identity?.IsAuthenticated == true))
             {
+                if (await ShouldRedirectToInitialSetupAsync(context))
+                {
+                    context.Response.Redirect(BuildInitialSetupRedirectTarget(
+                        NormalizeReturnUrl($"{context.Request.Path}{context.Request.QueryString}")));
+                    return;
+                }
+
                 await next();
                 return;
             }
@@ -367,6 +382,115 @@ public class Program
 
             return Results.Redirect(target);
         });
+        app.MapPost("/auth/initial-setup/start", async (
+            HttpContext context,
+            ISecuritySettingsService securitySettingsService) =>
+        {
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            var email = form["email"].ToString();
+            var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
+
+            try
+            {
+                await securitySettingsService.StartInitialSetupAsync(
+                    new SecurityUserEditor
+                    {
+                        Email = email,
+                        SessionLifetimeMinutes = SecuritySessionPolicy.DefaultSessionLifetimeMinutes,
+                        SshAuthenticationMode = RemoteAccessSshAuthenticationMode.Password
+                    },
+                    BuildAbsoluteLoginUrl(context, email),
+                    context.RequestAborted);
+
+                return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl));
+            }
+            catch (Exception exception)
+            {
+                return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl, exception.Message, email));
+            }
+        }).DisableAntiforgery();
+        app.MapPost("/auth/initial-setup/reset", async (
+            HttpContext context,
+            ISecuritySettingsService securitySettingsService) =>
+        {
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
+
+            try
+            {
+                await securitySettingsService.ResetInitialSetupOtpAsync(
+                    BuildAbsoluteLoginUrl(context, null),
+                    context.RequestAborted);
+
+                return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl));
+            }
+            catch (Exception exception)
+            {
+                return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl, exception.Message));
+            }
+        }).DisableAntiforgery();
+        app.MapPost("/auth/initial-setup/verify", async (
+            HttpContext context,
+            ISecuritySettingsService securitySettingsService,
+            PasskeyAuthenticationService passkeyAuthenticationService) =>
+        {
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
+            if (!Guid.TryParse(form["userId"].ToString(), out var userId))
+            {
+                return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl, "The pending setup user was not valid."));
+            }
+
+            var otpCode = form["otpCode"].ToString();
+            var result = await securitySettingsService.ConfirmInitialSetupOtpAsync(
+                userId,
+                otpCode,
+                context.RequestAborted);
+            if (!result.Succeeded || !result.UserId.HasValue || string.IsNullOrWhiteSpace(result.Email))
+            {
+                return Results.Redirect(BuildInitialSetupRedirectTarget(
+                    returnUrl,
+                    result.FailureMessage ?? "The MFA code was not valid.",
+                    form["email"].ToString()));
+            }
+
+            Claim[] claims =
+            [
+                new Claim(ClaimTypes.NameIdentifier, result.UserId.Value.ToString()),
+                new Claim(ClaimTypes.Name, result.Email),
+                new Claim(ClaimTypes.Email, result.Email),
+                new Claim("lms:mfa", "true"),
+                new Claim("amr", "otp")
+            ];
+
+            var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme));
+            var sessionLifetime = TimeSpan.FromMinutes(
+                SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(result.SessionLifetimeMinutes));
+            var issuedAtUtc = DateTimeOffset.UtcNow;
+            ((ClaimsIdentity)principal.Identity!).AddClaim(new Claim(
+                "auth_time",
+                issuedAtUtc.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            await context.SignInAsync(
+                CookieAuthenticationDefaults.AuthenticationScheme,
+                principal,
+                new AuthenticationProperties
+                {
+                    IsPersistent = false,
+                    AllowRefresh = false,
+                    IssuedUtc = issuedAtUtc,
+                    ExpiresUtc = issuedAtUtc.Add(sessionLifetime)
+                });
+
+            if (IsPasskeyCapableRequest(context) &&
+                await passkeyAuthenticationService.ShouldOfferPasskeySetupAsync(
+                    result.UserId.Value,
+                    context.RequestAborted))
+            {
+                return Results.Redirect(BuildPasskeySetupRedirectTarget(returnUrl));
+            }
+
+            return Results.Redirect(returnUrl);
+        }).DisableAntiforgery();
         app.MapPost("/auth/login", async (
             HttpContext context,
             ISecurityAuthenticationService authenticationService,
@@ -416,10 +540,11 @@ public class Program
                     ExpiresUtc = issuedAtUtc.Add(sessionLifetime)
                 });
 
-            if (IsEdgeGatewayReturnUrl(returnUrl) ||
+            if (IsPasskeyCapableRequest(context) &&
+                (IsEdgeGatewayReturnUrl(returnUrl) ||
                 await passkeyAuthenticationService.ShouldOfferPasskeySetupAsync(
                     result.UserId.Value,
-                    context.RequestAborted))
+                    context.RequestAborted)))
             {
                 context.Response.Redirect(BuildPasskeySetupRedirectTarget(returnUrl));
                 return;
@@ -966,7 +1091,12 @@ public class Program
     private static bool IsEdgeAuthCheckPath(PathString path) =>
         path.StartsWithSegments("/edge-auth/check");
 
+    private static bool IsInitialSetupPath(PathString path) =>
+        path.Value?.Equals("/InitialSetup", StringComparison.OrdinalIgnoreCase) == true ||
+        path.Value?.Equals("/initial-setup", StringComparison.OrdinalIgnoreCase) == true;
+
     private static bool IsAuthenticationEntryPath(PathString path) =>
+        IsInitialSetupPath(path) ||
         path.StartsWithSegments("/login") ||
         path.StartsWithSegments("/auth");
 
@@ -1041,6 +1171,83 @@ public class Program
         }
 
         return $"/login?{string.Join("&", queryParts)}";
+    }
+
+    private static string BuildInitialSetupRedirectTarget(
+        string returnUrl,
+        string? errorMessage = null,
+        string? email = null)
+    {
+        var queryParts = new List<string>
+        {
+            $"returnUrl={Uri.EscapeDataString(NormalizeReturnUrl(returnUrl))}"
+        };
+
+        if (!string.IsNullOrWhiteSpace(errorMessage))
+        {
+            queryParts.Add($"error={Uri.EscapeDataString(errorMessage)}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(email))
+        {
+            queryParts.Add($"email={Uri.EscapeDataString(email.Trim())}");
+        }
+
+        return $"/InitialSetup?{string.Join("&", queryParts)}";
+    }
+
+    private static async Task<bool> ShouldRedirectToInitialSetupAsync(HttpContext context)
+    {
+        if (!HttpMethods.IsGet(context.Request.Method) &&
+            !HttpMethods.IsHead(context.Request.Method))
+        {
+            return false;
+        }
+
+        var path = context.Request.Path;
+        if (IsInitialSetupPath(path) ||
+            IsAlwaysAnonymousAllowedPath(path) ||
+            path.StartsWithSegments("/auth") ||
+            path.StartsWithSegments("/api") ||
+            path.StartsWithSegments("/internal"))
+        {
+            return false;
+        }
+
+        var securitySettingsService = context.RequestServices.GetRequiredService<ISecuritySettingsService>();
+        var setup = await securitySettingsService.GetInitialSetupAsync(context.RequestAborted);
+        return !setup.IsComplete;
+    }
+
+    private static string BuildAbsoluteLoginUrl(HttpContext context, string? email)
+    {
+        var builder = new StringBuilder();
+        builder.Append(context.Request.Scheme);
+        builder.Append("://");
+        builder.Append(context.Request.Host.ToUriComponent());
+        builder.Append("/login");
+
+        if (!string.IsNullOrWhiteSpace(email))
+        {
+            builder.Append("?email=");
+            builder.Append(Uri.EscapeDataString(email.Trim()));
+        }
+
+        return builder.ToString();
+    }
+
+    private static bool IsPasskeyCapableRequest(HttpContext context)
+    {
+        if (context.Request.IsHttps)
+        {
+            return true;
+        }
+
+        var host = context.Request.Host.Host;
+        return host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+               host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+               host.Equals("[::1]", StringComparison.OrdinalIgnoreCase) ||
+               host.Equals("::1", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task ValidateRemoteSessionAsync(CookieValidatePrincipalContext context)

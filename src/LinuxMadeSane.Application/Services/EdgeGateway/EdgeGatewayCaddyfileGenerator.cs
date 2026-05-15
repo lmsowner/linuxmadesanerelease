@@ -50,7 +50,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
             {
                 builder.AppendLine($"    @{authMatcherName} {{");
                 builder.AppendLine($"        host {route.Hostname}");
-                builder.AppendLine("        path /login /login/* /auth/login /auth/logout /auth/setup-passkey /edge-auth/* /api/passkeys/login/* /api/passkeys/enroll/* /api/passkeys/register/* /access-denied /scripts/theme*.js /scripts/passkeys*.js /styles/* /lib/xterm/* /lib/pdfjs/pdf_viewer*.css /app*.css /LinuxMadeSane.Web*.styles.css /Components/Pages/Login* /Components/Pages/PasskeySetupPrompt* /images/lms-auth-panel.png /images/lms-splash.png /favicon.png /favicon.ico");
+                builder.AppendLine("        path /InitialSetup /initial-setup /login /login/* /auth/initial-setup/* /auth/login /auth/logout /auth/setup-passkey /edge-auth/* /api/passkeys/login/* /api/passkeys/enroll/* /api/passkeys/register/* /access-denied /scripts/theme*.js /scripts/passkeys*.js /styles/* /lib/xterm/* /lib/pdfjs/pdf_viewer*.css /app*.css /LinuxMadeSane.Web*.styles.css /Components/Pages/Login* /Components/Pages/InitialSetup* /Components/Pages/PasskeySetupPrompt* /images/lms-auth-panel.png /images/lms-splash.png /favicon.png /favicon.ico");
                 builder.AppendLine("    }");
                 builder.AppendLine($"    handle @{authMatcherName} {{");
                 builder.AppendLine($"        reverse_proxy 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
