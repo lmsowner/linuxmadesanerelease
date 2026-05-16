@@ -12,6 +12,12 @@ The canonical installer is:
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
 ```
 
+Short link:
+
+```bash
+curl -fsSL https://bit.ly/4tCQKCN | sudo bash
+```
+
 The public repository remains a safe public CE source/docs surface. It must not receive the public website project, Pro/Enterprise packages, portal packages, private manifests, license secrets, databases, local configuration, credentials, or proprietary implementation details.
 
 Expected files for each release:

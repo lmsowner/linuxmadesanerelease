@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 namespace LinuxMadeSane.Web.Components.Ui;
 
 public enum UiIconGlyph
@@ -43,5 +46,8 @@ public enum UiIconGlyph
     Repair = 38,
     Search = 39,
     Upload = 40,
-    Download = 41
+    Download = 41,
+    Lock = 42,
+    Unlock = 43,
+    Key = 44
 }

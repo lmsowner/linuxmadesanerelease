@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
@@ -59,6 +62,7 @@ public sealed class SqliteSecurityUserStore(LinuxMadeSaneDbContext dbContext) : 
                 NormalizedEmail = user.Email.Trim().ToUpperInvariant(),
                 LinuxUsername = user.LinuxUsername,
                 IsEnabled = user.IsEnabled,
+                SessionLifetimeMinutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(user.SessionLifetimeMinutes),
                 SshAuthenticationMode = (int)user.SshAuthenticationMode,
                 AuthorizedKeyEntries = user.AuthorizedKeyEntries,
                 IsLocalAccountManaged = user.IsLocalAccountManaged,
@@ -75,6 +79,7 @@ public sealed class SqliteSecurityUserStore(LinuxMadeSaneDbContext dbContext) : 
             entity.NormalizedEmail = user.Email.Trim().ToUpperInvariant();
             entity.LinuxUsername = user.LinuxUsername;
             entity.IsEnabled = user.IsEnabled;
+            entity.SessionLifetimeMinutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(user.SessionLifetimeMinutes);
             entity.SshAuthenticationMode = (int)user.SshAuthenticationMode;
             entity.AuthorizedKeyEntries = user.AuthorizedKeyEntries;
             entity.IsLocalAccountManaged = user.IsLocalAccountManaged;
@@ -108,6 +113,7 @@ public sealed class SqliteSecurityUserStore(LinuxMadeSaneDbContext dbContext) : 
             entity.Email,
             entity.LinuxUsername,
             entity.IsEnabled,
+            SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(entity.SessionLifetimeMinutes),
             Enum.IsDefined(typeof(RemoteAccessSshAuthenticationMode), entity.SshAuthenticationMode)
                 ? (RemoteAccessSshAuthenticationMode)entity.SshAuthenticationMode
                 : RemoteAccessSshAuthenticationMode.Password,

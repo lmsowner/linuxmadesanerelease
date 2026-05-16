@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Ai;
@@ -18,6 +21,9 @@ public sealed class SqliteAiProviderRegistry(
         new("openai", AiProviderType.OpenAi, "OpenAI", "Runnable in this build.", true, true),
         new("anthropic", AiProviderType.Anthropic, "Anthropic", "Runnable in this build.", true, true, true, string.Empty, false),
         new("gemini", AiProviderType.Gemini, "Gemini", "Runnable in this build.", true, true, true, string.Empty, false),
+        new("groq", AiProviderType.Groq, "Groq", "GroqCloud OpenAI-compatible chat completions.", true, true, true, string.Empty, false),
+        new("xai", AiProviderType.XAi, "xAI Grok", "xAI Grok OpenAI-compatible chat completions.", true, true, true, string.Empty, false),
+        new("deepseek", AiProviderType.DeepSeek, "DeepSeek", "DeepSeek OpenAI-compatible chat completions.", true, true, true, string.Empty, false),
         new("ollama", AiProviderType.Ollama, "Local Ollama", "Linux Made Sane local AI engine powered by Ollama.", true, true, true, string.Empty, false, false)
     ];
     private static readonly AiProviderDefinition RemoteProviderDefinition =
@@ -65,7 +71,17 @@ public sealed class SqliteAiProviderRegistry(
         new(AiProviderType.Gemini, "gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash-Lite Preview", "Preview Gemini 3.1 Flash-Lite endpoint for fast lightweight work.", true, false),
         new(AiProviderType.Gemini, "gemini-2.5-pro", "Gemini 2.5 Pro", "Advanced Gemini model for complex reasoning and coding tasks.", true, false),
         new(AiProviderType.Gemini, "gemini-2.5-flash", "Gemini 2.5 Flash", "Balanced Gemini model for faster production traffic.", true, false),
-        new(AiProviderType.Gemini, "gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "Fastest low-cost Gemini model for high-throughput workloads.", true, false)
+        new(AiProviderType.Gemini, "gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "Fastest low-cost Gemini model for high-throughput workloads.", true, false),
+
+        new(AiProviderType.Groq, "llama-3.3-70b-versatile", "Llama 3.3 70B Versatile", "Groq-hosted Llama 3.3 70B model with tool use and long-context support.", true, true),
+        new(AiProviderType.Groq, "llama-3.1-8b-instant", "Llama 3.1 8B Instant", "Fast Groq-hosted Llama model for lightweight operational prompts.", true, false),
+        new(AiProviderType.Groq, "openai/gpt-oss-120b", "GPT OSS 120B", "Groq-hosted open-weight model for stronger reasoning workloads.", true, false),
+        new(AiProviderType.Groq, "openai/gpt-oss-20b", "GPT OSS 20B", "Groq-hosted smaller open-weight model for fast everyday tasks.", true, false),
+
+        new(AiProviderType.XAi, "grok-4.3", "Grok 4.3", "xAI flagship Grok model with strong instruction following and tool calling.", true, true),
+
+        new(AiProviderType.DeepSeek, "deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek V4 fast model using non-thinking chat mode for reliable LMS tool workflows.", true, true),
+        new(AiProviderType.DeepSeek, "deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek V4 higher-capability model using non-thinking chat mode for reliable LMS tool workflows.", true, false)
     ];
 
     public IReadOnlyList<AiProviderDefinition> ListSupportedProviders() =>
@@ -147,7 +163,7 @@ public sealed class SqliteAiProviderRegistry(
 
         return settings.ProviderType switch
         {
-            AiProviderType.OpenAi or AiProviderType.Anthropic or AiProviderType.Gemini or AiProviderType.Ollama or AiProviderType.RemoteLmsAiEngine =>
+            AiProviderType.OpenAi or AiProviderType.Anthropic or AiProviderType.Gemini or AiProviderType.Groq or AiProviderType.XAi or AiProviderType.DeepSeek or AiProviderType.Ollama or AiProviderType.RemoteLmsAiEngine =>
                 AiProviderRuntimeFactory.Create(definition, settings, models, secretStore, httpClientFactory, ollamaRuntimeService, remoteGateway),
             _ => new UnavailableAiProvider(
                 settings.ProviderKey,

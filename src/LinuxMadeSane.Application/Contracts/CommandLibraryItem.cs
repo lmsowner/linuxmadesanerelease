@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Core.Models;
 
 namespace LinuxMadeSane.Application.Contracts;
@@ -17,7 +20,8 @@ public sealed record CommandLibraryItem(
     Guid? TemplateSourceId = null,
     Guid? LinkGroupId = null,
     IReadOnlyList<RunbookParameterDefinition>? ParameterDefinitions = null,
-    IReadOnlyDictionary<string, string>? ParameterValueSnapshot = null)
+    IReadOnlyDictionary<string, string>? ParameterValueSnapshot = null,
+    bool IsGlobalFavorite = false)
 {
     public bool IsScript =>
         CommandText.Contains('\n') || CommandText.Contains('\r');

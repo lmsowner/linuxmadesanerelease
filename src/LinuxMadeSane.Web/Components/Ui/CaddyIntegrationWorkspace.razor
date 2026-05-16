@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE.md for details. *@
+
 @using System.Text
 @using LinuxMadeSane.Application.Contracts.Caddy
 @using LinuxMadeSane.Application.Interfaces
@@ -32,11 +35,10 @@ else
         }
 
         <section class="surface-card caddy-overview-card">
-            <div class="table-header">
+            <div class="caddy-overview-header">
                 <div>
                     <p class="eyebrow">Caddy</p>
                     <h3>Reverse proxy manager</h3>
-                    <p class="meta-text">Keep LMS-managed reverse proxy routes tidy, validate the active configuration, and push changes back through the Caddy include file.</p>
                 </div>
 
                 <div class="caddy-header-actions">
@@ -95,16 +97,33 @@ else
                 </article>
             </div>
 
-            <div class="caddy-config-strip">
-                <div class="caddy-config-point">
-                    <span>Main config</span>
-                    <code>@dashboard.MainConfigPath</code>
+            <section class="caddy-config-viewer" aria-label="Caddy config viewer">
+                <div class="caddy-config-toolbar">
+                    <label class="caddy-config-label" for="caddy-config-file">Config file</label>
+                    <select id="caddy-config-file"
+                            class="caddy-config-select"
+                            value="@selectedConfigKey"
+                            disabled="@(configFileOptions.Count == 0 || isConfigLoading)"
+                            @onchange="HandleConfigSelectionChangedAsync">
+                        @foreach (var option in configFileOptions)
+                        {
+                            <option value="@option.Key">@option.Label</option>
+                        }
+                    </select>
+
+                    <UiPill Tone="@GetSelectedConfigTone()">@selectedConfigStatus</UiPill>
                 </div>
-                <div class="caddy-config-point">
-                    <span>LMS include</span>
-                    <code>@dashboard.ManagedConfigPath</code>
-                </div>
-            </div>
+
+                @if (SelectedConfigFile is not null)
+                {
+                    <div class="caddy-config-path-row">
+                        <span>@SelectedConfigFile.Description</span>
+                        <code>@SelectedConfigFile.Path</code>
+                    </div>
+                }
+
+                <pre class="caddy-config-code" aria-readonly="true"><code>@selectedConfigContent</code></pre>
+            </section>
         </section>
 
         @if (!dashboard.IsInstalled)
@@ -145,7 +164,7 @@ else
             {
                 <div class="empty-state caddy-empty-state">
                     <p>No Caddy routes yet.</p>
-                    <p class="meta-text">Add the first hostname once Caddy is installed and LMS will generate the managed reverse proxy include for you.</p>
+                    <p class="meta-text">Add the first manual Caddy route here, or use Edge Gateway for Cloudflare Tunnel publishing.</p>
                 </div>
             }
             else
@@ -404,8 +423,12 @@ else
     private CaddyProxyRouteListItem? routePendingDelete;
     private Guid? loadedHostId;
     private IReadOnlyList<OperationLogEntry> lastOperationLogs = [];
+    private IReadOnlyList<CaddyConfigFileOption> configFileOptions = [];
     private string statusMessage = string.Empty;
     private string editorStatusMessage = string.Empty;
+    private string selectedConfigKey = string.Empty;
+    private string selectedConfigContent = "Select a Caddy config file to inspect.";
+    private string selectedConfigStatus = "Read only";
     private bool statusIsError;
     private bool editorStatusIsError;
     private bool isLoaded;
@@ -416,9 +439,11 @@ else
     private bool isRestarting;
     private bool isSavingRoute;
     private bool isDeletingRoute;
+    private bool isConfigLoading;
 
     private bool IsLocalHost => AiLocalMachine.IsLocalMachine(HostId);
     private bool IsBusy => isInstalling || isReloading || isRestarting || isSavingRoute || isDeletingRoute;
+    private CaddyConfigFileOption? SelectedConfigFile => configFileOptions.FirstOrDefault(option => option.Key == selectedConfigKey);
 
     protected override async Task OnParametersSetAsync()
     {
@@ -439,6 +464,10 @@ else
         if (!IsLocalHost)
         {
             dashboard = null;
+            configFileOptions = [];
+            selectedConfigKey = string.Empty;
+            selectedConfigContent = "Caddy config files are only available on the local LMS host.";
+            selectedConfigStatus = "Unavailable";
             isLoaded = true;
             return;
         }
@@ -457,7 +486,110 @@ else
         }
 
         dashboard = await CaddyIntegrationService.GetDashboardAsync();
+        await RefreshConfigFileOptionsAsync();
         isLoaded = true;
+    }
+
+    private async Task RefreshConfigFileOptionsAsync()
+    {
+        if (dashboard is null)
+        {
+            configFileOptions = [];
+            selectedConfigKey = string.Empty;
+            selectedConfigContent = "No Caddy dashboard is loaded.";
+            selectedConfigStatus = "Unavailable";
+            return;
+        }
+
+        configFileOptions = BuildConfigFileOptions(dashboard);
+        if (configFileOptions.Count == 0)
+        {
+            selectedConfigKey = string.Empty;
+            selectedConfigContent = "No Caddy config paths are known yet.";
+            selectedConfigStatus = "Unavailable";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(selectedConfigKey) ||
+            configFileOptions.All(option => !string.Equals(option.Key, selectedConfigKey, StringComparison.Ordinal)))
+        {
+            selectedConfigKey = configFileOptions[0].Key;
+        }
+
+        await LoadSelectedConfigContentAsync();
+    }
+
+    private static IReadOnlyList<CaddyConfigFileOption> BuildConfigFileOptions(CaddyIntegrationDashboardViewModel model)
+    {
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var options = new List<CaddyConfigFileOption>();
+
+        AddConfigOption(options, seenPaths, "main", "Main Caddyfile", model.MainConfigPath, "Caddy root config");
+        AddConfigOption(options, seenPaths, "manual", "LMS manual routes", model.ManagedConfigPath, "Manual reverse proxy include");
+        AddConfigOption(options, seenPaths, "edge", "Edge Gateway routes", "/etc/caddy/linuxmadesane/edge-gateway.caddy", "Edge Gateway include");
+        AddConfigOption(options, seenPaths, "remote-lms", "Remote LMS relays", "/etc/caddy/linuxmadesane/remote-lms-relays.caddy", "SSH/Caddy LMS relay include");
+
+        return options;
+    }
+
+    private static void AddConfigOption(
+        ICollection<CaddyConfigFileOption> options,
+        ISet<string> seenPaths,
+        string key,
+        string label,
+        string path,
+        string description)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !seenPaths.Add(path))
+        {
+            return;
+        }
+
+        options.Add(new CaddyConfigFileOption(key, label, path, description));
+    }
+
+    private async Task HandleConfigSelectionChangedAsync(ChangeEventArgs args)
+    {
+        selectedConfigKey = args.Value?.ToString() ?? string.Empty;
+        await LoadSelectedConfigContentAsync();
+    }
+
+    private async Task LoadSelectedConfigContentAsync()
+    {
+        var option = SelectedConfigFile;
+        if (option is null)
+        {
+            selectedConfigContent = "No Caddy config file is selected.";
+            selectedConfigStatus = "Unavailable";
+            return;
+        }
+
+        isConfigLoading = true;
+
+        try
+        {
+            if (!System.IO.File.Exists(option.Path))
+            {
+                selectedConfigContent = $"# {option.Path} does not exist yet.";
+                selectedConfigStatus = "Missing";
+                return;
+            }
+
+            var content = await System.IO.File.ReadAllTextAsync(option.Path);
+            selectedConfigContent = string.IsNullOrWhiteSpace(content)
+                ? $"# {option.Path} is empty."
+                : content;
+            selectedConfigStatus = "Read only";
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or System.IO.IOException)
+        {
+            selectedConfigContent = $"# Unable to read {option.Path}\n# {exception.Message}";
+            selectedConfigStatus = "Unreadable";
+        }
+        finally
+        {
+            isConfigLoading = false;
+        }
     }
 
     private async Task OpenCreateRouteDialogAsync()
@@ -736,4 +868,19 @@ else
             OperationLogLevel.Error => UiPillTone.Failure,
             _ => UiPillTone.Neutral
         };
+
+    private UiPillTone GetSelectedConfigTone() =>
+        selectedConfigStatus switch
+        {
+            "Missing" => UiPillTone.Warning,
+            "Unreadable" => UiPillTone.Failure,
+            "Unavailable" => UiPillTone.Neutral,
+            _ => UiPillTone.Success
+        };
+
+    private sealed record CaddyConfigFileOption(
+        string Key,
+        string Label,
+        string Path,
+        string Description);
 }

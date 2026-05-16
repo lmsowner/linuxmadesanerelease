@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Application.Contracts;
 
 namespace LinuxMadeSane.Application.Interfaces;
@@ -22,6 +25,8 @@ public interface IRunbookService
     Task SetHostRunbookAssignmentsAsync(Guid hostId, IReadOnlyList<Guid> runbookIds, CancellationToken cancellationToken = default);
 
     Task SetCommandQuickAccessAsync(Guid commandId, bool isQuickAccess, CancellationToken cancellationToken = default);
+
+    Task SetCommandGlobalFavoriteAsync(Guid commandId, bool isGlobalFavorite, CancellationToken cancellationToken = default);
 
     Task<StarterRunbookImportResult> ImportStarterRunbooksAsync(CancellationToken cancellationToken = default);
 }

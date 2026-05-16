@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -839,6 +842,11 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
         bool keepSavedPassword,
         CancellationToken cancellationToken = default) =>
         sambaRemoteMountService.UpdateManagedRemoteMountAsync(id, request, keepSavedPassword, cancellationToken);
+
+    public Task<RemoteShareMountResult?> ReconnectManagedRemoteMountAsync(
+        Guid id,
+        CancellationToken cancellationToken = default) =>
+        sambaRemoteMountService.ReconnectManagedRemoteMountAsync(id, cancellationToken);
 
     public Task CleanupTemporaryRemoteMountsAsync(CancellationToken cancellationToken = default) =>
         sambaRemoteMountService.CleanupTemporaryMountsAsync(cancellationToken);

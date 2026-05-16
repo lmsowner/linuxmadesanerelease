@@ -10,6 +10,7 @@ For the local machine, the installer also prepares localhost SSH automation by d
 
 - creates a dedicated `linuxmadesane-runner` account
 - creates key-based localhost SSH access for LMS-managed terminal and automation workflows
+- uses `/var/lib/linuxmadesane/runner/workspace` as the default writable working directory
 - enables non-interactive local sudo for LMS automation unless disabled
 
 This is intended to make a fresh Community install usable without asking for a QR code, password prompt, or manual localhost credential setup.

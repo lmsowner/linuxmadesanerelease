@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using System.ComponentModel.DataAnnotations;
 using LinuxMadeSane.Core.Enums;
 
@@ -24,6 +27,8 @@ public sealed class RunbookEditor
     public bool RequiresSudo { get; set; }
 
     public bool IsQuickAccess { get; set; }
+
+    public bool IsGlobalFavorite { get; set; }
 
     public bool IsTemplate { get; set; }
 

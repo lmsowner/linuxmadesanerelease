@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE.md for details. *@
+
 @using LinuxMadeSane.Application.Contracts
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Abstractions
@@ -323,8 +326,8 @@
 </UiModal>
 
 <UiModal IsOpen="@ShowHostLookupDialog"
-         Title="Find SSH host"
-         Subtitle="Probe the LMS server's LAN or, when available, its tailnet for reachable SSH servers, then pick one."
+         Title="Find SSH or LMS host"
+         Subtitle="Probe the LMS server's LAN or, when available, its tailnet for reachable SSH servers. LMS hosts are detected from their health endpoint on port 5080."
          Class="managed-host-lookup-modal"
          CloseOnBackdrop="true"
          OnClose="CloseHostLookupDialog">
@@ -371,7 +374,7 @@
             {
                 <div class="empty-state managed-host-editor-discovery-empty">
                     <h3>No scan run yet</h3>
-                    <p>Choose `Scan LAN` or `Scan tailnet` to look for reachable SSH servers.</p>
+                    <p>Choose `Scan LAN` or `Scan tailnet` to look for reachable SSH servers and detect Linux Made Sane hosts.</p>
                 </div>
             }
             else if (DiscoveredHosts.Count > 0)
@@ -397,10 +400,15 @@
                                 {
                                     <span class="meta-text managed-host-editor-discovery-inline">@host.Platform</span>
                                 }
+
+                                @if (host.IsLinuxMadeSaneHost)
+                                {
+                                    <UiPill Tone="UiPillTone.Success">@FormatLmsDiscoveryLabel(host)</UiPill>
+                                }
                             </div>
 
                             <div class="managed-host-editor-discovery-pick">
-                                <UiCommandButton Label="Use this host"
+                                <UiCommandButton Label="@(host.IsLinuxMadeSaneHost ? "Use LMS host" : "Use this host")"
                                                  Glyph="UiIconGlyph.Connect"
                                                  Variant="UiButtonVariant.Action"
                                                  Disabled="@(IsBusy || IsTestingConnection)"
@@ -855,18 +863,26 @@
 
         Editor.Hostname = host.Target;
         Editor.Port = host.Port;
+        Editor.HostKind = host.IsLinuxMadeSaneHost ? ManagedHostKind.LmsHost : ManagedHostKind.SshHost;
 
         if (string.IsNullOrWhiteSpace(Editor.Platform) && !string.IsNullOrWhiteSpace(host.Platform))
         {
             Editor.Platform = host.Platform;
         }
 
-        HostDiscoveryMessage = $"Using {host.Target}. Review the username and auth details, then save the host.";
+        HostDiscoveryMessage = host.IsLinuxMadeSaneHost
+            ? $"Using {host.Target} as an LMS host. Review the username and auth details, then save the host."
+            : $"Using {host.Target}. Review the username and auth details, then save the host.";
         HostDiscoveryTone = "success";
         ShowHostLookupDialog = false;
         ClearConnectionTestState();
         return Task.CompletedTask;
     }
+
+    private static string FormatLmsDiscoveryLabel(DiscoveredSshHost host) =>
+        string.IsNullOrWhiteSpace(host.LinuxMadeSaneVersion)
+            ? "LMS host"
+            : $"LMS {host.LinuxMadeSaneVersion}";
 
     private Task HandleSaveAsync() => OnSave.InvokeAsync();
 

@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE.md for details. *@
+
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Application.Services
 @inject IRunbookService RunbookService
@@ -55,10 +58,14 @@
                             <UiGlyphIcon Glyph="UiIconGlyph.Run" />
 	                        </span>
 	                        <span class="ui-context-menu-button-label">@command.Name</span>
-	                        @if (command.RequiresSudo)
-	                        {
-	                            <span class="terminal-runbooks-context-tag">sudo</span>
-	                        }
+                        @if (command.RequiresSudo)
+                        {
+                            <span class="terminal-runbooks-context-tag">sudo</span>
+                        }
+                        @if (command.IsGlobalFavorite)
+                        {
+                            <span class="terminal-runbooks-context-tag">global</span>
+                        }
                     </button>
                 }
             }
@@ -126,6 +133,10 @@
                                 {
                                     <span class="terminal-runbooks-selector-item-favourite">Favourite</span>
                                 }
+                                @if (command.IsGlobalFavorite)
+                                {
+                                    <span class="terminal-runbooks-selector-item-favourite">Global</span>
+                                }
                             </button>
 
 	                            <button type="button"
@@ -179,13 +190,16 @@
             : commands
                 .Where(command =>
                     !command.IsTemplate &&
-                    command.HostIds.Contains(HostId!.Value))
-                .OrderBy(command => command.Name, StringComparer.OrdinalIgnoreCase)
+                    (command.HostIds.Contains(HostId!.Value) || command.IsGlobalFavorite))
+                .OrderByDescending(command => command.IsGlobalFavorite)
+                .ThenBy(command => command.Name, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
 
     private IReadOnlyList<CommandLibraryItem> QuickAccessCommands =>
         HostCommands
-            .Where(command => command.IsQuickAccess)
+            .Where(command => command.IsQuickAccess || command.IsGlobalFavorite)
+            .OrderByDescending(command => command.IsGlobalFavorite)
+            .ThenBy(command => command.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
     private IReadOnlyList<CommandLibraryItem> FilteredCommands =>

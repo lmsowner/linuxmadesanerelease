@@ -6,6 +6,12 @@
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
 ```
 
+Short link:
+
+```bash
+curl -fsSL https://bit.ly/4tCQKCN | sudo bash
+```
+
 The public installer:
 
 - detects `linux-x64`, `linux-arm64`, or `linux-arm`
@@ -17,7 +23,9 @@ The public installer:
 - creates the `linux-made-sane.service` systemd unit
 - creates a dedicated `linuxmadesane` service account for the LMS web service
 - configures localhost SSH runner access for terminal, runbook, and scheduled automation workflows unless disabled
+- creates `/var/lib/linuxmadesane/runner/workspace` as the default writable local runner workspace
 - stops any existing `linux-made-sane.service` before replacing application files during an update
+- installs `linux-made-sane-update` for LMS-managed self-updates
 - starts the service and checks `/healthz`
 
 See [Security model](SECURITY.md) before changing runner, SSH, or sudo defaults.
@@ -26,7 +34,7 @@ See [Security model](SECURITY.md) before changing runner, SSH, or sudo defaults.
 
 ```bash
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 5095
-curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=2026.05.08.0 bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=v2026.05.13.10.08 bash
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env RID=linux-arm64 bash
 ```
 
@@ -43,6 +51,7 @@ Supported environment variables:
 - `LMS_CONFIGURE_LOCAL_SSH`: set `false` to skip localhost SSH runner setup
 - `LMS_ENABLE_LOCAL_SUDO`: set `false` to skip passwordless sudo setup for local automation
 - `LMS_BASE_URL`: override the public website base URL for staging tests
+- `LMS_UPDATE_HELPER_PATH`: default `/usr/local/sbin/linux-made-sane-update`
 
 Supported flags:
 
@@ -64,6 +73,7 @@ sudo systemctl start linux-made-sane.service
 sudo systemctl stop linux-made-sane.service
 sudo systemctl restart linux-made-sane.service
 sudo journalctl -u linux-made-sane.service -n 100 --no-pager
+sudo /usr/local/sbin/linux-made-sane-update
 ```
 
 ## Cold Start

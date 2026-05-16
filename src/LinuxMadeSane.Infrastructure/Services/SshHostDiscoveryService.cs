@@ -1,9 +1,13 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
@@ -14,13 +18,16 @@ namespace LinuxMadeSane.Infrastructure.Services;
 public sealed class SshHostDiscoveryService : ISshHostDiscoveryService
 {
     private const int DefaultSshPort = 22;
+    private const int DefaultLmsHttpPort = 5080;
     private const int MaxConcurrentProbes = 64;
     private const int MaxTailnetPeersToProbe = 64;
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromMilliseconds(650);
     private static readonly TimeSpan BannerTimeout = TimeSpan.FromMilliseconds(900);
+    private static readonly TimeSpan LmsHealthTimeout = TimeSpan.FromMilliseconds(700);
     private static readonly TimeSpan ReverseLookupTimeout = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(10);
     private static readonly ConcurrentDictionary<string, CachedLanDiscoverySnapshot> LanDiscoveryCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HttpClient LmsHealthClient = CreateLmsHealthClient();
     private readonly ILinuxCommandRunner commandRunner;
     private readonly TailscalePeerStatusReader tailscalePeerStatusReader;
 
@@ -527,6 +534,8 @@ public sealed class SshHostDiscoveryService : ISshHostDiscoveryService
             }
         }
 
+        var lmsProbe = await ProbeLinuxMadeSaneHealthAsync(target, candidate.IpAddress, cancellationToken);
+
         return new DiscoveredSshHost(
             displayName,
             target,
@@ -535,7 +544,146 @@ public sealed class SshHostDiscoveryService : ISshHostDiscoveryService
             candidate.ScopeLabel,
             candidate.SourceLabel,
             candidate.Platform,
-            sshBanner);
+            sshBanner,
+            lmsProbe.IsDetected,
+            lmsProbe.BaseUrl,
+            lmsProbe.Version);
+    }
+
+    private static async Task<LmsHealthProbeResult> ProbeLinuxMadeSaneHealthAsync(
+        string target,
+        string? ipAddress,
+        CancellationToken cancellationToken)
+    {
+        foreach (var uri in BuildLinuxMadeSaneHealthUris(target, ipAddress))
+        {
+            using var requestCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            requestCts.CancelAfter(LmsHealthTimeout);
+
+            try
+            {
+                using var response = await LmsHealthClient.GetAsync(uri, requestCts.Token);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                var content = await response.Content.ReadAsStringAsync(requestCts.Token);
+                var match = TryReadLinuxMadeSaneHealthResponse(content);
+                if (match.IsDetected)
+                {
+                    return match with { BaseUrl = BuildBaseUrl(uri) };
+                }
+            }
+            catch
+            {
+                // Host discovery should stay best-effort. A failed LMS health probe still leaves the SSH host usable.
+            }
+        }
+
+        return new LmsHealthProbeResult(false, null, null);
+    }
+
+    internal static LmsHealthProbeResult TryReadLinuxMadeSaneHealthResponse(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return new LmsHealthProbeResult(false, null, null);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(content);
+            var root = document.RootElement;
+            var product = ReadJsonString(root, "product");
+            var name = ReadJsonString(root, "name");
+            var status = ReadJsonString(root, "status");
+            var version = ReadJsonString(root, "version");
+            var hasProductMarker =
+                string.Equals(product, "linux-made-sane", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, "Linux Made Sane", StringComparison.OrdinalIgnoreCase);
+
+            if (hasProductMarker && string.Equals(status, "ok", StringComparison.OrdinalIgnoreCase))
+            {
+                return new LmsHealthProbeResult(true, null, NullIfWhiteSpace(version));
+            }
+
+            if (string.Equals(status, "ok", StringComparison.OrdinalIgnoreCase) &&
+                HasLinuxMadeSaneVersionShape(version) &&
+                content.Contains("version", StringComparison.OrdinalIgnoreCase))
+            {
+                return new LmsHealthProbeResult(true, null, NullIfWhiteSpace(version));
+            }
+        }
+        catch (JsonException)
+        {
+            if (content.Contains("Linux Made Sane", StringComparison.OrdinalIgnoreCase))
+            {
+                return new LmsHealthProbeResult(true, null, null);
+            }
+        }
+
+        return new LmsHealthProbeResult(false, null, null);
+    }
+
+    private static IReadOnlyList<Uri> BuildLinuxMadeSaneHealthUris(string target, string? ipAddress)
+    {
+        var hosts = new[] { target, ipAddress }
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var uris = new List<Uri>(hosts.Length * 2);
+        foreach (var host in hosts)
+        {
+            uris.Add(BuildHealthUri(Uri.UriSchemeHttp, host));
+            uris.Add(BuildHealthUri(Uri.UriSchemeHttps, host));
+        }
+
+        return uris;
+    }
+
+    private static Uri BuildHealthUri(string scheme, string host) =>
+        new UriBuilder(scheme, host, DefaultLmsHttpPort, "healthz").Uri;
+
+    private static string BuildBaseUrl(Uri healthUri) =>
+        new UriBuilder(healthUri.Scheme, healthUri.Host, healthUri.Port).Uri.ToString().TrimEnd('/');
+
+    private static string? ReadJsonString(JsonElement root, string propertyName) =>
+        root.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+
+    private static bool HasLinuxMadeSaneVersionShape(string? version)
+    {
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            return false;
+        }
+
+        var normalized = version.Trim();
+        if (normalized.StartsWith('v') || normalized.StartsWith('V'))
+        {
+            normalized = normalized[1..];
+        }
+
+        var parts = normalized.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts is { Length: 4 or 5 } && parts.All(static part => part.All(char.IsDigit));
+    }
+
+    private static HttpClient CreateLmsHealthClient()
+    {
+        var handler = new HttpClientHandler
+        {
+            AllowAutoRedirect = false,
+            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+        };
+
+        return new HttpClient(handler)
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
     }
 
     private static async Task<string?> ReadSshBannerAsync(TcpClient client, CancellationToken cancellationToken)
@@ -951,6 +1099,8 @@ public sealed class SshHostDiscoveryService : ISshHostDiscoveryService
 
     private static string? NullIfWhiteSpace(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    internal sealed record LmsHealthProbeResult(bool IsDetected, string? BaseUrl, string? Version);
 
     private static string BuildFailureMessage(LinuxCommandResult commandResult)
     {

@@ -1,0 +1,56 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE.md for details. *@
+
+@using LinuxMadeSane.Core.Models.Cloudflare
+
+<section class="http-service-lookup-row" role="listitem">
+    <div class="http-service-lookup-main">
+        <strong title="@Service.Url">@EndpointLabel</strong>
+        @if (!string.IsNullOrWhiteSpace(ServiceName))
+        {
+            <span title="@ServiceName">(@ServiceName)</span>
+        }
+    </div>
+    <div class="http-service-lookup-chips" aria-label="Service details">
+        <span class="http-service-lookup-chip @SchemeClass" title="@Service.Scheme">@Service.Scheme.ToUpperInvariant()</span>
+        <span class="http-service-lookup-chip status" title="HTTP status @Service.StatusCode">@Service.StatusCode</span>
+    </div>
+    <button class="http-service-lookup-use" type="button" title="Use @Service.Url" @onclick="HandleUseAsync">
+        <UiGlyphIcon Glyph="UiIconGlyph.Connect" />
+        <span>Use</span>
+    </button>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public LocalHttpServiceEndpoint Service { get; set; } = default!;
+    [Parameter] public EventCallback<LocalHttpServiceEndpoint> OnUse { get; set; }
+
+    private string EndpointLabel => $"{Service.Host}:{Service.Port}";
+
+    private string SchemeClass =>
+        Service.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? "https" : "http";
+
+    private string ServiceName
+    {
+        get
+        {
+            var name = !string.IsNullOrWhiteSpace(Service.Title)
+                ? Service.Title
+                : !string.IsNullOrWhiteSpace(Service.DisplayName)
+                    ? Service.DisplayName
+                    : Service.ServerHeader;
+
+            if (string.IsNullOrWhiteSpace(Service.IpAddress) ||
+                Service.Host.Equals(Service.IpAddress, StringComparison.OrdinalIgnoreCase))
+            {
+                return name ?? string.Empty;
+            }
+
+            return string.IsNullOrWhiteSpace(name)
+                ? Service.IpAddress
+                : $"{name} · {Service.IpAddress}";
+        }
+    }
+
+    private Task HandleUseAsync() => OnUse.InvokeAsync(Service);
+}

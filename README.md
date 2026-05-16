@@ -10,6 +10,12 @@ Current Community downloads are served by the public website:
 https://www.linuxmadesane.com
 ```
 
+Public links:
+
+- Website: https://www.linuxmadesane.com
+- LinkedIn: https://www.linkedin.com/in/richardkiernan/
+- Public Community Edition repository: https://github.com/lmsowner/linuxmadesanerelease
+
 Do not put the public website project, Pro/Enterprise packages, portal packages, private manifests, license secrets, private configuration, databases, credentials, or proprietary implementation details in this repository.
 
 ## Quick Install
@@ -18,6 +24,12 @@ On a Linux machine with systemd:
 
 ```bash
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
+```
+
+Short link:
+
+```bash
+curl -fsSL https://bit.ly/4tCQKCN | sudo bash
 ```
 
 Then open:
@@ -49,7 +61,7 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 509
 For a specific release:
 
 ```bash
-curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=2026.05.08.0 bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=v2026.05.13.10.08 bash
 ```
 
 ## What The Installer Does
@@ -62,6 +74,8 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=2026.
 - creates and manages the `linux-made-sane.service` systemd unit
 - installs useful host packages on apt-based systems unless disabled
 - configures localhost SSH access for LMS automation unless disabled
+- creates a writable local runner workspace for terminals, files, runbooks, and scheduled jobs
+- installs the local update helper used by LMS-managed updates
 - stops an existing service before replacing files during an update
 
 ## Supported Linux Builds
@@ -91,3 +105,15 @@ dotnet build src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj
 - [Release assets](docs/RELEASES.md)
 - [CE source](docs/SOURCE.md)
 - [Distro and Raspberry Pi testing](docs/TESTING.md)
+
+## License
+
+Linux Made Sane Community Edition is source-available under the Business Source License 1.1.
+
+It is free for personal, homelab, educational, non-profit, and internal commercial use.
+
+A commercial license from Richard D. Kiernan is required for hosted, MSP, SaaS, white-label, resale, or third-party managed-service use.
+
+Linux Made Sane is provided as-is, with no warranties, express or implied. You are responsible for how you install, configure, expose, and operate it, and you use it at your own risk.
+
+See [LICENSE.md](LICENSE.md).

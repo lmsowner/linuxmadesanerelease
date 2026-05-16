@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using System.Collections.Concurrent;
 using System.Text;
 using LinuxMadeSane.Core.Abstractions;
@@ -236,7 +239,7 @@ public sealed class FileActionQueueService(
                     BrowserTransferToken = uploadRegistration.Token,
                     ExpectedBytes = sourceItem.SizeBytes,
                     TransferOffsetBytes = offsetBytes,
-                    TransferTotalBytes = checked(sourceItem.SizeBytes * 2),
+                    TransferTotalBytes = CalculateItemTransferTotalBytes(FileActionKind.Upload, sourceItem.SizeBytes),
                     TransferPhase = "Uploading to Linux Made Sane"
                 };
 
@@ -284,7 +287,9 @@ public sealed class FileActionQueueService(
             {
                 ExpectedBytes = request.EstimatedSizeBytes,
                 TransferOffsetBytes = 0,
-                TransferTotalBytes = request.EstimatedSizeBytes.HasValue ? checked(request.EstimatedSizeBytes.Value * 2) : null,
+                TransferTotalBytes = request.EstimatedSizeBytes.HasValue
+                    ? CalculateItemTransferTotalBytes(FileActionKind.Download, request.EstimatedSizeBytes.Value)
+                    : null,
                 TransferPhase = request.IsDirectory ? "Preparing archive" : "Downloading to Linux Made Sane"
             };
 
@@ -330,7 +335,7 @@ public sealed class FileActionQueueService(
                 workspaceId,
                 jobId,
                 itemId,
-                totalBytes + bytesTransferred,
+                bytesTransferred,
                 totalBytes,
                 "Saving to your browser"))
         {
@@ -800,9 +805,7 @@ public sealed class FileActionQueueService(
         CancellationToken cancellationToken,
         Action<string>? reportCurrentDetail)
     {
-        var tempRoot = Path.Combine(
-            Path.GetTempPath(),
-            "linuxmadesane",
+        var tempRoot = LmsTemporaryPaths.Combine(
             "file-actions",
             job.Id.ToString("N"),
             item.Id.ToString("N"));
@@ -1148,7 +1151,7 @@ public sealed class FileActionQueueService(
         ManagedHostConnectionProfile sourceProfile,
         CancellationToken cancellationToken)
     {
-        var stagedRoot = Path.Combine(Path.GetTempPath(), "linuxmadesane", "browser-downloads", job.Id.ToString("N"), item.Id.ToString("N"));
+        var stagedRoot = LmsTemporaryPaths.Combine("browser-downloads", job.Id.ToString("N"), item.Id.ToString("N"));
         Directory.CreateDirectory(stagedRoot);
         var stagedFilePath = Path.Combine(stagedRoot, SanitizeFileName(item.DestinationPath ?? item.DisplayName));
         string? remoteArchivePath = null;
@@ -1190,7 +1193,7 @@ public sealed class FileActionQueueService(
 
             var stagedInfo = new FileInfo(stagedFilePath);
             item.ExpectedBytes = stagedInfo.Length;
-            item.TransferTotalBytes = checked(stagedInfo.Length * 2);
+            item.TransferTotalBytes = CalculateItemTransferTotalBytes(job.Kind, stagedInfo.Length);
             RecalculateJobTransferBudget(job);
             TryUpdateTransferProgress(workspaceId, job.Id, item.Id, stagedInfo.Length, stagedInfo.Length, "Waiting for browser download");
 
@@ -1214,7 +1217,7 @@ public sealed class FileActionQueueService(
             Notify(workspaceId, job);
 
             await browserFileTransferService.WaitForDownloadCompletionAsync(registration.Token, cancellationToken);
-            TryUpdateTransferProgress(workspaceId, job.Id, item.Id, stagedInfo.Length * 2, stagedInfo.Length, "Saved to your browser");
+            TryUpdateTransferProgress(workspaceId, job.Id, item.Id, stagedInfo.Length, stagedInfo.Length, "Saved to your browser");
             return downloadFileName;
         }
         finally
@@ -1282,7 +1285,7 @@ public sealed class FileActionQueueService(
             if (totalBytes > 0)
             {
                 item.ExpectedBytes = totalBytes;
-                item.TransferTotalBytes = checked(totalBytes * 2);
+                item.TransferTotalBytes = CalculateItemTransferTotalBytes(job.Kind, totalBytes);
                 RecalculateJobTransferBudget(job);
             }
 
@@ -1307,7 +1310,7 @@ public sealed class FileActionQueueService(
         if (normalizedTotalBytes.HasValue && normalizedTotalBytes.Value > 0)
         {
             item.ExpectedBytes = normalizedTotalBytes;
-            item.TransferTotalBytes = checked(normalizedTotalBytes.Value * 2);
+            item.TransferTotalBytes = CalculateItemTransferTotalBytes(job.Kind, normalizedTotalBytes.Value);
         }
 
         item.TransferPhase = phase;
@@ -1316,6 +1319,9 @@ public sealed class FileActionQueueService(
         job.CurrentDetail = detail;
         job.TransferPhase = phase;
     }
+
+    private static long CalculateItemTransferTotalBytes(FileActionKind kind, long fileBytes) =>
+        kind == FileActionKind.Upload ? checked(fileBytes * 2) : fileBytes;
 
     private static void RecalculateJobTransferBudget(FileActionJob job)
     {

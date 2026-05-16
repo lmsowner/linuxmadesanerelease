@@ -1,0 +1,9 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
+namespace LinuxMadeSane.Application.Contracts.Security;
+
+public sealed record SecurityMessagingTestResult(
+    bool Succeeded,
+    bool Attempted,
+    string Message);

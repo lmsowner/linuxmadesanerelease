@@ -1,3 +1,6 @@
+/* Copyright (c) Richard D. Kiernan.
+ * Licensed under the Business Source License 1.1. See LICENSE.md for details. */
+
 window.lmsClipboard = (() => {
     async function writeText(text) {
         if (typeof text !== "string" || text.length === 0) {

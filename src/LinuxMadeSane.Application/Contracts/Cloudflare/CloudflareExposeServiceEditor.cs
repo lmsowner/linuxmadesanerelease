@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Core.Enums;
 using System.ComponentModel.DataAnnotations;
 
@@ -9,7 +12,7 @@ public sealed class CloudflareExposeServiceEditor
 
     public string ApiTokenInput { get; set; } = string.Empty;
 
-    public bool SaveApiToken { get; set; }
+    public bool SaveApiToken { get; set; } = true;
 
     public bool ClearSavedApiToken { get; set; }
 
@@ -69,4 +72,6 @@ public sealed class CloudflareExposeServiceEditor
     public string EmailDomainAllowList { get; set; } = string.Empty;
 
     public bool ConfirmDangerousExposure { get; set; }
+
+    public bool ConfirmDnsRecordReplacement { get; set; }
 }

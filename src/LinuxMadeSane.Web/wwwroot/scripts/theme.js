@@ -1,3 +1,6 @@
+/* Copyright (c) Richard D. Kiernan.
+ * Licensed under the Business Source License 1.1. See LICENSE.md for details. */
+
 window.lmsTheme = (() => {
     const storageKeys = {
         palette: "lms.theme.palette",
@@ -763,30 +766,68 @@ window.lmsLayout = (() => {
     const sidebarKey = "lms.layout.sidebar-collapsed";
 
     function getSidebarCollapsed() {
-        return false;
+        try {
+            return window.localStorage.getItem(sidebarKey) === "true";
+        } catch {
+            return document.documentElement.classList.contains("sidebar-collapsed");
+        }
     }
 
-    function clearSidebarCollapsed() {
-        document.documentElement.classList.remove("sidebar-collapsed");
-        document.querySelectorAll(".sidebar-collapsed").forEach(element => {
-            element.classList.remove("sidebar-collapsed");
+    function applySidebarCollapsed(collapsed) {
+        document.documentElement.classList.toggle("sidebar-collapsed", collapsed);
+        document.querySelectorAll("[data-lms-app-frame]").forEach(element => {
+            element.classList.toggle("sidebar-collapsed", collapsed);
         });
 
         try {
-            window.localStorage.removeItem(sidebarKey);
+            if (collapsed) {
+                window.localStorage.setItem(sidebarKey, "true");
+            } else {
+                window.localStorage.removeItem(sidebarKey);
+            }
         } catch {
         }
     }
 
-    function setSidebarCollapsed() {
-        clearSidebarCollapsed();
+    function setSidebarCollapsed(collapsed = true) {
+        applySidebarCollapsed(collapsed !== false);
+    }
+
+    function toggleSidebarCollapsed() {
+        setSidebarCollapsed(!getSidebarCollapsed());
+    }
+
+    function bindSidebarToggles() {
+        document.querySelectorAll("[data-sidebar-toggle]").forEach(element => {
+            if (element.dataset.sidebarToggleBound === "true") {
+                return;
+            }
+
+            element.dataset.sidebarToggleBound = "true";
+            element.addEventListener("click", event => {
+                event.preventDefault();
+                const action = element.dataset.sidebarToggle;
+                if (action === "show") {
+                    setSidebarCollapsed(false);
+                    return;
+                }
+
+                if (action === "hide") {
+                    setSidebarCollapsed(true);
+                    return;
+                }
+
+                toggleSidebarCollapsed();
+            });
+        });
     }
 
     function initializeSidebar() {
-        clearSidebarCollapsed();
+        bindSidebarToggles();
+        applySidebarCollapsed(getSidebarCollapsed());
     }
 
-    clearSidebarCollapsed();
+    initializeSidebar();
 
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", initializeSidebar, { once: true });
@@ -800,6 +841,7 @@ window.lmsLayout = (() => {
     return {
         getSidebarCollapsed,
         setSidebarCollapsed,
+        toggleSidebarCollapsed,
         initializeSidebar
     };
 })();

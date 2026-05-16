@@ -1,3 +1,6 @@
+/* Copyright (c) Richard D. Kiernan.
+ * Licensed under the Business Source License 1.1. See LICENSE.md for details. */
+
 window.lmsMediaHlsPreview = (() => {
     const players = new Map();
     const loadingScripts = new Map();

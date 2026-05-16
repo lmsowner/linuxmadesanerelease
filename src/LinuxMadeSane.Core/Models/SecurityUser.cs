@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Core.Enums;
 
 namespace LinuxMadeSane.Core.Models;
@@ -7,6 +10,7 @@ public sealed record SecurityUser(
     string Email,
     string LinuxUsername,
     bool IsEnabled,
+    int SessionLifetimeMinutes,
     RemoteAccessSshAuthenticationMode SshAuthenticationMode,
     string AuthorizedKeyEntries,
     bool IsLocalAccountManaged,

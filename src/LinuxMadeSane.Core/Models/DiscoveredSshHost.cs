@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 namespace LinuxMadeSane.Core.Models;
 
 public sealed record DiscoveredSshHost(
@@ -8,4 +11,7 @@ public sealed record DiscoveredSshHost(
     string ScopeLabel,
     string SourceLabel,
     string? Platform,
-    string? SshBanner);
+    string? SshBanner,
+    bool IsLinuxMadeSaneHost = false,
+    string? LinuxMadeSaneBaseUrl = null,
+    string? LinuxMadeSaneVersion = null);

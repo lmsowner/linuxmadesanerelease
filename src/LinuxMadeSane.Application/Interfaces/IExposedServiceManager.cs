@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Application.Contracts.Cloudflare;
 using LinuxMadeSane.Core.Models.Cloudflare;
 
@@ -12,6 +15,11 @@ public interface IExposedServiceManager
     Task<CloudflareValidationResult> ValidateTokenAsync(
         Guid hostId,
         string? apiToken,
+        CancellationToken cancellationToken = default);
+
+    Task<ExposedServiceConnectorSetupResult> EnsureConnectorAsync(
+        Guid hostId,
+        CloudflareExposeServiceEditor editor,
         CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<CloudflareDnsRecord>> ListZoneRecordsAsync(

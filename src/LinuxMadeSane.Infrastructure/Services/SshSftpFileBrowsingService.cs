@@ -1,8 +1,12 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
 using Microsoft.Extensions.Logging;
 using Renci.SshNet;
+using Renci.SshNet.Common;
 using Renci.SshNet.Sftp;
 using System.Globalization;
 using System.IO;
@@ -32,18 +36,29 @@ public sealed class SshSftpFileBrowsingService(
         var normalizedPath = NormalizePath(path);
         var credentials = await ResolveCredentialsAsync(host, username, password, privateKey, privateKeyPassphrase, preferStoredCredentials, cancellationToken);
         logger.LogInformation("Listing SFTP items for host {HostId} path {Path}", host.Id, normalizedPath);
-        var sftpItems = await RunBlockingRemoteOperationAsync(
-            () =>
-            {
-                using var client = Connect(host, credentials);
-                var items = client
-                    .ListDirectory(normalizedPath)
-                    .Where(item => item.Name is not "." and not "..")
-                    .ToArray();
-                client.Disconnect();
-                return items;
-            },
-            cancellationToken);
+        ISftpFile[] sftpItems;
+        try
+        {
+            sftpItems = await RunBlockingRemoteOperationAsync(
+                () =>
+                {
+                    using var client = Connect(host, credentials);
+                    var items = client
+                        .ListDirectory(normalizedPath)
+                        .Where(item => item.Name is not "." and not "..")
+                        .ToArray();
+                    client.Disconnect();
+                    return items;
+                },
+                cancellationToken);
+        }
+        catch (SftpPathNotFoundException exception)
+        {
+            throw new FileAccessPathNotFoundException(
+                normalizedPath,
+                $"Folder {normalizedPath} does not exist on {host.Name}.",
+                exception);
+        }
 
         var metadataByPath = await TryReadRemoteMetadataAsync(host, credentials, normalizedPath, cancellationToken);
         var items = sftpItems
@@ -347,14 +362,30 @@ public sealed class SshSftpFileBrowsingService(
         cancellationToken.ThrowIfCancellationRequested();
 
         var normalizedPath = NormalizePath(path);
-        await ExecuteShellCommandAsync(
-            host,
-            username,
-            password,
-            privateKey,
-            privateKeyPassphrase,
-            preferStoredCredentials,
-            $"mkdir -p -- {QuoteShellArgument(normalizedPath)}",
+        EnsureMutablePath(normalizedPath);
+        var credentials = await ResolveCredentialsAsync(host, username, password, privateKey, privateKeyPassphrase, preferStoredCredentials, cancellationToken);
+
+        await RunBlockingRemoteOperationAsync(
+            () =>
+            {
+                using var client = Connect(host, credentials);
+                if (client.Exists(normalizedPath))
+                {
+                    var attributes = client.GetAttributes(normalizedPath);
+                    if (!attributes.IsDirectory)
+                    {
+                        throw new InvalidOperationException($"{normalizedPath} already exists and is not a folder.");
+                    }
+
+                    client.Disconnect();
+                    return 0;
+                }
+
+                EnsureDirectoryExists(client, GetDirectoryName(normalizedPath));
+                client.CreateDirectory(normalizedPath);
+                client.Disconnect();
+                return 0;
+            },
             cancellationToken);
 
         return normalizedPath;

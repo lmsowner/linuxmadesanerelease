@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Cloudflare;
 
@@ -32,9 +35,9 @@ public static class ExposedServiceDryRunPlanner
                 $"Update existing managed DNS record for {context.Hostname} to point at {context.DnsTargetDescription}.",
                 true),
             _ => new ExposedServicePlanStep(
-                "DNS conflict",
-                $"The hostname already points elsewhere and must be resolved before apply: {context.DnsConflictReason}",
-                false)
+                "Replace DNS",
+                $"Delete the existing DNS record for {context.Hostname}, then create proxied CNAME {context.Hostname} -> {context.DnsTargetDescription}.",
+                true)
         });
 
         steps.Add(new ExposedServicePlanStep(
@@ -49,7 +52,7 @@ public static class ExposedServiceDryRunPlanner
                 : context.HasInstalledConnector
                     ? "This host already has cloudflared installed for a different tunnel. Reuse that installed tunnel instead of trying to create or attach another local cloudflared service."
             : context.RunConnectorInstallOnHost
-                ? "Linux Made Sane will run the cloudflared connector install command on this managed host after apply. If cloudflared is missing or SSH execution fails, the command will still be shown for manual recovery."
+                ? "Linux Made Sane will install or attach cloudflared on this managed host after apply. If automatic setup fails, the command will still be shown for manual recovery."
                 : "Run the Cloudflare-provided cloudflared connector command on the machine serving the local service URL after apply. Existing tunnels can front multiple hostnames, so reuse one unless you need a separate connector identity.",
             false));
 

@@ -1,10 +1,19 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE.md for details. *@
+
 @implements IAsyncDisposable
 @using System.Text.RegularExpressions
+@using LinuxMadeSane.Application.Contracts
 @using LinuxMadeSane.Application.Contracts.Ai
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Application.Services
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
 @using LinuxMadeSane.Web.Services
 @inject IAiThreadService ThreadService
+@inject IManagedHostService HostService
+@inject ISshKeyPairGenerator SshKeyPairGenerator
 @inject ITerminalAiAssistantService TerminalAiAssistantService
 @inject IJSRuntime JSRuntime
 
@@ -16,6 +25,22 @@
     @if (!string.IsNullOrWhiteSpace(panelError))
     {
         <div class="callout error">@panelError</div>
+    }
+    @if (ShouldShowHostAuthAdvice)
+    {
+        <div class="callout warning terminal-ai-auth-advice">
+            <div class="terminal-ai-auth-advice-copy">
+                <strong>Public key SSH is recommended for AI-run terminal commands.</strong>
+                <span>This host is configured for username/password SSH. AI-suggested commands can leave the terminal waiting at login or sudo prompts; switch the host to Public key auth and use an intentional sudo policy for privileged automation.</span>
+            </div>
+            <div class="terminal-ai-auth-advice-actions">
+                <UiCommandButton Label="Set up public key"
+                                 Glyph="UiIconGlyph.Connection"
+                                 Variant="UiButtonVariant.ActionSubtle"
+                                 Disabled="@isPublicKeySetupBusy"
+                                 OnClick="OpenPublicKeySetupAsync" />
+            </div>
+        </div>
     }
 
     <section class="terminal-ai-section terminal-ai-provider-section">
@@ -65,6 +90,12 @@
                         @if (!string.IsNullOrWhiteSpace(entry.SuggestedCommand))
                         {
                             <pre class="command-preview-block command-display-block terminal-ai-command-preview">@entry.SuggestedCommand</pre>
+                            @if (ShouldShowCommandAuthAdvice(entry.SuggestedCommand))
+                            {
+                                <div class="callout warning terminal-ai-auth-advice">
+                                    <span>This command uses sudo on a username/password SSH host. It may pause at a password prompt; Public key auth plus an explicit sudo policy is the smoother LMS setup.</span>
+                                </div>
+                            }
                             <div class="toolbar-row">
                                 <UiCommandButton Label="Run then review" Glyph="UiIconGlyph.Analyze" OnClick="@(() => RunAndAnalyzeCommandAsync(entry.SuggestedCommand))" />
                                 <UiCommandButton Label="Run commands" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.Toolbar" OnClick="@(() => RunCommandAsync(entry.SuggestedCommand))" />
@@ -131,6 +162,97 @@
     </section>
 </section>
 
+<UiModal IsOpen="@isPublicKeySetupOpen"
+         Title="Set up public key SSH"
+         Subtitle="Generate an LMS key, install the public key in the current SSH account, then test and save the host so future sessions use key auth first."
+         Class="terminal-ai-public-key-modal"
+         CloseOnBackdrop="@(!isPublicKeySetupBusy)"
+         OnClose="ClosePublicKeySetupAsync">
+    <ChildContent>
+        @if (publicKeySetupEditor is null || publicKeySetupKeyPair is null)
+        {
+            <p class="callout info terminal-ai-public-key-status">Preparing public key setup...</p>
+        }
+        else
+        {
+            <div class="terminal-ai-public-key-flow">
+                <div class="terminal-ai-public-key-steps">
+                    <article class="surface-subcard terminal-ai-public-key-step">
+                        <strong>1. Generate</strong>
+                        <span>LMS generated a key pair for @PublicKeySetupTargetLabel. The private key is only saved after the connection test passes.</span>
+                    </article>
+                    <article class="surface-subcard terminal-ai-public-key-step">
+                        <strong>2. Install</strong>
+                        <span>Send the install command to the current terminal. It only appends the public key to the current account's authorized_keys file.</span>
+                    </article>
+                    <article class="surface-subcard terminal-ai-public-key-step">
+                        <strong>3. Save</strong>
+                        <span>LMS tests key auth without using the password, then saves this host as Public key first.</span>
+                    </article>
+                </div>
+
+                <label class="terminal-inline-field">
+                    <span>Public key</span>
+                    <textarea readonly class="ui-control-input terminal-ai-public-key-textarea">@publicKeySetupKeyPair.PublicKey</textarea>
+                </label>
+
+                <span class="meta-text">Fingerprint: @publicKeySetupKeyPair.FingerprintSha256</span>
+
+                <details class="terminal-ai-public-key-command">
+                    <summary>Install command</summary>
+                    <pre class="command-preview-block command-display-block">@PublicKeyInstallCommand</pre>
+                </details>
+
+                <div class="toolbar-row terminal-ai-public-key-actions">
+                    <UiCommandButton Label="Install public key"
+                                     Glyph="UiIconGlyph.Run"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     Disabled="@(isPublicKeySetupBusy || !RunCommand.HasDelegate)"
+                                     OnClick="RunPublicKeyInstallCommandAsync" />
+                    <UiCommandButton Label="Copy public key"
+                                     Glyph="UiIconGlyph.Copy"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     Disabled="@isPublicKeySetupBusy"
+                                     OnClick="CopyPublicKeySetupKeyAsync" />
+                    <UiCommandButton Label="Generate new key"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@isPublicKeySetupBusy"
+                                     OnClick="GeneratePublicKeySetupKeyAsync" />
+                </div>
+
+                <UiCheckboxField @bind-Value="keepStoredPasswordFallback"
+                                 Label="Keep saved password as fallback"
+                                 Helper="Recommended until the key has been used for a few normal connections. Disable it later if you want key-only SSH."
+                                 Disabled="@(!publicKeySetupEditor.HasStoredPassword || isPublicKeySetupBusy)"
+                                 Compact="true"
+                                 Card="true" />
+            </div>
+        }
+    </ChildContent>
+
+    <Footer>
+        <div class="terminal-ai-public-key-footer">
+            @if (!string.IsNullOrWhiteSpace(publicKeySetupStatus))
+            {
+                <p class="callout @publicKeySetupTone terminal-ai-public-key-status">@publicKeySetupStatus</p>
+            }
+
+            <div class="terminal-ai-public-key-footer-actions">
+                <UiCommandButton Label="Close"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@isPublicKeySetupBusy"
+                                 OnClick="ClosePublicKeySetupAsync" />
+                <UiCommandButton Label="@(isPublicKeySetupBusy ? "Testing..." : "Save and test key auth")"
+                                 Glyph="UiIconGlyph.Save"
+                                 Disabled="@(isPublicKeySetupBusy || publicKeySetupEditor is null || publicKeySetupKeyPair is null)"
+                                 OnClick="SavePublicKeyAuthenticationAsync" />
+            </div>
+        </div>
+    </Footer>
+</UiModal>
+
 @code {
     [Parameter, EditorRequired]
     public TerminalTabState Tab { get; set; } = default!;
@@ -154,12 +276,40 @@
     private const int MaxInvestigationSteps = 4;
     private string selectedProviderKey = string.Empty;
     private string selectedModelId = string.Empty;
+    private Guid? observedTabId;
+    private ManagedHostEditor? publicKeySetupEditor;
+    private GeneratedSshKeyPair? publicKeySetupKeyPair;
+    private bool isPublicKeySetupOpen;
+    private bool isPublicKeySetupBusy;
+    private bool publicKeyInstallCommandSent;
+    private bool publicKeySetupSaved;
+    private bool keepStoredPasswordFallback = true;
+    private string publicKeySetupStatus = string.Empty;
+    private string publicKeySetupTone = "info";
     private static readonly Regex terminalErrorPattern = new(
         @"(?im)\b(error|failed|failure|exception|traceback|permission denied|command not found|no such file|cannot|timed out|not found|segmentation fault|fatal)\b",
+        RegexOptions.Compiled);
+    private static readonly Regex sudoCommandPattern = new(
+        @"(?im)(^|[;&|]\s*)sudo(\s|$)",
         RegexOptions.Compiled);
 
     private bool isBusy => isSendingPrompt || isRunningAndAnalyzing || isInvestigating;
     private bool ShouldShowExplainAction => HasTerminalErrorContext();
+    private bool HostUsesPublicKeyAuthentication =>
+        ManagedHostAuthenticationPolicy.UsesPublicKeyAuthentication(Tab.PrimaryAuthenticationType) ||
+        ManagedHostAuthenticationPolicy.UsesPublicKeyAuthentication(Tab.FallbackAuthenticationType);
+    private bool ShouldShowHostAuthAdvice =>
+        !publicKeySetupSaved &&
+        ManagedHostAuthenticationPolicy.UsesPassword(Tab.PrimaryAuthenticationType) &&
+        !HostUsesPublicKeyAuthentication;
+    private string PublicKeyInstallCommand =>
+        publicKeySetupKeyPair is null
+            ? string.Empty
+            : BuildPublicKeyInstallCommand(publicKeySetupKeyPair.PublicKey);
+    private string PublicKeySetupTargetLabel =>
+        publicKeySetupEditor is null
+            ? Tab.HostName
+            : $"{publicKeySetupEditor.Username}@{publicKeySetupEditor.Hostname}";
 
     private IReadOnlyList<TerminalAiConversationEntry> RecentEntries =>
         Tab.AiConversation.Entries
@@ -209,7 +359,7 @@ Selected terminal content:
             var initialOutputLength = Tab.Snapshot?.Output.Length ?? 0;
             var initialActivity = Tab.Snapshot?.LastActivityUtc;
 
-            await RunCommand.InvokeAsync(commandText);
+            await ExecuteSuggestedCommandAsync(commandText);
             await WaitForTerminalUpdateAsync(initialOutputLength, initialActivity);
             await AnalyzeSessionAsync();
         }
@@ -274,7 +424,7 @@ Selected terminal content:
 
                 var initialOutputLength = Tab.Snapshot?.Output.Length ?? 0;
                 var initialActivity = Tab.Snapshot?.LastActivityUtc;
-                await RunCommand.InvokeAsync(normalizedCommand);
+                await ExecuteSuggestedCommandAsync(normalizedCommand);
                 await WaitForTerminalUpdateAsync(initialOutputLength, initialActivity);
             }
 
@@ -379,6 +529,12 @@ Selected terminal content:
 
     protected override async Task OnParametersSetAsync()
     {
+        if (observedTabId != Tab.Id)
+        {
+            observedTabId = Tab.Id;
+            ResetPublicKeySetupState();
+        }
+
         await EnsureProviderContextAsync();
         SyncTerminalProviderSelection();
     }
@@ -603,11 +759,269 @@ Selected terminal content:
 
     private async Task RunCommandAsync(string commandText)
     {
-        if (RunCommand.HasDelegate)
+        if (!RunCommand.HasDelegate)
         {
-            await RunCommand.InvokeAsync(commandText);
+            return;
+        }
+
+        await ExecuteSuggestedCommandAsync(commandText);
+    }
+
+    private async Task ExecuteSuggestedCommandAsync(string commandText)
+    {
+        if (ShouldShowCommandAuthAdvice(commandText))
+        {
+            panelInfo = "This command may pause at a password prompt because the host uses username/password SSH. Public key auth plus an explicit sudo policy is recommended for AI-run automation.";
+            await InvokeAsync(StateHasChanged);
+        }
+
+        await RunCommand.InvokeAsync(commandText);
+    }
+
+    private bool ShouldShowCommandAuthAdvice(string? commandText) =>
+        ShouldShowHostAuthAdvice && ContainsSudoCommand(commandText);
+
+    private async Task OpenPublicKeySetupAsync()
+    {
+        isPublicKeySetupOpen = true;
+        publicKeySetupStatus = string.Empty;
+        publicKeySetupTone = "info";
+        await EnsurePublicKeySetupAsync();
+    }
+
+    private Task ClosePublicKeySetupAsync()
+    {
+        if (!isPublicKeySetupBusy)
+        {
+            isPublicKeySetupOpen = false;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task EnsurePublicKeySetupAsync()
+    {
+        if (isPublicKeySetupBusy || publicKeySetupEditor is not null && publicKeySetupKeyPair is not null)
+        {
+            return;
+        }
+
+        isPublicKeySetupBusy = true;
+        publicKeySetupStatus = "Loading host details...";
+        publicKeySetupTone = "info";
+
+        try
+        {
+            publicKeySetupEditor = await HostService.GetEditorAsync(Tab.HostId);
+            if (publicKeySetupEditor is null)
+            {
+                throw new InvalidOperationException("Host not found.");
+            }
+
+            keepStoredPasswordFallback = publicKeySetupEditor.HasStoredPassword;
+            await GeneratePublicKeySetupKeyCoreAsync();
+            publicKeySetupStatus = "Key generated. Install the public key in the current terminal, then save and test key auth.";
+            publicKeySetupTone = "success";
+        }
+        catch (Exception exception)
+        {
+            publicKeySetupStatus = exception.Message;
+            publicKeySetupTone = "error";
+        }
+        finally
+        {
+            isPublicKeySetupBusy = false;
+            await InvokeAsync(StateHasChanged);
         }
     }
+
+    private async Task GeneratePublicKeySetupKeyAsync()
+    {
+        if (isPublicKeySetupBusy)
+        {
+            return;
+        }
+
+        isPublicKeySetupBusy = true;
+        publicKeySetupStatus = "Generating a new key pair...";
+        publicKeySetupTone = "info";
+
+        try
+        {
+            await GeneratePublicKeySetupKeyCoreAsync();
+            publicKeyInstallCommandSent = false;
+            publicKeySetupStatus = "New key generated. Install this public key before saving.";
+            publicKeySetupTone = "success";
+        }
+        catch (Exception exception)
+        {
+            publicKeySetupStatus = exception.Message;
+            publicKeySetupTone = "error";
+        }
+        finally
+        {
+            isPublicKeySetupBusy = false;
+        }
+    }
+
+    private async Task GeneratePublicKeySetupKeyCoreAsync()
+    {
+        publicKeySetupKeyPair = await SshKeyPairGenerator.GenerateAsync(
+            SshKeyGenerationProfile.Ed25519,
+            BuildPublicKeyComment());
+    }
+
+    private async Task RunPublicKeyInstallCommandAsync()
+    {
+        if (publicKeySetupKeyPair is null)
+        {
+            publicKeySetupStatus = "Generate a key before installing it.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        if (!RunCommand.HasDelegate)
+        {
+            publicKeySetupStatus = "Open a connected terminal for this host before running the install command.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        await RunCommand.InvokeAsync(PublicKeyInstallCommand);
+        publicKeyInstallCommandSent = true;
+        publicKeySetupStatus = "Install command sent. Wait for the terminal to report installed or already installed, then save and test key auth.";
+        publicKeySetupTone = "success";
+    }
+
+    private async Task CopyPublicKeySetupKeyAsync()
+    {
+        if (publicKeySetupKeyPair is null)
+        {
+            publicKeySetupStatus = "Generate a key before copying it.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", publicKeySetupKeyPair.PublicKey);
+        publicKeySetupStatus = copied
+            ? "Public key copied."
+            : "Clipboard copy was blocked by the browser. Select the public key text manually.";
+        publicKeySetupTone = copied ? "success" : "warning";
+    }
+
+    private async Task SavePublicKeyAuthenticationAsync()
+    {
+        if (publicKeySetupEditor is null || publicKeySetupKeyPair is null)
+        {
+            publicKeySetupStatus = "Generate a key before saving.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        isPublicKeySetupBusy = true;
+        publicKeySetupStatus = publicKeyInstallCommandSent
+            ? "Testing public key SSH..."
+            : "Testing public key SSH. If this fails, run the install command first.";
+        publicKeySetupTone = "info";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var editor = publicKeySetupEditor;
+            editor.PrivateKey = publicKeySetupKeyPair.PrivateKey;
+            editor.PrivateKeyPassphrase = string.Empty;
+            editor.ClearStoredPrivateKey = false;
+            editor.ClearStoredPrivateKeyPassphrase = editor.HasStoredPrivateKeyPassphrase;
+            editor.PrimaryAuthenticationType = AuthenticationType.PrivateKey;
+            editor.FallbackAuthenticationType = null;
+            editor.Password = string.Empty;
+            editor.ClearStoredPassword = false;
+
+            var testResult = await HostService.TestConnectionAsync(editor);
+            if (testResult.Status != ConnectionTestStatus.Succeeded)
+            {
+                publicKeySetupStatus = BuildConnectionTestMessage(
+                    testResult,
+                    "Public key SSH did not connect. Run the install command in the terminal and try again.");
+                publicKeySetupTone = "error";
+                return;
+            }
+
+            editor.FallbackAuthenticationType =
+                keepStoredPasswordFallback && editor.HasStoredPassword
+                    ? AuthenticationType.Password
+                    : null;
+            editor.ClearStoredPassword = !keepStoredPasswordFallback && editor.HasStoredPassword;
+
+            await HostService.SaveHostAsync(editor);
+            Tab.ApplyAuthentication(AuthenticationType.PrivateKey, editor.FallbackAuthenticationType);
+            Tab.PreferStoredCredentials = true;
+            publicKeySetupSaved = true;
+            publicKeySetupStatus = "Public key auth is saved and tested. Existing terminals can stay open; reconnect when you want to use the key.";
+            publicKeySetupTone = "success";
+        }
+        catch (Exception exception)
+        {
+            publicKeySetupStatus = exception.Message;
+            publicKeySetupTone = "error";
+        }
+        finally
+        {
+            isPublicKeySetupBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ResetPublicKeySetupState()
+    {
+        isPublicKeySetupOpen = false;
+        isPublicKeySetupBusy = false;
+        publicKeySetupEditor = null;
+        publicKeySetupKeyPair = null;
+        publicKeyInstallCommandSent = false;
+        publicKeySetupSaved = false;
+        keepStoredPasswordFallback = true;
+        publicKeySetupStatus = string.Empty;
+        publicKeySetupTone = "info";
+    }
+
+    private string? BuildPublicKeyComment()
+    {
+        var username = publicKeySetupEditor?.Username.Trim() ?? Tab.Username.Trim();
+        var hostname = publicKeySetupEditor?.Hostname.Trim() ?? Tab.HostAddress.Trim();
+
+        if (!string.IsNullOrWhiteSpace(username) && !string.IsNullOrWhiteSpace(hostname))
+        {
+            return $"linux-made-sane:{username}@{hostname}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(hostname))
+        {
+            return $"linux-made-sane:{hostname}";
+        }
+
+        return string.IsNullOrWhiteSpace(username)
+            ? "linux-made-sane"
+            : $"linux-made-sane:{username}";
+    }
+
+    private static string BuildConnectionTestMessage(HostConnectionTestResult result, string fallback)
+    {
+        var summary = string.IsNullOrWhiteSpace(result.Summary) ? fallback : result.Summary.Trim();
+        var message = string.IsNullOrWhiteSpace(result.Detail)
+            ? summary
+            : $"{summary} {result.Detail.Trim()}";
+
+        return string.Equals(message, fallback, StringComparison.Ordinal)
+            ? message
+            : $"{message} {fallback}";
+    }
+
+    private static string BuildPublicKeyInstallCommand(string publicKey)
+        => SshAuthorizedKeyInstallCommandBuilder.Build(publicKey);
+
+    private static bool ContainsSudoCommand(string? commandText) =>
+        !string.IsNullOrWhiteSpace(commandText) && sudoCommandPattern.IsMatch(commandText);
 
     private static UiPillTone GetMessageTone(AiChatMessageRole role) =>
         role switch

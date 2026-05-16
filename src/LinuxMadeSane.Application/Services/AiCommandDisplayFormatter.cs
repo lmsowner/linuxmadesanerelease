@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using LinuxMadeSane.Core.Models.Ai;

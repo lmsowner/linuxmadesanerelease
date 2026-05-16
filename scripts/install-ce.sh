@@ -19,6 +19,14 @@ SERVICE_DESCRIPTION="Linux Made Sane Service"
 SERVICE_PORT="${SERVICE_PORT:-5080}"
 START_SERVICE="${START_SERVICE:-false}"
 INSTALL_SYSTEM_PACKAGES="${INSTALL_SYSTEM_PACKAGES:-true}"
+CONFIGURE_LOCAL_SSH="${CONFIGURE_LOCAL_SSH:-true}"
+ENABLE_LOCAL_SUDO="${ENABLE_LOCAL_SUDO:-true}"
+RUNNER_USER="${RUNNER_USER:-linuxmadesane-runner}"
+RUNNER_GROUP="${RUNNER_GROUP:-linuxmadesane-runner}"
+RUNNER_HOME="${RUNNER_HOME:-/var/lib/linuxmadesane/runner}"
+RUNNER_WORKSPACE="${RUNNER_WORKSPACE:-${RUNNER_HOME}/workspace}"
+LMS_BASE_URL="${LMS_BASE_URL:-https://www.linuxmadesane.com}"
+UPDATE_HELPER_PATH="${UPDATE_HELPER_PATH:-/usr/local/sbin/linux-made-sane-update}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +38,8 @@ while [[ $# -gt 0 ]]; do
     --service-port) SERVICE_PORT="$2"; shift 2 ;;
     --start) START_SERVICE=true; shift ;;
     --skip-system-packages) INSTALL_SYSTEM_PACKAGES=false; shift ;;
+    --no-local-ssh) CONFIGURE_LOCAL_SSH=false; shift ;;
+    --no-local-sudo) ENABLE_LOCAL_SUDO=false; shift ;;
     *) lms_die "unknown argument: $1" ;;
   esac
 done
@@ -69,11 +79,18 @@ EXECUTABLE_PATH="$CURRENT_DIR/LinuxMadeSane.Web"
 
 mkdir -p "$RELEASE_DIR" "$DATA_ROOT_ABS" "$CONFIG_ROOT_ABS" "$SYSTEMD_ROOT_ABS"
 
-lms_install_host_packages ffmpeg samba-common-bin smbclient cifs-utils
+lms_install_host_packages sudo openssh-server openssh-client caddy ffmpeg samba-common-bin smbclient cifs-utils
 
 if [[ "$LMS_DEST_ROOT" == "" ]]; then
   lms_prepare_live_service_user "$SERVICE_USER" "$SERVICE_GROUP" "$INSTALL_ROOT"
 fi
+
+if lms_is_truthy "$CONFIGURE_LOCAL_SSH"; then
+  lms_enable_openssh_server
+  lms_prepare_local_ssh_runner "$SERVICE_USER" "$SERVICE_GROUP" "$CONFIG_ROOT_ABS" "$RUNNER_USER" "$RUNNER_GROUP" "$RUNNER_HOME" "$ENABLE_LOCAL_SUDO" "$RUNNER_WORKSPACE"
+fi
+
+lms_detect_installer_identity
 
 cp -a "$APP_SOURCE"/. "$RELEASE_DIR"/
 ln -sfn "$RELEASE_DIR" "$CURRENT_DIR"
@@ -82,7 +99,25 @@ lms_write_env_file \
   "$ENV_FILE" \
   "ASPNETCORE_ENVIRONMENT=Production" \
   "ASPNETCORE_URLS=http://0.0.0.0:${SERVICE_PORT}" \
-  "ConnectionStrings__LinuxMadeSane=Data Source=${DATA_ROOT}/linuxmadesane.db"
+  "ConnectionStrings__LinuxMadeSane=Data Source=${DATA_ROOT}/linuxmadesane.db" \
+  "DataProtection__KeyDirectory=${DATA_ROOT}/protection-keys" \
+  "LocalHostBootstrap__Username=${RUNNER_USER}" \
+  "LocalHostBootstrap__PrivateKeyPath=${CONFIG_ROOT}/ssh/lms_local_runner_ed25519" \
+  "LocalHostBootstrap__DefaultWorkingDirectory=${RUNNER_WORKSPACE}" \
+  "LocalHostBootstrap__Port=22" \
+  "InitialSetupBootstrap__InstallerUsername=${LMS_INSTALLER_USERNAME}" \
+  "InitialSetupBootstrap__InstallerUserId=${LMS_INSTALLER_UID}" \
+  "InitialSetupBootstrap__InstallerHomeDirectory=${LMS_INSTALLER_HOME}" \
+  "InitialSetupBootstrap__InstallerShell=${LMS_INSTALLER_SHELL}" \
+  "InitialSetupBootstrap__InstalledAtUtc=${LMS_INSTALLER_INSTALLED_AT_UTC}" \
+  "ApplicationUpdates__Enabled=true" \
+  "ApplicationUpdates__ManifestUrl=${LMS_BASE_URL}/api/downloads/manifest" \
+  "ApplicationUpdates__InstallScriptUrl=${LMS_BASE_URL}/install.sh" \
+  "ApplicationUpdates__Edition=community" \
+  "ApplicationUpdates__Rid=linux-x64" \
+  "ApplicationUpdates__CheckIntervalMinutes=360" \
+  "ApplicationUpdates__InstallAutomatically=false" \
+  "ApplicationUpdates__UpdateHelperPath=${UPDATE_HELPER_PATH}"
 
 lms_render_systemd_unit \
   "$REPO_ROOT/deploy/systemd/linux-made-sane.service.template" \
@@ -93,6 +128,8 @@ lms_render_systemd_unit \
   "$CURRENT_DIR" \
   "$ENV_FILE" \
   "$EXECUTABLE_PATH"
+
+lms_write_update_helper "$SERVICE_USER" "$LMS_BASE_URL" "$UPDATE_HELPER_PATH"
 
 lms_maybe_chown "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_ROOT_ABS"
 lms_maybe_chown "$SERVICE_USER:$SERVICE_GROUP" "$DATA_ROOT_ABS"
@@ -107,3 +144,6 @@ fi
 lms_log "CE install complete"
 printf 'version: %s\nservice unit: %s\ninstall root: %s\ndata root: %s\nconfig file: %s\nport: %s\n' \
   "$PACKAGE_VERSION" "$SERVICE_UNIT" "$INSTALL_ROOT_ABS" "$DATA_ROOT_ABS" "$ENV_FILE" "$SERVICE_PORT"
+printf 'local SSH runner: %s@localhost:22\n' "$RUNNER_USER"
+lms_print_access_urls "$SERVICE_PORT"
+printf 'update command: sudo %s\n' "$UPDATE_HELPER_PATH"

@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Application.Contracts;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
@@ -64,7 +67,8 @@ public sealed class RunbookService(
                     primary.TemplateSourceId,
                     primary.LinkGroupId,
                     primary.ParameterDefinitions,
-                    primary.ParameterValueSnapshot);
+                    primary.ParameterValueSnapshot,
+                    primary.IsGlobalFavorite);
             })
             .OrderBy(item => item.HostName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
@@ -158,7 +162,8 @@ public sealed class RunbookService(
                     null,
                     null,
                     normalizedDefinitions,
-                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)),
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                    false),
                 cancellationToken);
 
             return templateId;
@@ -198,6 +203,7 @@ public sealed class RunbookService(
             normalizedDescription,
             editor.RequiresSudo,
             editor.IsQuickAccess,
+            editor.IsGlobalFavorite,
             editor.TemplateSourceId,
             parameterDefinitionsForSave,
             parameterValuesForSave,
@@ -269,6 +275,7 @@ public sealed class RunbookService(
             existing.Description,
             existing.RequiresSudo,
             existing.IsQuickAccess,
+            existing.IsGlobalFavorite,
             existing.TemplateSourceId,
             existing.ParameterDefinitions ?? [],
             existing.ParameterValueSnapshot ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
@@ -326,6 +333,26 @@ public sealed class RunbookService(
         foreach (var runbook in ResolveLogicalRunbookGroup(allCommands, command))
         {
             await savedCommandStore.SaveAsync(runbook with { IsQuickAccess = isQuickAccess }, cancellationToken);
+        }
+    }
+
+    public async Task SetCommandGlobalFavoriteAsync(Guid commandId, bool isGlobalFavorite, CancellationToken cancellationToken = default)
+    {
+        var allCommands = await savedCommandStore.ListAsync(cancellationToken);
+        var command = allCommands.FirstOrDefault(saved => saved.Id == commandId);
+        if (command is null)
+        {
+            throw new InvalidOperationException("Runbook not found.");
+        }
+
+        if (command.IsTemplate)
+        {
+            throw new InvalidOperationException("Templates cannot be marked as global terminal favourites.");
+        }
+
+        foreach (var runbook in ResolveLogicalRunbookGroup(allCommands, command))
+        {
+            await savedCommandStore.SaveAsync(runbook with { IsGlobalFavorite = isGlobalFavorite }, cancellationToken);
         }
     }
 
@@ -574,6 +601,7 @@ public sealed class RunbookService(
         string description,
         bool requiresSudo,
         bool isQuickAccess,
+        bool isGlobalFavorite,
         Guid? templateSourceId,
         IReadOnlyList<RunbookParameterDefinition> parameterDefinitions,
         IReadOnlyDictionary<string, string> parameterValueSnapshot,
@@ -615,7 +643,8 @@ public sealed class RunbookService(
                     templateSourceId,
                     groupId,
                     parameterDefinitions,
-                    parameterValueSnapshot),
+                    parameterValueSnapshot,
+                    isGlobalFavorite),
                 cancellationToken);
         }
 
@@ -649,7 +678,7 @@ public sealed class RunbookService(
 
         return string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
-            $"copy:{command.Name}\u001f{command.Description}\u001f{NormalizeRunbookContent(command.CommandText)}\u001f{command.RequiresSudo}\u001f{command.IsQuickAccess}\u001f{command.TemplateSourceId?.ToString("D") ?? string.Empty}\u001f{SerializeRunbookParameterDefinitions(command.ParameterDefinitions)}\u001f{SerializeRunbookParameterValues(command.ParameterValueSnapshot)}");
+            $"copy:{command.Name}\u001f{command.Description}\u001f{NormalizeRunbookContent(command.CommandText)}\u001f{command.RequiresSudo}\u001f{command.IsQuickAccess}\u001f{command.IsGlobalFavorite}\u001f{command.TemplateSourceId?.ToString("D") ?? string.Empty}\u001f{SerializeRunbookParameterDefinitions(command.ParameterDefinitions)}\u001f{SerializeRunbookParameterValues(command.ParameterValueSnapshot)}");
     }
 
     private static string SerializeRunbookParameterDefinitions(IReadOnlyList<RunbookParameterDefinition>? definitions)

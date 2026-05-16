@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE.md for details. *@
+
 @page "/commands"
 @rendermode InteractiveServer
 @using LinuxMadeSane.Application.Contracts
@@ -190,7 +193,7 @@
                                 <div class="runbook-row-meta">
                                     <span><strong>Type:</strong> @GetRunbookTypeLabel(command)</span>
                                     <span><strong>Scope:</strong> @GetRunbookAvailabilitySummary(command)</span>
-                                    <span><strong>Terminal:</strong> @(command.IsTemplate ? "Templates must be instantiated first" : command.IsQuickAccess ? "Shown in terminal menu" : "Not a terminal favourite")</span>
+                                    <span><strong>Terminal:</strong> @GetTerminalAvailabilityLabel(command)</span>
                                     @if (command.HasParameters)
                                     {
                                         <span><strong>Parameters:</strong> @command.ParameterDefinitions!.Count</span>
@@ -934,6 +937,7 @@
             CommandText = command.CommandText,
             RequiresSudo = command.RequiresSudo,
             IsQuickAccess = command.IsQuickAccess,
+            IsGlobalFavorite = command.IsGlobalFavorite,
             IsTemplate = command.IsTemplate,
             TemplateSourceId = command.TemplateSourceId,
             LinkGroupId = duplicate ? null : command.LinkGroupId,
@@ -1003,6 +1007,25 @@
             1 => command.HostName,
             _ => $"{command.HostIds.Count} machines"
         };
+    }
+
+    private static string GetTerminalAvailabilityLabel(CommandLibraryItem command)
+    {
+        if (command.IsTemplate)
+        {
+            return "Templates must be instantiated first";
+        }
+
+        if (command.IsGlobalFavorite)
+        {
+            return command.IsQuickAccess
+                ? "Shown in every terminal menu and selected host menus"
+                : "Shown in every terminal menu";
+        }
+
+        return command.IsQuickAccess
+            ? "Shown in selected host terminal menus"
+            : "Not a terminal favourite";
     }
 
     private const string DefaultRunbookScript = "#!/usr/bin/env bash\nset -euo pipefail\n";

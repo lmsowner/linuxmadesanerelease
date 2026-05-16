@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Application.Contracts.Shares;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Shares;
@@ -9,6 +12,8 @@ public interface IShareManagementService
     Task<SharesDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default);
 
     Task<ShareManagerViewModel> GetShareManagerAsync(CancellationToken cancellationToken = default);
+
+    Task<int> GetShareCountAsync(CancellationToken cancellationToken = default);
 
     Task<UsersGroupsManagerViewModel> GetUsersGroupsManagerAsync(CancellationToken cancellationToken = default);
 
@@ -62,6 +67,11 @@ public interface IShareManagementService
 
     Task<NetworkShareMountExplorerViewModel> GetNetworkShareMountExplorerAsync(
         NetworkShareDiscoveryScope discoveryScope = NetworkShareDiscoveryScope.Lan,
+        bool runDiscovery = true,
+        CancellationToken cancellationToken = default);
+
+    Task<SshfsMountExplorerViewModel> GetSshfsMountExplorerAsync(
+        bool inspectTooling = true,
         CancellationToken cancellationToken = default);
 
     Task<RemoteShareBrowseResult> BrowseRemoteSharesAsync(
@@ -77,7 +87,24 @@ public interface IShareManagementService
         RemoteShareMountEditor editor,
         CancellationToken cancellationToken = default);
 
+    Task<RemoteShareMountResult?> ReconnectManagedRemoteMountAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
+
+    Task<SshfsMountResult> CreateSshfsMountAsync(
+        SshfsMountEditor editor,
+        CancellationToken cancellationToken = default);
+
+    Task<SshfsMountResult?> ReconnectManagedSshfsMountAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
+
+    Task<ShareMountReconnectSummary> ReconnectDisconnectedManagedMountsAsync(
+        CancellationToken cancellationToken = default);
+
     Task<ShareToolingInstallResult> InstallMissingShareToolingAsync(CancellationToken cancellationToken = default);
+
+    Task<ShareToolingInstallResult> InstallMissingSshfsToolingAsync(CancellationToken cancellationToken = default);
 
     Task<SambaSystemActionResult> RunSambaSystemActionAsync(
         SambaSystemAction action,
@@ -90,4 +117,6 @@ public interface IShareManagementService
     Task<bool> DisconnectCurrentRemoteMountAsync(string localMountPath, CancellationToken cancellationToken = default);
 
     Task DeleteManagedRemoteMountAsync(Guid id, CancellationToken cancellationToken = default);
+
+    Task DeleteManagedSshfsMountAsync(Guid id, CancellationToken cancellationToken = default);
 }

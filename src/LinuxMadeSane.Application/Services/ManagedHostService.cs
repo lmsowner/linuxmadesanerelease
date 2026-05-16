@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE.md for details.
+
 using LinuxMadeSane.Application.Contracts;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
@@ -16,7 +19,8 @@ public sealed class ManagedHostService(
     ISshConnectionService sshConnectionService,
     IManagedHostHealthProbe healthProbe,
     ISecretStore secretStore,
-    ISshHostDiscoveryService sshHostDiscoveryService) : IManagedHostService
+    ISshHostDiscoveryService sshHostDiscoveryService,
+    ICommandExecutionService commandExecutionService) : IManagedHostService
 {
     private static readonly IReadOnlyList<SshCredentialType> CredentialTypes =
     [
@@ -202,6 +206,256 @@ public sealed class ManagedHostService(
         return new ManagedHostDetailsViewModel(host, connection, health, commands, CredentialTypes, capabilities);
     }
 
+    public async Task<ManagedHostLmsInstallResult> InstallLmsAsync(
+        Guid id,
+        ManagedHostLmsInstallOptions options,
+        IProgress<ManagedHostLmsInstallProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        var host = await hostStore.GetAsync(id, cancellationToken);
+        if (host is null)
+        {
+            throw new InvalidOperationException("Host not found.");
+        }
+
+        if (IsCurrentLmsEndpoint(host))
+        {
+            throw new InvalidOperationException("This machine is already the local Linux Made Sane host.");
+        }
+
+        if (!HasStoredConnectionMaterial(host))
+        {
+            throw new InvalidOperationException("Save SSH credentials for this host before installing Linux Made Sane on it.");
+        }
+
+        var sudoPassword = await ResolveStoredSudoPasswordAsync(host, cancellationToken);
+        var inputExecutionService = commandExecutionService as ICommandExecutionInputService;
+        var canUseStoredSudoPassword =
+            !string.IsNullOrEmpty(sudoPassword) &&
+            inputExecutionService is not null;
+        var commandText = BuildLmsInstallCommand(options, canUseStoredSudoPassword);
+        var installProgress = new SynchronousCommandExecutionProgress(update =>
+            ReportLmsInstallProgress(
+                update,
+                progress,
+                "Starting remote Linux Made Sane install.",
+                "Remote install completed successfully.",
+                exitCode => $"Remote install failed with exit code {exitCode}."));
+
+        progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+            ManagedHostLmsInstallProgressState.Starting,
+            "Connecting over SSH and running the public installer.",
+            DateTimeOffset.UtcNow));
+
+        CommandExecutionResult result;
+        try
+        {
+            result = canUseStoredSudoPassword
+                ? await inputExecutionService!.ExecuteAsync(
+                    host,
+                    commandText,
+                    new CommandExecutionInput($"{sudoPassword}\n", true),
+                    installProgress,
+                    cancellationToken)
+                : await commandExecutionService.ExecuteAsync(host, commandText, installProgress, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var now = DateTimeOffset.UtcNow;
+            progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+                ManagedHostLmsInstallProgressState.Failed,
+                ex.Message,
+                now));
+
+            return new ManagedHostLmsInstallResult(
+                false,
+                "Linux Made Sane install failed.",
+                ex.Message,
+                commandText,
+                null,
+                string.Empty,
+                ex.ToString(),
+                now,
+                now);
+        }
+
+        if (!result.IsSuccess)
+        {
+            var failureDetail = string.IsNullOrWhiteSpace(result.StandardError)
+                ? "The remote installer returned a non-zero exit code."
+                : result.StandardError.Trim();
+
+            return new ManagedHostLmsInstallResult(
+                false,
+                "Linux Made Sane install failed.",
+                failureDetail,
+                result.CommandText,
+                result.ExitCode,
+                result.StandardOutput,
+                result.StandardError,
+                result.StartedAtUtc,
+                result.CompletedAtUtc);
+        }
+
+        if (options.MarkAsLmsHostOnSuccess)
+        {
+            var updatedHost = host with
+            {
+                Kind = ManagedHostKind.LmsHost,
+                LastSeenUtc = result.CompletedAtUtc,
+                LastConnectionTestStatus = ConnectionTestStatus.Succeeded
+            };
+            await hostStore.SaveAsync(updatedHost, cancellationToken);
+        }
+
+        var wasLmsHost = ManagedHostCapabilities.IsLmsHost(host);
+        return new ManagedHostLmsInstallResult(
+            true,
+            wasLmsHost ? "Linux Made Sane updated." : "Linux Made Sane installed.",
+            wasLmsHost
+                ? $"The remote LMS host was updated and restarted. Try http://{host.Hostname}:5080/ if the network and firewall allow browser access."
+                : $"The host is now marked as an LMS host. Try http://{host.Hostname}:5080/ if the network and firewall allow browser access.",
+            result.CommandText,
+            result.ExitCode,
+            result.StandardOutput,
+            result.StandardError,
+            result.StartedAtUtc,
+            result.CompletedAtUtc);
+    }
+
+    public async Task<ManagedHostLmsInstallResult> UninstallLmsAsync(
+        Guid id,
+        ManagedHostLmsUninstallOptions options,
+        IProgress<ManagedHostLmsInstallProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        var host = await hostStore.GetAsync(id, cancellationToken);
+        if (host is null)
+        {
+            throw new InvalidOperationException("Host not found.");
+        }
+
+        if (IsCurrentLmsEndpoint(host))
+        {
+            throw new InvalidOperationException("Use the local installer command to uninstall the local Linux Made Sane instance.");
+        }
+
+        if (!ManagedHostCapabilities.IsLmsHost(host))
+        {
+            throw new InvalidOperationException("This host is not registered as a Linux Made Sane host.");
+        }
+
+        if (!HasStoredConnectionMaterial(host))
+        {
+            throw new InvalidOperationException("Save SSH credentials for this host before uninstalling Linux Made Sane from it.");
+        }
+
+        var sudoPassword = await ResolveStoredSudoPasswordAsync(host, cancellationToken);
+        var inputExecutionService = commandExecutionService as ICommandExecutionInputService;
+        var canUseStoredSudoPassword =
+            !string.IsNullOrEmpty(sudoPassword) &&
+            inputExecutionService is not null;
+        var commandText = BuildLmsUninstallCommand(options, canUseStoredSudoPassword);
+        var uninstallProgress = new SynchronousCommandExecutionProgress(update =>
+            ReportLmsInstallProgress(
+                update,
+                progress,
+                "Starting remote Linux Made Sane uninstall.",
+                "Remote uninstall completed successfully.",
+                exitCode => $"Remote uninstall failed with exit code {exitCode}."));
+
+        progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+            ManagedHostLmsInstallProgressState.Starting,
+            "Connecting over SSH and running the public uninstaller.",
+            DateTimeOffset.UtcNow));
+
+        CommandExecutionResult result;
+        try
+        {
+            result = canUseStoredSudoPassword
+                ? await inputExecutionService!.ExecuteAsync(
+                    host,
+                    commandText,
+                    new CommandExecutionInput($"{sudoPassword}\n", true),
+                    uninstallProgress,
+                    cancellationToken)
+                : await commandExecutionService.ExecuteAsync(host, commandText, uninstallProgress, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var now = DateTimeOffset.UtcNow;
+            progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+                ManagedHostLmsInstallProgressState.Failed,
+                ex.Message,
+                now));
+
+            return new ManagedHostLmsInstallResult(
+                false,
+                "Linux Made Sane uninstall failed.",
+                ex.Message,
+                commandText,
+                null,
+                string.Empty,
+                ex.ToString(),
+                now,
+                now);
+        }
+
+        if (!result.IsSuccess)
+        {
+            var failureDetail = string.IsNullOrWhiteSpace(result.StandardError)
+                ? "The remote uninstaller returned a non-zero exit code."
+                : result.StandardError.Trim();
+
+            return new ManagedHostLmsInstallResult(
+                false,
+                "Linux Made Sane uninstall failed.",
+                failureDetail,
+                result.CommandText,
+                result.ExitCode,
+                result.StandardOutput,
+                result.StandardError,
+                result.StartedAtUtc,
+                result.CompletedAtUtc);
+        }
+
+        if (options.MarkAsSshHostOnSuccess)
+        {
+            var updatedHost = host with
+            {
+                Kind = ManagedHostKind.SshHost,
+                LastSeenUtc = result.CompletedAtUtc,
+                LastConnectionTestStatus = ConnectionTestStatus.Succeeded
+            };
+            await hostStore.SaveAsync(updatedHost, cancellationToken);
+        }
+
+        return new ManagedHostLmsInstallResult(
+            true,
+            "Linux Made Sane uninstalled.",
+            options.RemoveData
+                ? "The remote LMS service, application files, data, and config were removed. The host remains registered as an SSH host."
+                : "The remote LMS service and application files were removed. Data and config were kept. The host remains registered as an SSH host.",
+            result.CommandText,
+            result.ExitCode,
+            result.StandardOutput,
+            result.StandardError,
+            result.StartedAtUtc,
+            result.CompletedAtUtc);
+    }
+
     public async Task<ServerHealthSnapshot> GetHealthSnapshotAsync(Guid id, CancellationToken cancellationToken = default)
     {
         var host = await hostStore.GetAsync(id, cancellationToken);
@@ -316,7 +570,7 @@ public sealed class ManagedHostService(
             existing?.LastSeenUtc,
             existing?.LastConnectionTestStatus ?? ConnectionTestStatus.NotRun,
             editor.Platform.Trim(),
-            NormalizeHostKind(editor.HostKind, hostId));
+            NormalizeHostKind(editor.HostKind, hostId, editor.Hostname));
     }
 
     private static void ValidateConnectionEditor(ManagedHostEditor editor)
@@ -351,6 +605,158 @@ public sealed class ManagedHostService(
             : normalizedHostname;
     }
 
+    private async Task<string?> ResolveStoredSudoPasswordAsync(
+        ManagedHost host,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(host.PasswordSecretReference))
+        {
+            return null;
+        }
+
+        var password = await secretStore.ResolveSecretAsync(host.PasswordSecretReference, cancellationToken);
+        return string.IsNullOrEmpty(password) ? null : password;
+    }
+
+    private static string BuildLmsInstallCommand(
+        ManagedHostLmsInstallOptions options,
+        bool canUseStoredSudoPassword)
+    {
+        var installUrl = NormalizeInstallUrl(options.InstallUrl);
+        var installerArguments = new List<string>();
+        if (options.UpdateExistingInstall)
+        {
+            installerArguments.Add("--install");
+        }
+
+        if (!options.StartService)
+        {
+            installerArguments.Add("--no-start");
+        }
+
+        if (!options.ConfigureLocalSshRunner)
+        {
+            installerArguments.Add("--no-local-ssh");
+        }
+        else if (!options.EnableLocalSudo)
+        {
+            installerArguments.Add("--no-local-sudo");
+        }
+
+        return BuildRemoteLmsInstallerCommand(
+            installUrl,
+            "lms-host-conversion",
+            installerArguments,
+            canUseStoredSudoPassword);
+    }
+
+    private static string BuildLmsUninstallCommand(
+        ManagedHostLmsUninstallOptions options,
+        bool canUseStoredSudoPassword)
+    {
+        var installUrl = NormalizeInstallUrl(options.InstallUrl);
+        var installerArguments = options.RemoveData
+            ? new List<string> { "--purge" }
+            : new List<string> { "--uninstall", "--keep-data" };
+
+        return BuildRemoteLmsInstallerCommand(
+            installUrl,
+            "lms-host-uninstall",
+            installerArguments,
+            canUseStoredSudoPassword);
+    }
+
+    private static string BuildRemoteLmsInstallerCommand(
+        string installUrl,
+        string source,
+        IReadOnlyCollection<string> installerArguments,
+        bool canUseStoredSudoPassword)
+    {
+        var quotedInstallerArguments = string.Join(" ", installerArguments.Select(QuoteShellArgument));
+        var script = string.Join(
+            "\n",
+            "set -euo pipefail",
+            "if [ \"$(id -u)\" -eq 0 ]; then",
+            "  SUDO=''",
+            "elif command -v sudo >/dev/null 2>&1; then",
+            canUseStoredSudoPassword
+                ? "  if IFS= read -r LMS_SUDO_PASSWORD; then\n    printf '%s\\n' \"$LMS_SUDO_PASSWORD\" | sudo -S -p '' -v\n    unset LMS_SUDO_PASSWORD\n    SUDO='sudo -n'\n  else\n    echo 'Stored SSH password was not available to sudo.' >&2\n    exit 126\n  fi"
+                : "  SUDO='sudo -n'",
+            "else",
+            "  echo 'Remote account is not root and sudo is not installed.' >&2",
+            "  exit 126",
+            "fi",
+            "if ! command -v curl >/dev/null 2>&1; then",
+            "  if command -v apt-get >/dev/null 2>&1; then",
+            "    $SUDO apt-get update",
+            "    $SUDO apt-get install -y -- curl",
+            "  else",
+            "    echo 'curl is required to install or remove Linux Made Sane. Install curl or use an apt-based distro.' >&2",
+            "    exit 127",
+            "  fi",
+            "fi",
+            $"curl -fsSL {QuoteShellArgument(installUrl)} | $SUDO env LMS_SOURCE={source} bash -s -- {quotedInstallerArguments}");
+
+        return $"bash -lc {QuoteShellArgument(script)}";
+    }
+
+    private static string NormalizeInstallUrl(string installUrl)
+    {
+        if (!Uri.TryCreate(installUrl?.Trim(), UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new InvalidOperationException("Enter a valid HTTP or HTTPS installer URL.");
+        }
+
+        return uri.ToString();
+    }
+
+    private static string QuoteShellArgument(string value) =>
+        $"'{value.Replace("'", "'\"'\"'", StringComparison.Ordinal)}'";
+
+    private static void ReportLmsInstallProgress(
+        CommandExecutionUpdate update,
+        IProgress<ManagedHostLmsInstallProgressUpdate>? progress,
+        string startedMessage,
+        string completedMessage,
+        Func<int, string> failedMessageFactory)
+    {
+        switch (update)
+        {
+            case CommandExecutionStartedUpdate started:
+                progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+                    ManagedHostLmsInstallProgressState.Starting,
+                    startedMessage,
+                    started.StartedAtUtc));
+                break;
+            case CommandExecutionOutputUpdate output when !string.IsNullOrWhiteSpace(output.Content):
+                progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+                    ManagedHostLmsInstallProgressState.Output,
+                    output.Content.TrimEnd(),
+                    output.OccurredAtUtc,
+                    output.Channel));
+                break;
+            case CommandExecutionCompletedUpdate completed:
+                progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+                    completed.ExitCode == 0
+                        ? ManagedHostLmsInstallProgressState.Completed
+                        : ManagedHostLmsInstallProgressState.Failed,
+                    completed.ExitCode == 0
+                        ? completedMessage
+                        : failedMessageFactory(completed.ExitCode),
+                    completed.CompletedAtUtc));
+                break;
+        }
+    }
+
+    private static bool HasStoredConnectionMaterial(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private static bool IsCurrentLmsEndpoint(ManagedHost host) =>
+        AiLocalMachine.IsLocalMachine(host.Id) ||
+        AiLocalMachine.IsLoopbackHostname(host.Hostname);
+
     private async Task DeleteTransientSecretAsync(string? secretReference, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(secretReference))
@@ -369,8 +775,8 @@ public sealed class ManagedHostService(
             : trimmedEnvironment;
     }
 
-    private static ManagedHostKind NormalizeHostKind(ManagedHostKind hostKind, Guid hostId) =>
-        AiLocalMachine.IsLocalMachine(hostId)
+    private static ManagedHostKind NormalizeHostKind(ManagedHostKind hostKind, Guid hostId, string hostname) =>
+        AiLocalMachine.IsLocalMachine(hostId) || AiLocalMachine.IsLoopbackHostname(hostname)
             ? ManagedHostKind.LmsHost
             : hostKind;
 
@@ -457,4 +863,9 @@ public sealed class ManagedHostService(
             "Unavailable",
             "Unavailable",
             capturedAtUtc);
+
+    private sealed class SynchronousCommandExecutionProgress(Action<CommandExecutionUpdate> handler) : IProgress<CommandExecutionUpdate>
+    {
+        public void Report(CommandExecutionUpdate value) => handler(value);
+    }
 }

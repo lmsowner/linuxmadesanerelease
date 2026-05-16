@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE.md for details. *@
+
 @page "/terminal-window/{TabId:guid}"
 @layout PopupLayout
 @rendermode InteractiveServer
@@ -14,7 +17,7 @@
 @inject IJSRuntime JSRuntime
 @inject NavigationManager NavigationManager
 
-<PageTitle>Detached Terminal | Linux Made Sane</PageTitle>
+<PageTitle>@TerminalWindowPageTitle</PageTitle>
 
 @* Guardrail: this detached window is a second terminal surface, not a second SSH
    implementation. Reuse the shared workspace/session/secret abstractions and extract
@@ -195,6 +198,9 @@
     private bool pendingAiAnalyzeSession;
     private string? pendingAiSelectionText;
     private bool autoConnectIssued;
+    private string TerminalWindowPageTitle => tab is null
+        ? "Terminal | Linux Made Sane"
+        : $"Terminal - {BuildTerminalTitleHostLabel(tab)} | Linux Made Sane";
 
     protected override Task OnInitializedAsync()
     {
@@ -839,6 +845,15 @@
             TerminalSessionStatus.Faulted => UiPillTone.Failure,
             _ => UiPillTone.Neutral
         };
+
+    private static string BuildTerminalTitleHostLabel(TerminalTabState terminalTab)
+    {
+        var name = string.IsNullOrWhiteSpace(terminalTab.HostName) ? terminalTab.HostAddress : terminalTab.HostName.Trim();
+        var address = terminalTab.HostAddress.Trim();
+        return string.IsNullOrWhiteSpace(address) || string.Equals(name, address, StringComparison.OrdinalIgnoreCase)
+            ? name
+            : $"{name} ({address})";
+    }
 
     private static string GetSessionLabel(TerminalTabState terminalTab) =>
         terminalTab.Snapshot?.Status switch

@@ -1,4 +1,8 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Application.Interfaces;
+using LinuxMadeSane.Application.Contracts.EdgeGateway;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Abstractions.Portal;
 using LinuxMadeSane.Core.Models.Cloudflare;
@@ -23,7 +27,10 @@ public static class DependencyInjection
         IConfiguration configuration,
         string contentRootPath)
     {
-        var dataProtectionDirectory = new DirectoryInfo(Path.Combine(contentRootPath, "data", "protection-keys"));
+        var dataProtectionDirectory = new DirectoryInfo(BuildRootedPath(
+            configuration["DataProtection:KeyDirectory"],
+            Path.Combine(contentRootPath, "data", "protection-keys"),
+            contentRootPath));
         dataProtectionDirectory.Create();
 
         var connectionString = BuildSqliteConnectionString(
@@ -37,6 +44,7 @@ public static class DependencyInjection
             .Bind(configuration.GetSection("Cloudflare"))
             .ValidateDataAnnotations();
         services.AddSingleton(serviceProvider => serviceProvider.GetRequiredService<IOptions<CloudflareIntegrationOptions>>().Value);
+        services.AddSingleton(configuration.GetSection("EdgeGateway").Get<EdgeGatewayOptions>() ?? new EdgeGatewayOptions());
         services.AddHttpClient<ICloudflareClient, CloudflareClient>();
         services.AddDbContext<LinuxMadeSaneDbContext>(options => options
             .UseSqlite(connectionString)
@@ -52,6 +60,7 @@ public static class DependencyInjection
         services.AddSingleton(new RdpOptimizerStorageSettings(Path.Combine(contentRootPath, "data", "rdp-optimizer")));
         services.AddSingleton(new ShareMountStorageSettings(Path.Combine(contentRootPath, "data", "share-mounts")));
         services.AddSingleton(new SftpBackupStorageSettings(Path.Combine(contentRootPath, "data", "sftp-backups")));
+        services.AddSingleton(new HttpServiceDiscoveryStorageSettings(Path.Combine(contentRootPath, "data", "http-service-discovery")));
         services.AddHostedService<TemporaryShareMountCleanupService>();
         services.AddScoped<IAiConversationStore, SqliteAiConversationStore>();
         services.AddScoped<IAiProviderSettingsStore, SqliteAiProviderSettingsStore>();
@@ -71,7 +80,13 @@ public static class DependencyInjection
         services.AddScoped<ISecretStore, SqliteProtectedSecretStore>();
         services.AddScoped<IPortalConnectionStore, DisabledPortalConnectionStore>();
         services.AddScoped<ICloudflareExposureStore, SqliteCloudflareExposureStore>();
+        services.AddScoped<IEdgeGatewaySettingsStore, SqliteEdgeGatewaySettingsStore>();
+        services.AddScoped<IMessagingEmailSettingsStore, SqliteMessagingEmailSettingsStore>();
+        services.AddScoped<IEmailDeliveryService, ConfiguredEmailDeliveryService>();
+        services.AddHttpClient(nameof(ConfiguredEmailDeliveryService));
         services.AddScoped<ISecurityUserStore, SqliteSecurityUserStore>();
+        services.AddScoped<ISecurityPasskeyStore, SqliteSecurityPasskeyStore>();
+        services.AddScoped<ILocalInstanceIdentityStore, SqliteLocalInstanceIdentityStore>();
         services.AddScoped<IRemoteAccessSystemService, LocalRemoteAccessSystemService>();
         services.AddScoped<ILocalUserAccessSystemService, LocalUserAccessSystemService>();
         services.AddScoped<ITrustedNetworkStore, SqliteTrustedNetworkStore>();
@@ -80,9 +95,12 @@ public static class DependencyInjection
         services.AddScoped<IManagedHostHealthProbe, ManagedHostHealthProbe>();
         services.AddScoped<ISavedCommandStore, SqliteSavedCommandStore>();
         services.AddScoped<ILinuxShareModuleDataService, SqliteLinuxShareModuleDataService>();
+        services.AddScoped<ISshfsMountService, SshfsRemoteMountService>();
         services.AddScoped<ILinuxServiceModuleDataService, SqliteLinuxServiceModuleDataService>();
         services.AddScoped<ILinuxSchedulingModuleDataService, SqliteLinuxSchedulingModuleDataService>();
         services.AddScoped<ICaddyIntegrationDataService, SqliteCaddyIntegrationDataService>();
+        services.AddScoped<IEdgeGatewayStore, SqliteEdgeGatewayStore>();
+        services.AddScoped<IEdgeGatewayCaddyManager, LocalEdgeGatewayCaddyManager>();
         services.AddScoped<IMediaLibraryIntegrationDataService, SqliteMediaLibraryIntegrationDataService>();
         services.AddScoped<ISftpServerStore, SqliteSftpServerStore>();
         services.AddScoped<ISftpAuditService, SqliteSftpAuditService>();
@@ -113,6 +131,7 @@ public static class DependencyInjection
         services.AddScoped<ICloudflareAccessService, CloudflareAccessService>();
         services.AddScoped<ISshConnectionService, SshConnectionService>();
         services.AddScoped<ICommandExecutionService, ManagedHostCommandExecutionService>();
+        services.AddScoped<ILocalHttpServiceDiscoveryService, LocalHttpServiceDiscoveryService>();
         services.AddScoped<IManagedHostFileAccessService, ManagedHostFileAccessService>();
         services.AddSingleton<ITerminalSessionService, SshTerminalSessionService>();
         services.AddScoped<ILocalFileBrowsingService, LocalFileBrowsingService>();
@@ -130,5 +149,16 @@ public static class DependencyInjection
         }
 
         return builder.ToString();
+    }
+
+    private static string BuildRootedPath(string? configuredPath, string fallbackPath, string contentRootPath)
+    {
+        var path = string.IsNullOrWhiteSpace(configuredPath)
+            ? fallbackPath
+            : configuredPath.Trim();
+
+        return Path.IsPathRooted(path)
+            ? path
+            : Path.GetFullPath(path, contentRootPath);
     }
 }

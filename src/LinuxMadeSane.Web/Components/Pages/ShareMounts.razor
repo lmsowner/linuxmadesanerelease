@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE.md for details. *@
+
 @page "/shares"
 @page "/shares/mounts"
 @rendermode InteractiveServer
@@ -6,7 +9,7 @@
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.RdpOptimizer
 @using LinuxMadeSane.Core.Models.Shares
-@inject IShareManagementService ShareService
+@inject ShareMountsWorkspaceService ShareWorkspace
 @inject IJSRuntime JSRuntime
 
 <PageTitle>Network Shares | Linux Made Sane</PageTitle>
@@ -31,7 +34,7 @@
                     <Header>
                         <div class="page-tab-header">
                             <span class="page-tab-title">Network mounts</span>
-                            <span class="page-tab-count">@GetRemoteShareTotalCount()</span>
+                            <span class="page-tab-count">@GetRemoteShareTabCountLabel()</span>
                         </div>
                     </Header>
                     <ChildContent>
@@ -127,13 +130,39 @@
                                 {
                                     <p class="callout @mountStatusTone">@mountStatusMessage</p>
                                 }
+                                @if (isNetworkMountStateLoading)
+                                {
+                                    <p class="callout info">Checking saved network mounts in the background.</p>
+                                }
+                                @if (!string.IsNullOrWhiteSpace(explorerLoadError))
+                                {
+                                    <p class="callout warning">@explorerLoadError</p>
+                                }
+                                @if (isReconnectingMounts)
+                                {
+                                    <p class="callout info">Checking disconnected saved mounts and reconnecting anything LMS can safely remount.</p>
+                                }
 
                                 <label class="service-search compact-search">
                                     <span>Search shares</span>
                                     <input @bind="shareMountSearchTerm" @bind:event="oninput" placeholder="Search remote host, share, mount path, or status" />
                                 </label>
 
-                                @if (GetRemoteShareTotalCount() == 0)
+                                @if (isNetworkMountStateLoading)
+                                {
+                                    <div class="empty-state">
+                                        <h3>Checking saved mounts</h3>
+                                        <p>LMS is loading saved network mounts and current mount status in the background.</p>
+                                    </div>
+                                }
+                                else if (!string.IsNullOrWhiteSpace(explorerLoadError))
+                                {
+                                    <div class="empty-state">
+                                        <h3>Network mounts could not be loaded</h3>
+                                        <p>@explorerLoadError</p>
+                                    </div>
+                                }
+                                else if (GetRemoteShareTotalCount() == 0)
                                 {
                                     <div class="empty-state">
                                         <h3>No remote shares mounted yet</h3>
@@ -177,6 +206,15 @@
                                                     @if (CanExposeManagedMountBrowser(mount))
                                                     {
                                                         <UiCommandButton Label="@(IsCurrentMountBrowserExpanded(mount.LocalMountPath) ? "Close browser" : "Browse files")" Glyph="UiIconGlyph.FolderOpen" Variant="UiButtonVariant.Action" OnClick="@(() => ToggleCurrentMountBrowserAsync(mount.LocalMountPath))" />
+                                                    }
+                                                    else if (!mount.IsMounted)
+                                                    {
+                                                        <UiCommandButton Label="@(reconnectingNetworkMountIds.Contains(mount.Id) ? "Reconnecting..." : "Reconnect")"
+                                                                         Title="Reconnect this saved network mount"
+                                                                         Glyph="UiIconGlyph.Refresh"
+                                                                         Variant="UiButtonVariant.Action"
+                                                                         Disabled="@reconnectingNetworkMountIds.Contains(mount.Id)"
+                                                                         OnClick="@(() => ReconnectManagedNetworkMountAsync(mount))" />
                                                     }
                                                     else
                                                     {
@@ -375,17 +413,273 @@
                     </ChildContent>
                 </TabPage>
 
-                <TabPage Value="@NetworkSharesTabValue" Title="Network shares">
+                <TabPage Value="@SshMountsTabValue" Title="SSH Mount">
                     <Header>
                         <div class="page-tab-header">
-                            <span class="page-tab-title">Network shares</span>
-                            <span class="page-tab-count">@localShareCount</span>
+                            <span class="page-tab-title">SSH Mount</span>
+                            <span class="page-tab-count">@GetSshfsMountTabCountLabel()</span>
                         </div>
                     </Header>
                     <ChildContent>
                         <div class="share-workspace-tab-content">
-                            <ShareManagerWorkspace Embedded="true"
-                                                   OnShareCountChanged="HandleLocalShareCountChangedAsync" />
+                            @if (sshfsExplorer is null)
+                            {
+                                <section class="surface-card">
+                                    <p class="meta-text">Loading SSHFS mount explorer...</p>
+                                </section>
+                            }
+                            else
+                            {
+                                @if (!sshfsExplorer.Tooling.HasAllRequiredPackages)
+                                {
+                                    <section class="surface-card stack-list">
+                                        <div class="table-header">
+                                            <h2>SSHFS dependency check</h2>
+                                            <span>@sshfsExplorer.Tooling.MissingPackageNames.Count missing</span>
+                                        </div>
+
+                                        <p class="callout warning">@sshfsExplorer.Tooling.StatusMessage</p>
+                                        <p class="meta-text">SSH Mount uses `sshfs` and FUSE on this LMS server. LMS mounts registered SSH hosts using stored public key authentication.</p>
+                                        <code class="block-code">@sshfsExplorer.Tooling.InstallCommand</code>
+
+                                        @if (sshfsExplorer.Tooling.IsLocalHostRegistered && !string.IsNullOrWhiteSpace(sshfsExplorer.Tooling.LocalHostName))
+                                        {
+                                            <div class="toolbar-row">
+                                                <UiCommandButton Label="@(isInstallingSshfsTooling ? "Installing..." : $"Install on {sshfsExplorer.Tooling.LocalHostName}")" Glyph="UiIconGlyph.Connect" OnClick="ShowSshfsInstallPrompt" Disabled="@isInstallingSshfsTooling" />
+                                            </div>
+
+                                            @if (showSshfsInstallPrompt)
+                                            {
+                                                <div class="callout warning">
+                                                    <strong>Install missing SSHFS packages on @sshfsExplorer.Tooling.LocalHostName?</strong>
+                                                    <div>This will run the local LMS package install flow for: @string.Join(", ", sshfsExplorer.Tooling.MissingPackageNames).</div>
+                                                    <div class="toolbar-row">
+                                                        <UiCommandButton Label="@(isInstallingSshfsTooling ? "Installing..." : "Confirm install")" Glyph="UiIconGlyph.Connect" OnClick="InstallMissingSshfsToolingAsync" Disabled="@isInstallingSshfsTooling" />
+                                                        <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="HideSshfsInstallPrompt" Disabled="@isInstallingSshfsTooling" />
+                                                    </div>
+                                                </div>
+                                            }
+                                        }
+                                        else
+                                        {
+                                            <p class="callout warning">Auto-install is unavailable because the LMS local machine is not registered in host inventory.</p>
+                                        }
+
+                                        @if (sshfsToolingInstallResult is not null)
+                                        {
+                                            <p class="callout @(sshfsToolingInstallResult.Success ? "success" : "warning")">@sshfsToolingInstallResult.StatusMessage</p>
+
+                                            @if (sshfsToolingInstallResult.OperationLogs.Count > 0)
+                                            {
+                                                <code class="block-code log-panel">@string.Join(Environment.NewLine + Environment.NewLine, sshfsToolingInstallResult.OperationLogs.Select(FormatLog))</code>
+                                            }
+                                        }
+                                    </section>
+                                }
+
+                                <section class="surface-card stack-list share-list-panel">
+                                    <div class="table-header share-list-header">
+                                        <div>
+                                            <h2>SSHFS mounts on LMS</h2>
+                                            <span>@GetSshfsMountListSummary()</span>
+                                        </div>
+                                        <div class="toolbar-row">
+                                            <UiCommandButton Label="Mount SSH host" Glyph="UiIconGlyph.NetworkMount" OnClick="OpenAddSshfsMountModal" Disabled="@(!CanCreateSshfsMounts())" />
+                                        </div>
+                                    </div>
+
+                                    @if (!string.IsNullOrWhiteSpace(sshfsStatusMessage))
+                                    {
+                                        <p class="callout @sshfsStatusTone">@sshfsStatusMessage</p>
+                                    }
+                                    @if (isSshfsMountStateLoading)
+                                    {
+                                        <p class="callout info">Checking saved SSHFS mounts in the background.</p>
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(sshfsLoadError))
+                                    {
+                                        <p class="callout warning">@sshfsLoadError</p>
+                                    }
+                                    @if (isReconnectingMounts)
+                                    {
+                                        <p class="callout info">Checking disconnected saved SSHFS mounts and reconnecting anything LMS can safely remount.</p>
+                                    }
+
+                                    <label class="service-search compact-search">
+                                        <span>Search SSH mounts</span>
+                                        <input @bind="sshfsMountSearchTerm" @bind:event="oninput" placeholder="Search host, remote path, mount path, or status" />
+                                    </label>
+
+                                    @if (isSshfsMountStateLoading)
+                                    {
+                                        <div class="empty-state">
+                                            <h3>Checking saved SSHFS mounts</h3>
+                                            <p>LMS is loading saved SSHFS mounts and current mount status in the background.</p>
+                                        </div>
+                                    }
+                                    else if (!string.IsNullOrWhiteSpace(sshfsLoadError))
+                                    {
+                                        <div class="empty-state">
+                                            <h3>SSHFS mounts could not be loaded</h3>
+                                            <p>@sshfsLoadError</p>
+                                        </div>
+                                    }
+                                    else if (GetSshfsMountTotalCount() == 0)
+                                    {
+                                        <div class="empty-state">
+                                            <h3>No SSHFS mounts yet</h3>
+                                            <p>Register an SSH host with stored public key authentication, then mount a remote folder onto this LMS server.</p>
+                                        </div>
+                                    }
+                                    else if (GetSshfsMountListCount() == 0)
+                                    {
+                                        <div class="empty-state">
+                                            <h3>No SSH mounts match that search</h3>
+                                            <p>Clear the search to show all SSHFS mounts.</p>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="share-grid-list">
+                                            <div class="share-grid-header" aria-hidden="true">
+                                                <span>SSH source</span>
+                                                <span>Mount point</span>
+                                                <span>Summary</span>
+                                                <span>Actions</span>
+                                                <span>Details</span>
+                                            </div>
+
+                                            @foreach (var mount in GetVisibleManagedSshfsMounts())
+                                            {
+                                                <article class="share-grid-row">
+                                                    <div class="share-grid-cell share-name-cell">
+                                                        <span class="entry-name">
+                                                            <UiIcon Name="UiIconName.TerminalFiles" />
+                                                            <strong>@BuildSshfsSourceSummary(mount)</strong>
+                                                        </span>
+                                                    </div>
+                                                    <div class="share-grid-cell share-mount-cell">
+                                                        <span class="share-mount-path" title="@mount.LocalMountPath">@mount.LocalMountPath</span>
+                                                    </div>
+                                                    <div class="share-grid-cell share-summary-cell">
+                                                        <span class="share-status-summary">@GetManagedSshfsMountSummary(mount)</span>
+                                                    </div>
+                                                    <div class="share-grid-cell share-actions-cell">
+                                                        @if (CanExposeSshfsMountBrowser(mount))
+                                                        {
+                                                            <UiCommandButton Label="@(IsCurrentMountBrowserExpanded(mount.LocalMountPath) ? "Close browser" : "Browse files")" Glyph="UiIconGlyph.FolderOpen" Variant="UiButtonVariant.Action" OnClick="@(() => ToggleCurrentMountBrowserAsync(mount.LocalMountPath))" />
+                                                        }
+                                                        else if (!mount.IsMounted)
+                                                        {
+                                                            <UiCommandButton Label="@(reconnectingSshfsMountIds.Contains(mount.Id) ? "Reconnecting..." : "Reconnect")"
+                                                                             Title="Reconnect this saved SSHFS mount"
+                                                                             Glyph="UiIconGlyph.Refresh"
+                                                                             Variant="UiButtonVariant.Action"
+                                                                             Disabled="@reconnectingSshfsMountIds.Contains(mount.Id)"
+                                                                             OnClick="@(() => ReconnectManagedSshfsMountAsync(mount))" />
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="share-grid-unavailable">Unavailable</span>
+                                                        }
+
+                                                        <UiCommandButton Label="Delete mount"
+                                                                         Title="Delete this SSHFS mount"
+                                                                         Glyph="UiIconGlyph.Delete"
+                                                                         Variant="UiButtonVariant.Danger"
+                                                                         OnClick="@(() => OpenDeleteSshfsMountModal(mount))" />
+                                                    </div>
+
+                                                    @if (IsCurrentMountBrowserExpanded(mount.LocalMountPath))
+                                                    {
+                                                        <div class="simple-share-browser">
+                                                            <LocalPathBrowser RootPath="@mount.LocalMountPath" Title="Mounted files" />
+                                                        </div>
+                                                    }
+
+                                                    <details class="share-grid-details">
+                                                        <summary class="share-grid-details-toggle" title="Details" aria-label="Details">
+                                                            <span aria-hidden="true">+</span>
+                                                        </summary>
+                                                        <div class="share-grid-details-panel">
+                                                            <dl class="mount-detail-grid">
+                                                                <div class="mount-detail-row">
+                                                                    <dt>Remote</dt>
+                                                                    <dd>@BuildSshfsSourceSummary(mount)</dd>
+                                                                </div>
+                                                                <div class="mount-detail-row">
+                                                                    <dt>Mounted at</dt>
+                                                                    <dd>@mount.LocalMountPath</dd>
+                                                                </div>
+                                                                <div class="mount-detail-row">
+                                                                    <dt>Status</dt>
+                                                                    <dd>@mount.StatusMessage</dd>
+                                                                </div>
+                                                                <div class="mount-detail-row">
+                                                                    <dt>Created</dt>
+                                                                    <dd>@mount.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</dd>
+                                                                </div>
+                                                            </dl>
+                                                        </div>
+                                                    </details>
+                                                </article>
+                                            }
+
+                                            @foreach (var mount in GetVisibleUnmanagedSshfsMounts())
+                                            {
+                                                <article class="share-grid-row">
+                                                    <div class="share-grid-cell share-name-cell">
+                                                        <span class="entry-name">
+                                                            <UiIcon Name="UiIconName.TerminalFiles" />
+                                                            <strong>@mount.SourcePath</strong>
+                                                        </span>
+                                                    </div>
+                                                    <div class="share-grid-cell share-mount-cell">
+                                                        <span class="share-mount-path" title="@mount.LocalMountPath">@mount.LocalMountPath</span>
+                                                    </div>
+                                                    <div class="share-grid-cell share-summary-cell">
+                                                        <span class="share-status-summary">@GetCurrentMountSummary(mount)</span>
+                                                    </div>
+                                                    <div class="share-grid-cell share-actions-cell">
+                                                        @if (CanExposeMountBrowser(mount))
+                                                        {
+                                                            <UiCommandButton Label="@(IsCurrentMountBrowserExpanded(mount.LocalMountPath) ? "Close browser" : "Browse files")" Glyph="UiIconGlyph.FolderOpen" Variant="UiButtonVariant.Action" OnClick="@(() => ToggleCurrentMountBrowserAsync(mount.LocalMountPath))" />
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="share-grid-unavailable">Unavailable</span>
+                                                        }
+                                                    </div>
+                                                    @if (IsCurrentMountBrowserExpanded(mount.LocalMountPath))
+                                                    {
+                                                        <div class="simple-share-browser">
+                                                            <LocalPathBrowser RootPath="@mount.LocalMountPath" Title="Mounted files" />
+                                                        </div>
+                                                    }
+                                                </article>
+                                            }
+                                        </div>
+                                    }
+                                </section>
+                            }
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@NetworkSharesTabValue" Title="Network shares">
+                    <Header>
+                        <div class="page-tab-header">
+                            <span class="page-tab-title">Network shares</span>
+                            <span class="page-tab-count">@GetLocalShareTabCountLabel()</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="share-workspace-tab-content">
+                            @if (activeTab == NetworkSharesTabValue)
+                            {
+                                <ShareManagerWorkspace Embedded="true"
+                                                       OnShareCountChanged="HandleLocalShareCountChangedAsync" />
+                            }
                         </div>
                     </ChildContent>
                 </TabPage>
@@ -601,6 +895,129 @@
             </div>
         </UiModal>
 
+        <UiModal IsOpen="@showAddSshfsMountPanel"
+                 Title="Mount SSH host"
+                 Subtitle="Mount a registered public-key SSH host with SSHFS."
+                 Class="share-add-modal"
+                 OnClose="CloseAddSshfsMountModal">
+            <div class="add-share-steps share-modal-steps">
+                <section class="surface-subcard add-share-step">
+                    <div class="add-share-step-header">
+                        <span class="add-share-step-number">1</span>
+                        <div>
+                            <strong>Select a registered host</strong>
+                            <span class="meta-text">SSHFS mounts require stored public key authentication and a non-interactive private key.</span>
+                        </div>
+                    </div>
+
+                    @if (GetMountableSshfsHostCandidates().Count == 0)
+                    {
+                        <div class="empty-state">
+                            <p>No registered SSH hosts are ready for SSHFS. Add or edit a host so it uses stored public key authentication.</p>
+                        </div>
+                    }
+                    else
+                    {
+                        <label class="service-search compact-search">
+                            <span>SSH host</span>
+                            <select value="@sshfsEditor.HostId" @onchange="HandleSshfsHostChangedAsync">
+                                @foreach (var host in GetMountableSshfsHostCandidates())
+                                {
+                                    <option value="@host.HostId">@BuildSshfsHostOptionLabel(host)</option>
+                                }
+                            </select>
+                        </label>
+
+                        @if (SelectedSshfsHostCandidate is not null)
+                        {
+                            <p class="callout success">@SelectedSshfsHostCandidate.StatusMessage</p>
+                        }
+                    }
+
+                    @if (sshfsExplorer?.HostCandidates.Any(candidate => !candidate.CanMountWithSshfs) == true)
+                    {
+                        <details class="advanced-share-details">
+                            <summary>Hosts not ready for SSHFS</summary>
+                            <div class="decision-list">
+                                @foreach (var host in sshfsExplorer.HostCandidates.Where(candidate => !candidate.CanMountWithSshfs))
+                                {
+                                    <InfoPill Eyebrow="@host.Name" Text="@host.StatusMessage" />
+                                }
+                            </div>
+                        </details>
+                    }
+                </section>
+
+                <section class="surface-subcard add-share-step">
+                    <div class="add-share-step-header">
+                        <span class="add-share-step-number">2</span>
+                        <div>
+                            <strong>Choose paths</strong>
+                            <span class="meta-text">Pick the remote SSH folder and where it should appear on this LMS server.</span>
+                        </div>
+                    </div>
+
+                    <div class="share-mapping-grid">
+                        <UiTextField Label="Remote SSH path"
+                                     Helper="Absolute path on the selected SSH host."
+                                     Value="@sshfsEditor.RemotePath"
+                                     ValueChanged="SetSshfsRemotePathAsync"
+                                     ValueExpression="@(() => sshfsEditor.RemotePath)"
+                                     Compact="true"
+                                     Placeholder="/srv/data" />
+
+                        <UiTextField Label="LMS mount path"
+                                     Helper="Absolute local path where LMS will mount the remote folder."
+                                     Value="@sshfsEditor.LocalMountPath"
+                                     ValueChanged="SetSshfsLocalMountPathAsync"
+                                     ValueExpression="@(() => sshfsEditor.LocalMountPath)"
+                                     Compact="true"
+                                     Placeholder="/mnt/lms/server/data" />
+                    </div>
+
+                    <div class="share-mapping-suggestions">
+                        <span class="share-mapping-suggestions-label">Suggested mount points</span>
+                        <div class="share-mapping-suggestion-list">
+                            @foreach (var suggestion in BuildSshfsMountPathSuggestions())
+                            {
+                                <button class="share-mapping-suggestion @(sshfsEditor.LocalMountPath.Equals(suggestion.Path, StringComparison.Ordinal) ? "selected" : null)"
+                                        type="button"
+                                        title="@suggestion.Help"
+                                        @onclick="@(() => ApplySshfsMountPathSuggestionAsync(suggestion.Path))">
+                                    <strong>@suggestion.Label</strong>
+                                    <span>@suggestion.Path</span>
+                                </button>
+                            }
+                        </div>
+                    </div>
+                </section>
+
+                <section class="surface-subcard add-share-step">
+                    <div class="add-share-step-header">
+                        <span class="add-share-step-number">3</span>
+                        <div>
+                            <strong>Mount and save</strong>
+                            <span class="meta-text">LMS writes a managed SSHFS mount and keeps the private key file locked down on this server.</span>
+                        </div>
+                    </div>
+
+                    <p class="callout warning">Use a dedicated mount key where possible. LMS cannot automate SSHFS mounts that require an interactive key passphrase.</p>
+
+                    @if (!string.IsNullOrWhiteSpace(sshfsStatusMessage))
+                    {
+                        <p class="callout @sshfsStatusTone">@sshfsStatusMessage</p>
+                    }
+
+                    <div class="toolbar-row share-mapping-actions">
+                        <UiCommandButton Label="@(isCreatingSshfsMount ? "Mounting..." : "Mount and save")"
+                                         Glyph="UiIconGlyph.NetworkMount"
+                                         Disabled="@(!CanSubmitSshfsMount())"
+                                         OnClick="CreateSshfsMountAsync" />
+                    </div>
+                </section>
+            </div>
+        </UiModal>
+
         <UiModal IsOpen="@showEditMountPanel"
                  Title="Edit network mount"
                  Subtitle="Update the server, share, mount path, or saved credentials, then remount it on LMS."
@@ -654,47 +1071,104 @@
             </div>
         </UiModal>
 
+        <UiModal IsOpen="@showDeleteSshfsMountPanel"
+                 Title="Delete SSHFS mount"
+                 Subtitle="This removes the saved SSHFS mount and disconnects it from the LMS server."
+                 Class="share-delete-modal"
+                 OnClose="CloseDeleteSshfsMountModal">
+            <div class="share-delete-modal-body">
+                <section class="share-mapping-route">
+                    <span class="share-mapping-route-icon" aria-hidden="true">
+                        <UiGlyphIcon Glyph="UiIconGlyph.NetworkMount" />
+                    </span>
+                    <div class="share-mapping-route-copy">
+                        <strong>@(pendingSshfsMountDeletion is null ? "SSHFS mount" : BuildSshfsSourceSummary(pendingSshfsMountDeletion))</strong>
+                        <span>@(pendingSshfsMountDeletion is null ? "Current mount path" : $"Mounted at {pendingSshfsMountDeletion.LocalMountPath}")</span>
+                    </div>
+                </section>
+
+                <p class="callout warning">LMS will unmount this SSHFS connection, remove its saved identity file, and remove its managed fstab entry.</p>
+
+                <div class="toolbar-row share-delete-actions">
+                    <UiCommandButton Label="Cancel"
+                                     Glyph="UiIconGlyph.Clear"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@isDeletingSshfsMount"
+                                     OnClick="CloseDeleteSshfsMountModal" />
+                    <UiCommandButton Label="@(isDeletingSshfsMount ? "Removing..." : "Delete mount")"
+                                     Glyph="UiIconGlyph.Delete"
+                                     Variant="UiButtonVariant.Danger"
+                                     Disabled="@isDeletingSshfsMount"
+                                     OnClick="ConfirmDeleteSshfsMountAsync" />
+                </div>
+            </div>
+        </UiModal>
+
     }
 </div>
 
 @code {
     private const string NetworkMountsTabValue = "network-mounts";
+    private const string SshMountsTabValue = "ssh-mounts";
     private const string NetworkSharesTabValue = "network-shares";
 
-    private NetworkShareMountExplorerViewModel? explorer;
+    private NetworkShareMountExplorerViewModel? explorer = CreatePendingNetworkExplorer();
+    private SshfsMountExplorerViewModel? sshfsExplorer = CreatePendingSshfsExplorer();
     private RemoteShareBrowseResult? browseResult;
     private RemoteShareConnectionEditor connectionEditor = new();
     private RemoteShareMountEditor mountEditor = new();
     private RemoteShareMountEditor editMountEditor = new();
+    private SshfsMountEditor sshfsEditor = new();
     private NetworkShareMachine? selectedMachine;
     private ManagedRemoteShareMount? pendingManagedMountEdit;
     private ManagedRemoteShareMount? pendingManagedMountDeletion;
+    private ManagedSshfsMount? pendingSshfsMountDeletion;
     private CurrentSystemMount? pendingCurrentMountDeletion;
     private int localShareCount;
     private string activeTab = NetworkMountsTabValue;
     private string machineSearchTerm = string.Empty;
     private string currentMountSearchTerm = string.Empty;
     private string shareMountSearchTerm = string.Empty;
+    private string sshfsMountSearchTerm = string.Empty;
     private string browserStatusMessage = string.Empty;
     private string browserStatusTone = "info";
     private string mountStatusMessage = string.Empty;
     private string mountStatusTone = "info";
+    private string? explorerLoadError;
+    private string? sshfsLoadError;
+    private bool initialShareStateLoadStarted;
+    private bool isNetworkMountStateLoading = true;
+    private bool isSshfsMountStateLoading = true;
+    private bool isLocalShareCountLoading = true;
+    private bool isReconnectingMounts;
+    private bool hasStartedReconnectPass;
+    private string sshfsStatusMessage = string.Empty;
+    private string sshfsStatusTone = "info";
     private ShareToolingInstallResult? shareToolingInstallResult;
+    private ShareToolingInstallResult? sshfsToolingInstallResult;
     private ElementReference connectionTargetInputElement;
     private ElementReference connectionUserNameInputElement;
     private ElementReference connectionPasswordInputElement;
     private bool showInstallPrompt;
+    private bool showSshfsInstallPrompt;
     private bool isInstallingShareTooling;
+    private bool isInstallingSshfsTooling;
     private bool isDiscovering;
     private bool isBrowsing;
     private bool isMounting;
+    private bool isCreatingSshfsMount;
     private bool isUpdatingMount;
     private bool isDeletingMount;
+    private bool isDeletingSshfsMount;
     private bool showAddSharePanel;
+    private bool showAddSshfsMountPanel;
     private bool showEditMountPanel;
     private bool showDeleteMountPanel;
+    private bool showDeleteSshfsMountPanel;
     private NetworkShareDiscoveryScope activeDiscoveryScope = NetworkShareDiscoveryScope.Lan;
     private readonly HashSet<string> expandedCurrentMountBrowsers = new(StringComparer.Ordinal);
+    private readonly HashSet<Guid> reconnectingNetworkMountIds = [];
+    private readonly HashSet<Guid> reconnectingSshfsMountIds = [];
     private string DeleteMountModalTitle => pendingManagedMountDeletion is not null
         ? "Delete network mount"
         : "Unmount network mount";
@@ -716,10 +1190,238 @@
         ? "Delete mount"
         : "Unmount";
 
-    protected override async Task OnInitializedAsync()
+    private static NetworkShareMountExplorerViewModel CreatePendingNetworkExplorer() =>
+        new(
+            new ShareToolingStatusViewModel(
+                HasAllRequiredPackages: true,
+                CanScanNetwork: false,
+                CanBrowseRemoteShares: false,
+                CanCreateRemoteMounts: false,
+                IsLocalHostRegistered: false,
+                LocalHostName: null,
+                StatusMessage: "Checking network share tooling...",
+                InstallCommand: string.Empty,
+                MissingPackageNames: [],
+                Notes: [],
+                Packages: []),
+            new NetworkShareMachineDiscoveryResult(
+                [],
+                "Network discovery has not been run yet.",
+                [],
+                NetworkShareDiscoveryScope.Lan),
+            [],
+            []);
+
+    private static SshfsMountExplorerViewModel CreatePendingSshfsExplorer() =>
+        new(
+            new SshfsToolingStatusViewModel(
+                HasAllRequiredPackages: true,
+                CanCreateSshfsMounts: false,
+                IsLocalHostRegistered: false,
+                LocalHostName: null,
+                StatusMessage: "Checking SSHFS tooling...",
+                InstallCommand: string.Empty,
+                MissingPackageNames: [],
+                Notes: [],
+                Packages: []),
+            [],
+            [],
+            []);
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
     {
-        await RefreshDiscoveryAsync();
-        localShareCount = (await ShareService.GetShareManagerAsync()).Shares.Count;
+        if (firstRender && !initialShareStateLoadStarted)
+        {
+            initialShareStateLoadStarted = true;
+            _ = LoadInitialShareStateAsync();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadInitialShareStateAsync()
+    {
+        try
+        {
+            var networkExplorer = await ShareWorkspace.GetNetworkShareMountExplorerAsync(activeDiscoveryScope, runDiscovery: false);
+            await InvokeAsync(() =>
+            {
+                explorer = networkExplorer;
+                explorerLoadError = null;
+                isNetworkMountStateLoading = false;
+                StateHasChanged();
+            });
+        }
+        catch (Exception exception)
+        {
+            await InvokeAsync(() =>
+            {
+                explorerLoadError = $"Network mount state could not be loaded: {exception.Message}";
+                isNetworkMountStateLoading = false;
+                StateHasChanged();
+            });
+        }
+
+        try
+        {
+            var sshfsMountExplorer = await ShareWorkspace.GetSshfsMountExplorerAsync(inspectTooling: false);
+            await InvokeAsync(() =>
+            {
+                sshfsExplorer = sshfsMountExplorer;
+                sshfsLoadError = null;
+                isSshfsMountStateLoading = false;
+                ApplyDefaultSshfsHostCandidate();
+                StateHasChanged();
+            });
+        }
+        catch (Exception exception)
+        {
+            await InvokeAsync(() =>
+            {
+                sshfsLoadError = $"SSHFS mount state could not be loaded: {exception.Message}";
+                isSshfsMountStateLoading = false;
+                StateHasChanged();
+            });
+        }
+
+        try
+        {
+            var shareCount = await ShareWorkspace.GetShareCountAsync();
+            await InvokeAsync(() =>
+            {
+                localShareCount = shareCount;
+                isLocalShareCountLoading = false;
+                StateHasChanged();
+            });
+        }
+        catch
+        {
+            await InvokeAsync(() =>
+            {
+                localShareCount = 0;
+                isLocalShareCountLoading = false;
+                StateHasChanged();
+            });
+        }
+
+        _ = ReconnectDisconnectedMountsAsync();
+    }
+
+    private async Task ReconnectDisconnectedMountsAsync()
+    {
+        if (hasStartedReconnectPass)
+        {
+            return;
+        }
+
+        hasStartedReconnectPass = true;
+        isReconnectingMounts = true;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var summary = await ShareWorkspace.ReconnectDisconnectedManagedMountsAsync();
+            await InvokeAsync(() =>
+            {
+                if (summary.ReconnectedNetworkMounts > 0 || summary.FailedNetworkMounts > 0)
+                {
+                    mountStatusMessage = summary.FailedNetworkMounts == 0
+                        ? $"Reconnected {summary.ReconnectedNetworkMounts} saved network mount(s)."
+                        : $"Reconnected {summary.ReconnectedNetworkMounts} saved network mount(s); {summary.FailedNetworkMounts} still need attention.";
+                    mountStatusTone = summary.FailedNetworkMounts == 0 ? "success" : "warning";
+                }
+
+                if (summary.ReconnectedSshfsMounts > 0 || summary.FailedSshfsMounts > 0)
+                {
+                    sshfsStatusMessage = summary.FailedSshfsMounts == 0
+                        ? $"Reconnected {summary.ReconnectedSshfsMounts} saved SSHFS mount(s)."
+                        : $"Reconnected {summary.ReconnectedSshfsMounts} saved SSHFS mount(s); {summary.FailedSshfsMounts} still need attention.";
+                    sshfsStatusTone = summary.FailedSshfsMounts == 0 ? "success" : "warning";
+                }
+            });
+
+            if (summary.ReconnectedNetworkMounts > 0)
+            {
+                var networkExplorer = await ShareWorkspace.GetNetworkShareMountExplorerAsync(activeDiscoveryScope, runDiscovery: false);
+                await InvokeAsync(() => explorer = networkExplorer);
+            }
+
+            if (summary.ReconnectedSshfsMounts > 0)
+            {
+                var sshfsMountExplorer = await ShareWorkspace.GetSshfsMountExplorerAsync(inspectTooling: false);
+                await InvokeAsync(() => sshfsExplorer = sshfsMountExplorer);
+            }
+        }
+        catch
+        {
+            // Reconnect is opportunistic; failed mounts remain visible for manual reconnect.
+        }
+        finally
+        {
+            isReconnectingMounts = false;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ReconnectManagedNetworkMountAsync(ManagedRemoteShareMount mount)
+    {
+        if (!reconnectingNetworkMountIds.Add(mount.Id))
+        {
+            return;
+        }
+
+        mountStatusMessage = $"Reconnecting //{mount.RemoteHost}/{mount.ShareName}...";
+        mountStatusTone = "info";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var result = await ShareWorkspace.ReconnectManagedRemoteMountAsync(mount.Id);
+            mountStatusMessage = result?.StatusMessage ?? "The saved network mount no longer exists.";
+            mountStatusTone = result is null ? "warning" : "success";
+            explorer = await ShareWorkspace.GetNetworkShareMountExplorerAsync(activeDiscoveryScope, runDiscovery: false);
+        }
+        catch (Exception exception)
+        {
+            mountStatusMessage = exception.Message;
+            mountStatusTone = "error";
+        }
+        finally
+        {
+            reconnectingNetworkMountIds.Remove(mount.Id);
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ReconnectManagedSshfsMountAsync(ManagedSshfsMount mount)
+    {
+        if (!reconnectingSshfsMountIds.Add(mount.Id))
+        {
+            return;
+        }
+
+        sshfsStatusMessage = $"Reconnecting {BuildSshfsSourceSummary(mount)}...";
+        sshfsStatusTone = "info";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var result = await ShareWorkspace.ReconnectManagedSshfsMountAsync(mount.Id);
+            sshfsStatusMessage = result?.StatusMessage ?? "The saved SSHFS mount no longer exists.";
+            sshfsStatusTone = result is null ? "warning" : "success";
+            sshfsExplorer = await ShareWorkspace.GetSshfsMountExplorerAsync(inspectTooling: false);
+        }
+        catch (Exception exception)
+        {
+            sshfsStatusMessage = exception.Message;
+            sshfsStatusTone = "error";
+        }
+        finally
+        {
+            reconnectingSshfsMountIds.Remove(mount.Id);
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     private Task RefreshLanDiscoveryAsync() =>
@@ -728,14 +1430,20 @@
     private Task RefreshTailnetDiscoveryAsync() =>
         RefreshDiscoveryAsync(NetworkShareDiscoveryScope.Tailnet);
 
-    private async Task RefreshDiscoveryAsync(NetworkShareDiscoveryScope? scope = null)
+    private Task RefreshMountStateAsync() =>
+        RefreshDiscoveryAsync(runDiscovery: false);
+
+    private async Task RefreshDiscoveryAsync(NetworkShareDiscoveryScope? scope = null, bool runDiscovery = true)
     {
         activeDiscoveryScope = scope ?? activeDiscoveryScope;
         isDiscovering = true;
+        await InvokeAsync(StateHasChanged);
 
         try
         {
-            explorer = await ShareService.GetNetworkShareMountExplorerAsync(activeDiscoveryScope);
+            explorer = await ShareWorkspace.GetNetworkShareMountExplorerAsync(activeDiscoveryScope, runDiscovery);
+            explorerLoadError = null;
+            isNetworkMountStateLoading = false;
             if (explorer.Tooling.HasAllRequiredPackages)
             {
                 showInstallPrompt = false;
@@ -744,6 +1452,33 @@
         finally
         {
             isDiscovering = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RefreshSshfsAsync(bool inspectTooling = true)
+    {
+        sshfsExplorer = await ShareWorkspace.GetSshfsMountExplorerAsync(inspectTooling);
+        sshfsLoadError = null;
+        isSshfsMountStateLoading = false;
+        if (sshfsExplorer.Tooling.HasAllRequiredPackages)
+        {
+            showSshfsInstallPrompt = false;
+        }
+
+        ApplyDefaultSshfsHostCandidate();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void ApplyDefaultSshfsHostCandidate()
+    {
+        if (sshfsEditor.HostId == Guid.Empty)
+        {
+            var firstCandidate = GetMountableSshfsHostCandidates().FirstOrDefault();
+            if (firstCandidate is not null)
+            {
+                ApplySshfsHostCandidate(firstCandidate);
+            }
         }
     }
 
@@ -784,7 +1519,7 @@
 
         try
         {
-            browseResult = await ShareService.BrowseRemoteSharesAsync(connectionEditor);
+            browseResult = await ShareWorkspace.BrowseRemoteSharesAsync(connectionEditor);
             browserStatusMessage = browseResult.StatusMessage;
             browserStatusTone = browseResult.Shares.Count > 0
                 ? "success"
@@ -874,12 +1609,12 @@
 
         try
         {
-            var result = await ShareService.CreateRemoteShareMountAsync(mountEditor);
+            var result = await ShareWorkspace.CreateRemoteShareMountAsync(mountEditor);
             mountStatusMessage = result.StatusMessage;
             mountStatusTone = "success";
             shareMountSearchTerm = string.Empty;
             showAddSharePanel = false;
-            await RefreshDiscoveryAsync();
+            await RefreshMountStateAsync();
 
             if (browseAfterMount)
             {
@@ -901,13 +1636,13 @@
     {
         try
         {
-            await ShareService.DeleteManagedRemoteMountAsync(id);
+            await ShareWorkspace.DeleteManagedRemoteMountAsync(id);
             if (!string.IsNullOrWhiteSpace(localMountPath))
             {
                 expandedCurrentMountBrowsers.Remove(localMountPath);
             }
 
-            await RefreshDiscoveryAsync();
+            await RefreshMountStateAsync();
             mountStatusMessage = "Managed LMS mount deleted.";
             mountStatusTone = "success";
             return true;
@@ -924,17 +1659,17 @@
     {
         try
         {
-            var disconnected = await ShareService.DisconnectCurrentRemoteMountAsync(localMountPath);
+            var disconnected = await ShareWorkspace.DisconnectCurrentRemoteMountAsync(localMountPath);
             if (!disconnected)
             {
                 mountStatusMessage = $"`{localMountPath}` is no longer mounted on this LMS server.";
                 mountStatusTone = "warning";
-                await RefreshDiscoveryAsync();
+                await RefreshMountStateAsync();
                 return false;
             }
 
             expandedCurrentMountBrowsers.Remove(localMountPath);
-            await RefreshDiscoveryAsync();
+            await RefreshMountStateAsync();
             mountStatusMessage = "Network mount disconnected.";
             mountStatusTone = "success";
             return true;
@@ -958,15 +1693,26 @@
         showInstallPrompt = false;
     }
 
+    private void ShowSshfsInstallPrompt()
+    {
+        sshfsToolingInstallResult = null;
+        showSshfsInstallPrompt = true;
+    }
+
+    private void HideSshfsInstallPrompt()
+    {
+        showSshfsInstallPrompt = false;
+    }
+
     private async Task InstallMissingShareToolingAsync()
     {
         isInstallingShareTooling = true;
 
         try
         {
-            shareToolingInstallResult = await ShareService.InstallMissingShareToolingAsync();
+            shareToolingInstallResult = await ShareWorkspace.InstallMissingShareToolingAsync();
             showInstallPrompt = false;
-            await RefreshDiscoveryAsync();
+            await RefreshMountStateAsync();
         }
         catch (Exception exception)
         {
@@ -980,6 +1726,31 @@
         finally
         {
             isInstallingShareTooling = false;
+        }
+    }
+
+    private async Task InstallMissingSshfsToolingAsync()
+    {
+        isInstallingSshfsTooling = true;
+
+        try
+        {
+            sshfsToolingInstallResult = await ShareWorkspace.InstallMissingSshfsToolingAsync();
+            showSshfsInstallPrompt = false;
+            await RefreshSshfsAsync();
+        }
+        catch (Exception exception)
+        {
+            sshfsToolingInstallResult = new ShareToolingInstallResult(
+                false,
+                sshfsExplorer?.Tooling.LocalHostName ?? "Local machine",
+                exception.Message,
+                sshfsExplorer?.Tooling.MissingPackageNames ?? [],
+                []);
+        }
+        finally
+        {
+            isInstallingSshfsTooling = false;
         }
     }
 
@@ -1005,11 +1776,32 @@
         showAddSharePanel = true;
     }
 
+    private void OpenAddSshfsMountModal()
+    {
+        sshfsStatusMessage = string.Empty;
+        sshfsStatusTone = "info";
+        var selected = SelectedSshfsHostCandidate ?? GetMountableSshfsHostCandidates().FirstOrDefault();
+        if (selected is not null)
+        {
+            ApplySshfsHostCandidate(selected);
+        }
+
+        showAddSshfsMountPanel = true;
+    }
+
     private void CloseAddShareModal()
     {
         if (!isMounting)
         {
             showAddSharePanel = false;
+        }
+    }
+
+    private void CloseAddSshfsMountModal()
+    {
+        if (!isCreatingSshfsMount)
+        {
+            showAddSshfsMountPanel = false;
         }
     }
 
@@ -1056,12 +1848,12 @@
 
         try
         {
-            var result = await ShareService.UpdateManagedRemoteMountAsync(pendingManagedMountEdit.Id, editMountEditor);
+            var result = await ShareWorkspace.UpdateManagedRemoteMountAsync(pendingManagedMountEdit.Id, editMountEditor);
             mountStatusMessage = result.StatusMessage;
             mountStatusTone = "success";
             showEditMountPanel = false;
             pendingManagedMountEdit = null;
-            await RefreshDiscoveryAsync();
+            await RefreshMountStateAsync();
         }
         catch (Exception exception)
         {
@@ -1074,11 +1866,49 @@
         }
     }
 
+    private async Task CreateSshfsMountAsync()
+    {
+        if (!CanSubmitSshfsMount())
+        {
+            return;
+        }
+
+        isCreatingSshfsMount = true;
+        sshfsStatusMessage = string.Empty;
+        sshfsStatusTone = "info";
+
+        try
+        {
+            var result = await ShareWorkspace.CreateSshfsMountAsync(sshfsEditor);
+            sshfsStatusMessage = result.StatusMessage;
+            sshfsStatusTone = "success";
+            sshfsMountSearchTerm = string.Empty;
+            showAddSshfsMountPanel = false;
+            expandedCurrentMountBrowsers.Add(result.LocalMountPath);
+            await RefreshSshfsAsync();
+        }
+        catch (Exception exception)
+        {
+            sshfsStatusMessage = exception.Message;
+            sshfsStatusTone = "error";
+        }
+        finally
+        {
+            isCreatingSshfsMount = false;
+        }
+    }
+
     private void OpenDeleteManagedMountModal(ManagedRemoteShareMount mount)
     {
         pendingManagedMountDeletion = mount;
         pendingCurrentMountDeletion = null;
         showDeleteMountPanel = true;
+    }
+
+    private void OpenDeleteSshfsMountModal(ManagedSshfsMount mount)
+    {
+        pendingSshfsMountDeletion = mount;
+        showDeleteSshfsMountPanel = true;
     }
 
     private void OpenDisconnectCurrentMountModal(CurrentSystemMount mount)
@@ -1095,6 +1925,15 @@
             pendingManagedMountDeletion = null;
             pendingCurrentMountDeletion = null;
             showDeleteMountPanel = false;
+        }
+    }
+
+    private void CloseDeleteSshfsMountModal()
+    {
+        if (!isDeletingSshfsMount)
+        {
+            pendingSshfsMountDeletion = null;
+            showDeleteSshfsMountPanel = false;
         }
     }
 
@@ -1133,8 +1972,50 @@
         }
     }
 
+    private async Task ConfirmDeleteSshfsMountAsync()
+    {
+        if (pendingSshfsMountDeletion is null)
+        {
+            return;
+        }
+
+        isDeletingSshfsMount = true;
+
+        try
+        {
+            await ShareWorkspace.DeleteManagedSshfsMountAsync(pendingSshfsMountDeletion.Id);
+            expandedCurrentMountBrowsers.Remove(pendingSshfsMountDeletion.LocalMountPath);
+            await RefreshSshfsAsync();
+            sshfsStatusMessage = "SSHFS mount deleted.";
+            sshfsStatusTone = "success";
+            showDeleteSshfsMountPanel = false;
+            pendingSshfsMountDeletion = null;
+        }
+        catch (Exception exception)
+        {
+            sshfsStatusMessage = exception.Message;
+            sshfsStatusTone = "error";
+        }
+        finally
+        {
+            isDeletingSshfsMount = false;
+        }
+    }
+
     private int GetRemoteShareListCount() =>
         GetVisibleManagedMounts().Count + GetVisibleUnmanagedNetworkMounts().Count;
+
+    private int GetSshfsMountListCount() =>
+        GetVisibleManagedSshfsMounts().Count + GetVisibleUnmanagedSshfsMounts().Count;
+
+    private string GetRemoteShareTabCountLabel() =>
+        isNetworkMountStateLoading ? "..." : GetRemoteShareTotalCount().ToString();
+
+    private string GetSshfsMountTabCountLabel() =>
+        isSshfsMountStateLoading ? "..." : GetSshfsMountTotalCount().ToString();
+
+    private string GetLocalShareTabCountLabel() =>
+        isLocalShareCountLoading ? "..." : localShareCount.ToString();
 
     private int GetRemoteShareTotalCount()
     {
@@ -1147,6 +2028,17 @@
                explorer.CurrentMounts.Count(mount => mount.IsNetworkMount && !mount.IsManagedByLms);
     }
 
+    private int GetSshfsMountTotalCount()
+    {
+        if (sshfsExplorer is null)
+        {
+            return 0;
+        }
+
+        return sshfsExplorer.ManagedMounts.Count +
+               sshfsExplorer.CurrentMounts.Count(mount => !mount.IsManagedByLms);
+    }
+
     private string GetRemoteShareListSummary()
     {
         var totalCount = GetRemoteShareTotalCount();
@@ -1156,6 +2048,17 @@
         }
 
         return $"{GetRemoteShareListCount()} of {totalCount} share(s)";
+    }
+
+    private string GetSshfsMountListSummary()
+    {
+        var totalCount = GetSshfsMountTotalCount();
+        if (string.IsNullOrWhiteSpace(sshfsMountSearchTerm))
+        {
+            return $"{totalCount} SSH mount(s)";
+        }
+
+        return $"{GetSshfsMountListCount()} of {totalCount} SSH mount(s)";
     }
 
     private IReadOnlyList<ManagedRemoteShareMount> GetVisibleManagedMounts()
@@ -1170,6 +2073,18 @@
             .ToArray();
     }
 
+    private IReadOnlyList<ManagedSshfsMount> GetVisibleManagedSshfsMounts()
+    {
+        if (sshfsExplorer is null)
+        {
+            return [];
+        }
+
+        return sshfsExplorer.ManagedMounts
+            .Where(MatchesSshfsMountFilter)
+            .ToArray();
+    }
+
     private IReadOnlyList<CurrentSystemMount> GetVisibleUnmanagedNetworkMounts()
     {
         if (explorer is null)
@@ -1180,6 +2095,19 @@
         return explorer.CurrentMounts
             .Where(mount => mount.IsNetworkMount && !mount.IsManagedByLms)
             .Where(MatchesShareMountFilter)
+            .ToArray();
+    }
+
+    private IReadOnlyList<CurrentSystemMount> GetVisibleUnmanagedSshfsMounts()
+    {
+        if (sshfsExplorer is null)
+        {
+            return [];
+        }
+
+        return sshfsExplorer.CurrentMounts
+            .Where(mount => !mount.IsManagedByLms)
+            .Where(MatchesSshfsMountFilter)
             .ToArray();
     }
 
@@ -1212,9 +2140,41 @@
                ContainsShareMountSearch(mount.MountOptions);
     }
 
+    private bool MatchesSshfsMountFilter(ManagedSshfsMount mount)
+    {
+        if (string.IsNullOrWhiteSpace(sshfsMountSearchTerm))
+        {
+            return true;
+        }
+
+        return ContainsSshfsMountSearch(mount.HostName) ||
+               ContainsSshfsMountSearch(mount.Hostname) ||
+               ContainsSshfsMountSearch(mount.UserName) ||
+               ContainsSshfsMountSearch(mount.RemotePath) ||
+               ContainsSshfsMountSearch(mount.LocalMountPath) ||
+               ContainsSshfsMountSearch(mount.StatusMessage);
+    }
+
+    private bool MatchesSshfsMountFilter(CurrentSystemMount mount)
+    {
+        if (string.IsNullOrWhiteSpace(sshfsMountSearchTerm))
+        {
+            return true;
+        }
+
+        return ContainsSshfsMountSearch(mount.SourcePath) ||
+               ContainsSshfsMountSearch(mount.LocalMountPath) ||
+               ContainsSshfsMountSearch(mount.FileSystemType) ||
+               ContainsSshfsMountSearch(mount.MountOptions);
+    }
+
     private bool ContainsShareMountSearch(string? value) =>
         !string.IsNullOrWhiteSpace(value) &&
         value.Contains(shareMountSearchTerm, StringComparison.OrdinalIgnoreCase);
+
+    private bool ContainsSshfsMountSearch(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.Contains(sshfsMountSearchTerm, StringComparison.OrdinalIgnoreCase);
 
     private IReadOnlyList<NetworkShareMachine> GetVisibleMachines()
     {
@@ -1265,11 +2225,11 @@
         }
 
         expandedCurrentMountBrowsers.Remove(mountPath);
-        if (await ShareService.ReleaseTemporaryRemoteMountAsync(mountPath))
+        if (await ShareWorkspace.ReleaseTemporaryRemoteMountAsync(mountPath))
         {
             mountStatusMessage = "Temporary LMS mount released.";
             mountStatusTone = "success";
-            await RefreshDiscoveryAsync();
+            await RefreshMountStateAsync();
         }
     }
 
@@ -1303,6 +2263,26 @@
     private bool CanCreateRemoteMounts() =>
         explorer?.Tooling.CanCreateRemoteMounts ?? false;
 
+    private bool CanCreateSshfsMounts() =>
+        sshfsExplorer?.Tooling.CanCreateSshfsMounts == true &&
+        GetMountableSshfsHostCandidates().Count > 0;
+
+    private bool CanSubmitSshfsMount() =>
+        CanCreateSshfsMounts() &&
+        !isCreatingSshfsMount &&
+        sshfsEditor.HostId != Guid.Empty &&
+        !string.IsNullOrWhiteSpace(sshfsEditor.RemotePath) &&
+        !string.IsNullOrWhiteSpace(sshfsEditor.LocalMountPath) &&
+        Path.IsPathRooted(sshfsEditor.LocalMountPath);
+
+    private IReadOnlyList<SshfsMountHostCandidate> GetMountableSshfsHostCandidates() =>
+        sshfsExplorer?.HostCandidates
+            .Where(candidate => candidate.CanMountWithSshfs)
+            .ToArray() ?? [];
+
+    private SshfsMountHostCandidate? SelectedSshfsHostCandidate =>
+        sshfsExplorer?.HostCandidates.FirstOrDefault(candidate => candidate.HostId == sshfsEditor.HostId);
+
     private CurrentSystemMount? FindCurrentMount(string localMountPath) =>
         explorer?.CurrentMounts.FirstOrDefault(mount =>
             mount.LocalMountPath.Equals(localMountPath, StringComparison.OrdinalIgnoreCase));
@@ -1322,6 +2302,122 @@
 
         return Path.IsPathRooted(mount.LocalMountPath) &&
                Directory.Exists(mount.LocalMountPath);
+    }
+
+    private bool CanExposeSshfsMountBrowser(ManagedSshfsMount mount)
+    {
+        if (!mount.IsMounted)
+        {
+            return false;
+        }
+
+        return Path.IsPathRooted(mount.LocalMountPath) &&
+               Directory.Exists(mount.LocalMountPath);
+    }
+
+    private Task HandleSshfsHostChangedAsync(ChangeEventArgs args)
+    {
+        if (Guid.TryParse(args.Value?.ToString(), out var hostId))
+        {
+            var candidate = sshfsExplorer?.HostCandidates.FirstOrDefault(item => item.HostId == hostId);
+            if (candidate is not null)
+            {
+                ApplySshfsHostCandidate(candidate);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private void ApplySshfsHostCandidate(SshfsMountHostCandidate candidate)
+    {
+        sshfsEditor.HostId = candidate.HostId;
+        sshfsEditor.RemotePath = string.IsNullOrWhiteSpace(candidate.DefaultRemotePath)
+            ? "/"
+            : candidate.DefaultRemotePath;
+        sshfsEditor.LocalMountPath = BuildDefaultSshfsMountPath(candidate, sshfsEditor.RemotePath);
+        sshfsEditor.PersistOnServer = true;
+    }
+
+    private Task SetSshfsRemotePathAsync(string? value)
+    {
+        sshfsEditor.RemotePath = string.IsNullOrWhiteSpace(value) ? "/" : value.Trim();
+        var candidate = SelectedSshfsHostCandidate;
+        if (candidate is not null)
+        {
+            sshfsEditor.LocalMountPath = BuildDefaultSshfsMountPath(candidate, sshfsEditor.RemotePath);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetSshfsLocalMountPathAsync(string? value)
+    {
+        sshfsEditor.LocalMountPath = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task ApplySshfsMountPathSuggestionAsync(string path)
+    {
+        sshfsEditor.LocalMountPath = path;
+        return Task.CompletedTask;
+    }
+
+    private IReadOnlyList<SshfsMountPathSuggestion> BuildSshfsMountPathSuggestions()
+    {
+        var candidate = SelectedSshfsHostCandidate;
+        if (candidate is null)
+        {
+            return [];
+        }
+
+        var remoteLeaf = GetRemotePathLeaf(sshfsEditor.RemotePath);
+        return
+        [
+            new(
+                "LMS default",
+                BuildDefaultSshfsMountPath(candidate, sshfsEditor.RemotePath),
+                "Recommended LMS-managed SSHFS mount location."),
+            new(
+                "Standard /mnt",
+                $"/mnt/{ShareMountPathSuggestions.SlugifyPathSegment(candidate.Name, "host")}/{ShareMountPathSuggestions.SlugifyPathSegment(remoteLeaf, "remote")}",
+                "Standard Linux mount area for temporary or admin-created mounts.")
+        ];
+    }
+
+    private static string BuildDefaultSshfsMountPath(SshfsMountHostCandidate candidate, string remotePath) =>
+        $"/mnt/lms/ssh/{ShareMountPathSuggestions.SlugifyPathSegment(candidate.Name, "host")}/{ShareMountPathSuggestions.SlugifyPathSegment(GetRemotePathLeaf(remotePath), "remote")}";
+
+    private static string GetRemotePathLeaf(string? remotePath)
+    {
+        var trimmed = string.IsNullOrWhiteSpace(remotePath) ? "root" : remotePath.Trim().TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(trimmed) || trimmed == "/")
+        {
+            return "root";
+        }
+
+        var separatorIndex = trimmed.LastIndexOf('/');
+        return separatorIndex < 0
+            ? trimmed
+            : trimmed[(separatorIndex + 1)..];
+    }
+
+    private static string BuildSshfsSourceSummary(ManagedSshfsMount mount) =>
+        $"{mount.UserName}@{mount.Hostname}:{mount.RemotePath}";
+
+    private static string BuildSshfsHostOptionLabel(SshfsMountHostCandidate host) =>
+        $"{host.Name} ({host.UserName}@{host.Hostname}:{host.Port})";
+
+    private static string GetManagedSshfsMountSummary(ManagedSshfsMount mount)
+    {
+        var parts = new List<string>
+        {
+            mount.IsMounted ? "Mounted" : "Saved only",
+            "Managed by LMS",
+            $"Port {mount.Port}"
+        };
+
+        return string.Join(" • ", parts);
     }
 
     private static bool CanExposeMountBrowser(CurrentSystemMount mount) =>
@@ -1349,6 +2445,8 @@
 
         return string.Join(Environment.NewLine, parts);
     }
+
+    private sealed record SshfsMountPathSuggestion(string Label, string Path, string Help);
 
     private static string GetMachineSummary(NetworkShareMachine machine)
     {
