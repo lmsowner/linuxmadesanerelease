@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.ComponentModel.DataAnnotations;
 using LinuxMadeSane.Core.Models.MediaLibrary;
 using LinuxMadeSane.Core.Models.RdpOptimizer;

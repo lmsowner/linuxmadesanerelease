@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Ai;
@@ -20,6 +23,8 @@ internal static class AiProviderRuntimeFactory
             AiProviderType.Anthropic => new AnthropicAiProvider(settings.ProviderKey, definition, settings, models, secretStore, httpClientFactory),
             AiProviderType.Gemini => new GeminiAiProvider(settings.ProviderKey, definition, settings, models, secretStore, httpClientFactory),
             AiProviderType.Groq => new GroqAiProvider(settings.ProviderKey, definition, settings, models, secretStore, httpClientFactory),
+            AiProviderType.XAi => new XAiGrokAiProvider(settings.ProviderKey, definition, settings, models, secretStore, httpClientFactory),
+            AiProviderType.DeepSeek => new DeepSeekAiProvider(settings.ProviderKey, definition, settings, models, secretStore, httpClientFactory),
             AiProviderType.Ollama => new OllamaAiProvider(settings.ProviderKey, definition, settings, models, ollamaRuntimeService),
             AiProviderType.RemoteLmsAiEngine => new RemoteLmsAiEngineAiProvider(settings.ProviderKey, definition, settings, models, remoteGateway),
             _ => throw new NotSupportedException($"{settings.ProviderType} is not implemented yet in this Linux Made Sane build.")

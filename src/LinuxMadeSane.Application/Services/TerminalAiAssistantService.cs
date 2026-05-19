@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Text;
 using System.Text.RegularExpressions;
 using LinuxMadeSane.Application.Contracts.Ai;
@@ -60,7 +63,7 @@ public sealed partial class TerminalAiAssistantService(
                     request.HostId,
                     string.IsNullOrWhiteSpace(request.HostName) ? "Current terminal host" : request.HostName.Trim(),
                     string.IsNullOrWhiteSpace(request.HostAddress) ? request.HostName.Trim() : request.HostAddress.Trim(),
-                    string.IsNullOrWhiteSpace(request.HostEnvironment) ? "Terminal" : request.HostEnvironment.Trim(),
+                    "Terminal",
                     now)
             ];
 

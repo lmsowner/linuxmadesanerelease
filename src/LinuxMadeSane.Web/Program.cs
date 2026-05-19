@@ -5,6 +5,7 @@ using System.Net;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using LinuxMadeSane.Application;
 using LinuxMadeSane.Application.Contracts.EdgeGateway;
 using LinuxMadeSane.Application.Contracts.Security;
@@ -23,6 +24,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace LinuxMadeSane.Web;
 
@@ -74,6 +76,28 @@ public class Program
                 };
             });
         builder.Services.AddAuthorization();
+        builder.Services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            options.AddPolicy("lms-auth-start", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    BuildRateLimitPartitionKey(context),
+                    _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 20,
+                        Window = TimeSpan.FromMinutes(5),
+                        QueueLimit = 0
+                    }));
+            options.AddPolicy("lms-auth-verify", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    BuildRateLimitPartitionKey(context),
+                    _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 10,
+                        Window = TimeSpan.FromMinutes(5),
+                        QueueLimit = 0
+                    }));
+        });
         builder.Services.AddSingleton<ITransientConnectionSecretStore, TransientConnectionSecretStore>();
         builder.Services.AddSingleton<TerminalWorkspaceRegistry>();
         builder.Services.AddSingleton<FileBrowserWorkspaceRegistry>();
@@ -134,18 +158,11 @@ public class Program
             await next();
         });
         app.UseForwardedHeaders();
-        if (app.Environment.IsDevelopment())
-        {
-            app.UseWhen(
-                context => !IsMediaLibraryApiPath(context.Request.Path) && !IsEdgeAuthCheckPath(context.Request.Path),
-                branch => branch.UseHttpsRedirection());
-        }
-        else
-        {
-            app.UseWhen(
-                context => !IsEdgeAuthCheckPath(context.Request.Path),
-                branch => branch.UseHttpsRedirection());
-        }
+        var forceHttpsRedirection = IsHttpsRedirectionForced(app.Configuration);
+        var isDevelopment = app.Environment.IsDevelopment();
+        app.UseWhen(
+            context => ShouldApplyHttpsRedirection(context, isDevelopment, forceHttpsRedirection),
+            branch => branch.UseHttpsRedirection());
         app.Use(async (context, next) =>
         {
             var workspaceId = context.Request.Cookies.TryGetValue(TerminalWorkspaceAccessor.CookieName, out var cookieValue) &&
@@ -273,6 +290,7 @@ public class Program
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         });
 
+        app.UseRateLimiter();
         app.UseAntiforgery();
 
         app.MapStaticAssets();
@@ -287,7 +305,8 @@ public class Program
             HttpContext context,
             RemoteLmsTunnelAccessService tunnelAccessService) =>
         {
-            if (!IsLoopbackRequest(context.Connection.RemoteIpAddress))
+            if (!IsLoopbackRequest(context.Connection.RemoteIpAddress) ||
+                !IsLoopbackRequestHost(context.Request.Host))
             {
                 return Results.NotFound();
             }
@@ -388,6 +407,7 @@ public class Program
         {
             var form = await context.Request.ReadFormAsync(context.RequestAborted);
             var email = form["email"].ToString();
+            var linuxUsername = form["linuxUsername"].ToString();
             var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
 
             try
@@ -396,6 +416,7 @@ public class Program
                     new SecurityUserEditor
                     {
                         Email = email,
+                        LinuxUsername = linuxUsername,
                         SessionLifetimeMinutes = SecuritySessionPolicy.DefaultSessionLifetimeMinutes,
                         SshAuthenticationMode = RemoteAccessSshAuthenticationMode.Password
                     },
@@ -406,9 +427,9 @@ public class Program
             }
             catch (Exception exception)
             {
-                return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl, exception.Message, email));
+                return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl, exception.Message, email, linuxUsername));
             }
-        }).DisableAntiforgery();
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-start");
         app.MapPost("/auth/initial-setup/reset", async (
             HttpContext context,
             ISecuritySettingsService securitySettingsService) =>
@@ -428,7 +449,7 @@ public class Program
             {
                 return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl, exception.Message));
             }
-        }).DisableAntiforgery();
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-start");
         app.MapPost("/auth/initial-setup/verify", async (
             HttpContext context,
             ISecuritySettingsService securitySettingsService,
@@ -490,7 +511,7 @@ public class Program
             }
 
             return Results.Redirect(returnUrl);
-        }).DisableAntiforgery();
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
         app.MapPost("/auth/login", async (
             HttpContext context,
             ISecurityAuthenticationService authenticationService,
@@ -551,7 +572,7 @@ public class Program
             }
 
             context.Response.Redirect(returnUrl);
-        }).DisableAntiforgery();
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
         app.MapPost("/auth/logout", async (HttpContext context) =>
         {
             await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
@@ -661,7 +682,7 @@ public class Program
                     new { succeeded = false, message = "Passkey sign-in could not start." },
                     statusCode: StatusCodes.Status500InternalServerError);
             }
-        }).DisableAntiforgery();
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-start");
         app.MapPost("/api/passkeys/login/complete", async (
             HttpContext context,
             PasskeyAuthenticationService passkeyAuthenticationService,
@@ -723,7 +744,7 @@ public class Program
                     new { succeeded = false, message = "Passkey sign-in failed." },
                     statusCode: StatusCodes.Status500InternalServerError);
             }
-        }).DisableAntiforgery();
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
         app.MapPost("/internal/scheduler/tasks/{taskId:guid}/run", async (
             HttpContext context,
             Guid taskId,
@@ -1150,6 +1171,72 @@ public class Program
     private static bool IsLoopbackRequest(IPAddress? remoteIpAddress) =>
         remoteIpAddress is not null && IPAddress.IsLoopback(remoteIpAddress);
 
+    private static bool ShouldApplyHttpsRedirection(
+        HttpContext context,
+        bool isDevelopment,
+        bool forceHttpsRedirection)
+    {
+        if (context.Request.IsHttps ||
+            IsEdgeAuthCheckPath(context.Request.Path))
+        {
+            return false;
+        }
+
+        if (forceHttpsRedirection)
+        {
+            return true;
+        }
+
+        if (IsMediaLibraryApiPath(context.Request.Path))
+        {
+            return false;
+        }
+
+        return isDevelopment && IsLoopbackRequestHost(context.Request.Host);
+    }
+
+    private static bool IsHttpsRedirectionForced(IConfiguration configuration)
+    {
+        var value = configuration["Server:EnableHttpsRedirection"];
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+               value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+               value.Equals("yes", StringComparison.OrdinalIgnoreCase) ||
+               value.Equals("on", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildRateLimitPartitionKey(HttpContext context)
+    {
+        var remoteAddress = context.Connection.RemoteIpAddress;
+        if (remoteAddress is null)
+        {
+            return "unknown";
+        }
+
+        return (remoteAddress.IsIPv4MappedToIPv6 ? remoteAddress.MapToIPv4() : remoteAddress).ToString();
+    }
+
+    private static bool IsLoopbackRequestHost(HostString host)
+    {
+        var value = host.Host.Trim().TrimEnd('.');
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        if (value.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        value = value.TrimStart('[').TrimEnd(']');
+        return IPAddress.TryParse(value, out var address) && IPAddress.IsLoopback(address);
+    }
+
     private static string BuildLoginRedirectTarget(PathString path, string? queryString) =>
         BuildLoginRedirectTarget(NormalizeReturnUrl($"{path}{queryString}"), null, null);
 
@@ -1176,7 +1263,8 @@ public class Program
     private static string BuildInitialSetupRedirectTarget(
         string returnUrl,
         string? errorMessage = null,
-        string? email = null)
+        string? email = null,
+        string? linuxUsername = null)
     {
         var queryParts = new List<string>
         {
@@ -1191,6 +1279,11 @@ public class Program
         if (!string.IsNullOrWhiteSpace(email))
         {
             queryParts.Add($"email={Uri.EscapeDataString(email.Trim())}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(linuxUsername))
+        {
+            queryParts.Add($"linuxUsername={Uri.EscapeDataString(linuxUsername.Trim())}");
         }
 
         return $"/InitialSetup?{string.Join("&", queryParts)}";

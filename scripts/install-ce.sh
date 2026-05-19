@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Copyright (c) Richard D. Kiernan.
+# Licensed under the Business Source License 1.1. See LICENSE for details.
+
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,6 +94,8 @@ if lms_is_truthy "$CONFIGURE_LOCAL_SSH"; then
   lms_prepare_local_ssh_runner "$SERVICE_USER" "$SERVICE_GROUP" "$CONFIG_ROOT_ABS" "$RUNNER_USER" "$RUNNER_GROUP" "$RUNNER_HOME" "$ENABLE_LOCAL_SUDO" "$RUNNER_WORKSPACE"
 fi
 
+lms_detect_installer_identity
+
 cp -a "$APP_SOURCE"/. "$RELEASE_DIR"/
 ln -sfn "$RELEASE_DIR" "$CURRENT_DIR"
 
@@ -103,6 +109,11 @@ lms_write_env_file \
   "LocalHostBootstrap__PrivateKeyPath=${CONFIG_ROOT}/ssh/lms_local_runner_ed25519" \
   "LocalHostBootstrap__DefaultWorkingDirectory=${RUNNER_WORKSPACE}" \
   "LocalHostBootstrap__Port=22" \
+  "InitialSetupBootstrap__InstallerUsername=${LMS_INSTALLER_USERNAME}" \
+  "InitialSetupBootstrap__InstallerUserId=${LMS_INSTALLER_UID}" \
+  "InitialSetupBootstrap__InstallerHomeDirectory=${LMS_INSTALLER_HOME}" \
+  "InitialSetupBootstrap__InstallerShell=${LMS_INSTALLER_SHELL}" \
+  "InitialSetupBootstrap__InstalledAtUtc=${LMS_INSTALLER_INSTALLED_AT_UTC}" \
   "ApplicationUpdates__Enabled=true" \
   "ApplicationUpdates__ManifestUrl=${LMS_BASE_URL}/api/downloads/manifest" \
   "ApplicationUpdates__InstallScriptUrl=${LMS_BASE_URL}/install.sh" \

@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Collections.Concurrent;
 using System.Text;
 using LinuxMadeSane.Core.Abstractions;
@@ -41,6 +44,30 @@ public sealed class FileActionQueueService(
 
         lock (session.SyncRoot)
         {
+            var sameHost = request.SourceHost.Id == request.DestinationHost.Id;
+            var offsetBytes = 0L;
+            var items = new List<FileActionJobItem>(request.Items.Count);
+            foreach (var sourceItem in request.Items)
+            {
+                var item = new FileActionJobItem(
+                    Guid.NewGuid(),
+                    sourceItem.DisplayName,
+                    NormalizeBrowserPath(sourceItem.SourcePath),
+                    CombineBrowserPath(request.DestinationDirectoryPath, sourceItem.DisplayName),
+                    sourceItem.IsDirectory);
+
+                if (TryResolvePasteTransferTotalBytes(request.Kind, sameHost, sourceItem, out var transferTotalBytes))
+                {
+                    item.ExpectedBytes = sourceItem.EstimatedSizeBytes;
+                    item.TransferOffsetBytes = offsetBytes;
+                    item.TransferTotalBytes = transferTotalBytes;
+                    item.TransferPhase = BuildInitialTransferPhase(request.Kind, sameHost);
+                    offsetBytes += transferTotalBytes;
+                }
+
+                items.Add(item);
+            }
+
             job = new FileActionJob(
                 Guid.NewGuid(),
                 request.Kind,
@@ -49,15 +76,11 @@ public sealed class FileActionQueueService(
                 request.DestinationHost,
                 CaptureExecutionContext(request.DestinationExecution),
                 request.DestinationDirectoryPath,
-                request.Items
-                    .Select(item => new FileActionJobItem(
-                        Guid.NewGuid(),
-                        item.DisplayName,
-                        NormalizeBrowserPath(item.SourcePath),
-                        CombineBrowserPath(request.DestinationDirectoryPath, item.DisplayName),
-                        item.IsDirectory))
-                    .ToList(),
-                DateTimeOffset.UtcNow);
+                items,
+                DateTimeOffset.UtcNow)
+            {
+                TotalBytes = offsetBytes > 0 ? offsetBytes : null
+            };
 
             session.Jobs[job.Id] = job;
         }
@@ -579,6 +602,14 @@ public sealed class FileActionQueueService(
                         nextItem.Status = FileActionItemStatus.Succeeded;
                         nextItem.CompletedAtUtc = DateTimeOffset.UtcNow;
                         nextItem.Message = BuildSuccessMessage(job.Kind, nextItem);
+                        if (nextItem.TransferTotalBytes.HasValue)
+                        {
+                            job.TotalBytes ??= CalculateTotalTransferBytes(job.Items);
+                            job.BytesTransferred = Math.Max(
+                                job.BytesTransferred,
+                                nextItem.TransferOffsetBytes + nextItem.TransferTotalBytes.Value);
+                        }
+
                         job.ActiveItemId = null;
                         job.CurrentDetail = null;
                     }
@@ -718,7 +749,8 @@ public sealed class FileActionQueueService(
                 item.SourcePath,
                 item.DestinationPath!,
                 destinationProfile,
-                cancellationToken),
+                cancellationToken,
+                CreateSameHostCopyProgress(workspaceId, job, item)),
             FileActionKind.Move when sameHost => await fileAccessService.MoveAsync(
                 job.DestinationHost,
                 item.SourcePath,
@@ -726,6 +758,7 @@ public sealed class FileActionQueueService(
                 destinationProfile,
                 cancellationToken),
             FileActionKind.Copy or FileActionKind.Move => await ExecuteCrossHostTransferAsync(
+                workspaceId,
                 job,
                 item,
                 fileAccessService,
@@ -776,6 +809,70 @@ public sealed class FileActionQueueService(
         };
     }
 
+    private IProgress<FileTransferProgress>? CreateSameHostCopyProgress(
+        string workspaceId,
+        FileActionJob job,
+        FileActionJobItem item) =>
+        new DelegatingProgress<FileTransferProgress>(progress =>
+        {
+            var totalBytes = progress.TotalBytes ?? item.ExpectedBytes ?? 0;
+            TryUpdateTransferProgress(
+                workspaceId,
+                job.Id,
+                item.Id,
+                progress.BytesTransferred,
+                totalBytes,
+                $"Copying on {job.DestinationHost.Name}");
+        });
+
+    private IProgress<FileTransferProgress> CreateCrossHostDownloadProgress(
+        string workspaceId,
+        FileActionJob job,
+        FileActionJobItem item,
+        Func<long?> getTransferSizeBytes,
+        Action<long> setTransferSizeBytes) =>
+        new DelegatingProgress<FileTransferProgress>(progress =>
+        {
+            var transferSizeBytes = progress.TotalBytes ?? getTransferSizeBytes() ?? 0;
+            if (transferSizeBytes > 0)
+            {
+                setTransferSizeBytes(transferSizeBytes);
+            }
+
+            var logicalBytesTransferred = CalculateCrossHostLogicalProgressBytes(
+                transferSizeBytes,
+                progress.BytesTransferred,
+                isUploadLeg: false);
+            TryUpdateTransferProgress(
+                workspaceId,
+                job.Id,
+                item.Id,
+                logicalBytesTransferred,
+                transferSizeBytes,
+                $"Downloading from {job.SourceHost.Name}");
+        });
+
+    private IProgress<FileTransferProgress> CreateCrossHostUploadProgress(
+        string workspaceId,
+        FileActionJob job,
+        FileActionJobItem item,
+        Func<long?> getTransferSizeBytes) =>
+        new DelegatingProgress<FileTransferProgress>(progress =>
+        {
+            var transferSizeBytes = progress.TotalBytes ?? getTransferSizeBytes() ?? 0;
+            var logicalBytesTransferred = CalculateCrossHostLogicalProgressBytes(
+                transferSizeBytes,
+                progress.BytesTransferred,
+                isUploadLeg: true);
+            TryUpdateTransferProgress(
+                workspaceId,
+                job.Id,
+                item.Id,
+                logicalBytesTransferred,
+                transferSizeBytes,
+                $"Sending to {job.DestinationHost.Name}");
+        });
+
     private static async Task<string?> ExecuteDeleteAsync(
         FileActionJob job,
         FileActionJobItem item,
@@ -793,7 +890,8 @@ public sealed class FileActionQueueService(
         return null;
     }
 
-    private static async Task<string?> ExecuteCrossHostTransferAsync(
+    private async Task<string?> ExecuteCrossHostTransferAsync(
+        string workspaceId,
         FileActionJob job,
         FileActionJobItem item,
         IManagedHostFileAccessService fileAccessService,
@@ -827,21 +925,48 @@ public sealed class FileActionQueueService(
             {
                 reportCurrentDetail?.Invoke(item.DisplayName);
                 var localFilePath = Path.Combine(tempRoot, SanitizeFileName(item.DisplayName));
+                var transferSize = item.ExpectedBytes;
+                var downloadProgress = CreateCrossHostDownloadProgress(
+                    workspaceId,
+                    job,
+                    item,
+                    () => transferSize,
+                    value => transferSize = value);
                 await DownloadSourceFileAsync(
                     job,
                     item.SourcePath,
                     localFilePath,
                     fileAccessService,
                     sourceProfile,
-                    cancellationToken);
+                    cancellationToken,
+                    downloadProgress);
 
+                var localFileInfo = new FileInfo(localFilePath);
+                transferSize = localFileInfo.Length;
+                TryUpdateTransferProgress(
+                    workspaceId,
+                    job.Id,
+                    item.Id,
+                    CalculateCrossHostLogicalProgressBytes(
+                        transferSize.Value,
+                        transferSize.Value,
+                        isUploadLeg: false),
+                    transferSize.Value,
+                    $"Sending to {job.DestinationHost.Name}");
+
+                var uploadProgress = CreateCrossHostUploadProgress(
+                    workspaceId,
+                    job,
+                    item,
+                    () => transferSize);
                 await UploadDestinationFileAsync(
                     job,
                     localFilePath,
                     item.DestinationPath!,
                     fileAccessService,
                     destinationProfile,
-                    cancellationToken);
+                    cancellationToken,
+                    uploadProgress);
             }
 
             if (job.Kind == FileActionKind.Move)
@@ -1317,12 +1442,62 @@ public sealed class FileActionQueueService(
         job.TransferPhase = phase;
     }
 
+    private static bool TryResolvePasteTransferTotalBytes(
+        FileActionKind kind,
+        bool sameHost,
+        FileActionSourceItem sourceItem,
+        out long transferTotalBytes)
+    {
+        transferTotalBytes = 0;
+        if (sourceItem.IsDirectory ||
+            sourceItem.EstimatedSizeBytes is not > 0 ||
+            kind is not (FileActionKind.Copy or FileActionKind.Move))
+        {
+            return false;
+        }
+
+        if (kind == FileActionKind.Move && sameHost)
+        {
+            return false;
+        }
+
+        transferTotalBytes = sourceItem.EstimatedSizeBytes.Value;
+        return true;
+    }
+
+    private static long CalculateCrossHostLogicalProgressBytes(
+        long totalBytes,
+        long currentLegBytesTransferred,
+        bool isUploadLeg)
+    {
+        if (totalBytes <= 0)
+        {
+            return 0;
+        }
+
+        var clampedLegBytes = Math.Clamp(currentLegBytesTransferred, 0, totalBytes);
+        return isUploadLeg
+            ? Math.Clamp((totalBytes + clampedLegBytes) / 2, 0, totalBytes)
+            : Math.Clamp(clampedLegBytes / 2, 0, totalBytes);
+    }
+
+    private static string BuildInitialTransferPhase(FileActionKind kind, bool sameHost) =>
+        sameHost
+            ? kind == FileActionKind.Copy ? "Copying on host" : "Moving on host"
+            : "Preparing transfer";
+
     private static long CalculateItemTransferTotalBytes(FileActionKind kind, long fileBytes) =>
         kind == FileActionKind.Upload ? checked(fileBytes * 2) : fileBytes;
 
     private static void RecalculateJobTransferBudget(FileActionJob job)
     {
-        var totalBytes = CalculateTotalTransferBytes(job.Items);
+        var totalBytes = 0L;
+        foreach (var item in job.Items)
+        {
+            item.TransferOffsetBytes = totalBytes;
+            totalBytes += item.TransferTotalBytes ?? 0;
+        }
+
         if (totalBytes > 0)
         {
             job.TotalBytes = totalBytes;
@@ -1619,6 +1794,11 @@ public sealed class FileActionQueueService(
         public long? TransferTotalBytes { get; set; }
         public string? TransferPhase { get; set; }
     }
+
+    private sealed class DelegatingProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
+    }
 }
 
 public sealed record FileActionExecutionContext(
@@ -1629,7 +1809,8 @@ public sealed record FileActionExecutionContext(
 public sealed record FileActionSourceItem(
     string SourcePath,
     string DisplayName,
-    bool IsDirectory);
+    bool IsDirectory,
+    long? EstimatedSizeBytes = null);
 
 public sealed record FileActionPasteRequest(
     FileActionKind Kind,

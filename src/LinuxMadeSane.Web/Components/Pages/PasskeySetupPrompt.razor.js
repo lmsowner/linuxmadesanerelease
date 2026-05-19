@@ -1,3 +1,6 @@
+/* Copyright (c) Richard D. Kiernan.
+ * Licensed under the Business Source License 1.1. See LICENSE for details. */
+
 const enrollments = document.querySelectorAll("[data-passkey-enrollment]");
 
 for (const enrollment of enrollments) {

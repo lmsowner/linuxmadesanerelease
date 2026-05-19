@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Net.Sockets;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
@@ -21,7 +24,7 @@ public sealed class SshConnectionService(
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        logger.LogInformation("Testing SSH connection for host {HostId} at {Hostname}:{Port}", host.Id, host.Hostname, host.Port);
+        logger.LogDebug("Testing SSH connection for host {HostId} at {Hostname}:{Port}", host.Id, host.Hostname, host.Port);
 
         if (string.IsNullOrWhiteSpace(host.Hostname))
         {

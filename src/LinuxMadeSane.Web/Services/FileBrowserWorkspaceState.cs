@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Collections.Concurrent;
 using System.Linq;
 
@@ -192,7 +195,7 @@ public sealed class FileBrowserWorkspaceState
         lock (syncRoot)
         {
             var items = snapshot.Items
-                .Select(item => new FileBrowserClipboardItemState(item.SourcePath, item.DisplayName, item.IsDirectory))
+                .Select(item => new FileBrowserClipboardItemState(item.SourcePath, item.DisplayName, item.IsDirectory, item.SizeBytes))
                 .ToArray();
 
             Clipboard = new FileBrowserClipboardState(
@@ -282,7 +285,8 @@ public enum FileBrowserClipboardOperation
 public sealed record FileBrowserClipboardItemSnapshot(
     string SourcePath,
     string DisplayName,
-    bool IsDirectory);
+    bool IsDirectory,
+    long? SizeBytes = null);
 
 public sealed record FileBrowserClipboardSnapshot(
     FileBrowserClipboardOperation Operation,
@@ -295,7 +299,8 @@ public sealed record FileBrowserClipboardSnapshot(
 public sealed record FileBrowserClipboardItemState(
     string SourcePath,
     string DisplayName,
-    bool IsDirectory);
+    bool IsDirectory,
+    long? SizeBytes = null);
 
 public sealed record FileBrowserClipboardState(
     FileBrowserClipboardOperation Operation,

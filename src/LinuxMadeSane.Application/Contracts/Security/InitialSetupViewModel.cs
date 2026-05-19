@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 namespace LinuxMadeSane.Application.Contracts.Security;
 
 public sealed record InitialSetupViewModel(
@@ -7,5 +10,9 @@ public sealed record InitialSetupViewModel(
     Guid? PendingUserId,
     string PendingEmail,
     string PendingLinuxUsername,
+    string SuggestedLinuxUsername,
+    string InstallerLinuxUsername,
+    string InstallerHomeDirectory,
+    bool HasInstallerIdentity,
     int UserCount,
     string StatusMessage);

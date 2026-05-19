@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -650,14 +653,13 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         }
 
         var lines = response.Servers.Select(server =>
-            $"{server.Name} | {FormatHostEndpoint(server.Hostname, server.Port)} | {server.Environment} | {server.OperatingStatus} | connection {server.ConnectionStatus} | attached={server.IsAttachedToThread}");
+            $"{server.Name} | {FormatHostEndpoint(server.Hostname, server.Port)} | {server.OperatingStatus} | connection {server.ConnectionStatus} | attached={server.IsAttachedToThread}");
         return string.Join(Environment.NewLine, lines);
     }
 
     private static string BuildServerSummaryOutput(AiToolServerSummary summary) =>
         $"Name: {summary.Name}{Environment.NewLine}" +
         $"Host: {FormatHostEndpoint(summary.Hostname, summary.Port)}{Environment.NewLine}" +
-        $"Environment: {summary.Environment}{Environment.NewLine}" +
         $"Platform: {summary.Platform}{Environment.NewLine}" +
         $"Working directory: {summary.DefaultWorkingDirectory}{Environment.NewLine}" +
         $"Operating status: {summary.OperatingStatus}{Environment.NewLine}" +

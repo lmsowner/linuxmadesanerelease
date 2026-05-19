@@ -1,3 +1,6 @@
+/* Copyright (c) Richard D. Kiernan.
+ * Licensed under the Business Source License 1.1. See LICENSE for details. */
+
 window.lmsFileBrowser = (() => {
     const scrollWatchers = new WeakMap();
     const keyWatchers = new WeakMap();
@@ -140,6 +143,12 @@ window.lmsFileBrowser = (() => {
         }
 
         return menus.length;
+    }
+
+    function refreshOpenLayoutSurfaces() {
+        window.requestAnimationFrame(() => {
+            positionContextMenus();
+        });
     }
 
     function positionContextMenu(menu) {
@@ -725,6 +734,8 @@ window.lmsFileBrowser = (() => {
 
         return `lms-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     }
+
+    window.addEventListener("lms-theme-change", refreshOpenLayoutSurfaces);
 
     return {
         watchSuggestionScroll,

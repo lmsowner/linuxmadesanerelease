@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
 @using LinuxMadeSane.Application.Contracts
 @using LinuxMadeSane.Application.Contracts.MediaLibrary
 @using LinuxMadeSane.Application.Contracts.Shares
@@ -259,10 +262,10 @@ else
                                     @if (browser is not null)
                                     {
                                         <UiCommandButton Label="Open terminal"
-                                                         Title="Use a terminal when you need explicit sudo or ACL changes."
+                                                         Title="Open a separate terminal window as the current Linux account for sudo, ownership, or ACL changes."
                                                          Glyph="UiIconGlyph.Run"
                                                          Variant="UiButtonVariant.Ghost"
-                                                         Href="@($"/hosts/{browser.Host.Id}/terminal")" />
+                                                         OnClick="@(() => OpenTerminalForAccessGuidanceAsync(accessDeniedPath))" />
                                     }
                                 </div>
                             </section>
@@ -445,9 +448,10 @@ else
                                             @if (browser is not null)
                                             {
                                                 <UiCommandButton Label="Open terminal"
+                                                                 Title="Open a separate terminal window as the current Linux account for sudo, ownership, or ACL changes."
                                                                  Glyph="UiIconGlyph.Run"
                                                                  Variant="UiButtonVariant.Ghost"
-                                                                 Href="@($"/hosts/{browser.Host.Id}/terminal")" />
+                                                                 OnClick="@(() => OpenTerminalForAccessGuidanceAsync(item.FullPath))" />
                                             }
                                         </div>
                                     </div>
@@ -2907,6 +2911,31 @@ else
         DismissContextMenu();
         ClearOperationMessage();
 
+        await OpenDetachedTerminalAsync(targetDirectoryPath);
+    }
+
+    private Task OpenTerminalForAccessGuidanceAsync(string blockedPath)
+    {
+        if (browser is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        DismissContextMenu();
+        ClearOperationMessage();
+
+        var normalizedBlockedPath = ResolveBrowserPath(blockedPath);
+        var workingDirectoryPath = GetParentDirectory(normalizedBlockedPath);
+        return OpenDetachedTerminalAsync(workingDirectoryPath, normalizedBlockedPath);
+    }
+
+    private async Task OpenDetachedTerminalAsync(string targetDirectoryPath, string? relatedPath = null)
+    {
+        if (browser is null)
+        {
+            return;
+        }
+
         var terminalWorkspace = TerminalWorkspaceRegistry.GetOrCreate(workspaceId);
         var terminalTab = terminalWorkspace.AddTab(browser.Host, targetDirectoryPath, activate: false);
         terminalTab.Username = connectionUsername;
@@ -2930,7 +2959,10 @@ else
             return;
         }
 
-        SetOperationMessage($"Opening terminal in {targetDirectoryPath}.", "success");
+        var detail = string.IsNullOrWhiteSpace(relatedPath) || string.Equals(targetDirectoryPath, relatedPath, StringComparison.Ordinal)
+            ? $"Opening terminal in {targetDirectoryPath}."
+            : $"Opening terminal in {targetDirectoryPath} for {relatedPath}.";
+        SetOperationMessage(detail, "success");
         await InvokeAsync(StateHasChanged);
     }
 
@@ -3404,7 +3436,8 @@ else
                 .Select(item => new FileBrowserClipboardItemSnapshot(
                     ResolveBrowserPath(item.FullPath),
                     item.Name,
-                    item.ItemType == SftpItemType.Folder))
+                    item.ItemType == SftpItemType.Folder,
+                    item.ItemType == SftpItemType.Folder ? null : item.SizeBytes))
                 .ToArray(),
             connectionUsername,
             ConnectionSecretStore.Clone(connectionSecretHandle),
@@ -3426,7 +3459,11 @@ else
         WorkspaceState.SetClipboard(new FileBrowserClipboardSnapshot(
             operation,
             browser.Host,
-            [new FileBrowserClipboardItemSnapshot(request.TargetPath, request.DisplayName, request.IsDirectory)],
+            [new FileBrowserClipboardItemSnapshot(
+                request.TargetPath,
+                request.DisplayName,
+                request.IsDirectory,
+                request.IsDirectory ? null : request.Item?.SizeBytes)],
             connectionUsername,
             ConnectionSecretStore.Clone(connectionSecretHandle),
             preferStoredCredentials));
@@ -3467,7 +3504,7 @@ else
                 browser.Host,
                 destinationDirectoryPath,
                 clipboardEntry.Items
-                    .Select(item => new FileActionSourceItem(item.SourcePath, item.DisplayName, item.IsDirectory))
+                    .Select(item => new FileActionSourceItem(item.SourcePath, item.DisplayName, item.IsDirectory, item.SizeBytes))
                     .ToArray(),
                 BuildFileActionExecutionContext()));
 
@@ -5230,8 +5267,8 @@ else
         }
 
         return IsLocalBrowser
-            ? $"{normalizedPath} is blocked by local filesystem permissions. Use Owner / permissions from a readable parent, or open a terminal and run sudo explicitly."
-            : $"{normalizedPath} is blocked by the SSH account currently in use. Use the owning Linux account, save key-based credentials for that account, or open a terminal for explicit sudo/ACL work.";
+            ? $"{normalizedPath} is blocked by local filesystem permissions. Browse it as the Linux account that owns it, or open a terminal for explicit sudo, ownership, or ACL work."
+            : $"{normalizedPath} is blocked by the SSH account currently in use. Use the owning Linux account, save key-based credentials for that account, or open a terminal for explicit sudo, ownership, or ACL work.";
     }
 
     private static bool IsAccessDeniedFailure(Exception exception)

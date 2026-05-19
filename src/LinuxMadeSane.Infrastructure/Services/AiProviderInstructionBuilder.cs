@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Text;
 using LinuxMadeSane.Core.Models.Ai;
 
@@ -30,8 +33,6 @@ internal static class AiProviderInstructionBuilder
             {
                 builder.Append("- ");
                 builder.Append(server.ServerName);
-                builder.Append(" | ");
-                builder.Append(server.Environment);
                 builder.Append(" | ");
                 builder.AppendLine(server.Hostname);
             }

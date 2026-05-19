@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
@@ -119,24 +122,12 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
 
     private void LogCommandRequested(LinuxCommandRequest request, string operationLabel, string commandText)
     {
-        if (request.IsOptionalExternalTool)
-        {
-            logger.LogDebug("Linux command requested: {Operation}", operationLabel);
-            return;
-        }
-
-        logger.LogInformation("Linux command requested: {Operation}", operationLabel);
+        logger.LogDebug("Linux command requested: {Operation}", operationLabel);
     }
 
     private void LogCommandCompleted(LinuxCommandRequest request, string operationLabel, string commandText, int exitCode)
     {
-        if (request.IsOptionalExternalTool)
-        {
-            logger.LogDebug("Linux command completed: {Operation} => {ExitCode}", operationLabel, exitCode);
-            return;
-        }
-
-        logger.LogInformation("Linux command completed: {Operation} => {ExitCode}", operationLabel, exitCode);
+        logger.LogDebug("Linux command completed: {Operation} => {ExitCode}", operationLabel, exitCode);
     }
 
     private void LogMissingExecutable(LinuxCommandRequest request, string operationLabel, string commandText, string message)

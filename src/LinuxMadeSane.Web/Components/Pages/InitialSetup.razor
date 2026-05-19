@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
 @page "/InitialSetup"
 @page "/initial-setup"
 @layout AuthLayout
@@ -38,6 +41,14 @@
         }
         else if (setupState.CanStart)
         {
+            @if (setupState.HasInstallerIdentity)
+            {
+                <div class="initial-setup-card">
+                    <h2>Installer identity detected.</h2>
+                    <p>LMS was installed by Linux user <strong>@setupState.InstallerLinuxUsername</strong>@FormatInstallerHome(setupState.InstallerHomeDirectory). This first LMS login will use that Linux identity by default.</p>
+                </div>
+            }
+
             <form method="post" action="/auth/initial-setup/start" class="initial-setup-form">
                 <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
 
@@ -46,8 +57,18 @@
                     <input name="email" type="email" value="@Email" autocomplete="email" placeholder="you@example.com" required />
                 </label>
 
+                <label class="initial-setup-field">
+                    <span>Default Linux user</span>
+                    <input name="linuxUsername"
+                           type="text"
+                           value="@LinuxUsernameValue"
+                           autocomplete="username"
+                           placeholder="richard"
+                           required />
+                </label>
+
                 <button class="initial-setup-primary" type="submit">Register LMS login</button>
-                <p class="initial-setup-footnote">Use an email address you control. LMS uses it for MFA setup, passkeys, and recovery workflows.</p>
+                <p class="initial-setup-footnote">Use an email address you control. LMS links this login to the Linux user above for terminals, file access, MFA setup, passkeys, and recovery workflows.</p>
             </form>
         }
         else if (setupState.CanVerify && provisioning is not null)
@@ -114,10 +135,18 @@
     [SupplyParameterFromQuery]
     public string? Email { get; set; }
 
+    [SupplyParameterFromQuery]
+    public string? LinuxUsername { get; set; }
+
     private InitialSetupViewModel? setupState;
     private SecurityUserProvisioningViewModel? provisioning;
 
     private string NormalizedReturnUrl => NormalizeReturnUrl(ReturnUrl);
+
+    private string LinuxUsernameValue =>
+        !string.IsNullOrWhiteSpace(LinuxUsername)
+            ? LinuxUsername.Trim()
+            : setupState?.SuggestedLinuxUsername ?? string.Empty;
 
     protected override async Task OnInitializedAsync()
     {
@@ -144,4 +173,9 @@
             ? trimmed
             : "/";
     }
+
+    private static string FormatInstallerHome(string homeDirectory) =>
+        string.IsNullOrWhiteSpace(homeDirectory)
+            ? string.Empty
+            : $" ({homeDirectory})";
 }

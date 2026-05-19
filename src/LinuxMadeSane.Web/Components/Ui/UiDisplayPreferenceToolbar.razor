@@ -1,5 +1,10 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
 @using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.JSInterop
 @using LinuxMadeSane.Application.Interfaces
+@implements IAsyncDisposable
 @inject IUserDisplayPreferenceService UserDisplayPreferenceService
 @inject IJSRuntime JSRuntime
 
@@ -14,6 +19,8 @@
 
     private Guid? userId;
     private bool initialized;
+    private DotNetObjectReference<UiDisplayPreferenceToolbar>? dotNetReference;
+    private int? themeObserverId;
     private string? storedThemeMode;
     private string paletteId = "smooth-grey";
     private int fontScalePercent = 100;
@@ -61,6 +68,8 @@
             darkModeEnabled = string.Equals(settings.Scheme, "dark", StringComparison.OrdinalIgnoreCase);
         }
 
+        dotNetReference = DotNetObjectReference.Create(this);
+        themeObserverId = await JSRuntime.InvokeAsync<int>("lmsTheme.registerObserver", dotNetReference);
         StateHasChanged();
     }
 
@@ -104,6 +113,50 @@
         {
             await UserDisplayPreferenceService.SaveAsync(userId.Value, paletteId, themeMode, fontScalePercent);
         }
+    }
+
+    [JSInvokable]
+    public Task HandleThemeChanged(ThemePreferenceState settings)
+    {
+        var nextPaletteId = string.IsNullOrWhiteSpace(settings.PaletteId) ? paletteId : settings.PaletteId;
+        var nextFontScalePercent = settings.FontScalePercent <= 0 ? fontScalePercent : settings.FontScalePercent;
+        var nextMode = string.IsNullOrWhiteSpace(settings.Mode) ? storedThemeMode : settings.Mode;
+        var nextDarkModeEnabled = string.Equals(settings.Scheme, "dark", StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(nextMode, "dark", StringComparison.OrdinalIgnoreCase);
+
+        if (string.Equals(paletteId, nextPaletteId, StringComparison.Ordinal) &&
+            fontScalePercent == nextFontScalePercent &&
+            darkModeEnabled == nextDarkModeEnabled &&
+            string.Equals(storedThemeMode, nextMode, StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.CompletedTask;
+        }
+
+        paletteId = nextPaletteId;
+        fontScalePercent = nextFontScalePercent;
+        storedThemeMode = nextMode;
+        darkModeEnabled = nextDarkModeEnabled;
+
+        return InvokeAsync(StateHasChanged);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (themeObserverId.HasValue)
+        {
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("lmsTheme.unregisterObserver", themeObserverId.Value);
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
+        dotNetReference?.Dispose();
     }
 
     public sealed class ThemePreferenceState

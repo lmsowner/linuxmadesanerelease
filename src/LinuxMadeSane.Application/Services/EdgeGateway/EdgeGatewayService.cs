@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Claims;
@@ -997,7 +1000,7 @@ public sealed class EdgeGatewayService(
 
         var status = validateResult.Success ? EdgeGatewayDiagnosticStatus.Good : EdgeGatewayDiagnosticStatus.Broken;
         var message = validateResult.Success
-            ? "Route, backend target, and Caddy snippet look good."
+            ? "Route check passed."
             : validateResult.Summary;
         await store.SaveRouteAsync(route with
         {

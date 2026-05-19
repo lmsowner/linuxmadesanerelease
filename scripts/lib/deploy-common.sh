@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Copyright (c) Richard D. Kiernan.
+# Licensed under the Business Source License 1.1. See LICENSE for details.
+
+
 set -euo pipefail
 
 lms_repo_root() {
@@ -200,6 +204,31 @@ SUDOERS
 
   if command -v visudo >/dev/null 2>&1; then
     visudo -cf "$sudoers_file" >/dev/null
+  fi
+}
+
+lms_detect_installer_identity() {
+  local username="${SUDO_USER:-${USER:-}}"
+  if [[ -z "$username" ]]; then
+    username="$(id -un 2>/dev/null || true)"
+  fi
+
+  LMS_INSTALLER_USERNAME="$username"
+  LMS_INSTALLER_UID=""
+  LMS_INSTALLER_HOME=""
+  LMS_INSTALLER_SHELL=""
+  LMS_INSTALLER_INSTALLED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ -n "$username" ]]; then
+    LMS_INSTALLER_UID="$(id -u "$username" 2>/dev/null || true)"
+    if command -v getent >/dev/null 2>&1; then
+      local passwd_entry
+      passwd_entry="$(getent passwd "$username" 2>/dev/null || true)"
+      if [[ -n "$passwd_entry" ]]; then
+        LMS_INSTALLER_HOME="$(printf '%s' "$passwd_entry" | cut -d: -f6)"
+        LMS_INSTALLER_SHELL="$(printf '%s' "$passwd_entry" | cut -d: -f7)"
+      fi
+    fi
   fi
 }
 

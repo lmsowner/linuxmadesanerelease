@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
 @page "/hosts/{HostId:guid}"
 @rendermode InteractiveServer
 @using LinuxMadeSane.Application.Interfaces
@@ -62,6 +65,14 @@ else
                                      OnClick="ShowLmsInstallPrompt"
                                      Disabled="@isInstallingLms" />
                 }
+                else if (ShouldShowLmsInstallUnavailableAction)
+                {
+                    <UiCommandButton Label="Install unavailable"
+                                     Glyph="UiIconGlyph.Download"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Title="@LmsInstallUnavailableMessage"
+                                     Disabled="true" />
+                }
                 @if (CanUpdateLmsHost)
                 {
                     <UiCommandButton Label="@LmsUpdateButtonLabel"
@@ -91,6 +102,10 @@ else
         @if (!string.IsNullOrWhiteSpace(lmsBackgroundUpdateStatus))
         {
             <p class="@($"callout {lmsBackgroundUpdateTone}")">@lmsBackgroundUpdateStatus</p>
+        }
+        @if (ShouldShowLmsInstallUnavailableNote)
+        {
+            <p class="callout warning">@LmsInstallUnavailableMessage</p>
         }
 
         <TabControl ActiveValue="@activeTab"
@@ -134,7 +149,6 @@ else
                             <div class="details-grid">
                                 <ServiceMetricComponent TagName="div" Label="Host type" Value="@details.Capabilities.KindLabel" />
                                 <ServiceMetricComponent TagName="div" Label="Endpoint" Value="@($"{details.Host.Hostname}:{details.Host.Port}")" />
-                                <ServiceMetricComponent TagName="div" Label="Environment" Value="@FormatEnvironment(details.Host.Environment)" />
                                 <ServiceMetricComponent TagName="div" Label="Primary auth" Value="@ManagedHostAuthenticationPolicy.GetDisplayLabel(details.Host.PrimaryAuthenticationType)" />
                                 <ServiceMetricComponent TagName="div" Label="Working directory" Value="@details.Host.DefaultWorkingDirectory" />
                             </div>
@@ -349,11 +363,23 @@ else
     private string lmsBackgroundUpdateStatus = string.Empty;
     private string lmsBackgroundUpdateTone = "info";
 
-    private bool CanInstallLmsHost => details is { Capabilities.IsLmsHost: false };
+    private bool CanInstallLmsHost => details is { Capabilities.SupportsLmsInstall: true };
 
-    private bool CanUpdateLmsHost => details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false };
+    private bool ShouldShowLmsInstallUnavailableAction =>
+        details is { Capabilities.IsLmsHost: false, Capabilities.SupportsLmsInstall: false };
 
-    private bool CanUninstallLmsHost => details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false };
+    private bool ShouldShowLmsInstallUnavailableNote => ShouldShowLmsInstallUnavailableAction;
+
+    private string LmsInstallUnavailableMessage =>
+        details?.Capabilities.LmsInstallSupportMessage ?? "LMS cannot be installed on this host.";
+
+    private bool CanUpdateLmsHost =>
+        details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false } &&
+        !IsCurrentLmsEndpoint(details.Host);
+
+    private bool CanUninstallLmsHost =>
+        details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false } &&
+        !IsCurrentLmsEndpoint(details.Host);
 
     private bool CanConnectToRemoteLmsHost =>
         details is { Capabilities.IsLmsHost: true, Capabilities.IsLocalLmsHost: false };
@@ -449,11 +475,13 @@ else
             !isInstallingLms &&
             !showLmsInstallPrompt &&
             installQueryHandledForHostId != HostId &&
-            string.Equals(InstallAction, "lms", StringComparison.OrdinalIgnoreCase) &&
-            CanInstallLmsHost)
+            string.Equals(InstallAction, "lms", StringComparison.OrdinalIgnoreCase))
         {
             installQueryHandledForHostId = HostId;
-            ShowLmsInstallPrompt();
+            if (CanInstallLmsHost)
+            {
+                ShowLmsInstallPrompt();
+            }
         }
 
         if (details is not null &&
@@ -566,6 +594,12 @@ else
     {
         if (details is null || isInstallingLms)
         {
+            return Task.CompletedTask;
+        }
+
+        if (IsCurrentLmsEndpoint(details.Host))
+        {
+            NavigationManager.NavigateTo("/updates");
             return Task.CompletedTask;
         }
 
@@ -837,9 +871,6 @@ else
     private static string BuildRemoteLmsPopupName(ManagedHost host) =>
         $"lms-remote-{host.Id:N}-{Guid.NewGuid():N}";
 
-    private static string FormatEnvironment(string? environment) =>
-        string.IsNullOrWhiteSpace(environment) ? "Unlabeled" : environment;
-
     private static string FormatPlatform(string? platform) =>
         string.IsNullOrWhiteSpace(platform) ? "Platform not set" : platform;
 
@@ -852,6 +883,10 @@ else
     private static bool HasStoredCredentials(ManagedHost host) =>
         !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
         !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private static bool IsCurrentLmsEndpoint(ManagedHost host) =>
+        ManagedHostCapabilities.Describe(host).IsLocalLmsHost ||
+        AiLocalMachine.IsLoopbackHostname(host.Hostname);
 
     private static string? FirstNonBlank(params string?[] values) =>
         values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();

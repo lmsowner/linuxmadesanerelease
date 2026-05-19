@@ -1,0 +1,84 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using System.Linq.Expressions
+
+<UiField Label="@Label"
+         Helper="@Helper"
+         Compact="@Compact"
+         Inline="@Inline"
+         Class="@Class">
+    <ChildContent>
+        <div class="@ControlClass">
+            <button class="ui-locked-text-field-lock"
+                    type="button"
+                    title="@ResolvedLockTitle"
+                    aria-label="@ResolvedLockTitle"
+                    disabled="@LockDisabled"
+                    @onclick="OnLockClick">
+                <UiGlyphIcon Glyph="@(Locked ? UiIconGlyph.Lock : UiIconGlyph.Unlock)" />
+            </button>
+            <InputText Value="@Value"
+                       ValueChanged="@ValueChanged"
+                       ValueExpression="@ValueExpression"
+                       class="@ResolvedInputClass"
+                       type="@Type"
+                       placeholder="@Placeholder"
+                       autocomplete="@Autocomplete"
+                       disabled="@Locked"
+                       @attributes="AdditionalAttributes" />
+            <button class="ui-locked-text-field-save"
+                    type="@SaveButtonType"
+                    title="@ResolvedSaveTitle"
+                    aria-label="@ResolvedSaveTitle"
+                    disabled="@(Locked || SaveDisabled)">
+                <UiGlyphIcon Glyph="UiIconGlyph.Save" />
+            </button>
+        </div>
+    </ChildContent>
+    <ValidationContent>
+        @if (CurrentEditContext is not null && ValueExpression is not null)
+        {
+            <ValidationMessage For="ValueExpression" />
+        }
+    </ValidationContent>
+</UiField>
+
+@code {
+    [Parameter] public string? Label { get; set; }
+    [Parameter] public string? Helper { get; set; }
+    [Parameter] public string? Value { get; set; }
+    [Parameter] public EventCallback<string?> ValueChanged { get; set; }
+    [Parameter] public Expression<Func<string?>>? ValueExpression { get; set; }
+    [Parameter] public string Type { get; set; } = "text";
+    [Parameter] public string? Placeholder { get; set; }
+    [Parameter] public string? Autocomplete { get; set; }
+    [Parameter] public bool Locked { get; set; } = true;
+    [Parameter] public bool LockDisabled { get; set; }
+    [Parameter] public bool SaveDisabled { get; set; }
+    [Parameter] public string SaveButtonType { get; set; } = "submit";
+    [Parameter] public string? LockTitle { get; set; }
+    [Parameter] public string? SaveTitle { get; set; }
+    [Parameter] public bool Compact { get; set; }
+    [Parameter] public bool Inline { get; set; }
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public string? InputClass { get; set; }
+    [Parameter] public EventCallback OnLockClick { get; set; }
+    [Parameter(CaptureUnmatchedValues = true)] public IReadOnlyDictionary<string, object>? AdditionalAttributes { get; set; }
+
+    [CascadingParameter] private EditContext? CurrentEditContext { get; set; }
+
+    private string ResolvedLockTitle => !string.IsNullOrWhiteSpace(LockTitle)
+        ? LockTitle.Trim()
+        : Locked ? "Unlock" : "Lock";
+
+    private string ResolvedSaveTitle => string.IsNullOrWhiteSpace(SaveTitle) ? "Save" : SaveTitle.Trim();
+
+    private string ControlClass => Locked
+        ? "ui-locked-text-field locked"
+        : "ui-locked-text-field unlocked";
+
+    private string ResolvedInputClass => string.IsNullOrWhiteSpace(InputClass)
+        ? "ui-locked-text-field-input"
+        : $"ui-locked-text-field-input {InputClass}";
+}

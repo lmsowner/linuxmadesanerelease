@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
 @page "/edge-gateway"
 @rendermode InteractiveServer
 @using LinuxMadeSane.Application.Contracts.EdgeGateway
@@ -295,7 +298,7 @@
                         </section>
                     }
 
-                    <section class="surface-card edge-card edge-enable-card">
+                    <section class="edge-card edge-setup-section edge-enable-card">
                         <div class="table-header">
                             <div>
                                 <p class="eyebrow">Edge Gateway services</p>
@@ -318,7 +321,7 @@
 
                     @if (ShouldShowRuntimeSetupDetails)
                     {
-                        <section class="surface-card edge-card edge-runtime-card">
+                        <section class="edge-card edge-setup-section edge-runtime-card">
                             <div class="table-header">
                                 <div>
                                     <p class="eyebrow">Local edge runtime</p>
@@ -349,8 +352,8 @@
                         </section>
                     }
 
-                    <details class="surface-subcard edge-relay-settings @(relayNamespaceUnlocked ? "unlocked" : "locked")" open="@relayNamespaceUnlocked">
-                        <summary class="edge-relay-settings-summary">
+                    <details class="edge-setup-section edge-relay-settings @(relayNamespaceUnlocked ? "unlocked" : "locked")" open="@relayNamespaceExpanded">
+                        <summary class="edge-relay-settings-summary" @onclick="ToggleRelayNamespaceExpanded" @onclick:preventDefault="true">
                             <div>
                                 <span class="eyebrow">Relay namespace</span>
                                 <strong>@edgeSettingsEditor.GatewaySubdomain</strong>
@@ -360,7 +363,8 @@
                                 <UiPill Tone="@(relayNamespaceUnlocked ? UiPillTone.Warning : UiPillTone.Success)">
                                     @(relayNamespaceUnlocked ? "Unlocked" : "Locked")
                                 </UiPill>
-                                <span class="edge-relay-toggle-text">Details</span>
+                                <span class="edge-relay-toggle-text edge-relay-toggle-expand">Expand</span>
+                                <span class="edge-relay-toggle-text edge-relay-toggle-collapse">Collapse</span>
                             </span>
                         </summary>
 
@@ -370,43 +374,28 @@
                             </p>
 
                             <EditForm Model="@edgeSettingsEditor" OnValidSubmit="SaveEdgeGatewaySettingsAsync" class="edge-relay-settings-form">
-                                <div class="edge-form-grid edge-form-grid-two">
-                                    <UiTextField @bind-Value="edgeSettingsEditor.GatewaySubdomain"
-                                                 Label="Relay label"
-                                                 Helper="@BuildRelayNamespaceHelper()"
-                                                 Placeholder="relay"
-                                                 Disabled="@(!relayNamespaceUnlocked)"
-                                                 InputClass="edge-relay-label-input"
-                                                 Compact="true" />
+                                <div class="edge-relay-settings-form-line">
+                                    <UiLockedTextField @bind-Value="edgeSettingsEditor.GatewaySubdomain"
+                                                       Label="Relay label"
+                                                       Helper="@BuildRelayNamespaceHelper()"
+                                                       Placeholder="relay"
+                                                       Locked="@(!relayNamespaceUnlocked)"
+                                                       LockTitle='@(relayNamespaceUnlocked ? "Lock namespace" : "Unlock namespace")'
+                                                       SaveTitle="Save relay label"
+                                                       Compact="true"
+                                                       Class="edge-relay-lock-field"
+                                                       OnLockClick="ToggleRelayNamespaceLockAsync" />
                                     <div class="edge-readonly-field">
                                         <span class="ui-field-label">Example</span>
                                         <strong>@BuildGatewaySubdomainExample()</strong>
                                         <span>@BuildRelayNamespaceExampleHelper()</span>
                                     </div>
                                 </div>
-                                <div class="toolbar-row">
-                                    <UiCommandButton Label="@(relayNamespaceUnlocked ? "Lock namespace" : "Unlock namespace")"
-                                                     Glyph="@(relayNamespaceUnlocked ? UiIconGlyph.Lock : UiIconGlyph.Unlock)"
-                                                     Variant="@(relayNamespaceUnlocked ? UiButtonVariant.Ghost : UiButtonVariant.Action)"
-                                                     OnClick="ToggleRelayNamespaceLockAsync" />
-                                    <UiCommandButton Label="Save relay label"
-                                                     Glyph="UiIconGlyph.Save"
-                                                     Type="submit"
-                                                     Variant="UiButtonVariant.Primary"
-                                                     Disabled="@(!relayNamespaceUnlocked)" />
-                                    @if (relayNamespaceUnlocked)
-                                    {
-                                        <UiCommandButton Label="Cancel"
-                                                         Glyph="UiIconGlyph.Clear"
-                                                         Variant="UiButtonVariant.Ghost"
-                                                         OnClick="CancelRelayNamespaceEditAsync" />
-                                    }
-                                </div>
                             </EditForm>
                         </div>
                     </details>
 
-                    <section class="surface-card edge-card edge-new-app-card">
+                    <section class="edge-card edge-setup-section edge-new-app-card">
                         <div class="table-header">
                             <div>
                                 <p class="eyebrow">New app setup</p>
@@ -763,6 +752,7 @@
     private bool showRouteModal;
     private bool isHttpServicePickerOpen;
     private bool isDiscoveringHttpServices;
+    private bool relayNamespaceExpanded;
     private bool relayNamespaceUnlocked;
     private bool confirmWildcardDnsReplacement;
     private bool confirmRouteDnsReplacement;
@@ -851,6 +841,7 @@
         {
             await EdgeGatewayService.SaveSettingsAsync(edgeSettingsEditor);
             userMessage = "Edge Gateway relay label saved.";
+            relayNamespaceExpanded = true;
             relayNamespaceUnlocked = false;
             cloudflareSetupResult = null;
             cloudflareRouteSetupResult = null;
@@ -907,7 +898,13 @@
             return;
         }
 
+        relayNamespaceExpanded = true;
         relayNamespaceUnlocked = true;
+    }
+
+    private void ToggleRelayNamespaceExpanded()
+    {
+        relayNamespaceExpanded = !relayNamespaceExpanded;
     }
 
     private async Task CancelRelayNamespaceEditAsync()
@@ -1243,7 +1240,9 @@
     {
         lastDiagnostic = await EdgeGatewayService.TestRouteAsync(routeId);
         activeTab = DiagnosticsTabValue;
-        userMessage = lastDiagnostic.Summary;
+        userMessage = lastDiagnostic.Status == EdgeGatewayDiagnosticStatus.Good
+            ? string.Empty
+            : lastDiagnostic.Summary;
         await LoadAsync();
     }
 

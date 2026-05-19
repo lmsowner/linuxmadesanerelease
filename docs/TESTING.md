@@ -57,13 +57,7 @@ Short link:
 curl -fsSL https://bit.ly/4tCQKCN | sudo bash
 ```
 
-Test a specific version with `LMS_VERSION`:
-
-```bash
-curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=v2026.05.13.10.08 bash
-```
-
-Releases are installed into versioned folders and `current` is updated to point at the newest installed release.
+The public installer is expected to install the current Community release only.
 
 ## Remove Test Install
 

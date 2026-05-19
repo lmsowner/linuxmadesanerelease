@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Core.Models;
 
 namespace LinuxMadeSane.Core.Abstractions;
@@ -63,7 +66,8 @@ public interface ILocalFileBrowsingService
         string workingDirectory,
         string sourcePath,
         string destinationPath,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        IProgress<FileTransferProgress>? progress = null);
 
     Task<string> MoveAsync(
         string workingDirectory,

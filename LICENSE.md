@@ -4,7 +4,7 @@ Parameters
 
 Licensor: Richard D. Kiernan
 
-Licensed Work: Linux Made Sane Community Edition. The Licensed Work includes the Community Edition source code, binaries, scripts, documentation, and other files distributed by Richard D. Kiernan as part of Linux Made Sane Community Edition.
+Licensed Work: Linux Made Sane Community Edition. The Licensed Work includes the Community Edition source code, binaries, scripts, documentation, and other files distributed by Richard D. Kiernan as part of Linux Made Sane Community Edition, excluding third-party components that are identified as separately licensed in THIRD-PARTY-NOTICES.md or preserved upstream notices.
 
 Additional Use Grant:
 
@@ -16,7 +16,7 @@ The Additional Use Grant does not permit the following unless you have a commerc
 - use LMS to manage infrastructure belonging to third-party customers as an MSP, consultant, outsourcing provider, hosting provider, or service bureau
 - resell, white-label, rebrand, package, or embed LMS as part of a paid commercial product or service
 - remove or obscure LMS branding, copyright notices, or license notices
-- use Pro, Business, or Enterprise features not included in Community Edition
+- use Business or Enterprise features not included in Community Edition
 
 Change Date: Four years after the release date of each version of the Licensed Work.
 

@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
 @page "/hosts"
 @rendermode @(new InteractiveServerRenderMode(prerender: false))
 @implements IAsyncDisposable
@@ -52,7 +55,6 @@
                 <table class="hosts-table hosts-table-lms">
                     <colgroup>
                         <col class="hosts-col-name" />
-                        <col class="hosts-col-environment" />
                         <col class="hosts-col-status" />
                         <col class="hosts-col-auth" />
                         <col class="hosts-col-version" />
@@ -62,7 +64,6 @@
                     <thead>
                         <tr>
                             <th><span class="hosts-column-heading">Name</span></th>
-                            <th><span class="hosts-column-heading">Environment</span></th>
                             <th><span class="hosts-column-heading">Status</span></th>
                             <th><span class="hosts-column-heading">Auth</span></th>
                             <th><span class="hosts-column-heading">Version</span></th>
@@ -74,7 +75,7 @@
                         @if (LmsHostRows.Count == 0)
                         {
                             <tr>
-                                <td colspan="7" class="hosts-loading-cell">
+                                <td colspan="6" class="hosts-loading-cell">
                                     <span class="meta-text">No LMS hosts registered yet.</span>
                                 </td>
                             </tr>
@@ -99,7 +100,6 @@
                                             <span class="meta-text hosts-row-meta">@row.Host.Hostname:@row.Host.Port</span>
                                         </div>
                                     </td>
-                                    <td><span class="hosts-row-value">@FormatEnvironment(row.Host.Environment)</span></td>
                                     <td class="hosts-status-cell">
                                         <div class="stack-tight hosts-status-stack">
                                             <UiPill Tone="@GetStatusTone(row)" Class="hosts-status-pill">@GetStatusLabel(row)</UiPill>
@@ -186,7 +186,6 @@
                 <table class="hosts-table hosts-table-ssh">
                     <colgroup>
                         <col class="hosts-col-name" />
-                        <col class="hosts-col-environment" />
                         <col class="hosts-col-status" />
                         <col class="hosts-col-auth" />
                         <col class="hosts-col-last-seen" />
@@ -195,7 +194,6 @@
                     <thead>
                         <tr>
                             <th><span class="hosts-column-heading">Name</span></th>
-                            <th><span class="hosts-column-heading">Environment</span></th>
                             <th><span class="hosts-column-heading">Status</span></th>
                             <th><span class="hosts-column-heading">Auth</span></th>
                             <th><span class="hosts-column-heading">Last seen</span></th>
@@ -206,7 +204,7 @@
                         @if (SshHostRows.Count == 0)
                         {
                             <tr>
-                                <td colspan="6" class="hosts-loading-cell">
+                                <td colspan="5" class="hosts-loading-cell">
                                     <span class="meta-text">No SSH-only hosts registered yet.</span>
                                 </td>
                             </tr>
@@ -230,7 +228,6 @@
                                             <span class="meta-text hosts-row-meta">@row.Host.Hostname:@row.Host.Port</span>
                                         </div>
                                     </td>
-                                    <td><span class="hosts-row-value">@FormatEnvironment(row.Host.Environment)</span></td>
                                     <td class="hosts-status-cell">
                                         <div class="stack-tight hosts-status-stack">
                                             <UiPill Tone="@GetStatusTone(row)" Class="hosts-status-pill">@GetStatusLabel(row)</UiPill>
@@ -260,7 +257,15 @@
                                                              Variant="UiButtonVariant.Action"
                                                              SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
                                             <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
-                                            <UiCommandButton Label="Install LMS" Glyph="UiIconGlyph.Download" Href="@($"/hosts/{row.Host.Id}?install=lms")" Variant="UiButtonVariant.Action" />
+                                            @if (TryGetLmsInstallAction(row.Host) is { } installAction)
+                                            {
+                                                <UiCommandButton Label="@installAction.Label"
+                                                                 Glyph="UiIconGlyph.Download"
+                                                                 Href="@installAction.Href"
+                                                                 Title="@installAction.Title"
+                                                                 Disabled="@installAction.Disabled"
+                                                                 Variant="UiButtonVariant.Action" />
+                                            }
                                             <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Href="@($"/hosts/{row.Host.Id}/edit")" Variant="UiButtonVariant.Action" />
                                         </div>
                                     </td>
@@ -775,6 +780,11 @@
             return false;
         }
 
+        if (IsCurrentLmsEndpoint(row.Host))
+        {
+            return false;
+        }
+
         return row.LmsUpdate?.IsUpdateAvailable == true;
     }
 
@@ -798,6 +808,19 @@
         return capabilities is { IsLmsHost: true, IsLocalLmsHost: false };
     }
 
+    private static HostActionLink? TryGetLmsInstallAction(ManagedHost host)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(host);
+        if (capabilities.IsLmsHost)
+        {
+            return null;
+        }
+
+        return capabilities.SupportsLmsInstall
+            ? new HostActionLink("Install LMS", $"/hosts/{host.Id}?install=lms", "Install Linux Made Sane on this SSH host.")
+            : new HostActionLink("Install blocked", null, capabilities.LmsInstallSupportMessage, true);
+    }
+
     private static bool CanOpenLmsDirectly(HostRowState row) =>
         row.LmsUpdate?.IsDirectWebAvailable == true;
 
@@ -816,7 +839,7 @@
     private static bool ShouldShowLmsUninstallAction(HostRowState row)
     {
         var capabilities = ManagedHostCapabilities.Describe(row.Host);
-        return capabilities.IsLmsHost && !capabilities.IsLocalLmsHost;
+        return capabilities.IsLmsHost && !capabilities.IsLocalLmsHost && !IsCurrentLmsEndpoint(row.Host);
     }
 
     private static string BuildLmsUninstallHref(ManagedHost host) =>
@@ -824,7 +847,7 @@
 
     private Task StartLmsHostUpdateAsync(ManagedHost host)
     {
-        if (IsLmsUpdateActiveFor(host) || ManagedHostCapabilities.Describe(host).IsLocalLmsHost)
+        if (IsLmsUpdateActiveFor(host) || IsCurrentLmsEndpoint(host))
         {
             return Task.CompletedTask;
         }
@@ -1133,11 +1156,12 @@
         !string.IsNullOrWhiteSpace(update.InstalledVersion) &&
         !update.InstalledVersion.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
 
+    private static bool IsCurrentLmsEndpoint(ManagedHost host) =>
+        ManagedHostCapabilities.Describe(host).IsLocalLmsHost ||
+        AiLocalMachine.IsLoopbackHostname(host.Hostname);
+
     private static string? FirstNonBlank(params string?[] values) =>
         values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
-
-    private static string FormatEnvironment(string? environment) =>
-        string.IsNullOrWhiteSpace(environment) ? "Unlabeled" : environment;
 
     private static string FormatAuthentication(AuthenticationType type) =>
         ManagedHostAuthenticationPolicy.GetDisplayLabel(type);
@@ -1595,4 +1619,6 @@
         string Message,
         DateTimeOffset StartedAtUtc,
         DateTimeOffset? CompletedAtUtc = null);
+
+    private sealed record HostActionLink(string Label, string? Href, string? Title = null, bool Disabled = false);
 }

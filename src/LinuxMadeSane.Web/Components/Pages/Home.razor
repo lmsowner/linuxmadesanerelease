@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
 @page "/"
 @rendermode @(new InteractiveServerRenderMode(prerender: false))
 @implements IAsyncDisposable
@@ -110,6 +113,8 @@
                                 <UiCommandButton Label="@lifecycleLink.Label"
                                                  Glyph="UiIconGlyph.Download"
                                                  Href="@lifecycleLink.Href"
+                                                 Title="@lifecycleLink.Title"
+                                                 Disabled="@lifecycleLink.Disabled"
                                                  Variant="UiButtonVariant.Action" />
                             }
                             <UiCommandButton Label="Terminal" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.Action" OnClick="@(() => OpenTerminalPopupAsync(details.Host.Id))" />
@@ -140,7 +145,6 @@
 
     </div>
 
-    <FileActionCenter />
 </div>
 
 @code {
@@ -278,10 +282,12 @@
         var capabilities = ManagedHostCapabilities.Describe(host);
         if (!capabilities.IsLmsHost)
         {
-            return new DashboardLifecycleLink("Install LMS", $"/hosts/{host.Id}?install=lms");
+            return capabilities.SupportsLmsInstall
+                ? new DashboardLifecycleLink("Install LMS", $"/hosts/{host.Id}?install=lms")
+                : new DashboardLifecycleLink("Install blocked", null, capabilities.LmsInstallSupportMessage, true);
         }
 
-        return capabilities.IsLocalLmsHost
+        return capabilities.IsLocalLmsHost || AiLocalMachine.IsLoopbackHostname(host.Hostname)
             ? new DashboardLifecycleLink("Update LMS", "/updates")
             : new DashboardLifecycleLink("Update LMS", $"/hosts/{host.Id}?update=lms");
     }
@@ -763,5 +769,5 @@
 
     private sealed record DashboardLink(string Href, string? Target = null, string? Rel = null);
 
-    private sealed record DashboardLifecycleLink(string Label, string Href);
+    private sealed record DashboardLifecycleLink(string Label, string? Href, string? Title = null, bool Disabled = false);
 }

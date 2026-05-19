@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Globalization;
 using System.IO.Compression;
 using System.Text;
@@ -266,15 +269,18 @@ public sealed class LocalFileBrowsingService(
         string workingDirectory,
         string sourcePath,
         string destinationPath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<FileTransferProgress>? progress = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         var normalizedSourcePath = LocalFileBrowsingSupport.NormalizePath(workingDirectory, sourcePath);
         var normalizedDestinationPath = LocalFileBrowsingSupport.NormalizePath(workingDirectory, destinationPath);
-        CopyPath(normalizedSourcePath, normalizedDestinationPath);
-
-        return Task.FromResult(normalizedDestinationPath);
+        return CopyPathWithProgressAsync(
+            normalizedSourcePath,
+            normalizedDestinationPath,
+            progress,
+            cancellationToken);
     }
 
     public Task<string> MoveAsync(
@@ -552,6 +558,39 @@ public sealed class LocalFileBrowsingService(
         File.Copy(sourcePath, destinationPath, overwrite: false);
     }
 
+    private static async Task<string> CopyPathWithProgressAsync(
+        string sourcePath,
+        string destinationPath,
+        IProgress<FileTransferProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (progress is null)
+        {
+            CopyPath(sourcePath, destinationPath);
+            return destinationPath;
+        }
+
+        EnsureCopyAllowed(sourcePath, destinationPath);
+
+        if (Directory.Exists(sourcePath))
+        {
+            await CopyDirectoryWithProgressAsync(
+                new DirectoryInfo(sourcePath),
+                new DirectoryInfo(destinationPath),
+                progress,
+                cancellationToken);
+            return destinationPath;
+        }
+
+        if (!File.Exists(sourcePath))
+        {
+            throw new InvalidOperationException($"{sourcePath} was not found on the local machine.");
+        }
+
+        await CopyFileWithProgressAsync(sourcePath, destinationPath, overwrite: false, progress, cancellationToken);
+        return destinationPath;
+    }
+
     private static void DeletePath(string path, bool recursive)
     {
         if (Directory.Exists(path))
@@ -586,6 +625,69 @@ public sealed class LocalFileBrowsingService(
         foreach (var directory in sourceDirectory.EnumerateDirectories())
         {
             CopyDirectory(directory, new DirectoryInfo(Path.Combine(destinationDirectory.FullName, directory.Name)));
+        }
+    }
+
+    private static async Task CopyDirectoryWithProgressAsync(
+        DirectoryInfo sourceDirectory,
+        DirectoryInfo destinationDirectory,
+        IProgress<FileTransferProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        if (!sourceDirectory.Exists)
+        {
+            throw new InvalidOperationException($"{sourceDirectory.FullName} was not found on the local machine.");
+        }
+
+        if (destinationDirectory.Exists)
+        {
+            throw new InvalidOperationException($"{destinationDirectory.FullName} already exists on the local machine.");
+        }
+
+        var directories = sourceDirectory
+            .EnumerateDirectories("*", SearchOption.AllDirectories)
+            .ToArray();
+        var files = sourceDirectory
+            .EnumerateFiles("*", SearchOption.AllDirectories)
+            .ToArray();
+        var totalBytes = files.Sum(file => file.Length);
+        long completedBytes = 0;
+
+        progress.Report(new FileTransferProgress(0, totalBytes));
+        destinationDirectory.Create();
+
+        foreach (var directory in directories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var relativePath = Path.GetRelativePath(sourceDirectory.FullName, directory.FullName);
+            Directory.CreateDirectory(Path.Combine(destinationDirectory.FullName, relativePath));
+        }
+
+        foreach (var file in files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var relativePath = Path.GetRelativePath(sourceDirectory.FullName, file.FullName);
+            var destinationFilePath = Path.Combine(destinationDirectory.FullName, relativePath);
+            var destinationParent = Path.GetDirectoryName(destinationFilePath);
+            if (!string.IsNullOrWhiteSpace(destinationParent))
+            {
+                Directory.CreateDirectory(destinationParent);
+            }
+
+            var startingBytes = completedBytes;
+            var fileProgress = new DelegatingProgress<FileTransferProgress>(update =>
+            {
+                var bytesTransferred = Math.Min(startingBytes + update.BytesTransferred, totalBytes);
+                progress.Report(new FileTransferProgress(bytesTransferred, totalBytes));
+            });
+
+            await CopyFileWithProgressAsync(
+                file.FullName,
+                destinationFilePath,
+                overwrite: false,
+                fileProgress,
+                cancellationToken);
+            completedBytes += file.Length;
         }
     }
 
@@ -1442,6 +1544,11 @@ public sealed class LocalFileBrowsingService(
         }
 
         await destinationStream.FlushAsync(cancellationToken);
+    }
+
+    private sealed class DelegatingProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
     }
 
     private async Task ExecuteMutationCommandAsync(

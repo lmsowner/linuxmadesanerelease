@@ -15,7 +15,7 @@ curl -fsSL https://bit.ly/4tCQKCN | sudo bash
 The public installer:
 
 - detects `linux-x64`, `linux-arm64`, or `linux-arm`
-- downloads the matching CE tarball from `https://www.linuxmadesane.com`
+- downloads the current matching CE tarball from `https://www.linuxmadesane.com`
 - verifies `SHA256SUMS` when available
 - installs to `/opt/linuxmadesane/ce`
 - stores data in `/var/lib/linuxmadesane/ce`
@@ -34,13 +34,11 @@ See [Security model](SECURITY.md) before changing runner, SSH, or sudo defaults.
 
 ```bash
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 5095
-curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=v2026.05.13.10.08 bash
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env RID=linux-arm64 bash
 ```
 
 Supported environment variables:
 
-- `LMS_VERSION`: release version
 - `RID`: `linux-x64`, `linux-arm64`, or `linux-arm`
 - `LMS_SERVICE_PORT`: HTTP port, default `5080`
 - `LMS_INSTALL_ROOT`: default `/opt/linuxmadesane/ce`

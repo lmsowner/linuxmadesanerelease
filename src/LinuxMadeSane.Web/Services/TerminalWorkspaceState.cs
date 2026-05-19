@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Collections.Concurrent;
 using LinuxMadeSane.Application.Contracts.Ai;
 using LinuxMadeSane.Core.Abstractions;
@@ -289,8 +292,6 @@ public sealed class TerminalTabState
 
     public string HostAddress { get; private set; } = string.Empty;
 
-    public string HostEnvironment { get; private set; } = string.Empty;
-
     public string DefaultWorkingDirectory { get; private set; } = string.Empty;
 
     public string Username { get; set; } = string.Empty;
@@ -359,7 +360,6 @@ public sealed class TerminalTabState
         HostId = host.Id;
         HostName = host.Name;
         HostAddress = host.Hostname;
-        HostEnvironment = host.Environment;
         DefaultWorkingDirectory = workingDirectoryOverride ?? host.DefaultWorkingDirectory;
         PrimaryAuthenticationType = host.PrimaryAuthenticationType;
         FallbackAuthenticationType = host.FallbackAuthenticationType;

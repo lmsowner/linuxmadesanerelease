@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Application.Contracts.Ai;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
@@ -514,6 +517,8 @@ public sealed class AiProviderSettingsService(
             AiProviderType.RemoteLmsAiEngine => "remote-ai-engine",
             AiProviderType.Gemini => "gemini",
             AiProviderType.Groq => "groq",
+            AiProviderType.XAi => "xai-grok",
+            AiProviderType.DeepSeek => "deepseek",
             _ => "provider"
         };
 

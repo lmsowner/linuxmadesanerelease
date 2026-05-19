@@ -1,3 +1,6 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
 @page "/settings"
 @rendermode InteractiveServer
 @using System.Net
@@ -7,8 +10,10 @@
 @using LinuxMadeSane.Application.Services
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Shares
 @using Microsoft.AspNetCore.Components.Forms
 @inject ISecuritySettingsService SecuritySettingsService
+@inject IShareManagementService ShareService
 @inject ITrustedNetworkAccessService TrustedNetworkAccessService
 @inject NavigationManager Navigation
 
@@ -302,6 +307,37 @@
                                                  Type="email"
                                                  Helper="Used for Linux Made Sane sign-in and OTP verification." />
 
+                                    <UiComboboxField TValue="string"
+                                                     Label="Associated Linux user"
+                                                     Value="@userEditor.LinuxUsername"
+                                                     ValueChanged="SetNewUserLinuxUsernameAsync"
+                                                     ValueExpression="@(() => userEditor.LinuxUsername)"
+                                                     Helper="Choose an existing local account, or leave this blank so LMS creates a managed Linux user from the email address.">
+                                        <option value="">Create LMS-managed Linux user</option>
+                                        @if (ShouldRenderCurrentLinuxUserOption(userEditor.LinuxUsername))
+                                        {
+                                            <option value="@userEditor.LinuxUsername">@FormatSavedLinuxUserOptionLabel(userEditor.LinuxUsername)</option>
+                                        }
+                                        @if (GetInteractiveLinuxUsers().Count > 0)
+                                        {
+                                            <optgroup label="Interactive users">
+                                                @foreach (var linuxUser in GetInteractiveLinuxUsers())
+                                                {
+                                                    <option value="@linuxUser.UserName">@FormatLinuxUserOptionLabel(linuxUser)</option>
+                                                }
+                                            </optgroup>
+                                        }
+                                        @if (GetSystemLinuxUsers().Count > 0)
+                                        {
+                                            <optgroup label="System users">
+                                                @foreach (var linuxUser in GetSystemLinuxUsers())
+                                                {
+                                                    <option value="@linuxUser.UserName">@FormatLinuxUserOptionLabel(linuxUser)</option>
+                                                }
+                                            </optgroup>
+                                        }
+                                    </UiComboboxField>
+
                                     @if (page.Messaging.CanSendLoginSetupEmail)
                                     {
                                         <p class="callout success">Verified Messaging is available. LMS will email the setup QR code and login link to the account email.</p>
@@ -398,6 +434,7 @@
                                     <thead>
                                         <tr>
                                             <th>Account</th>
+                                            <th>Linux user</th>
                                             <th>Status</th>
                                             <th>Login session</th>
                                             <th>Last login</th>
@@ -408,7 +445,7 @@
                                         @foreach (var user in page.Users)
                                         {
                                             <tr>
-                                                <td>
+                                                <td class="remote-access-account-cell">
                                                     <strong>@user.Email</strong>
                                                     @if (!user.HasOtpSecret)
                                                     {
@@ -416,9 +453,47 @@
                                                     }
                                                 </td>
                                                 <td>
-                                                    <div class="remote-access-status-stack">
-                                                        <span class="status-pill @(user.IsEnabled ? "success" : "neutral")">@(user.IsEnabled ? "Enabled" : "Disabled")</span>
-                                                        <span class="status-pill @(user.HasOtpSecret ? "neutral" : "warning")">@(user.HasOtpSecret ? "OTP ready" : "OTP missing")</span>
+                                                    <div class="remote-access-linux-editor">
+                                                        <div class="ui-combobox-shell ui-select-shell remote-access-linux-combobox">
+                                                            <select class="ui-combobox-input ui-select-input"
+                                                                    value="@GetLinuxUsernameEditor(user)"
+                                                                    aria-label="@($"Associated Linux user for {user.Email}")"
+                                                                    @onchange="@((ChangeEventArgs args) => SetLinuxUsernameEditor(user.Id, args))">
+                                                                @if (ShouldRenderCurrentLinuxUserOption(GetLinuxUsernameEditor(user)))
+                                                                {
+                                                                    <option value="@GetLinuxUsernameEditor(user)">@FormatSavedLinuxUserOptionLabel(GetLinuxUsernameEditor(user))</option>
+                                                                }
+                                                                @if (GetInteractiveLinuxUsers().Count > 0)
+                                                                {
+                                                                    <optgroup label="Interactive users">
+                                                                        @foreach (var linuxUser in GetInteractiveLinuxUsers())
+                                                                        {
+                                                                            <option value="@linuxUser.UserName">@FormatLinuxUserOptionLabel(linuxUser)</option>
+                                                                        }
+                                                                    </optgroup>
+                                                                }
+                                                                @if (GetSystemLinuxUsers().Count > 0)
+                                                                {
+                                                                    <optgroup label="System users">
+                                                                        @foreach (var linuxUser in GetSystemLinuxUsers())
+                                                                        {
+                                                                            <option value="@linuxUser.UserName">@FormatLinuxUserOptionLabel(linuxUser)</option>
+                                                                        }
+                                                                    </optgroup>
+                                                                }
+                                                            </select>
+                                                            <span class="ui-combobox-indicator ui-select-indicator" aria-hidden="true">
+                                                                <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                                                                    <path d="m2.5 4.5 3.5 3 3.5-3" />
+                                                                </svg>
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div class="remote-access-status-text">
+                                                        <span>@(user.IsEnabled ? "Enabled" : "Disabled")</span>
+                                                        <span>@(user.HasOtpSecret ? "OTP ready" : "OTP missing")</span>
                                                     </div>
                                                 </td>
                                                 <td>
@@ -454,15 +529,15 @@
                                                                    @onchange="@((ChangeEventArgs args) => SetSessionLifetimeEditorPart(user.Id, SessionLifetimePart.Minutes, args))" />
                                                         </label>
                                                         <span class="meta-text">@FormatSessionLifetimeMinutes(GetSessionLifetimeEditor(user))</span>
-                                                        <UiCommandButton Label="@(IsSavingSessionLifetime(user.Id) ? "Saving..." : "Save")"
-                                                                         Glyph="UiIconGlyph.Save"
-                                                                         Variant="UiButtonVariant.Action"
-                                                                         Disabled="@IsSavingSessionLifetime(user.Id)"
-                                                                         OnClick="@(() => SaveUserSessionLifetimeAsync(user))" />
                                                     </div>
                                                 </td>
                                                 <td>@FormatTimestamp(user.LastLoginAtUtc, "Never")</td>
                                                 <td class="actions-cell">
+                                                    <UiCommandButton Label="@(IsSavingUserSettings(user.Id) ? "Saving..." : "Save")"
+                                                                     Glyph="UiIconGlyph.Save"
+                                                                     Variant="UiButtonVariant.Action"
+                                                                     Disabled="@IsSavingUserSettings(user.Id)"
+                                                                     OnClick="@(() => SaveUserSettingsAsync(user))" />
                                                     <UiCommandButton Label="@(user.IsEnabled ? "Disable" : "Enable")"
                                                                      Glyph="@(user.IsEnabled ? UiIconGlyph.Disconnect : UiIconGlyph.Connect)"
                                                                      Variant="UiButtonVariant.Action"
@@ -798,6 +873,7 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
 
     private SecuritySettingsPageViewModel page = new([], [], BuildDefaultMessagingViewModel());
     private IReadOnlyList<LocalNetworkInterfaceView> networkInterfaces = [];
+    private IReadOnlyList<LinuxShareUser> localLinuxUsers = [];
     private TrustedNetworkAccessResult currentAccess = new("unknown", "unknown", false, null, false, false, false, false, false);
     private TrustedNetworkEntryEditor networkEditor = new();
     private SecurityUserEditor userEditor = new();
@@ -816,7 +892,9 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private bool messagingMessageIsError;
     private string messagingTestRecipient = string.Empty;
     private readonly Dictionary<Guid, int> sessionLifetimeEditors = new();
+    private readonly Dictionary<Guid, string> linuxUsernameEditors = new();
     private readonly HashSet<Guid> savingSessionLifetimes = [];
+    private readonly HashSet<Guid> savingLinuxUsernames = [];
     private string activeTab = TrustedNetworksTabValue;
     private bool showNetworkRiskModal;
     private bool showGraphHelpModal;
@@ -854,11 +932,26 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     {
         page = await SecuritySettingsService.GetPageAsync();
         messagingEditor = await SecuritySettingsService.GetMessagingEditorAsync();
+        localLinuxUsers = await LoadLocalLinuxUsersAsync();
         SyncSessionLifetimeEditors();
+        SyncLinuxUsernameEditors();
         networkInterfaces = LoadNetworkInterfaces();
         currentAccess = await TrustedNetworkAccessService.EvaluateAsync(
             HttpContext?.Connection.RemoteIpAddress,
             HttpContext?.Request.Host.Host);
+    }
+
+    private async Task<IReadOnlyList<LinuxShareUser>> LoadLocalLinuxUsersAsync()
+    {
+        try
+        {
+            var identities = await ShareService.GetUsersGroupsManagerAsync();
+            return identities.Users;
+        }
+        catch
+        {
+            return [];
+        }
     }
 
     private void SyncSessionLifetimeEditors()
@@ -872,6 +965,20 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         foreach (var user in page.Users)
         {
             sessionLifetimeEditors[user.Id] = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(user.SessionLifetimeMinutes);
+        }
+    }
+
+    private void SyncLinuxUsernameEditors()
+    {
+        var currentUserIds = page.Users.Select(user => user.Id).ToHashSet();
+        foreach (var staleUserId in linuxUsernameEditors.Keys.Where(userId => !currentUserIds.Contains(userId)).ToArray())
+        {
+            linuxUsernameEditors.Remove(staleUserId);
+        }
+
+        foreach (var user in page.Users)
+        {
+            linuxUsernameEditors[user.Id] = user.LinuxUsername;
         }
     }
 
@@ -1664,22 +1771,56 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
             value);
     }
 
-    private async Task SaveUserSessionLifetimeAsync(SecurityUserViewModel user)
+    private Task SetNewUserLinuxUsernameAsync(string? value)
     {
+        userEditor.LinuxUsername = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private string GetLinuxUsernameEditor(SecurityUserViewModel user)
+    {
+        if (linuxUsernameEditors.TryGetValue(user.Id, out var linuxUsername))
+        {
+            return linuxUsername;
+        }
+
+        linuxUsernameEditors[user.Id] = user.LinuxUsername;
+        return user.LinuxUsername;
+    }
+
+    private void SetLinuxUsernameEditor(Guid userId, ChangeEventArgs args)
+    {
+        linuxUsernameEditors[userId] = args.Value?.ToString()?.Trim() ?? string.Empty;
+    }
+
+    private async Task SaveUserSettingsAsync(SecurityUserViewModel user)
+    {
+        var linuxUsername = GetLinuxUsernameEditor(user).Trim();
+        if (string.IsNullOrWhiteSpace(linuxUsername))
+        {
+            userMessage = "Enter the Linux user this LMS account should use.";
+            userMessageIsError = true;
+            return;
+        }
+
         if (!sessionLifetimeEditors.TryGetValue(user.Id, out var minutes))
         {
             minutes = user.SessionLifetimeMinutes;
         }
 
+        savingLinuxUsernames.Add(user.Id);
         savingSessionLifetimes.Add(user.Id);
         userMessage = null;
 
         try
         {
             var normalizedMinutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(minutes);
-            await SecuritySettingsService.SetUserSessionLifetimeAsync(user.Id, normalizedMinutes);
+            var editor = await SecuritySettingsService.GetUserEditorAsync(user.Id);
+            editor.LinuxUsername = linuxUsername;
+            editor.SessionLifetimeMinutes = normalizedMinutes;
+            await SecuritySettingsService.SaveUserAsync(editor);
             sessionLifetimeEditors[user.Id] = normalizedMinutes;
-            userMessage = $"Login session for {user.Email} set to {FormatSessionLifetimeMinutes(normalizedMinutes)}.";
+            userMessage = $"Saved account settings for {user.Email}.";
             userMessageIsError = false;
             await LoadAsync();
         }
@@ -1690,11 +1831,46 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         }
         finally
         {
+            savingLinuxUsernames.Remove(user.Id);
             savingSessionLifetimes.Remove(user.Id);
         }
     }
 
-    private bool IsSavingSessionLifetime(Guid userId) => savingSessionLifetimes.Contains(userId);
+    private bool IsSavingUserSettings(Guid userId) =>
+        savingLinuxUsernames.Contains(userId) ||
+        savingSessionLifetimes.Contains(userId);
+
+    private IReadOnlyList<LinuxShareUser> GetInteractiveLinuxUsers() =>
+        localLinuxUsers
+            .Where(IsInteractiveLinuxUser)
+            .OrderBy(user => user.UserName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private IReadOnlyList<LinuxShareUser> GetSystemLinuxUsers() =>
+        localLinuxUsers
+            .Where(user => !IsInteractiveLinuxUser(user))
+            .OrderBy(user => user.UserName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private bool ShouldRenderCurrentLinuxUserOption(string? linuxUsername)
+    {
+        var trimmed = linuxUsername?.Trim();
+        return !string.IsNullOrWhiteSpace(trimmed) &&
+               localLinuxUsers.All(user => !user.UserName.Equals(trimmed, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string FormatSavedLinuxUserOptionLabel(string linuxUsername) =>
+        linuxUsername.Trim();
+
+    private static string FormatLinuxUserOptionLabel(LinuxShareUser user) => user.UserName;
+
+    private static bool IsInteractiveLinuxUser(LinuxShareUser user) =>
+        user.HomeDirectory.StartsWith("/home/", StringComparison.OrdinalIgnoreCase) &&
+        !IsNonInteractiveShell(user.LoginShell);
+
+    private static bool IsNonInteractiveShell(string shell) =>
+        shell.EndsWith("/nologin", StringComparison.OrdinalIgnoreCase) ||
+        shell.EndsWith("/false", StringComparison.OrdinalIgnoreCase);
 
     private static string FormatTimestamp(DateTimeOffset? value, string fallback) =>
         value?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? fallback;

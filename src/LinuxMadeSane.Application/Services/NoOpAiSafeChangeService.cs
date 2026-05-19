@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Application.Contracts.Ai;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Models.Ai;

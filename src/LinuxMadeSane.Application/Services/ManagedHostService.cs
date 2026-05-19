@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Application.Contracts;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
@@ -217,9 +220,16 @@ public sealed class ManagedHostService(
             throw new InvalidOperationException("Host not found.");
         }
 
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (IsCurrentLmsEndpoint(host))
         {
             throw new InvalidOperationException("This machine is already the local Linux Made Sane host.");
+        }
+
+        var capabilities = ManagedHostCapabilities.Describe(host);
+        var isExistingLmsUpdate = capabilities.IsLmsHost && options.UpdateExistingInstall;
+        if (!capabilities.SupportsLmsInstall && !isExistingLmsUpdate)
+        {
+            throw new InvalidOperationException(capabilities.LmsInstallSupportMessage);
         }
 
         if (!HasStoredConnectionMaterial(host))
@@ -340,7 +350,7 @@ public sealed class ManagedHostService(
             throw new InvalidOperationException("Host not found.");
         }
 
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (IsCurrentLmsEndpoint(host))
         {
             throw new InvalidOperationException("Use the local installer command to uninstall the local Linux Made Sane instance.");
         }
@@ -567,7 +577,7 @@ public sealed class ManagedHostService(
             existing?.LastSeenUtc,
             existing?.LastConnectionTestStatus ?? ConnectionTestStatus.NotRun,
             editor.Platform.Trim(),
-            NormalizeHostKind(editor.HostKind, hostId));
+            NormalizeHostKind(editor.HostKind, hostId, editor.Hostname));
     }
 
     private static void ValidateConnectionEditor(ManagedHostEditor editor)
@@ -750,6 +760,10 @@ public sealed class ManagedHostService(
         !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
         !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
 
+    private static bool IsCurrentLmsEndpoint(ManagedHost host) =>
+        AiLocalMachine.IsLocalMachine(host.Id) ||
+        AiLocalMachine.IsLoopbackHostname(host.Hostname);
+
     private async Task DeleteTransientSecretAsync(string? secretReference, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(secretReference))
@@ -768,8 +782,8 @@ public sealed class ManagedHostService(
             : trimmedEnvironment;
     }
 
-    private static ManagedHostKind NormalizeHostKind(ManagedHostKind hostKind, Guid hostId) =>
-        AiLocalMachine.IsLocalMachine(hostId)
+    private static ManagedHostKind NormalizeHostKind(ManagedHostKind hostKind, Guid hostId, string hostname) =>
+        AiLocalMachine.IsLocalMachine(hostId) || AiLocalMachine.IsLoopbackHostname(hostname)
             ? ManagedHostKind.LmsHost
             : hostKind;
 

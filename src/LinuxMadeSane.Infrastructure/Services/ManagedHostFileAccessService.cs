@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models;
 using LinuxMadeSane.Core.Models.Ai;
@@ -275,11 +278,12 @@ public sealed class ManagedHostFileAccessService(
         string sourcePath,
         string destinationPath,
         ManagedHostConnectionProfile connectionProfile,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<FileTransferProgress>? progress = null)
     {
         if (AiLocalMachine.IsLocalMachine(host.Id))
         {
-            return localFileBrowsingService.CopyAsync(host.DefaultWorkingDirectory, sourcePath, destinationPath, cancellationToken);
+            return localFileBrowsingService.CopyAsync(host.DefaultWorkingDirectory, sourcePath, destinationPath, cancellationToken, progress);
         }
 
         var request = BuildRemoteRequest(host, connectionProfile);
@@ -292,7 +296,8 @@ public sealed class ManagedHostFileAccessService(
             request.PrivateKey,
             request.PrivateKeyPassphrase,
             request.PreferStoredCredentials,
-            cancellationToken);
+            cancellationToken,
+            progress);
     }
 
     public Task<string> MoveAsync(

@@ -1,5 +1,9 @@
+/* Copyright (c) Richard D. Kiernan.
+ * Licensed under the Business Source License 1.1. See LICENSE for details. */
+
 window.lmsTerminal = (() => {
     const terminals = new Map();
+    const baseTerminalFontSize = 14;
 
     function getState(id) {
         return terminals.get(id);
@@ -7,6 +11,23 @@ window.lmsTerminal = (() => {
 
     function getCssValue(name) {
         return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
+    function getCurrentFontScale() {
+        const themeSettings = window.lmsTheme?.getThemeSettings?.();
+        const settingsScale = Number.parseFloat(themeSettings?.fontScalePercent);
+        if (Number.isFinite(settingsScale) && settingsScale > 0) {
+            return settingsScale / 100;
+        }
+
+        const cssScale = Number.parseFloat(getCssValue("--app-font-scale"));
+        return Number.isFinite(cssScale) && cssScale > 0
+            ? cssScale
+            : 1;
+    }
+
+    function getTerminalFontSize() {
+        return Math.round(baseTerminalFontSize * getCurrentFontScale() * 100) / 100;
     }
 
     function buildTerminalTheme() {
@@ -42,12 +63,34 @@ window.lmsTerminal = (() => {
         }
 
         state.terminal.options.theme = buildTerminalTheme();
+        state.terminal.options.fontSize = getTerminalFontSize();
+        state.terminal.options.lineHeight = 1.25;
         state.terminal.refresh(0, Math.max(state.terminal.rows - 1, 0));
+        scheduleTerminalFit(state);
     }
 
     function refreshAllThemes() {
         terminals.forEach(state => {
             applyThemeToTerminal(state);
+        });
+    }
+
+    function scheduleTerminalFit(state) {
+        if (!state?.fitAddon || !state?.terminal) {
+            return;
+        }
+
+        if (state.fitFrame) {
+            window.cancelAnimationFrame(state.fitFrame);
+        }
+
+        state.fitFrame = window.requestAnimationFrame(() => {
+            state.fitFrame = 0;
+            try {
+                state.fitAddon.fit();
+                state.dotNetRef?.invokeMethodAsync("OnTerminalResize", state.terminal.cols, state.terminal.rows);
+            } catch {
+            }
         });
     }
 
@@ -64,7 +107,7 @@ window.lmsTerminal = (() => {
             cursorBlink: true,
             cursorStyle: "block",
             fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
-            fontSize: 14,
+            fontSize: getTerminalFontSize(),
             lineHeight: 1.25,
             scrollback: 5000,
             theme: buildTerminalTheme()
@@ -122,7 +165,8 @@ window.lmsTerminal = (() => {
             lastOutput: "",
             lastRevision: -1,
             pendingInput: "",
-            inputFlushHandle: 0
+            inputFlushHandle: 0,
+            fitFrame: 0
         });
 
         dotNetRef.invokeMethodAsync("OnTerminalResize", terminal.cols, terminal.rows);
@@ -235,6 +279,9 @@ window.lmsTerminal = (() => {
         state.resizeObserver?.disconnect?.();
         if (state.inputFlushHandle) {
             window.clearTimeout(state.inputFlushHandle);
+        }
+        if (state.fitFrame) {
+            window.cancelAnimationFrame(state.fitFrame);
         }
         state.terminal?.dispose?.();
         terminals.delete(id);

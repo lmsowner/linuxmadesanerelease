@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) Richard D. Kiernan.
+# Licensed under the Business Source License 1.1. See LICENSE for details.
+
 set -euo pipefail
 
 LMS_PUBLIC_INSTALL_URL="${LMS_PUBLIC_INSTALL_URL:-https://www.linuxmadesane.com/install.sh}"

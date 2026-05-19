@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Infrastructure.Persistence.Seed;
 using LinuxMadeSane.Core.Enums;
@@ -1026,6 +1029,14 @@ public sealed class SqliteDatabaseInitializer(
             UPDATE managed_hosts
             SET Kind = {(int)ManagedHostKind.LmsHost}
             WHERE Id = {AiLocalMachine.ManagedHostId}
+               OR lower(trim(Hostname)) = 'localhost'
+               OR lower(trim(Hostname)) LIKE 'localhost:%'
+               OR lower(trim(Hostname)) = '127.0.0.1'
+               OR lower(trim(Hostname)) LIKE '127.%'
+               OR lower(trim(Hostname)) = '::1'
+               OR lower(trim(Hostname)) = '[::1]'
+               OR lower(trim(Hostname)) LIKE 'http://localhost%'
+               OR lower(trim(Hostname)) LIKE 'https://localhost%'
                OR lower(Name) LIKE '%linux made sane%'
                OR lower(Description) LIKE '%linux made sane%'
                OR lower(Platform) LIKE '%linux made sane%';

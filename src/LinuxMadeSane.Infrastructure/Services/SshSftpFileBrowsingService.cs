@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
@@ -428,7 +431,8 @@ public sealed class SshSftpFileBrowsingService(
         string? privateKey,
         string? privateKeyPassphrase,
         bool preferStoredCredentials,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<FileTransferProgress>? progress = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -436,6 +440,21 @@ public sealed class SshSftpFileBrowsingService(
         var normalizedDestinationPath = NormalizePath(destinationPath);
         EnsureDistinctPaths(normalizedSourcePath, normalizedDestinationPath);
         EnsureDestinationNotWithinSource(normalizedSourcePath, normalizedDestinationPath);
+
+        if (progress is not null)
+        {
+            var credentials = await ResolveCredentialsAsync(host, username, password, privateKey, privateKeyPassphrase, preferStoredCredentials, cancellationToken);
+            if (await TryCopyRemoteFileWithProgressAsync(
+                host,
+                credentials,
+                normalizedSourcePath,
+                normalizedDestinationPath,
+                progress,
+                cancellationToken))
+            {
+                return normalizedDestinationPath;
+            }
+        }
 
         await ExecuteShellCommandAsync(
             host,
@@ -1104,16 +1123,79 @@ public sealed class SshSftpFileBrowsingService(
             },
             cancellationToken);
 
+    private async Task<bool> TryCopyRemoteFileWithProgressAsync(
+        ManagedHost host,
+        ManagedHostSshCredentials credentials,
+        string normalizedSourcePath,
+        string normalizedDestinationPath,
+        IProgress<FileTransferProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        return await RunBlockingRemoteOperationAsync(
+            () =>
+            {
+                using var client = Connect(host, credentials);
+                if (!client.Exists(normalizedSourcePath))
+                {
+                    throw new InvalidOperationException($"{normalizedSourcePath} was not found on {host.Name}.");
+                }
+
+                var attributes = client.GetAttributes(normalizedSourcePath);
+                if (attributes.IsDirectory || attributes.IsSymbolicLink)
+                {
+                    client.Disconnect();
+                    return false;
+                }
+
+                if (client.Exists(normalizedDestinationPath))
+                {
+                    throw new InvalidOperationException($"{normalizedDestinationPath} already exists on {host.Name}.");
+                }
+
+                EnsureDirectoryExists(client, GetDirectoryName(normalizedDestinationPath));
+                using var sourceStream = client.OpenRead(normalizedSourcePath);
+                using var destinationStream = client.OpenWrite(normalizedDestinationPath);
+                destinationStream.SetLength(0);
+                CopyStreamWithProgress(
+                    sourceStream,
+                    destinationStream,
+                    progress,
+                    cancellationToken,
+                    attributes.Size);
+                destinationStream.Flush();
+                TryPreserveRemoteFileAttributes(client, normalizedDestinationPath, attributes);
+                client.Disconnect();
+                return true;
+            },
+            cancellationToken);
+    }
+
+    private static void TryPreserveRemoteFileAttributes(
+        SftpClient client,
+        string destinationPath,
+        SftpFileAttributes attributes)
+    {
+        try
+        {
+            client.SetAttributes(destinationPath, attributes);
+        }
+        catch
+        {
+            // Best effort only; the data copy has already completed.
+        }
+    }
+
     private static void CopyStreamWithProgress(
         Stream sourceStream,
         Stream destinationStream,
         IProgress<FileTransferProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long? totalBytesOverride = null)
     {
         const int bufferSize = 1024 * 128;
         var buffer = new byte[bufferSize];
         long totalBytesTransferred = 0;
-        long? totalBytes = sourceStream.CanSeek ? sourceStream.Length : null;
+        long? totalBytes = totalBytesOverride ?? (sourceStream.CanSeek ? sourceStream.Length : null);
 
         progress?.Report(new FileTransferProgress(0, totalBytes));
 

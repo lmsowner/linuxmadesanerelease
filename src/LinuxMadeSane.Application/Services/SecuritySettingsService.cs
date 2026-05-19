@@ -1,3 +1,6 @@
+// Copyright (c) Richard D. Kiernan.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
 using System.Net;
 using LinuxMadeSane.Application.Contracts.Security;
 using LinuxMadeSane.Application.Interfaces;
@@ -5,6 +8,7 @@ using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
 using LinuxMadeSane.Core.Models.Messaging;
+using Microsoft.Extensions.Configuration;
 using QRCoder;
 
 namespace LinuxMadeSane.Application.Services;
@@ -15,7 +19,8 @@ public sealed class SecuritySettingsService(
     ISecretStore secretStore,
     IRemoteAccessSystemService remoteAccessSystemService,
     IMessagingEmailSettingsStore messagingEmailSettingsStore,
-    IEmailDeliveryService emailDeliveryService) : ISecuritySettingsService
+    IEmailDeliveryService emailDeliveryService,
+    IConfiguration? configuration = null) : ISecuritySettingsService
 {
     public async Task<SecuritySettingsPageViewModel> GetPageAsync(CancellationToken cancellationToken = default)
     {
@@ -269,11 +274,6 @@ public sealed class SecuritySettingsService(
             ? await remoteAccessSystemService.EnsureLocalAccountAsync(linuxUsername, cancellationToken)
             : false;
 
-        if (linuxUsernameChanged && !createdLocalAccount)
-        {
-            throw new InvalidOperationException("That Linux username already exists on this machine. Choose a new dedicated local login for this LMS account.");
-        }
-
         var updated = user with
         {
             LinuxUsername = linuxUsername,
@@ -281,7 +281,7 @@ public sealed class SecuritySettingsService(
             SessionLifetimeMinutes = SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(editor.SessionLifetimeMinutes),
             SshAuthenticationMode = editor.SshAuthenticationMode,
             AuthorizedKeyEntries = NormalizeAuthorizedKeyEntries(editor.AuthorizedKeyEntries),
-            IsLocalAccountManaged = user.IsLocalAccountManaged || createdLocalAccount,
+            IsLocalAccountManaged = linuxUsernameChanged ? createdLocalAccount : user.IsLocalAccountManaged,
             UpdatedAtUtc = DateTimeOffset.UtcNow
         };
 
@@ -705,12 +705,7 @@ public sealed class SecuritySettingsService(
             }
 
             var isLocalAccountManaged = await remoteAccessSystemService.EnsureLocalAccountAsync(linuxUsername, cancellationToken);
-            if (!isLocalAccountManaged)
-            {
-                throw new InvalidOperationException("That Linux username already exists on this machine. Choose a new dedicated local login for this LMS account.");
-            }
-
-            return (linuxUsername, true);
+            return (linuxUsername, isLocalAccountManaged);
         }
 
         var baseLinuxUsername = DeriveLinuxUsername(normalizedEmail);
@@ -977,8 +972,19 @@ public sealed class SecuritySettingsService(
         Reset
     }
 
-    private static InitialSetupViewModel BuildInitialSetupViewModel(IReadOnlyList<SecurityUser> users)
+    private sealed record InitialSetupBootstrap(
+        string SuggestedLinuxUsername,
+        string InstallerLinuxUsername,
+        string InstallerHomeDirectory)
     {
+        public static InitialSetupBootstrap Empty { get; } = new(string.Empty, string.Empty, string.Empty);
+
+        public bool HasInstallerIdentity => !string.IsNullOrWhiteSpace(InstallerLinuxUsername);
+    }
+
+    private InitialSetupViewModel BuildInitialSetupViewModel(IReadOnlyList<SecurityUser> users)
+    {
+        var bootstrap = ReadInitialSetupBootstrap();
         var orderedUsers = users
             .OrderBy(user => user.CreatedAtUtc)
             .ThenBy(user => user.Email, StringComparer.OrdinalIgnoreCase)
@@ -993,8 +999,14 @@ public sealed class SecuritySettingsService(
                 null,
                 string.Empty,
                 string.Empty,
+                bootstrap.SuggestedLinuxUsername,
+                bootstrap.InstallerLinuxUsername,
+                bootstrap.InstallerHomeDirectory,
+                bootstrap.HasInstallerIdentity,
                 0,
-                "Create the first LMS login.");
+                bootstrap.HasInstallerIdentity
+                    ? $"Create the first LMS login and link it to Linux user {bootstrap.InstallerLinuxUsername}."
+                    : "Create the first LMS login.");
         }
 
         var pendingUser = orderedUsers.Length == 1 &&
@@ -1011,6 +1023,10 @@ public sealed class SecuritySettingsService(
                 pendingUser.Id,
                 pendingUser.Email,
                 ResolveLinuxUsername(pendingUser),
+                bootstrap.SuggestedLinuxUsername,
+                bootstrap.InstallerLinuxUsername,
+                bootstrap.InstallerHomeDirectory,
+                bootstrap.HasInstallerIdentity,
                 orderedUsers.Length,
                 "Verify the first MFA code to finish setup.");
         }
@@ -1022,8 +1038,49 @@ public sealed class SecuritySettingsService(
             null,
             string.Empty,
             string.Empty,
+            bootstrap.SuggestedLinuxUsername,
+            bootstrap.InstallerLinuxUsername,
+            bootstrap.InstallerHomeDirectory,
+            bootstrap.HasInstallerIdentity,
             orderedUsers.Length,
             "Initial setup is complete.");
+    }
+
+    private InitialSetupBootstrap ReadInitialSetupBootstrap()
+    {
+        if (configuration is null)
+        {
+            return InitialSetupBootstrap.Empty;
+        }
+
+        var section = configuration.GetSection("InitialSetupBootstrap");
+        var installerUsername = NormalizeOptional(section["InstallerUsername"]);
+        var installerHomeDirectory = NormalizeOptional(section["InstallerHomeDirectory"]);
+        var suggestedLinuxUsername = TryNormalizeLinuxUsername(installerUsername);
+
+        return new InitialSetupBootstrap(
+            suggestedLinuxUsername,
+            suggestedLinuxUsername,
+            installerHomeDirectory);
+    }
+
+    private static string TryNormalizeLinuxUsername(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            var linuxUsername = NormalizeLinuxUsername(value);
+            ValidateLinuxUsername(linuxUsername);
+            return linuxUsername;
+        }
+        catch (InvalidOperationException)
+        {
+            return string.Empty;
+        }
     }
 
     private async Task EnableAuthenticationForBuiltInNetworksAsync(CancellationToken cancellationToken)

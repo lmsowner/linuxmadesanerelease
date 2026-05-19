@@ -1,3 +1,6 @@
+/* Copyright (c) Richard D. Kiernan.
+ * Licensed under the Business Source License 1.1. See LICENSE for details. */
+
 window.lmsPasskeys = window.lmsPasskeys || {};
 
 window.lmsPasskeys.enroll = async (friendlyName) => {

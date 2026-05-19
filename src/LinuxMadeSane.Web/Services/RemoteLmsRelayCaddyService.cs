@@ -214,6 +214,16 @@ public sealed class RemoteLmsRelayCaddyService(
         foreach (var route in relayRoutes.OrderBy(static item => item.Hostname, StringComparer.OrdinalIgnoreCase))
         {
             var matcherName = $"remote_lms_{route.HostId:N}";
+            var grantMatcherName = $"remote_lms_grants_{route.HostId:N}";
+            builder.AppendLine($"@{grantMatcherName} {{");
+            builder.AppendLine($"    host {route.Hostname}");
+            builder.AppendLine("    path /internal/lms-tunnel/grants /internal/lms-tunnel/grants/*");
+            builder.AppendLine("}");
+            builder.AppendLine($"handle @{grantMatcherName} {{");
+            builder.AppendLine("    respond 404");
+            builder.AppendLine("}");
+            builder.AppendLine();
+
             builder.AppendLine($"@{matcherName} host {route.Hostname}");
             builder.AppendLine($"handle @{matcherName} {{");
             builder.AppendLine($"    reverse_proxy http://127.0.0.1:{Math.Clamp(route.LocalPort, 1, 65535)} {{");

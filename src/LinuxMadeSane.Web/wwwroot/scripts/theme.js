@@ -1,3 +1,6 @@
+/* Copyright (c) Richard D. Kiernan.
+ * Licensed under the Business Source License 1.1. See LICENSE for details. */
+
 window.lmsTheme = (() => {
     const storageKeys = {
         palette: "lms.theme.palette",
@@ -47,8 +50,11 @@ window.lmsTheme = (() => {
 
     let autoRefreshHandle = null;
     let enhancedThemeHooked = false;
+    let themeStorageRefreshHandle = 0;
+    let themeLayoutRefreshHandle = 0;
     let nextObserverId = 1;
     const themeObservers = new Map();
+    const themeStorageKeySet = new Set(Object.values(storageKeys));
 
     const paletteSelectSelector = "[data-theme-palette-select]";
     const fontScaleSelectSelector = "[data-theme-font-scale-select]";
@@ -484,6 +490,23 @@ window.lmsTheme = (() => {
             } catch {
             }
         });
+
+        scheduleThemeLayoutRefresh();
+    }
+
+    function scheduleThemeLayoutRefresh() {
+        if (typeof window === "undefined") {
+            return;
+        }
+
+        if (themeLayoutRefreshHandle) {
+            window.cancelAnimationFrame(themeLayoutRefreshHandle);
+        }
+
+        themeLayoutRefreshHandle = window.requestAnimationFrame(() => {
+            themeLayoutRefreshHandle = 0;
+            window.dispatchEvent(new Event("resize"));
+        });
     }
 
     function stopAutoRefresh() {
@@ -696,6 +719,33 @@ window.lmsTheme = (() => {
         syncThemeControls();
     }
 
+    function isThemeStorageEvent(event) {
+        if (!event || (event.key !== null && !themeStorageKeySet.has(event.key))) {
+            return false;
+        }
+
+        try {
+            return !event.storageArea || event.storageArea === window.localStorage;
+        } catch {
+            return true;
+        }
+    }
+
+    function scheduleThemeStorageRefresh(event) {
+        if (!isThemeStorageEvent(event)) {
+            return;
+        }
+
+        if (themeStorageRefreshHandle) {
+            window.cancelAnimationFrame(themeStorageRefreshHandle);
+        }
+
+        themeStorageRefreshHandle = window.requestAnimationFrame(() => {
+            themeStorageRefreshHandle = 0;
+            refreshThemeUi();
+        });
+    }
+
     function ensureEnhancedThemeBinding() {
         if (enhancedThemeHooked) {
             return;
@@ -732,6 +782,8 @@ window.lmsTheme = (() => {
             }
             syncThemeControls();
         });
+
+        window.addEventListener("storage", scheduleThemeStorageRefresh);
     }
 
     return {

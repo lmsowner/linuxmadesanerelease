@@ -58,16 +58,10 @@ For a different port:
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 5095
 ```
 
-For a specific release:
-
-```bash
-curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env LMS_VERSION=v2026.05.13.10.08 bash
-```
-
 ## What The Installer Does
 
 - detects `linux-x64`, `linux-arm64`, or `linux-arm`
-- downloads the matching CE tarball from `https://www.linuxmadesane.com`
+- downloads the current matching CE tarball from `https://www.linuxmadesane.com`
 - installs to `/opt/linuxmadesane/ce`
 - stores data in `/var/lib/linuxmadesane/ce`
 - writes config to `/etc/linuxmadesane/ce/service.env`
@@ -116,4 +110,6 @@ A commercial license from Richard D. Kiernan is required for hosted, MSP, SaaS, 
 
 Linux Made Sane is provided as-is, with no warranties, express or implied. You are responsible for how you install, configure, expose, and operate it, and you use it at your own risk.
 
-See [LICENSE.md](LICENSE.md).
+Redistributions must retain copyright, license, trademark, and third-party notices.
+
+See [LICENSE.md](LICENSE.md), [NOTICE](NOTICE), [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md), [TRADEMARKS.md](TRADEMARKS.md), and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
