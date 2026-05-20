@@ -17,6 +17,12 @@ public interface IExposedServiceManager
         string? apiToken,
         CancellationToken cancellationToken = default);
 
+    Task<CloudflareValidationResult> ValidateTokenAsync(
+        Guid hostId,
+        string? apiToken,
+        bool saveSuppliedToken,
+        CancellationToken cancellationToken = default);
+
     Task<ExposedServiceConnectorSetupResult> EnsureConnectorAsync(
         Guid hostId,
         CloudflareExposeServiceEditor editor,

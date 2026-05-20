@@ -6,5 +6,6 @@ namespace LinuxMadeSane.Core.Models.EdgeGateway;
 public sealed record EdgeGatewaySettings(
     int Id,
     string GatewaySubdomain,
+    string TunnelInstanceId,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);

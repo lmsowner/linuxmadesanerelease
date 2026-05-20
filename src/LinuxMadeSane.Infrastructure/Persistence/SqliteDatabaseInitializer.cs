@@ -650,12 +650,14 @@ public sealed class SqliteDatabaseInitializer(
             CREATE TABLE IF NOT EXISTS edge_gateway_settings (
                 Id INTEGER NOT NULL PRIMARY KEY,
                 GatewaySubdomain TEXT NOT NULL,
+                TunnelInstanceId TEXT NOT NULL DEFAULT '',
                 CreatedAtUtc TEXT NOT NULL,
                 UpdatedAtUtc TEXT NOT NULL
             );
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(settingsSql, cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_settings", "TunnelInstanceId", "TEXT NOT NULL DEFAULT ''", cancellationToken);
 
         const string routesSql = """
             CREATE TABLE IF NOT EXISTS edge_gateway_routes (

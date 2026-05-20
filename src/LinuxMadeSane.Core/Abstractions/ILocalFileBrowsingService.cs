@@ -49,6 +49,7 @@ public interface ILocalFileBrowsingService
         string path,
         string content,
         bool createDirectories,
+        string? encodingName = null,
         CancellationToken cancellationToken = default);
 
     Task<string> CreateDirectoryAsync(

@@ -49,5 +49,6 @@ public enum UiIconGlyph
     Download = 41,
     Lock = 42,
     Unlock = 43,
-    Key = 44
+    Key = 44,
+    Website = 45
 }

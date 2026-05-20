@@ -3,8 +3,12 @@
 
 @page "/edge-gateway"
 @rendermode InteractiveServer
+@using System.Net
+@using System.Net.Http
+@using System.Text
 @using LinuxMadeSane.Application.Contracts.EdgeGateway
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services.EdgeGateway
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Models.Cloudflare
 @using LinuxMadeSane.Core.Models.EdgeGateway
@@ -40,85 +44,18 @@
                     PanelClass="page-tab-panel edge-tab-panel">
             <ChildContent>
                 <TabPage Value="@PublishedAppsTabValue" Title="@($"Published Apps ({dashboard.Routes.Count})")">
-                    @if (cloudflareRouteSetupResult is not null)
-                    {
-                        <section class="surface-card edge-card">
-                            <div class="table-header">
-                                <div>
-                                    <p class="eyebrow">Route publishing</p>
-                                    <h2>@cloudflareRouteSetupResult.Hostname</h2>
-                                    <p class="meta-text">@cloudflareRouteSetupResult.Summary</p>
-                                </div>
-                                <UiPill Tone="@(cloudflareRouteSetupResult.Success ? UiPillTone.Success : UiPillTone.Warning)">
-                                    @(cloudflareRouteSetupResult.Success ? "Published" : "Needs confirmation")
-                                </UiPill>
-                            </div>
-                            <div class="edge-setup-result-grid">
-                                <div class="surface-subcard">
-                                    <h3>Public DNS</h3>
-                                    <p class="meta-text"><code>@cloudflareRouteSetupResult.Hostname</code> -> <code>@cloudflareRouteSetupResult.RelayHostname</code></p>
-                                </div>
-                                <div class="surface-subcard">
-                                    <h3>Relay wildcard</h3>
-                                    <p class="meta-text"><code>@cloudflareRouteSetupResult.RelayHostname</code> is covered by <code>@cloudflareRouteSetupResult.DnsTarget</code></p>
-                                </div>
-                                <div class="surface-subcard">
-                                    <h3>Caddy match</h3>
-                                    <p class="meta-text">Caddy matches <code>@cloudflareRouteSetupResult.Hostname</code> and proxies to the route target.</p>
-                                </div>
-                            </div>
-                            @if (cloudflareRouteSetupResult.RequiresDnsReplacement)
-                            {
-                                <div class="edge-confirm-row">
-                                    <UiCheckboxField @bind-Value="confirmRouteDnsReplacement"
-                                                     Label="Replace the existing DNS record for this route"
-                                                     Helper="Use this when the public hostname is currently pointing somewhere else."
-                                                     Compact="true" />
-                                    <UiCommandButton Label="Replace and publish"
-                                                     Glyph="UiIconGlyph.Save"
-                                                     Variant="UiButtonVariant.Danger"
-                                                     OnClick="@(() => ProvisionCloudflareRouteAsync(cloudflareRouteSetupResult.RouteId))" />
-                                </div>
-                            }
-                            @if (cloudflareRouteSetupResult.Steps.Count > 0)
-                            {
-                                <ul class="edge-setup-list">
-                                    @foreach (var step in cloudflareRouteSetupResult.Steps)
-                                    {
-                                        <li>@step</li>
-                                    }
-                                </ul>
-                            }
-                            @if (cloudflareRouteSetupResult.Warnings.Count > 0)
-                            {
-                                <ul class="edge-setup-list edge-warning-list">
-                                    @foreach (var warning in cloudflareRouteSetupResult.Warnings)
-                                    {
-                                        <li>@warning</li>
-                                    }
-                                </ul>
-                            }
-                        </section>
-                    }
-
                     <section class="surface-card edge-card">
                         <div class="table-header">
                             <div>
-                                <p class="eyebrow">Published services</p>
+                                <p class="eyebrow">Services</p>
                                 <h2>Apps and hosts exposed through Edge Gateway</h2>
-                                <p class="meta-text">Each service gets a public hostname. LMS creates the relay DNS and keeps Caddy as the local router.</p>
-                            </div>
-                            <div class="edge-actions">
-                                @if (CanCreateAppOnSelectedDomain)
-                                {
-                                    <UiCommandButton Label="Add service" Glyph="UiIconGlyph.Plus" OnClick="OpenNewRouteAsync" />
-                                }
+                                <p class="meta-text">Saving a service adds it to LMS. Press Publish on the service card to create Cloudflare DNS, tunnel ingress, and Caddy routing.</p>
                             </div>
                         </div>
 
                         @if (dashboard.Routes.Count == 0)
                         {
-                            <p class="meta-text">No services yet. Use Setup to prepare a relay, then add an app.</p>
+                            <p class="meta-text">No services yet. Use Setup to prepare a relay, add a service, then press Publish on the service card to make it live.</p>
                         }
                         else
                         {
@@ -127,20 +64,27 @@
                                 {
                                     var isDomainExpanded = IsRouteDomainExpanded(domainGroup.DomainName);
                                     <section class="edge-route-domain-group">
-                                        <button class="edge-route-domain-header"
-                                                type="button"
-                                                aria-expanded="@isDomainExpanded"
-                                                @onclick="@(() => ToggleRouteDomain(domainGroup.DomainName))">
-                                            <span class="edge-route-domain-chevron @(isDomainExpanded ? "expanded" : string.Empty)" aria-hidden="true"></span>
-                                            <span class="edge-route-domain-copy">
-                                                <strong>@domainGroup.DomainName</strong>
-                                                <span>@BuildRouteDomainSummary(domainGroup)</span>
-                                            </span>
+                                        <div class="edge-route-domain-header" aria-expanded="@isDomainExpanded">
+                                            <button class="edge-route-domain-toggle"
+                                                    type="button"
+                                                    @onclick="@(() => ToggleRouteDomain(domainGroup.DomainName))">
+                                                <span class="edge-route-domain-chevron @(isDomainExpanded ? "expanded" : string.Empty)" aria-hidden="true"></span>
+                                                <span class="edge-route-domain-copy">
+                                                    <strong>@domainGroup.DomainName</strong>
+                                                    <span>@BuildRouteDomainSummary(domainGroup)</span>
+                                                </span>
+                                            </button>
                                             <span class="edge-route-domain-pills">
                                                 <span class="edge-route-domain-pill">@domainGroup.Routes.Count app@(domainGroup.Routes.Count == 1 ? string.Empty : "s")</span>
                                                 <span class="edge-route-domain-pill">@domainGroup.EnabledCount enabled</span>
+                                                <UiCommandButton Label="Add App"
+                                                                 Glyph="UiIconGlyph.Plus"
+                                                                 Variant="UiButtonVariant.Primary"
+                                                                 Class="edge-route-domain-add"
+                                                                 Disabled="@(!CanCreateAppForDomain(domainGroup.DomainName))"
+                                                                 OnClick="@(() => UseCloudflareDomain(domainGroup.DomainName))" />
                                             </span>
-                                        </button>
+                                        </div>
 
                                         @if (isDomainExpanded)
                                         {
@@ -157,7 +101,7 @@
                                                                 <UiPill Tone="@GetAuthModeTone(route.AuthMode)">
                                                                     @BuildRouteAccessLabel(route.AuthMode)
                                                                 </UiPill>
-                                                                <UiPill Tone="@GetStatusTone(route.LastTestStatus)">@route.LastTestStatus</UiPill>
+                                                                <UiPill Tone="@GetStatusTone(route.LastTestStatus)">@BuildRouteTestStatusLabel(route.LastTestStatus)</UiPill>
                                                             </div>
                                                             <div class="edge-route-actions">
                                                                 <UiCommandButton Label="@(IsPublishingRoute(route.Id) ? "Publishing..." : "Publish")"
@@ -190,6 +134,65 @@
                                                             <div class="edge-route-status @(routeActionIsError ? "error" : "success")">
                                                                 @routeActionMessage
                                                             </div>
+                                                        }
+                                                        @if (cloudflareRouteSetupResult is { } publishResult && publishResult.RouteId == route.Id)
+                                                        {
+                                                            <details class="edge-route-publish-details">
+                                                                <summary>
+                                                                    <span>Publishing details</span>
+                                                                    <UiPill Tone="@(publishResult.Success ? UiPillTone.Success : UiPillTone.Warning)">
+                                                                        @(publishResult.Success ? "Published" : "Needs confirmation")
+                                                                    </UiPill>
+                                                                </summary>
+                                                                <div class="edge-route-publish-body">
+                                                                    <p class="meta-text">@publishResult.Summary</p>
+                                                                    <div class="edge-setup-result-grid">
+                                                                        <div class="surface-subcard">
+                                                                            <h3>Public DNS</h3>
+                                                                            <p class="meta-text"><code>@publishResult.Hostname</code> -> <code>@publishResult.RelayHostname</code></p>
+                                                                        </div>
+                                                                        <div class="surface-subcard">
+                                                                            <h3>Relay wildcard</h3>
+                                                                            <p class="meta-text"><code>@publishResult.RelayHostname</code> is covered by <code>@publishResult.DnsTarget</code></p>
+                                                                        </div>
+                                                                        <div class="surface-subcard">
+                                                                            <h3>Caddy match</h3>
+                                                                            <p class="meta-text">Caddy matches <code>@publishResult.Hostname</code> and proxies to the route target.</p>
+                                                                        </div>
+                                                                    </div>
+                                                                    @if (publishResult.RequiresDnsReplacement)
+                                                                    {
+                                                                        <div class="edge-confirm-row">
+                                                                            <UiCheckboxField @bind-Value="confirmRouteDnsReplacement"
+                                                                                             Label="Replace the existing DNS record for this route"
+                                                                                             Helper="Use this when the public hostname is currently pointing somewhere else."
+                                                                                             Compact="true" />
+                                                                            <UiCommandButton Label="Replace and publish"
+                                                                                             Glyph="UiIconGlyph.Save"
+                                                                                             Variant="UiButtonVariant.Danger"
+                                                                                             OnClick="@(() => ProvisionCloudflareRouteAsync(publishResult.RouteId))" />
+                                                                        </div>
+                                                                    }
+                                                                    @if (publishResult.Steps.Count > 0)
+                                                                    {
+                                                                        <ul class="edge-setup-list">
+                                                                            @foreach (var step in publishResult.Steps)
+                                                                            {
+                                                                                <li>@step</li>
+                                                                            }
+                                                                        </ul>
+                                                                    }
+                                                                    @if (publishResult.Warnings.Count > 0)
+                                                                    {
+                                                                        <ul class="edge-setup-list edge-warning-list">
+                                                                            @foreach (var warning in publishResult.Warnings)
+                                                                            {
+                                                                                <li>@warning</li>
+                                                                            }
+                                                                        </ul>
+                                                                    }
+                                                                </div>
+                                                            </details>
                                                         }
                                                     </article>
                                                 }
@@ -235,7 +238,7 @@
                                 <div class="edge-confirm-row">
                                     <UiCheckboxField @bind-Value="confirmWildcardDnsReplacement"
                                                      Label="Replace the existing wildcard DNS record for this Edge Gateway namespace"
-                                                     Helper="Use this when the scoped wildcard is currently pointing at another Cloudflare Tunnel or target."
+                                                     Helper="LMS will delete the existing wildcard record and recreate it pointing at this host's Edge Gateway tunnel."
                                                      Compact="true" />
                                     <UiCommandButton Label="Replace and set up"
                                                      Glyph="UiIconGlyph.Save"
@@ -298,25 +301,60 @@
                         </section>
                     }
 
-                    <section class="edge-card edge-setup-section edge-enable-card">
+                    <section class="edge-card edge-setup-section edge-cloudflare-token-card">
                         <div class="table-header">
                             <div>
-                                <p class="eyebrow">Edge Gateway services</p>
-                                <h2>Prepare the local Edge Gateway runtime</h2>
-                                <p class="meta-text">@BuildEdgeGatewayServicesHelper()</p>
+                                <p class="eyebrow">Cloudflare token</p>
+                                <h2>Connect Cloudflare to Edge Gateway</h2>
+                                <p class="meta-text">Validate a scoped token here before publishing. Edge Gateway will then list the Cloudflare zones that token can manage.</p>
                             </div>
-                            <div class="edge-enable-controls">
-                                <div class="edge-runtime-pills">
-                                    <UiPill Tone="@GetStatusTone(dashboard.Runtime.Caddy.Status)" Class="edge-runtime-pill">@BuildCaddyPillLabel()</UiPill>
-                                    <UiPill Tone="@GetCloudflarePillTone()" Class="edge-runtime-pill">@BuildCloudflarePillLabel()</UiPill>
+                            @if (dashboard.Cloudflare.HasSavedToken)
+                            {
+                                <div class="edge-token-header-actions">
+                                    <UiPill Tone="UiPillTone.Success">Token saved</UiPill>
+                                    <UiCommandButton Label="Setup Guide"
+                                                     Glyph="UiIconGlyph.Info"
+                                                     Variant="UiButtonVariant.Ghost"
+                                                     OnClick="OpenCloudflareSetupGuide" />
                                 </div>
-                                <UiSwitchField Label="Enable Edge Gateway Services"
-                                               Value="@EdgeGatewayServicesEnabled"
-                                               ValueChanged="SetEdgeGatewayServicesEnabledAsync"
-                                               Disabled="@IsRouteActionBusy"
-                                               Class="edge-enable-switch" />
-                            </div>
+                            }
                         </div>
+
+                        @if (dashboard.Cloudflare.HasSavedToken)
+                        {
+                            <div class="edge-token-ready">
+                                <div>
+                                    <strong>Cloudflare is connected.</strong>
+                                    <span>Use the domain section below to set up this LMS host's relay namespace and prepare Caddy/cloudflared automatically.</span>
+                                </div>
+                                <UiCommandButton Label="Reset settings"
+                                                 Glyph="UiIconGlyph.Delete"
+                                                 Variant="UiButtonVariant.Danger"
+                                                 OnClick="OpenResetSetupModal" />
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="edge-token-grid">
+                                <UiTextField @bind-Value="cloudflareTokenInput"
+                                             Label="Paste Cloudflare token"
+                                             Type="password"
+                                             Autocomplete="off"
+                                             Placeholder="Paste Cloudflare token"
+                                             Disabled="@isValidatingCloudflareToken"
+                                             Compact="true" />
+                                <UiCommandButton Label="@(isValidatingCloudflareToken ? "Validating and saving..." : "Validate and Save token")"
+                                                 Glyph="UiIconGlyph.Save"
+                                                 Variant="UiButtonVariant.Primary"
+                                                 Disabled="@(isValidatingCloudflareToken || string.IsNullOrWhiteSpace(cloudflareTokenInput))"
+                                                 OnClick="ValidateCloudflareTokenAsync" />
+                            </div>
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(cloudflareTokenMessage))
+                        {
+                            <p class="edge-token-message @(cloudflareTokenIsError ? "error" : "success")">@cloudflareTokenMessage</p>
+                        }
                     </section>
 
                     @if (ShouldShowRuntimeSetupDetails)
@@ -325,20 +363,20 @@
                             <div class="table-header">
                                 <div>
                                     <p class="eyebrow">Local edge runtime</p>
-                                    <h2>Caddy and cloudflared readiness</h2>
+                                    <h2>Managed runtime readiness</h2>
                                     <p class="meta-text">@dashboard.Runtime.Summary</p>
                                 </div>
                             </div>
                             <div class="edge-runtime-grid">
                                 <div class="surface-subcard edge-runtime-item">
-                                    <UiPill Tone="@GetStatusTone(dashboard.Runtime.Caddy.Status)">@dashboard.Runtime.Caddy.Status</UiPill>
+                                    <UiPill Tone="@GetStatusTone(dashboard.Runtime.Caddy.Status)">@BuildRuntimeStatusLabel(dashboard.Runtime.Caddy.Status)</UiPill>
                                     <div>
                                         <strong>@dashboard.Runtime.Caddy.Label</strong>
                                         <span>@dashboard.Runtime.Caddy.Message</span>
                                     </div>
                                 </div>
                                 <div class="surface-subcard edge-runtime-item">
-                                    <UiPill Tone="@GetStatusTone(dashboard.Runtime.Cloudflared.Status)">@dashboard.Runtime.Cloudflared.Status</UiPill>
+                                    <UiPill Tone="@GetStatusTone(dashboard.Runtime.Cloudflared.Status)">@BuildRuntimeStatusLabel(dashboard.Runtime.Cloudflared.Status)</UiPill>
                                     <div>
                                         <strong>@dashboard.Runtime.Cloudflared.Label</strong>
                                         <span>@dashboard.Runtime.Cloudflared.Message</span>
@@ -351,6 +389,78 @@
                             }
                         </section>
                     }
+
+                    <section class="edge-card edge-setup-section edge-local-relays-card">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Configured zones</p>
+                                <h2>Configured relay zones</h2>
+                                <p class="meta-text">Shows every relay wildcard LMS can see, including whether it appears to belong to this host.</p>
+                            </div>
+                            <UiPill Tone="@(ConfiguredCloudflareRelays.Count > 0 ? UiPillTone.Success : UiPillTone.Neutral)">
+                                @BuildConfiguredRelayCountLabel()
+                            </UiPill>
+                        </div>
+
+                        @if (CloudflareDomains.Count == 0)
+                        {
+                            <p class="meta-text">No Cloudflare zones are available from the saved token.</p>
+                        }
+                        else if (ConfiguredCloudflareRelays.Count == 0)
+                        {
+                            <p class="meta-text">No relay wildcard is currently configured for these Cloudflare zones.</p>
+                        }
+                        else
+                        {
+                            <div class="edge-local-relay-list">
+                                @foreach (var domain in ConfiguredCloudflareRelays)
+                                {
+                                    var routeCount = CountRoutesForDomain(domain.DomainName);
+                                    var relayRoutes = GetRoutesForDomain(domain.DomainName);
+                                    <div class="edge-local-relay-row">
+                                        <div class="edge-local-relay-main">
+                                            <strong>@domain.DomainName</strong>
+                                            <span><code>@domain.GatewayDomainName</code></span>
+                                            <UiCommandButton Label="Add"
+                                                             Glyph="UiIconGlyph.Plus"
+                                                             Variant="UiButtonVariant.Primary"
+                                                             Disabled="@isProvisioningCloudflareDomain"
+                                                             OnClick="@(() => UseCloudflareDomain(domain.DomainName))" />
+                                        </div>
+                                        <div class="edge-local-relay-meta">
+                                            <span>@BuildDomainRelayLabel(domain)</span>
+                                            <span>@BuildDomainRelayDetail(domain)</span>
+                                            <span>@routeCount app@(routeCount == 1 ? string.Empty : "s")</span>
+                                            @if (relayRoutes.Count > 0)
+                                            {
+                                                <div class="edge-local-relay-routes">
+                                                    @foreach (var route in relayRoutes.Take(3))
+                                                    {
+                                                        <span><strong>@route.DisplayName</strong> <code>@BuildExternalRouteUrl(route)</code></span>
+                                                    }
+                                                    @if (relayRoutes.Count > 3)
+                                                    {
+                                                        <span>+@(relayRoutes.Count - 3) more</span>
+                                                    }
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <span>No published app routes on this zone yet.</span>
+                                            }
+                                        </div>
+                                        <div class="edge-local-relay-actions">
+                                            <UiCommandButton Label="Delete"
+                                                             Glyph="UiIconGlyph.Delete"
+                                                             Variant="UiButtonVariant.Danger"
+                                                             Disabled="@(isProvisioningCloudflareDomain || isDeletingRelay)"
+                                                             OnClick="@(() => OpenRelayDeleteDialog(domain))" />
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </section>
 
                     <details class="edge-setup-section edge-relay-settings @(relayNamespaceUnlocked ? "unlocked" : "locked")" open="@relayNamespaceExpanded">
                         <summary class="edge-relay-settings-summary" @onclick="ToggleRelayNamespaceExpanded" @onclick:preventDefault="true">
@@ -376,12 +486,12 @@
                             <EditForm Model="@edgeSettingsEditor" OnValidSubmit="SaveEdgeGatewaySettingsAsync" class="edge-relay-settings-form">
                                 <div class="edge-relay-settings-form-line">
                                     <UiLockedTextField @bind-Value="edgeSettingsEditor.GatewaySubdomain"
-                                                       Label="Relay label"
+                                                       Label="Relay namespace"
                                                        Helper="@BuildRelayNamespaceHelper()"
-                                                       Placeholder="relay"
+                                                       Placeholder="relay or relay.example.com"
                                                        Locked="@(!relayNamespaceUnlocked)"
                                                        LockTitle='@(relayNamespaceUnlocked ? "Lock namespace" : "Unlock namespace")'
-                                                       SaveTitle="Save relay label"
+                                                       SaveTitle="Save relay namespace"
                                                        Compact="true"
                                                        Class="edge-relay-lock-field"
                                                        OnLockClick="ToggleRelayNamespaceLockAsync" />
@@ -398,79 +508,53 @@
                     <section class="edge-card edge-setup-section edge-new-app-card">
                         <div class="table-header">
                             <div>
-                                <p class="eyebrow">New app setup</p>
-                                <h2>Choose a domain and publish apps</h2>
+                                <p class="eyebrow">Setup Relay</p>
+                                <h2>Setup Relay</h2>
                                 <p class="meta-text">@dashboard.Cloudflare.Message</p>
                             </div>
                         </div>
 
                         @if (dashboard.Cloudflare.Domains.Count == 0)
                         {
-                            <p class="meta-text">Save and validate a Cloudflare token in Integrations first. Edge Gateway will then list the domains that token can manage.</p>
+                            <p class="meta-text">Validate a Cloudflare token above first. Edge Gateway will then list the domains that token can manage.</p>
+                        }
+                        else if (RelaySetupCloudflareDomains.Count == 0)
+                        {
+                            <p class="meta-text">Every available Cloudflare zone already has this LMS relay namespace configured. Use Configured zones above to add services or delete a relay before setting it up again.</p>
                         }
                         else
                         {
                             <div class="edge-domain-picker-grid">
                                 <UiSelectField TValue="string"
-                                               @bind-Value="selectedDomainName"
+                                               @bind-Value="selectedRelaySetupDomainName"
                                                Label="Cloudflare domain"
-                                               Helper="Pick the zone LMS should use for new public service names."
+                                               Helper="Only domains that still need this LMS relay namespace are listed."
                                                Compact="true">
-                                    @foreach (var domain in dashboard.Cloudflare.Domains)
+                                    @foreach (var domain in RelaySetupCloudflareDomains)
                                     {
                                         <option value="@domain.DomainName">@BuildDomainOptionLabel(domain)</option>
                                     }
                                 </UiSelectField>
                                 <div class="edge-domain-actions">
-                                    <UiCommandButton Label="@BuildRelayButtonLabel(SelectedCloudflareDomain)"
+                                    <UiCommandButton Label="@(IsProvisioningSelectedRelaySetupDomain ? "Setting up Relay..." : "Setup Relay")"
                                                      Glyph="UiIconGlyph.Connection"
                                                      Variant="UiButtonVariant.Primary"
-                                                     Disabled="@(SelectedCloudflareDomain is null || !dashboard.Runtime.CanAttemptPublish)"
-                                                     OnClick="@(() => ProvisionSelectedCloudflareDomainAsync())" />
-                                    @if (CanCreateAppOnSelectedDomain)
-                                    {
-                                        <UiCommandButton Label="New app"
-                                                         Glyph="UiIconGlyph.Plus"
-                                                         Variant="UiButtonVariant.Ghost"
-                                                         OnClick="@(() => UseSelectedCloudflareDomainAsync())" />
-                                    }
-                                    @if (SelectedCloudflareDomain is { RelayConfigured: true })
-                                    {
-                                        <UiCommandButton Label="Remove relay"
-                                                         Glyph="UiIconGlyph.Delete"
-                                                         Variant="UiButtonVariant.Danger"
-                                                         Disabled="@(!confirmRelayRemoval)"
-                                                         OnClick="@(() => RemoveSelectedCloudflareRelayAsync())" />
-                                    }
+                                                     Disabled="@(SelectedRelaySetupCloudflareDomain is null || !dashboard.Runtime.CanAttemptPublish || isProvisioningCloudflareDomain)"
+                                                     OnClick="@(() => ProvisionSelectedRelaySetupDomainAsync())" />
                                 </div>
                             </div>
-
-                            @if (SelectedCloudflareDomain is { } selectedDomain)
+                            @if (isProvisioningCloudflareDomain)
                             {
-                                <div class="edge-selected-domain" title="@BuildCloudflareDomainTitle(selectedDomain)">
-                                    <div>
-                                        <p class="eyebrow">Selected zone</p>
-                                        <h3>@selectedDomain.DomainName</h3>
-                                        <p class="meta-text">Relay namespace: <code>@selectedDomain.GatewayDomainName</code></p>
-                                    </div>
-                                    <div>
-                                        <p class="eyebrow">Relay status</p>
-                                        <UiPill Tone="@GetDomainRelayTone(selectedDomain)">@BuildDomainRelayLabel(selectedDomain)</UiPill>
-                                        <p class="meta-text">@BuildDomainRelayDetail(selectedDomain)</p>
-                                        @if (selectedDomain.RelayConfigured)
-                                        {
-                                            <UiCheckboxField @bind-Value="confirmRelayRemoval"
-                                                             Label="Confirm relay removal"
-                                                             Helper="Deletes the scoped wildcard DNS and removes the wildcard tunnel ingress. Route records are kept."
-                                                             Compact="true" />
-                                        }
-                                    </div>
-                                    <div>
-                                        <p class="eyebrow">Routes</p>
-                                        <strong>@dashboard.Routes.Count(route => route.DomainName.Equals(selectedDomain.DomainName, StringComparison.OrdinalIgnoreCase))</strong>
-                                        <p class="meta-text">services use this domain</p>
-                                    </div>
-                                </div>
+                                <p class="edge-domain-progress">
+                                    Setting up Relay for <code>@provisioningCloudflareDomainName</code>. Updating Cloudflare tunnel, DNS, local cloudflared, and Caddy...
+                                </p>
+                            }
+
+                            @if (SelectedRelaySetupCloudflareDomain is { } selectedDomain)
+                            {
+                                <p class="edge-domain-relay-preview">
+                                    Setup Relay will create <code>@selectedDomain.GatewayDomainName</code> with wildcard <code>*.@selectedDomain.GatewayDomainName</code>.
+                                </p>
                             }
                         }
                     </section>
@@ -489,7 +573,7 @@
                         @if (lastDiagnostic is not null)
                         {
                             <div class="edge-diagnostic">
-                                <UiPill Tone="@GetStatusTone(lastDiagnostic.Status)">@lastDiagnostic.Status</UiPill>
+                                <UiPill Tone="@GetStatusTone(lastDiagnostic.Status)">@BuildRuntimeStatusLabel(lastDiagnostic.Status)</UiPill>
                                 <strong>@lastDiagnostic.Summary</strong>
                                 <ul>
                                     @foreach (var check in lastDiagnostic.Checks)
@@ -534,7 +618,7 @@
 
     <UiModal IsOpen="@showRouteModal"
              Title="@routeModalTitle"
-             Subtitle="Public hostname, backend target, and LMS authentication policy."
+             Subtitle="Save creates a local LMS service record."
              Class="edge-route-modal"
              OnClose="CloseRouteModal">
         <ChildContent>
@@ -569,22 +653,47 @@
                         </UiSelectField>
                         <UiTextField @bind-Value="routeEditor.TargetHost" Label="Target host" Placeholder="192.168.1.20" Compact="true" />
                         <UiNumberField TValue="int" @bind-Value="routeEditor.TargetPort" Label="Port" Compact="true" />
-                        <UiCommandButton Label="Find HTTP/S"
-                                         Glyph="UiIconGlyph.Search"
-                                         Variant="UiButtonVariant.Ghost"
-                                         Class="edge-service-find-button"
-                                         OnClick="OpenHttpServicePickerAsync" />
-                    </div>
-
-                    <div class="edge-publish-preview">
-                        <div>
-                            <strong>@BuildPublishHeadline()</strong>
-                            <span>@BuildPublishDetail()</span>
+                        <div class="edge-target-actions">
+                            <UiCommandButton Label="@(isCheckingRouteTarget ? "Checking..." : "Check Target")"
+                                             Glyph="UiIconGlyph.Analyze"
+                                             Variant="UiButtonVariant.Primary"
+                                             Class="edge-target-check-button"
+                                             Disabled="@isCheckingRouteTarget"
+                                             OnClick="CheckRouteTargetAsync" />
+                            <UiCommandButton Label="Find HTTP/S"
+                                             Glyph="UiIconGlyph.Search"
+                                             Variant="UiButtonVariant.Ghost"
+                                             Class="edge-service-find-button"
+                                             Disabled="@isCheckingRouteTarget"
+                                             OnClick="OpenHttpServicePickerAsync" />
                         </div>
-                        <UiPill Tone="@GetAuthModeTone(routeEditor.AuthMode)">
-                            @BuildRouteAccessLabel(routeEditor.AuthMode)
-                        </UiPill>
                     </div>
+                    @if (!string.IsNullOrWhiteSpace(routeTargetCheckMessage))
+                    {
+                        <p class="edge-target-check-message @(routeTargetCheckIsError ? "error" : "success")">@routeTargetCheckMessage</p>
+                    }
+
+                    <details class="edge-advanced-settings edge-publish-details">
+                        <summary>
+                            <span>Publishing</span>
+                            <small>Public URL and DNS preview</small>
+                        </summary>
+                        <div class="edge-publish-details-body">
+                            <div class="edge-publish-preview">
+                                <div>
+                                    <strong>@BuildPublishHeadline()</strong>
+                                    <span>@BuildPublishDetail()</span>
+                                </div>
+                                <UiPill Tone="@GetAuthModeTone(routeEditor.AuthMode)">
+                                    @BuildRouteAccessLabel(routeEditor.AuthMode)
+                                </UiPill>
+                            </div>
+
+                            <p class="callout warning edge-publish-required">
+                                Save creates the service record only. Press Publish on the service card when you want the public hostname to go live.
+                            </p>
+                        </div>
+                    </details>
 
                     <div class="edge-form-flags">
                         <UiCheckboxField @bind-Value="routeEditor.Enabled" Label="Enabled" Compact="true" />
@@ -611,7 +720,7 @@
             </EditForm>
         </ChildContent>
         <Footer>
-            <UiCommandButton Label="Save route" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Primary" Type="submit" form="@routeEditorFormId" />
+            <UiCommandButton Label="Save service" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Primary" Type="submit" form="@routeEditorFormId" />
             <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="CloseRouteModal" />
         </Footer>
     </UiModal>
@@ -680,6 +789,123 @@
         </Footer>
     </UiModal>
 
+    <UiModal IsOpen="@showCloudflareSetupGuide"
+             Title="Cloudflare token setup"
+             Subtitle="Create a scoped token for Edge Gateway publishing."
+             Class="edge-setup-guide-modal"
+             OnClose="CloseCloudflareSetupGuide">
+        <ChildContent>
+            <div class="edge-setup-guide-body">
+                <section class="surface-subcard edge-setup-guide-section">
+                    <h3>Create the token</h3>
+                    <ol>
+                        <li>Open <a href="@CloudflareUserTokenUrl" target="_blank" rel="noreferrer">Cloudflare API Tokens</a>.</li>
+                        <li>Create a custom token named something obvious, for example <strong>Linux Made Sane</strong>.</li>
+                        <li>Scope it to the account and zones you want this LMS host to manage.</li>
+                        <li>Paste it into Edge Gateway and validate it. Cloudflare only shows the full token once.</li>
+                    </ol>
+                </section>
+                <section class="surface-subcard edge-setup-guide-section">
+                    <h3>Required permissions</h3>
+                    <div class="edge-token-permissions">
+                        <span><strong>Required</strong> <code>Account - Cloudflare Tunnel - Edit</code></span>
+                        <span><strong>Required</strong> <code>Zone - DNS - Edit</code></span>
+                        <span><strong>Optional</strong> <code>Account - Access: Apps and Policies - Edit</code></span>
+                    </div>
+                    <p class="meta-text">If a token validates but no zones appear, the zone scope is wrong. If tunnel setup fails, check the account scope and Tunnel permission.</p>
+                </section>
+                <p class="callout warning edge-ownership-warning">
+                    Warning: once a relay is set up, LMS manages the local Caddy configuration, the local cloudflared service, the Cloudflare tunnel ingress, and the scoped wildcard DNS record for this LMS host.
+                </p>
+            </div>
+        </ChildContent>
+        <Footer>
+            <UiCommandButton Label="Close"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             OnClick="CloseCloudflareSetupGuide" />
+        </Footer>
+    </UiModal>
+
+    <UiModal IsOpen="@showResetSetupModal"
+             Title="Reset Edge Gateway settings"
+             Subtitle="Remove the live Cloudflare footprint, local routes, token, and relay setup for this LMS host."
+             Class="edge-reset-modal"
+             CloseOnBackdrop="@(!isResettingEdgeGatewaySetup)"
+             OnClose="CloseResetSetupModal">
+        <ChildContent>
+            <div class="edge-reset-body">
+                <p class="callout warning">
+                    @BuildResetSetupWarning()
+                </p>
+                <p class="meta-text">
+                    If Cloudflare cleanup cannot complete, reset will stop before the token is forgotten so the live resources can still be cleaned up safely.
+                </p>
+                @if (!string.IsNullOrWhiteSpace(resetSetupMessage))
+                {
+                    <p class="edge-token-message error">@resetSetupMessage</p>
+                }
+            </div>
+        </ChildContent>
+        <Footer>
+            <UiCommandButton Label="Cancel"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isResettingEdgeGatewaySetup"
+                             OnClick="CloseResetSetupModal" />
+            <UiCommandButton Label="@(isResettingEdgeGatewaySetup ? "Resetting..." : "Reset settings")"
+                             Glyph="UiIconGlyph.Delete"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@isResettingEdgeGatewaySetup"
+                             OnClick="ConfirmResetSetupAsync" />
+        </Footer>
+    </UiModal>
+
+    <UiModal IsOpen="@(relayPendingDelete is not null)"
+             Title="Delete relay"
+             Subtitle="Remove the Cloudflare relay wildcard for this zone."
+             Class="edge-delete-relay-modal"
+             CloseOnBackdrop="@(!isDeletingRelay)"
+             OnClose="CloseRelayDeleteDialog">
+        <ChildContent>
+            @if (relayPendingDelete is not null)
+            {
+                <div class="edge-delete-route-body">
+                    <section class="surface-subcard edge-delete-route-summary">
+                        <strong>@relayPendingDelete.DomainName</strong>
+                        <span>@relayPendingDelete.GatewayDomainName</span>
+                        <span>*.@relayPendingDelete.GatewayDomainName</span>
+                    </section>
+                    <p class="callout warning">
+                        This deletes the scoped wildcard DNS record and removes the wildcard tunnel ingress. Route records are kept, but apps using this relay will stop working until the relay is set up again.
+                    </p>
+                    @if (relayPendingDelete is { RelayOwnedByThisLms: false })
+                    {
+                        <p class="callout warning">
+                            LMS does not think this relay belongs to the current host. Confirm only if you intentionally want LMS to remove this relay wildcard and matching tunnel ingress.
+                        </p>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(relayDeleteMessage))
+                    {
+                        <p class="edge-route-status error">@relayDeleteMessage</p>
+                    }
+                </div>
+            }
+        </ChildContent>
+        <Footer>
+            <UiCommandButton Label="Cancel"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isDeletingRelay"
+                             OnClick="CloseRelayDeleteDialog" />
+            <UiCommandButton Label="@(isDeletingRelay ? "Deleting..." : "Delete relay")"
+                             Glyph="UiIconGlyph.Delete"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@isDeletingRelay"
+                             OnClick="ConfirmDeleteRelayAsync" />
+        </Footer>
+    </UiModal>
+
     <UiModal IsOpen="@(routePendingDelete is not null)"
              Title="Delete published service"
              Subtitle="Remove this Edge Gateway route and regenerate the local Caddy config."
@@ -724,6 +950,7 @@
     private const string PublishedAppsTabValue = "published";
     private const string SetupTabValue = "setup";
     private const string DiagnosticsTabValue = "diagnostics";
+    private const string CloudflareUserTokenUrl = "https://dash.cloudflare.com/profile/api-tokens";
     private readonly string routeEditorFormId = $"edge-route-editor-form-{Guid.NewGuid():N}";
     private static readonly IReadOnlyList<EdgeGatewayAuthMode> AuthModeOptions =
     [
@@ -752,36 +979,55 @@
     private bool showRouteModal;
     private bool isHttpServicePickerOpen;
     private bool isDiscoveringHttpServices;
+    private bool showCloudflareSetupGuide;
+    private bool showResetSetupModal;
     private bool relayNamespaceExpanded;
     private bool relayNamespaceUnlocked;
     private bool confirmWildcardDnsReplacement;
     private bool confirmRouteDnsReplacement;
-    private bool confirmRelayRemoval;
+    private bool isValidatingCloudflareToken;
+    private bool cloudflareTokenIsError;
+    private bool isResettingEdgeGatewaySetup;
+    private bool isProvisioningCloudflareDomain;
+    private bool isDeletingRelay;
+    private bool isCheckingRouteTarget;
     private bool includeLanHttpScan = true;
     private bool includeTailnetHttpScan;
     private bool routeEditorIsError;
+    private bool routeTargetCheckIsError;
     private bool routeActionIsError;
     private Guid? publishingRouteId;
     private Guid? togglingRouteId;
     private bool isDeletingRoute;
+    private EdgeGatewayCloudflareDomainOption? relayPendingDelete;
     private EdgeGatewayRouteListItem? routePendingDelete;
     private Guid? routeActionMessageRouteId;
     private string routeActionMessage = string.Empty;
     private string routeDeleteMessage = string.Empty;
     private string routeEditorMessage = string.Empty;
+    private string routeTargetCheckMessage = string.Empty;
     private string routeModalTitle = "New route";
+    private string cloudflareTokenInput = string.Empty;
+    private string cloudflareTokenMessage = string.Empty;
+    private string resetSetupMessage = string.Empty;
+    private string provisioningCloudflareDomainName = string.Empty;
+    private string relayDeleteMessage = string.Empty;
     private string selectedDomainNameValue = string.Empty;
+    private string selectedRelaySetupDomainNameValue = string.Empty;
     private string selectedDomainName
     {
         get => selectedDomainNameValue;
         set
         {
-            if (!selectedDomainNameValue.Equals(value, StringComparison.OrdinalIgnoreCase))
-            {
-                confirmRelayRemoval = false;
-            }
-
             selectedDomainNameValue = value;
+        }
+    }
+    private string selectedRelaySetupDomainName
+    {
+        get => selectedRelaySetupDomainNameValue;
+        set
+        {
+            selectedRelaySetupDomainNameValue = value;
         }
     }
     private bool IsRouteActionBusy => publishingRouteId.HasValue || togglingRouteId.HasValue || isDeletingRoute;
@@ -789,8 +1035,6 @@
     private bool IsCloudflareReady =>
         dashboard?.Cloudflare.IsAvailable == true &&
         dashboard.Runtime.Cloudflared.Status == EdgeGatewayDiagnosticStatus.Good;
-    private bool SelectedDomainRelayReady =>
-        SelectedCloudflareDomain is { Paused: false, RelayConfigured: true, RelayUsesCloudflareTunnel: true };
     private bool ShouldShowRuntimeSetupDetails => !IsCaddyReady || !IsCloudflareReady;
     private EdgeGatewayRouteListItem? LocalLmsRoute =>
         dashboard?.Routes.FirstOrDefault(IsLocalLmsRoute);
@@ -806,17 +1050,41 @@
             .OrderBy(group => group.DomainName, StringComparer.OrdinalIgnoreCase)
             .ToArray()
         ?? [];
-    private bool EdgeGatewayServicesEnabled => IsCaddyReady && IsCloudflareReady && SelectedDomainRelayReady;
-
     private IReadOnlyList<EdgeGatewayCloudflareDomainOption> CloudflareDomains =>
         dashboard?.Cloudflare.Domains ?? [];
+
+    private IReadOnlyList<EdgeGatewayCloudflareDomainOption> ConfiguredCloudflareRelays =>
+        CloudflareDomains
+            .Where(static domain => domain.RelayConfigured)
+            .OrderBy(static domain => domain.DomainName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private IReadOnlyList<EdgeGatewayCloudflareDomainOption> RelaySetupCloudflareDomains =>
+        CloudflareDomains
+            .Where(static domain => !domain.RelayConfigured)
+            .OrderBy(static domain => domain.DomainName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
     private EdgeGatewayCloudflareDomainOption? SelectedCloudflareDomain =>
         CloudflareDomains.FirstOrDefault(domain => domain.DomainName.Equals(selectedDomainName, StringComparison.OrdinalIgnoreCase)) ??
         CloudflareDomains.FirstOrDefault();
 
+    private EdgeGatewayCloudflareDomainOption? SelectedRelaySetupCloudflareDomain =>
+        RelaySetupCloudflareDomains.FirstOrDefault(domain => domain.DomainName.Equals(selectedRelaySetupDomainName, StringComparison.OrdinalIgnoreCase)) ??
+        RelaySetupCloudflareDomains.FirstOrDefault();
+
     private bool CanCreateAppOnSelectedDomain =>
-        SelectedCloudflareDomain is { Paused: false, RelayConfigured: true, RelayUsesCloudflareTunnel: true };
+        SelectedCloudflareDomain is { Paused: false, RelayConfigured: true, RelayUsesCloudflareTunnel: true, RelayOwnedByThisLms: true };
+
+    private bool CanCreateAppForDomain(string domainName) =>
+        CloudflareDomains.Any(domain =>
+            domain.DomainName.Equals(domainName, StringComparison.OrdinalIgnoreCase) &&
+            domain is { Paused: false, RelayConfigured: true, RelayUsesCloudflareTunnel: true, RelayOwnedByThisLms: true });
+
+    private bool IsProvisioningSelectedRelaySetupDomain =>
+        isProvisioningCloudflareDomain &&
+        SelectedRelaySetupCloudflareDomain is { } domain &&
+        domain.DomainName.Equals(provisioningCloudflareDomainName, StringComparison.OrdinalIgnoreCase);
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 
@@ -828,8 +1096,18 @@
         if (CloudflareDomains.Count > 0 &&
             !CloudflareDomains.Any(domain => domain.DomainName.Equals(selectedDomainName, StringComparison.OrdinalIgnoreCase)))
         {
-            selectedDomainName = CloudflareDomains.FirstOrDefault(domain => domain.RelayConfigured)?.DomainName ??
+            selectedDomainName = CloudflareDomains.FirstOrDefault(domain => domain.RelayOwnedByThisLms)?.DomainName ??
+                                 CloudflareDomains.FirstOrDefault(domain => domain.RelayConfigured)?.DomainName ??
                                  CloudflareDomains[0].DomainName;
+        }
+
+        if (RelaySetupCloudflareDomains.Count == 0)
+        {
+            selectedRelaySetupDomainName = string.Empty;
+        }
+        else if (!RelaySetupCloudflareDomains.Any(domain => domain.DomainName.Equals(selectedRelaySetupDomainName, StringComparison.OrdinalIgnoreCase)))
+        {
+            selectedRelaySetupDomainName = RelaySetupCloudflareDomains[0].DomainName;
         }
 
         SyncRouteDomainExpansionState();
@@ -840,7 +1118,7 @@
         try
         {
             await EdgeGatewayService.SaveSettingsAsync(edgeSettingsEditor);
-            userMessage = "Edge Gateway relay label saved.";
+            userMessage = "Edge Gateway relay namespace saved.";
             relayNamespaceExpanded = true;
             relayNamespaceUnlocked = false;
             cloudflareSetupResult = null;
@@ -913,31 +1191,6 @@
         relayNamespaceUnlocked = false;
     }
 
-    private async Task SetEdgeGatewayServicesEnabledAsync(bool enabled)
-    {
-        if (IsRouteActionBusy)
-        {
-            return;
-        }
-
-        if (enabled)
-        {
-            if (SelectedCloudflareDomain is null)
-            {
-                userMessage = dashboard?.Cloudflare.HasSavedToken == true
-                    ? "Choose a Cloudflare domain before enabling Edge Gateway services."
-                    : "Configure and validate the Cloudflare token in Integrations before enabling Edge Gateway services.";
-                return;
-            }
-
-            await ProvisionSelectedCloudflareDomainAsync();
-            return;
-        }
-
-        userMessage = "Edge Gateway services stay ready until you remove the relay or disable published apps. Use Remove relay only when you intend to break published URLs for this LMS instance.";
-        await InvokeAsync(StateHasChanged);
-    }
-
     private async Task OpenNewRouteAsync()
     {
         routeEditor = await EdgeGatewayService.GetEditorAsync(null);
@@ -949,6 +1202,7 @@
         routeModalTitle = "New route";
         routeEditorMessage = string.Empty;
         routeEditorIsError = false;
+        ResetRouteTargetCheckMessage();
         showRouteModal = true;
     }
 
@@ -970,6 +1224,7 @@
         routeModalTitle = "Publish LMS";
         routeEditorMessage = string.Empty;
         routeEditorIsError = false;
+        ResetRouteTargetCheckMessage();
         showRouteModal = true;
     }
 
@@ -979,6 +1234,7 @@
         routeModalTitle = "Edit route";
         routeEditorMessage = string.Empty;
         routeEditorIsError = false;
+        ResetRouteTargetCheckMessage();
         showRouteModal = true;
     }
 
@@ -991,6 +1247,7 @@
         routeModalTitle = "New route";
         routeEditorMessage = string.Empty;
         routeEditorIsError = false;
+        ResetRouteTargetCheckMessage();
         showRouteModal = true;
     }
 
@@ -1011,6 +1268,58 @@
     private void CloseHttpServicePicker()
     {
         isHttpServicePickerOpen = false;
+    }
+
+    private async Task CheckRouteTargetAsync()
+    {
+        if (isCheckingRouteTarget)
+        {
+            return;
+        }
+
+        isCheckingRouteTarget = true;
+        routeTargetCheckIsError = false;
+        routeTargetCheckMessage = "Checking target with http and https...";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var host = EdgeGatewayRouteValidator.NormalizeTargetHost(routeEditor.TargetHost);
+            var port = EdgeGatewayRouteValidator.NormalizeTargetPort(routeEditor.TargetPort);
+            var currentScheme = routeEditor.TargetScheme;
+            var probes = await ProbeRouteTargetSchemesAsync(host, port);
+            var workingProbes = probes.Where(static probe => probe.Success).ToArray();
+
+            if (workingProbes.Length == 0)
+            {
+                routeTargetCheckIsError = true;
+                routeTargetCheckMessage = $"No HTTP/S response from {host}:{port}. {BuildRouteTargetProbeFailureSummary(probes)}";
+                return;
+            }
+
+            var selectedProbe = workingProbes.FirstOrDefault(probe => probe.Scheme == currentScheme) ??
+                                workingProbes.First();
+            routeEditor.TargetScheme = selectedProbe.Scheme;
+
+            routeTargetCheckMessage = selectedProbe.Scheme == currentScheme
+                ? $"Target OK using {FormatTargetScheme(selectedProbe.Scheme)}. {selectedProbe.Summary}"
+                : $"Switched scheme to {FormatTargetScheme(selectedProbe.Scheme)}. {selectedProbe.Summary}";
+        }
+        catch (Exception exception)
+        {
+            routeTargetCheckIsError = true;
+            routeTargetCheckMessage = exception.Message;
+        }
+        finally
+        {
+            isCheckingRouteTarget = false;
+        }
+    }
+
+    private void ResetRouteTargetCheckMessage()
+    {
+        routeTargetCheckMessage = string.Empty;
+        routeTargetCheckIsError = false;
     }
 
     private async Task LoadCachedHttpServicesAsync()
@@ -1117,6 +1426,8 @@
             : EdgeGatewayTargetScheme.Http;
         routeEditor.TargetHost = service.Host;
         routeEditor.TargetPort = service.Port;
+        routeTargetCheckIsError = false;
+        routeTargetCheckMessage = $"Selected {service.Url}.";
         isHttpServicePickerOpen = false;
         return Task.CompletedTask;
     }
@@ -1125,10 +1436,20 @@
     {
         try
         {
-            await EdgeGatewayService.SaveRouteAsync(routeEditor);
-            userMessage = "Edge Gateway route saved.";
+            var savedRouteId = await EdgeGatewayService.SaveRouteAsync(routeEditor);
+            var savedDomainName = NormalizeRouteDomainName(routeEditor.DomainName);
+            userMessage = "Service saved locally. It is not public yet. Press Publish on the service card to create Cloudflare DNS, tunnel ingress, and Caddy routing.";
+            routeActionMessageRouteId = savedRouteId;
+            routeActionMessage = userMessage;
+            routeActionIsError = false;
             routeEditorMessage = string.Empty;
             routeEditorIsError = false;
+            activeTab = PublishedAppsTabValue;
+            if (!string.IsNullOrWhiteSpace(savedDomainName))
+            {
+                expandedRouteDomains.Add(savedDomainName);
+            }
+
             showRouteModal = false;
             await LoadAsync();
         }
@@ -1248,12 +1569,24 @@
 
     private async Task ProvisionCloudflareDomainAsync(string domainName)
     {
+        if (isProvisioningCloudflareDomain)
+        {
+            return;
+        }
+
+        isProvisioningCloudflareDomain = true;
+        provisioningCloudflareDomainName = domainName;
+        userMessage = $"Setting up Relay for {domainName}. Updating Cloudflare tunnel, DNS, local cloudflared, and Caddy...";
+        cloudflareSetupResult = null;
+        cloudflareRelayRemovalResult = null;
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
+
         try
         {
             cloudflareSetupResult = await EdgeGatewayService.ProvisionCloudflareDomainAsync(
                 domainName,
                 confirmWildcardDnsReplacement);
-            cloudflareRelayRemovalResult = null;
             userMessage = cloudflareSetupResult.Summary;
             if (!cloudflareSetupResult.RequiresDnsReplacement)
             {
@@ -1267,39 +1600,200 @@
         {
             userMessage = exception.Message;
         }
+        finally
+        {
+            isProvisioningCloudflareDomain = false;
+            provisioningCloudflareDomainName = string.Empty;
+        }
     }
 
-    private async Task RemoveSelectedCloudflareRelayAsync()
+    private async Task ValidateCloudflareTokenAsync()
     {
-        if (SelectedCloudflareDomain is not { } domain)
+        if (isValidatingCloudflareToken)
         {
             return;
         }
 
+        if (string.IsNullOrWhiteSpace(cloudflareTokenInput))
+        {
+            cloudflareTokenIsError = true;
+            cloudflareTokenMessage = "Paste a Cloudflare API token before validating.";
+            return;
+        }
+
+        isValidatingCloudflareToken = true;
+        cloudflareTokenIsError = false;
+        cloudflareTokenMessage = "Validating Cloudflare token...";
+        userMessage = cloudflareTokenMessage;
+        await InvokeAsync(StateHasChanged);
+
         try
         {
-            cloudflareRelayRemovalResult = await EdgeGatewayService.RemoveCloudflareDomainRelayAsync(
-                domain.DomainName,
-                confirmRelayRemoval);
+            var validation = await EdgeGatewayService.ValidateCloudflareTokenAsync(
+                cloudflareTokenInput,
+                saveToken: true);
+            var autoSetupDomainName = validation.Zones.Count == 1
+                ? validation.Zones[0].Name
+                : string.Empty;
+            cloudflareTokenInput = string.Empty;
+            selectedDomainName = string.Empty;
+            selectedRelaySetupDomainName = string.Empty;
+            cloudflareTokenMessage = validation.Zones.Count == 0
+                ? "Token saved, but Cloudflare did not return any zones. Check the token zone scope."
+                : validation.Zones.Count == 1
+                    ? $"Token saved. Setting up Edge Gateway for {autoSetupDomainName}."
+                    : $"Token saved. Choose one of the {validation.Zones.Count} Cloudflare zones below to set up Edge Gateway.";
+            cloudflareTokenIsError = validation.Zones.Count == 0;
+            userMessage = cloudflareTokenMessage;
+            await LoadAsync();
+
+            if (!string.IsNullOrWhiteSpace(autoSetupDomainName))
+            {
+                selectedDomainName = autoSetupDomainName;
+                selectedRelaySetupDomainName = autoSetupDomainName;
+                await ProvisionCloudflareDomainAsync(autoSetupDomainName);
+            }
+        }
+        catch (Exception exception)
+        {
+            cloudflareTokenIsError = true;
+            cloudflareTokenMessage = exception.Message;
+            userMessage = exception.Message;
+        }
+        finally
+        {
+            isValidatingCloudflareToken = false;
+        }
+    }
+
+    private Task OpenCloudflareSetupGuide()
+    {
+        showCloudflareSetupGuide = true;
+        return Task.CompletedTask;
+    }
+
+    private Task CloseCloudflareSetupGuide()
+    {
+        showCloudflareSetupGuide = false;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenResetSetupModal()
+    {
+        resetSetupMessage = string.Empty;
+        showResetSetupModal = true;
+        return Task.CompletedTask;
+    }
+
+    private string BuildResetSetupWarning()
+    {
+        var namespaceText = SelectedCloudflareDomain is { GatewayDomainName.Length: > 0 } selectedDomain
+            ? selectedDomain.GatewayDomainName
+            : $"{edgeSettingsEditor.GatewaySubdomain}.domain";
+
+        return $"Warning: this deletes the current LMS relay namespace ({namespaceText}), all DNS records under that namespace, and any DNS records that point into it. It then removes/deletes the associated Cloudflare tunnel, clears local published app routes, reloads Caddy, clears the saved token, resets the relay namespace to the machine default, and generates a new Edge Gateway tunnel identity. Unrelated Cloudflare records outside that namespace are not reset.";
+    }
+
+    private Task CloseResetSetupModal()
+    {
+        if (!isResettingEdgeGatewaySetup)
+        {
+            showResetSetupModal = false;
+            resetSetupMessage = string.Empty;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmResetSetupAsync()
+    {
+        if (isResettingEdgeGatewaySetup)
+        {
+            return;
+        }
+
+        isResettingEdgeGatewaySetup = true;
+        resetSetupMessage = string.Empty;
+        try
+        {
+            await EdgeGatewayService.ResetSetupAsync();
             cloudflareSetupResult = null;
             cloudflareRouteSetupResult = null;
-            userMessage = cloudflareRelayRemovalResult.Summary;
-            if (!cloudflareRelayRemovalResult.RequiresConfirmation)
-            {
-                confirmRelayRemoval = false;
-            }
-
+            cloudflareRelayRemovalResult = null;
+            cloudflareTokenInput = string.Empty;
+            cloudflareTokenMessage = string.Empty;
+            selectedDomainName = string.Empty;
+            selectedRelaySetupDomainName = string.Empty;
+            relayPendingDelete = null;
+            relayDeleteMessage = string.Empty;
+            confirmWildcardDnsReplacement = false;
+            showResetSetupModal = false;
+            userMessage = "Edge Gateway setup settings were reset.";
             await LoadAsync();
         }
         catch (Exception exception)
         {
+            resetSetupMessage = exception.Message;
             userMessage = exception.Message;
+        }
+        finally
+        {
+            isResettingEdgeGatewaySetup = false;
         }
     }
 
-    private async Task ProvisionSelectedCloudflareDomainAsync()
+    private Task OpenRelayDeleteDialog(EdgeGatewayCloudflareDomainOption domain)
     {
-        if (SelectedCloudflareDomain is not { } domain)
+        relayPendingDelete = domain;
+        relayDeleteMessage = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task CloseRelayDeleteDialog()
+    {
+        if (!isDeletingRelay)
+        {
+            relayPendingDelete = null;
+            relayDeleteMessage = string.Empty;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmDeleteRelayAsync()
+    {
+        if (relayPendingDelete is not { } domain || isDeletingRelay)
+        {
+            return;
+        }
+
+        isDeletingRelay = true;
+        relayDeleteMessage = string.Empty;
+        try
+        {
+            cloudflareRelayRemovalResult = await EdgeGatewayService.RemoveCloudflareDomainRelayAsync(
+                domain.DomainName,
+                true);
+            cloudflareSetupResult = null;
+            cloudflareRouteSetupResult = null;
+            userMessage = cloudflareRelayRemovalResult.Summary;
+            relayPendingDelete = null;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            relayDeleteMessage = exception.Message;
+            userMessage = exception.Message;
+        }
+        finally
+        {
+            isDeletingRelay = false;
+        }
+    }
+
+    private async Task ProvisionSelectedRelaySetupDomainAsync()
+    {
+        if (SelectedRelaySetupCloudflareDomain is not { } domain)
         {
             return;
         }
@@ -1340,7 +1834,7 @@
             userMessage = cloudflareRouteSetupResult.Summary;
             routeActionIsError = !cloudflareRouteSetupResult.Success;
             routeActionMessage = cloudflareRouteSetupResult.RequiresDnsReplacement
-                ? $"{cloudflareRouteSetupResult.Summary} Confirm replacement in the Route publishing panel above."
+                ? $"{cloudflareRouteSetupResult.Summary} Open Publishing details on this service to confirm replacement."
                 : cloudflareRouteSetupResult.Summary;
             if (!cloudflareRouteSetupResult.RequiresDnsReplacement)
             {
@@ -1402,45 +1896,7 @@
             return $"Relay exists but needs checking: {domain.GatewayDomainName}.";
         }
 
-        return "Relay is not configured for this domain.";
-    }
-
-    private string BuildEdgeGatewayServicesHelper()
-    {
-        if (SelectedCloudflareDomain is null)
-        {
-            return "Switch on after Cloudflare is connected to prepare Caddy, cloudflared, and the relay namespace for published apps.";
-        }
-
-        if (EdgeGatewayServicesEnabled)
-        {
-            return $"{SelectedCloudflareDomain.GatewayDomainName} is ready. Add or publish apps below.";
-        }
-
-        return $"Switch on to prepare Caddy, cloudflared, and the relay namespace for {SelectedCloudflareDomain.GatewayDomainName}.";
-    }
-
-    private string BuildCaddyPillLabel() =>
-        IsCaddyReady ? "Caddy" : "Caddy setup";
-
-    private string BuildCloudflarePillLabel() =>
-        IsCloudflareReady ? "Cloudflare" : "Cloudflare setup";
-
-    private UiPillTone GetCloudflarePillTone()
-    {
-        if (dashboard is null)
-        {
-            return UiPillTone.Neutral;
-        }
-
-        if (IsCloudflareReady)
-        {
-            return UiPillTone.Success;
-        }
-
-        return dashboard.Cloudflare.HasSavedToken && dashboard.Runtime.Cloudflared.Status != EdgeGatewayDiagnosticStatus.Broken
-            ? UiPillTone.Warning
-            : UiPillTone.Failure;
+        return "Setup Relay before publishing apps on this domain.";
     }
 
     private static UiPillTone GetStatusTone(EdgeGatewayDiagnosticStatus status) => status switch
@@ -1449,6 +1905,24 @@
         EdgeGatewayDiagnosticStatus.Warning => UiPillTone.Warning,
         EdgeGatewayDiagnosticStatus.Broken => UiPillTone.Failure,
         _ => UiPillTone.Neutral
+    };
+
+    private static string BuildRouteTestStatusLabel(EdgeGatewayDiagnosticStatus status) => status switch
+    {
+        EdgeGatewayDiagnosticStatus.NotConfigured => "Not tested",
+        EdgeGatewayDiagnosticStatus.Good => "OK",
+        EdgeGatewayDiagnosticStatus.Warning => "Warning",
+        EdgeGatewayDiagnosticStatus.Broken => "Failed",
+        _ => "Unknown"
+    };
+
+    private static string BuildRuntimeStatusLabel(EdgeGatewayDiagnosticStatus status) => status switch
+    {
+        EdgeGatewayDiagnosticStatus.NotConfigured => "Needs setup",
+        EdgeGatewayDiagnosticStatus.Good => "OK",
+        EdgeGatewayDiagnosticStatus.Warning => "Warning",
+        EdgeGatewayDiagnosticStatus.Broken => "Failed",
+        _ => "Unknown"
     };
 
     private string BuildHttpScanSummary()
@@ -1482,6 +1956,127 @@
     private static string BuildHttpServiceKey(LocalHttpServiceEndpoint service) =>
         $"{service.Scope}|{service.Scheme}|{service.Host}|{service.Port}";
 
+    private static async Task<IReadOnlyList<RouteTargetProbeResult>> ProbeRouteTargetSchemesAsync(string host, int port)
+    {
+        using var handler = new HttpClientHandler
+        {
+            AllowAutoRedirect = false,
+            UseProxy = false,
+            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+        };
+        using var client = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+
+        var probes = new[]
+        {
+            ProbeRouteTargetAsync(client, host, port, EdgeGatewayTargetScheme.Https),
+            ProbeRouteTargetAsync(client, host, port, EdgeGatewayTargetScheme.Http)
+        };
+        return await Task.WhenAll(probes);
+    }
+
+    private static async Task<RouteTargetProbeResult> ProbeRouteTargetAsync(
+        HttpClient client,
+        string host,
+        int port,
+        EdgeGatewayTargetScheme scheme)
+    {
+        var targetUrl = BuildRouteTargetProbeUrl(host, port, scheme);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{targetUrl}/");
+            request.Headers.UserAgent.ParseAdd("LinuxMadeSane-edge-target-check");
+
+            using var response = await client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                timeout.Token);
+            var snippet = await TryReadProbeSnippetAsync(response, timeout.Token);
+            if (scheme == EdgeGatewayTargetScheme.Http && IsLikelyHttpsRequiredResponse(snippet))
+            {
+                return new RouteTargetProbeResult(
+                    scheme,
+                    false,
+                    $"{FormatTargetScheme(scheme)} reached the port, but the response says this endpoint expects https.");
+            }
+
+            var reason = string.IsNullOrWhiteSpace(response.ReasonPhrase)
+                ? string.Empty
+                : $" {response.ReasonPhrase.Trim()}";
+            return new RouteTargetProbeResult(
+                scheme,
+                true,
+                $"{FormatTargetScheme(scheme)} responded with HTTP {(int)response.StatusCode}{reason}.");
+        }
+        catch (TaskCanceledException)
+        {
+            return new RouteTargetProbeResult(scheme, false, $"{FormatTargetScheme(scheme)} timed out.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException or InvalidOperationException)
+        {
+            return new RouteTargetProbeResult(scheme, false, $"{FormatTargetScheme(scheme)} failed: {exception.Message}");
+        }
+    }
+
+    private static async Task<string> TryReadProbeSnippetAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        if ((int)response.StatusCode is not 400 and not 421 and not 426)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var buffer = new byte[4096];
+            var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+            return read <= 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, read);
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static bool IsLikelyHttpsRequiredResponse(string snippet)
+    {
+        if (string.IsNullOrWhiteSpace(snippet))
+        {
+            return false;
+        }
+
+        var text = snippet.ToLowerInvariant();
+        return text.Contains("plain http request was sent to https port", StringComparison.Ordinal) ||
+               text.Contains("client sent an http request to an https server", StringComparison.Ordinal) ||
+               text.Contains("requires tls", StringComparison.Ordinal) ||
+               text.Contains("requires https", StringComparison.Ordinal);
+    }
+
+    private static string BuildRouteTargetProbeUrl(string host, int port, EdgeGatewayTargetScheme scheme)
+    {
+        var hostPart = host.Contains(':', StringComparison.Ordinal) &&
+                       IPAddress.TryParse(host, out var address) &&
+                       address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6
+            ? $"[{host}]"
+            : host;
+        return $"{FormatTargetScheme(scheme)}://{hostPart}:{port}";
+    }
+
+    private static string BuildRouteTargetProbeFailureSummary(IEnumerable<RouteTargetProbeResult> probes) =>
+        string.Join(" ", probes.Select(static probe => probe.Summary));
+
+    private static string FormatTargetScheme(EdgeGatewayTargetScheme scheme) =>
+        scheme == EdgeGatewayTargetScheme.Https ? "https" : "http";
+
+    private sealed record RouteTargetProbeResult(
+        EdgeGatewayTargetScheme Scheme,
+        bool Success,
+        string Summary);
+
     private static UiPillTone GetDomainRelayTone(EdgeGatewayCloudflareDomainOption domain)
     {
         if (domain.Paused)
@@ -1494,7 +2089,9 @@
             return UiPillTone.Neutral;
         }
 
-        return domain.RelayUsesCloudflareTunnel ? UiPillTone.Success : UiPillTone.Warning;
+        return domain.RelayUsesCloudflareTunnel && domain.RelayOwnedByThisLms
+            ? UiPillTone.Success
+            : UiPillTone.Warning;
     }
 
     private static string FormatAuthMode(EdgeGatewayAuthMode mode) => mode switch
@@ -1648,22 +2245,7 @@
     }
 
     private static string BuildDomainOptionLabel(EdgeGatewayCloudflareDomainOption domain)
-    {
-        var status = domain.RelayConfigured
-            ? domain.RelayUsesCloudflareTunnel ? "relay ready" : "relay check"
-            : "no relay";
-        return $"{domain.DomainName} - {status}";
-    }
-
-    private static string BuildRelayButtonLabel(EdgeGatewayCloudflareDomainOption? domain)
-    {
-        if (domain is null)
-        {
-            return "Set up relay";
-        }
-
-        return domain.RelayConfigured ? "Check relay" : "Set up relay";
-    }
+        => $"{domain.DomainName} (*.{domain.GatewayDomainName})";
 
     private string BuildRouteEditorDomainHelper()
     {
@@ -1676,7 +2258,7 @@
                 : "Selected from the Edge Gateway domain picker.";
         }
 
-        var relay = domain.RelayConfigured && domain.RelayUsesCloudflareTunnel
+        var relay = domain.RelayConfigured && domain.RelayUsesCloudflareTunnel && domain.RelayOwnedByThisLms
             ? $"Relay ready: {domain.GatewayDomainName}."
             : $"Relay is not ready for {domain.GatewayDomainName}.";
         return routeEditor.Id.HasValue
@@ -1696,7 +2278,12 @@
             return "No relay";
         }
 
-        return domain.RelayUsesCloudflareTunnel ? "Relay ready" : "Check relay";
+        if (!domain.RelayUsesCloudflareTunnel)
+        {
+            return "Check relay";
+        }
+
+        return domain.RelayOwnedByThisLms ? "Local relay" : "Other LMS";
     }
 
     private static string BuildDomainRelayDetail(EdgeGatewayCloudflareDomainOption domain)
@@ -1711,9 +2298,14 @@
             return $"No wildcard DNS record found for *.{domain.GatewayDomainName}.";
         }
 
-        return domain.RelayUsesCloudflareTunnel
+        if (!domain.RelayUsesCloudflareTunnel)
+        {
+            return $"*.{domain.GatewayDomainName} exists but points to {domain.RelayDnsTarget}.";
+        }
+
+        return string.IsNullOrWhiteSpace(domain.RelayOwnershipSummary)
             ? $"*.{domain.GatewayDomainName} points to {domain.RelayDnsTarget}."
-            : $"*.{domain.GatewayDomainName} exists but points to {domain.RelayDnsTarget}.";
+            : domain.RelayOwnershipSummary;
     }
 
     private string BuildCloudflareSummary()
@@ -1723,11 +2315,27 @@
             return "needs token";
         }
 
-        var relayCount = CloudflareDomains.Count(domain => domain.RelayConfigured && domain.RelayUsesCloudflareTunnel);
+        var relayCount = CloudflareDomains.Count(domain => domain.RelayConfigured);
         return relayCount == 0
-            ? "no relays yet"
-            : relayCount == 1 ? "1 relay ready" : $"{relayCount} relays ready";
+            ? "no relays"
+            : relayCount == 1 ? "1 relay" : $"{relayCount} relays";
     }
+
+    private string BuildConfiguredRelayCountLabel() =>
+        ConfiguredCloudflareRelays.Count == 0
+            ? "None"
+            : ConfiguredCloudflareRelays.Count == 1 ? "1 zone" : $"{ConfiguredCloudflareRelays.Count} zones";
+
+    private int CountRoutesForDomain(string domainName) =>
+        dashboard?.Routes.Count(route => route.DomainName.Equals(domainName, StringComparison.OrdinalIgnoreCase)) ?? 0;
+
+    private IReadOnlyList<EdgeGatewayRouteListItem> GetRoutesForDomain(string domainName) =>
+        dashboard?.Routes
+            .Where(route => route.DomainName.Equals(domainName, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(route => route.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(route => route.Hostname, StringComparer.OrdinalIgnoreCase)
+            .ToArray()
+        ?? [];
 
     private string BuildPreviewTarget()
     {
@@ -1750,10 +2358,16 @@
             : $"/{normalized.TrimEnd('/')}";
     }
 
-    private static string BuildCloudflareDomainTitle(EdgeGatewayCloudflareDomainOption domain) =>
-        string.IsNullOrWhiteSpace(domain.AccountName)
-            ? $"{domain.DomainName} -> {domain.GatewayDomainName}"
-            : $"{domain.DomainName} -> {domain.GatewayDomainName} in {domain.AccountName}";
+    private static string BuildCloudflareDomainTitle(EdgeGatewayCloudflareDomainOption domain)
+    {
+        var account = string.IsNullOrWhiteSpace(domain.AccountName)
+            ? string.Empty
+            : $" in {domain.AccountName}";
+        var ownership = string.IsNullOrWhiteSpace(domain.RelayOwnershipSummary)
+            ? string.Empty
+            : $" - {domain.RelayOwnershipSummary}";
+        return $"{domain.DomainName} -> {domain.GatewayDomainName}{account}{ownership}";
+    }
 
     private string BuildRelayNamespaceHelper()
     {
@@ -1762,7 +2376,7 @@
             return "Locked to prevent accidental DNS changes. Unlock only when deliberately renaming this LMS relay namespace.";
         }
 
-        return "Use a single DNS label such as relay, edge, lms-relay, or office-relay. It must be unique across your LMS landscape.";
+        return "Use a DNS label such as relay, or a full namespace such as linuxmintrelay.example.com. It must be unique across your LMS landscape.";
     }
 
     private string BuildRelayNamespaceExampleHelper()
@@ -1779,10 +2393,23 @@
 
     private string BuildGatewaySubdomainExample()
     {
-        var label = string.IsNullOrWhiteSpace(edgeSettingsEditor.GatewaySubdomain)
-            ? dashboard?.Settings.GatewaySubdomain ?? "relay"
-            : edgeSettingsEditor.GatewaySubdomain.Trim().Trim('.');
-        return $"*.{label}.example.com";
+        var value = string.IsNullOrWhiteSpace(edgeSettingsEditor.GatewaySubdomain)
+            ? dashboard?.Settings.GatewaySubdomain ?? EdgeGatewayOptions.GatewaySubdomain
+            : edgeSettingsEditor.GatewaySubdomain;
+        var normalized = (value ?? string.Empty).Trim().TrimEnd('.');
+        if (normalized.StartsWith("*.", StringComparison.Ordinal))
+        {
+            normalized = normalized[2..];
+        }
+
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            normalized = "relay";
+        }
+
+        return normalized.Contains('.', StringComparison.Ordinal)
+            ? $"*.{normalized}"
+            : $"*.{normalized}.example.com";
     }
 
     private sealed record EdgeGatewayRouteDomainGroup(

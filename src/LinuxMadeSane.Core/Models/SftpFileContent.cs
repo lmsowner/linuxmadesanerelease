@@ -8,4 +8,5 @@ public sealed record SftpFileContent(
     string Content,
     long SizeBytes,
     DateTimeOffset? LastModifiedUtc,
-    bool IsTruncated);
+    bool IsTruncated,
+    string EncodingName = "utf-8");

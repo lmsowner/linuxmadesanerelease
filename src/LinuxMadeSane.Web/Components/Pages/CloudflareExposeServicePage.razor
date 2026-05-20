@@ -292,7 +292,7 @@ else
                                                            ValueExpression="@(() => editor.TunnelId)"
                                                            Helper="@TunnelSelectionFieldHelper">
                                                 <option value="@CreateNewTunnelOptionValue">Create new LMS tunnel</option>
-                                                @foreach (var tunnel in availableTunnels)
+                                                @foreach (var tunnel in TunnelSelectionOptions)
                                                 {
                                                     <option value="@tunnel.Id">@FormatTunnelOptionLabel(tunnel)</option>
                                                 }
@@ -857,8 +857,15 @@ else
         !editor.CreateNewTunnel && !string.IsNullOrWhiteSpace(editor.TunnelId)
             ? editor.TunnelId
             : HostHasInstalledConnector
-                ? availableTunnels.FirstOrDefault()?.Id ?? string.Empty
+                ? TunnelSelectionOptions.FirstOrDefault()?.Id ?? string.Empty
                 : CreateNewTunnelOptionValue;
+
+    private IReadOnlyList<CloudflareTunnel> TunnelSelectionOptions =>
+        HostHasInstalledConnector && !string.IsNullOrWhiteSpace(HostConnectorStatus?.TunnelId)
+            ? availableTunnels
+                .Where(item => item.Id.Equals(HostConnectorStatus.TunnelId, StringComparison.OrdinalIgnoreCase))
+                .ToArray()
+            : [];
 
     private CloudflaredConnectorStatus? HostConnectorStatus =>
         workspace?.HostConnectorStatus;
@@ -902,12 +909,10 @@ else
 
     private string TunnelSelectionFieldHelper =>
         validation is null
-            ? "Validate a token and choose a zone first so Linux Made Sane can load reusable tunnels."
+            ? "Validate a token and choose a zone first."
             : HostHasInstalledConnector
                 ? string.Empty
-            : availableTunnels.Count == 0
-            ? "No existing tunnels were loaded for this account, so LMS will create a new one unless you change the account or zone."
-            : "Pick an existing tunnel to keep multiple services on one connector, or create a new tunnel if you need isolation.";
+            : "LMS will create a tunnel for this host so this install does not reuse a tunnel from another LMS machine.";
 
     private IReadOnlyList<CloudflareExposedServiceListItemViewModel> ServiceEntries =>
         workspace?.ServiceEntries
@@ -1026,7 +1031,7 @@ else
             : isEnsuringConnector
                 ? "Setting up..."
                 : HostHasInstalledConnector
-                    ? "Validate token"
+                    ? (editor.SaveApiToken ? "Validate and save" : "Validate token")
                     : "Validate and set up";
 
     private string SelectedAccountName =>
@@ -1266,7 +1271,11 @@ else
                     "Cloudflare is checking the saved token and returning accounts and domains.");
             }
 
-            validation = await ExposedServiceManager.ValidateTokenAsync(HostId, editor.ApiTokenInput);
+            var savingSuppliedToken = editor.SaveApiToken && !string.IsNullOrWhiteSpace(editor.ApiTokenInput);
+            validation = await ExposedServiceManager.ValidateTokenAsync(
+                HostId,
+                editor.ApiTokenInput,
+                saveSuppliedToken: editor.SaveApiToken);
             hasSavedToken = validation.HasSavedToken;
 
             if (string.IsNullOrWhiteSpace(editor.AccountId))
@@ -1296,6 +1305,11 @@ else
 
             await LoadAvailableTunnelsAsync();
 
+            if (savingSuppliedToken && validation.HasSavedToken)
+            {
+                editor.ApiTokenInput = string.Empty;
+            }
+
             if (!preserveUiState && !suppressStatus && !HostHasInstalledConnector)
             {
                 await EnsureConnectorAsync(switchToApplicationsOnSuccess: true, clearStatus: false);
@@ -1307,7 +1321,12 @@ else
                 activeCloudflareTab = ApplicationsTabValue;
                 if (!suppressStatus)
                 {
-                    SetStatus("Cloudflare token validated.", isError: false, autoHide: true);
+                    SetStatus(
+                        savingSuppliedToken && validation.HasSavedToken
+                            ? "Cloudflare token validated and saved."
+                            : "Cloudflare token validated.",
+                        isError: false,
+                        autoHide: true);
                 }
             }
 
@@ -1893,7 +1912,7 @@ else
     {
         if (HostHasInstalledConnector &&
             !string.IsNullOrWhiteSpace(HostConnectorStatus?.TunnelId) &&
-            availableTunnels.Any(item => item.Id == HostConnectorStatus.TunnelId))
+            TunnelSelectionOptions.Any(item => item.Id == HostConnectorStatus.TunnelId))
         {
             editor.TunnelId = HostConnectorStatus.TunnelId!;
             editor.CreateNewTunnel = false;
@@ -1903,30 +1922,8 @@ else
 
         if (!editor.CreateNewTunnel &&
             !string.IsNullOrWhiteSpace(editor.TunnelId) &&
-            availableTunnels.Any(item => item.Id == editor.TunnelId))
+            TunnelSelectionOptions.Any(item => item.Id == editor.TunnelId))
         {
-            ApplySuggestedConnectorInstallDefault();
-            return;
-        }
-
-        var preferredTunnelId = workspace?.ServiceEntries
-            .OrderByDescending(item => item.Config.UpdatedAtUtc)
-            .Select(item => item.Config.TunnelId)
-            .FirstOrDefault(tunnelId => availableTunnels.Any(tunnel => tunnel.Id == tunnelId));
-
-        if (!string.IsNullOrWhiteSpace(preferredTunnelId))
-        {
-            editor.TunnelId = preferredTunnelId;
-            editor.CreateNewTunnel = false;
-            ApplySuggestedConnectorInstallDefault();
-            return;
-        }
-
-        var preferredManagedTunnel = availableTunnels.FirstOrDefault(item => item.IsManagedByLinuxMadeSane);
-        if (preferredManagedTunnel is not null)
-        {
-            editor.TunnelId = preferredManagedTunnel.Id;
-            editor.CreateNewTunnel = false;
             ApplySuggestedConnectorInstallDefault();
             return;
         }
@@ -2095,6 +2092,7 @@ else
         item switch
         {
             { ExistsInCloudflare: true } => "Live",
+            { IsOutOfSync: true } => "Review",
             { ExistsInLmsStore: true } => "Saved",
             _ => "Saved"
         };

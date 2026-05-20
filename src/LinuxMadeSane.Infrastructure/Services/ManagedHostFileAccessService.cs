@@ -204,11 +204,12 @@ public sealed class ManagedHostFileAccessService(
         string content,
         ManagedHostConnectionProfile connectionProfile,
         bool createDirectories,
+        string? encodingName = null,
         CancellationToken cancellationToken = default)
     {
         if (AiLocalMachine.IsLocalMachine(host.Id))
         {
-            return localFileBrowsingService.WriteFileAsync(host.DefaultWorkingDirectory, path, content, createDirectories, cancellationToken);
+            return localFileBrowsingService.WriteFileAsync(host.DefaultWorkingDirectory, path, content, createDirectories, encodingName, cancellationToken);
         }
 
         var request = BuildRemoteRequest(host, connectionProfile);
@@ -222,6 +223,7 @@ public sealed class ManagedHostFileAccessService(
             request.PrivateKeyPassphrase,
             request.PreferStoredCredentials,
             createDirectories,
+            encodingName,
             cancellationToken);
     }
 

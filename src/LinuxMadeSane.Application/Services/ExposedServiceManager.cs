@@ -7,6 +7,7 @@ using LinuxMadeSane.Application.Services.Cloudflare;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
+using LinuxMadeSane.Core.Models.Ai;
 using LinuxMadeSane.Core.Models.Cloudflare;
 using System.Security.Cryptography;
 using System.Text;
@@ -35,6 +36,8 @@ public sealed class ExposedServiceManager(
         var connectorStatus = await TryInspectCloudflaredConnectorAsync(host, cancellationToken);
         var (serviceEntries, syncWarnings) = await BuildWorkspaceServiceEntriesAsync(
             host.Id,
+            BuildTunnelName(host.Name, host.Id),
+            connectorStatus,
             settings,
             configs,
             cancellationToken);
@@ -49,9 +52,16 @@ public sealed class ExposedServiceManager(
             connectorStatus);
     }
 
+    public Task<CloudflareValidationResult> ValidateTokenAsync(
+        Guid hostId,
+        string? apiToken,
+        CancellationToken cancellationToken = default) =>
+        ValidateTokenAsync(hostId, apiToken, saveSuppliedToken: true, cancellationToken);
+
     public async Task<CloudflareValidationResult> ValidateTokenAsync(
         Guid hostId,
         string? apiToken,
+        bool saveSuppliedToken,
         CancellationToken cancellationToken = default)
     {
         _ = await GetHostAsync(hostId, cancellationToken);
@@ -59,9 +69,22 @@ public sealed class ExposedServiceManager(
         var resolvedToken = await ResolveApiTokenAsync(hostId, apiToken, settings, cancellationToken);
         var accounts = await zoneService.ListAccountsAsync(resolvedToken, cancellationToken);
         var zones = await zoneService.ListZonesAsync(resolvedToken, cancellationToken);
+        var hasSavedToken = !string.IsNullOrWhiteSpace(settings?.ApiTokenSecretReference);
+
+        if (saveSuppliedToken && !string.IsNullOrWhiteSpace(apiToken))
+        {
+            settings = await SaveValidatedTokenAsync(
+                hostId,
+                resolvedToken,
+                settings,
+                accounts,
+                zones,
+                cancellationToken);
+            hasSavedToken = !string.IsNullOrWhiteSpace(settings.ApiTokenSecretReference);
+        }
 
         return new CloudflareValidationResult(
-            !string.IsNullOrWhiteSpace(settings?.ApiTokenSecretReference),
+            hasSavedToken,
             accounts,
             zones);
     }
@@ -423,9 +446,19 @@ public sealed class ExposedServiceManager(
             return;
         }
 
-        var settings = await exposureStore.GetSettingsAsync(hostId, cancellationToken);
-        var resolvedToken = await ResolveApiTokenAsync(hostId, apiToken, settings, cancellationToken);
-        await RemoveCloudflareArtifactsAsync(config, resolvedToken, cancellationToken);
+        var host = await GetHostAsync(hostId, cancellationToken);
+        var connectorStatus = await TryInspectCloudflaredConnectorAsync(host, cancellationToken);
+        var defaultTunnelName = BuildTunnelName(host.Name, host.Id);
+        if (IsConfigOwnedByThisHost(config, connectorStatus, defaultTunnelName))
+        {
+            var settings = await exposureStore.GetSettingsAsync(hostId, cancellationToken);
+            var resolvedToken = await ResolveApiTokenAsync(hostId, apiToken, settings, cancellationToken);
+            await RemoveCloudflareArtifactsAsync(config, resolvedToken, cancellationToken);
+        }
+        else if (!removeLmsRecord)
+        {
+            throw new InvalidOperationException("That Cloudflare exposure points to a tunnel that is not attached to this LMS host, so LMS will not delete Cloudflare resources from another installation.");
+        }
 
         if (removeLmsRecord)
         {
@@ -569,7 +602,7 @@ public sealed class ExposedServiceManager(
 
         var tunnels = await tunnelService.ListTunnelsAsync(apiToken, account.Id, cancellationToken);
         var defaultTunnelName = BuildTunnelName(host.Name, host.Id);
-        var (tunnel, tunnelName) = ResolveTunnelSelection(tunnels, storedConfig, editor, defaultTunnelName);
+        var (tunnel, tunnelName) = ResolveTunnelSelection(tunnels, storedConfig, editor, connectorStatus, defaultTunnelName);
         ValidateConnectorReuse(connectorStatus, tunnel, editor.CreateNewTunnel);
 
         var tunnelConfiguration = tunnel is null
@@ -753,6 +786,48 @@ public sealed class ExposedServiceManager(
         return settings;
     }
 
+    private async Task<CloudflareSettings> SaveValidatedTokenAsync(
+        Guid hostId,
+        string apiToken,
+        CloudflareSettings? existingSettings,
+        IReadOnlyList<CloudflareAccount> accounts,
+        IReadOnlyList<CloudflareZone> zones,
+        CancellationToken cancellationToken)
+    {
+        var selectedZoneId = existingSettings?.ZoneId ?? string.Empty;
+        var zone = ResolveConnectorZone(zones, selectedZoneId, existingSettings);
+        var account = zone is null
+            ? ResolveValidationAccount(accounts, existingSettings)
+            : ResolveAccount(accounts, zone, existingSettings?.AccountId ?? string.Empty);
+
+        if (account is null)
+        {
+            throw new InvalidOperationException("The Cloudflare token is valid, but LMS could not determine which account to save it against.");
+        }
+
+        zone ??= new CloudflareZone(
+            existingSettings?.ZoneId ?? string.Empty,
+            existingSettings?.ZoneName ?? string.Empty,
+            account.Id,
+            account.Name,
+            string.Empty,
+            false);
+
+        return await SaveSettingsCoreAsync(
+            hostId,
+            new CloudflareExposeServiceEditor
+            {
+                ApiTokenInput = apiToken,
+                SaveApiToken = true,
+                AccountId = account.Id,
+                ZoneId = zone.Id
+            },
+            existingSettings,
+            account,
+            zone,
+            cancellationToken);
+    }
+
     private static bool RequiresDangerousExposureConfirmation(ExposedServiceDryRunPlan plan) =>
         plan.Warnings.Any(warning =>
             warning.RequiresConfirmation &&
@@ -794,6 +869,8 @@ public sealed class ExposedServiceManager(
 
     private async Task<(IReadOnlyList<CloudflareExposedServiceListItemViewModel> Entries, IReadOnlyList<string> Warnings)> BuildWorkspaceServiceEntriesAsync(
         Guid hostId,
+        string defaultTunnelName,
+        CloudflaredConnectorStatus? connectorStatus,
         CloudflareSettings? settings,
         IReadOnlyList<ExposedServiceConfig> storedConfigs,
         CancellationToken cancellationToken)
@@ -806,7 +883,13 @@ public sealed class ExposedServiceManager(
         try
         {
             var apiToken = await ResolveApiTokenAsync(hostId, null, settings, cancellationToken);
-            var discoveredConfigs = await DiscoverCloudflareServicesAsync(hostId, apiToken, settings, cancellationToken);
+            var discoveredConfigs = await DiscoverCloudflareServicesAsync(
+                hostId,
+                apiToken,
+                settings,
+                defaultTunnelName,
+                connectorStatus,
+                cancellationToken);
             return BuildMergedEntries(storedConfigs, discoveredConfigs);
         }
         catch (InvalidOperationException exception) when (string.IsNullOrWhiteSpace(settings.ApiTokenSecretReference))
@@ -831,8 +914,14 @@ public sealed class ExposedServiceManager(
         Guid hostId,
         string apiToken,
         CloudflareSettings settings,
+        string defaultTunnelName,
+        CloudflaredConnectorStatus? connectorStatus,
         CancellationToken cancellationToken)
     {
+        var localConnectorTunnelId = connectorStatus is { IsInstalled: true } &&
+                                     !string.IsNullOrWhiteSpace(connectorStatus.TunnelId)
+            ? connectorStatus.TunnelId
+            : string.Empty;
         var dnsRecords = await dnsService.ListRecordsAsync(apiToken, settings.ZoneId, cancellationToken);
         var candidateRecords = dnsRecords
             .Where(record =>
@@ -874,7 +963,11 @@ public sealed class ExposedServiceManager(
             var route = routes?.FirstOrDefault(item => item.Hostname.Equals(record.Name, StringComparison.OrdinalIgnoreCase));
             var application = applications.FirstOrDefault(item => item.Domain.Equals(record.Name, StringComparison.OrdinalIgnoreCase));
 
-            if (!ShouldTrackDiscoveredService(record, tunnel, route, application))
+            if (!ShouldTrackDiscoveredService(
+                    record,
+                    tunnel,
+                    localConnectorTunnelId,
+                    defaultTunnelName))
             {
                 continue;
             }
@@ -972,8 +1065,8 @@ public sealed class ExposedServiceManager(
                     stored!,
                     true,
                     false,
-                    false,
-                    "Saved in Linux Made Sane. Cloudflare live state was not matched; use the external link to test the route."));
+                    true,
+                    "Saved in Linux Made Sane, but Cloudflare live state was not matched to this host's local connector. Remove the local entry if it came from another LMS installation."));
         }
 
         var warnings = entries
@@ -1051,8 +1144,12 @@ public sealed class ExposedServiceManager(
 
     private string BuildTunnelName(string hostName, Guid hostId)
     {
+        var effectiveHostName = AiLocalMachine.IsLocalMachine(hostId) &&
+                                !string.IsNullOrWhiteSpace(Environment.MachineName)
+            ? Environment.MachineName
+            : hostName;
         var slug = string.Concat(
-            hostName
+            effectiveHostName
                 .Trim()
                 .ToLowerInvariant()
                 .Select(character => char.IsLetterOrDigit(character) ? character : '-'))
@@ -1063,8 +1160,22 @@ public sealed class ExposedServiceManager(
             slug = "host";
         }
 
-        var hostSuffix = hostId.ToString("N")[..8];
+        var hostSuffix = AiLocalMachine.IsLocalMachine(hostId) &&
+                         !string.IsNullOrWhiteSpace(Environment.MachineName)
+            ? BuildLocalMachineTunnelSuffix(Environment.MachineName)
+            : hostId.ToString("N")[..8];
         return $"{integrationOptions.ManagedTunnelNamePrefix}-{slug[..Math.Min(slug.Length, 24)]}-{hostSuffix}";
+    }
+
+    private static string BuildLocalMachineTunnelSuffix(string machineName)
+    {
+        var normalized = machineName.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return AiLocalMachine.ManagedHostId.ToString("N")[..8];
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))[..8].ToLowerInvariant();
     }
 
     private static string BuildPolicyName(string serviceName) =>
@@ -1074,6 +1185,7 @@ public sealed class ExposedServiceManager(
         IReadOnlyList<CloudflareTunnel> tunnels,
         ExposedServiceConfig? storedConfig,
         CloudflareExposeServiceEditor editor,
+        CloudflaredConnectorStatus? connectorStatus,
         string defaultTunnelName)
     {
         if (editor.CreateNewTunnel)
@@ -1090,11 +1202,19 @@ public sealed class ExposedServiceManager(
                 throw new InvalidOperationException("The selected Cloudflare tunnel is no longer available.");
             }
 
+            if (!IsTunnelOwnedByThisHost(selectedTunnel, connectorStatus, defaultTunnelName))
+            {
+                throw new InvalidOperationException("The selected Cloudflare tunnel belongs to another LMS installation. Create a new LMS tunnel or use the tunnel installed on this host.");
+            }
+
             return (selectedTunnel, selectedTunnel.Name);
         }
 
-        var resolvedTunnel = tunnels.FirstOrDefault(item => storedConfig is not null && item.Id == storedConfig.TunnelId)
-            ?? tunnels.FirstOrDefault(item => item.Name.Equals(defaultTunnelName, StringComparison.OrdinalIgnoreCase));
+        var resolvedTunnel = tunnels.FirstOrDefault(item =>
+                storedConfig is not null &&
+                item.Id == storedConfig.TunnelId &&
+                IsTunnelOwnedByThisHost(item, connectorStatus, defaultTunnelName))
+            ?? tunnels.FirstOrDefault(item => IsTunnelOwnedByThisHost(item, connectorStatus, defaultTunnelName));
 
         return resolvedTunnel is null
             ? (null, defaultTunnelName)
@@ -1155,16 +1275,18 @@ public sealed class ExposedServiceManager(
             var selectedTunnel = tunnels.FirstOrDefault(item =>
                 !item.IsDeleted &&
                 item.Id.Equals(editor.TunnelId.Trim(), StringComparison.Ordinal));
-            if (selectedTunnel is not null)
+            if (selectedTunnel is not null && IsTunnelOwnedByThisHost(selectedTunnel, connectorStatus, defaultTunnelName))
             {
                 return selectedTunnel;
             }
+
+            if (selectedTunnel is not null)
+            {
+                throw new InvalidOperationException("The selected Cloudflare tunnel belongs to another LMS installation. Create a new LMS tunnel or use the tunnel installed on this host.");
+            }
         }
 
-        return tunnels.FirstOrDefault(item =>
-                !item.IsDeleted &&
-                item.Name.Equals(defaultTunnelName, StringComparison.OrdinalIgnoreCase))
-            ?? tunnels.FirstOrDefault(item => !item.IsDeleted && item.IsManagedByLinuxMadeSane);
+        return tunnels.FirstOrDefault(item => IsTunnelOwnedByThisHost(item, connectorStatus, defaultTunnelName));
     }
 
     private async Task EnsureTunnelHasFallbackRouteAsync(
@@ -1654,6 +1776,31 @@ public sealed class ExposedServiceManager(
         return accounts.Count == 1 ? accounts[0] : null;
     }
 
+    private static CloudflareAccount? ResolveValidationAccount(
+        IReadOnlyList<CloudflareAccount> accounts,
+        CloudflareSettings? existingSettings)
+    {
+        if (!string.IsNullOrWhiteSpace(existingSettings?.AccountId))
+        {
+            var existingAccount = accounts.FirstOrDefault(item =>
+                item.Id.Equals(existingSettings.AccountId, StringComparison.Ordinal));
+            if (existingAccount is not null)
+            {
+                return existingAccount;
+            }
+
+            return new CloudflareAccount(
+                existingSettings.AccountId,
+                string.IsNullOrWhiteSpace(existingSettings.AccountName)
+                    ? existingSettings.AccountId
+                    : existingSettings.AccountName,
+                string.Empty,
+                null);
+        }
+
+        return accounts.Count == 1 ? accounts[0] : null;
+    }
+
     private static void ValidateEditor(CloudflareExposeServiceEditor editor)
     {
         if (string.IsNullOrWhiteSpace(editor.ZoneId))
@@ -1754,12 +1901,33 @@ public sealed class ExposedServiceManager(
     private bool ShouldTrackDiscoveredService(
         CloudflareDnsRecord record,
         CloudflareTunnel? tunnel,
-        CloudflareTunnelRoute? route,
-        CloudflareAccessApplication? application) =>
-        record.Comment.Equals(integrationOptions.ManagedRecordComment, StringComparison.OrdinalIgnoreCase) ||
-        tunnel?.IsManagedByLinuxMadeSane == true ||
-        route is not null ||
-        application is not null;
+        string localConnectorTunnelId,
+        string defaultTunnelName) =>
+        (!string.IsNullOrWhiteSpace(localConnectorTunnelId) &&
+         TryExtractTunnelIdFromDnsTarget(record.Content)?.Equals(localConnectorTunnelId, StringComparison.OrdinalIgnoreCase) == true) ||
+        (tunnel is not null && IsTunnelOwnedByThisHost(tunnel, null, defaultTunnelName));
+
+    private static bool IsConfigOwnedByThisHost(
+        ExposedServiceConfig config,
+        CloudflaredConnectorStatus? connectorStatus,
+        string defaultTunnelName) =>
+        (!string.IsNullOrWhiteSpace(config.TunnelId) &&
+         connectorStatus is { IsInstalled: true } &&
+         !string.IsNullOrWhiteSpace(connectorStatus.TunnelId) &&
+         config.TunnelId.Equals(connectorStatus.TunnelId, StringComparison.OrdinalIgnoreCase)) ||
+        (!string.IsNullOrWhiteSpace(config.TunnelName) &&
+         config.TunnelName.Equals(defaultTunnelName, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsTunnelOwnedByThisHost(
+        CloudflareTunnel tunnel,
+        CloudflaredConnectorStatus? connectorStatus,
+        string defaultTunnelName) =>
+        !tunnel.IsDeleted &&
+        ((!string.IsNullOrWhiteSpace(defaultTunnelName) &&
+          tunnel.Name.Equals(defaultTunnelName, StringComparison.OrdinalIgnoreCase)) ||
+         (connectorStatus is { IsInstalled: true } &&
+          !string.IsNullOrWhiteSpace(connectorStatus.TunnelId) &&
+          tunnel.Id.Equals(connectorStatus.TunnelId, StringComparison.OrdinalIgnoreCase)));
 
     private static ExposedServiceAccessMode InferAccessMode(
         CloudflareAccessApplication? application,

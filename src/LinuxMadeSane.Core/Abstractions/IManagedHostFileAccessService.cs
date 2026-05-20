@@ -63,6 +63,7 @@ public interface IManagedHostFileAccessService
         string content,
         ManagedHostConnectionProfile connectionProfile,
         bool createDirectories,
+        string? encodingName = null,
         CancellationToken cancellationToken = default);
 
     Task<string> CreateDirectoryAsync(

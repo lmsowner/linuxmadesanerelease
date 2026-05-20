@@ -963,12 +963,14 @@ public sealed class AiSafeChangeService(
         await using var stream = fileInfo.OpenRead();
         var buffer = new byte[safeMaxBytes];
         var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+        var decoded = TextFileEncoding.Decode(buffer.AsSpan(0, bytesRead));
         return new SftpFileContent(
             normalizedPath,
-            Encoding.UTF8.GetString(buffer, 0, bytesRead),
+            decoded.Content,
             fileInfo.Length,
             fileInfo.LastWriteTimeUtc == DateTime.MinValue ? null : new DateTimeOffset(fileInfo.LastWriteTimeUtc, TimeSpan.Zero),
-            fileInfo.Length > bytesRead);
+            fileInfo.Length > bytesRead,
+            decoded.EncodingName);
     }
 
     private async Task WriteBackupFileAsync(ManagedHost host, string path, string content, CancellationToken cancellationToken) =>
@@ -989,6 +991,7 @@ public sealed class AiSafeChangeService(
                 content,
                 CreateStoredConnectionProfile(host),
                 createDirectories,
+                encodingName: null,
                 cancellationToken);
             return;
         }

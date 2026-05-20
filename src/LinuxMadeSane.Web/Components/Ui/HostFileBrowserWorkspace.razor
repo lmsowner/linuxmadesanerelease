@@ -1235,6 +1235,7 @@ else
     private string previewMessage = string.Empty;
     private string previewMessageTone = "info";
     private string previewLoadedPath = string.Empty;
+    private string previewTextEncodingName = "utf-8";
     private FileBrowserPreviewDock previewDock = FileBrowserPreviewDock.Right;
     private int previewPanelSizePx = 520;
     private int directoryTreeRefreshVersion;
@@ -1407,7 +1408,8 @@ else
                                     !string.IsNullOrWhiteSpace(mediaPreviewStreamUrl) &&
                                     !string.IsNullOrWhiteSpace(mediaPreviewPlaybackUrl);
     private bool HasArchivePreview => previewArchiveFormat.HasValue;
-    private string PreviewLanguageLabel => GuessPreviewLanguage(selectedItem?.Name);
+    private string PreviewLanguageLabel => $"{GuessPreviewLanguage(selectedItem?.Name)} / {PreviewTextEncodingLabel}";
+    private string PreviewTextEncodingLabel => FormatTextEncodingLabel(previewTextEncodingName);
     private string PreviewVisualLabel => DescribeVisualPreview(previewBinaryContentType);
     private string PreviewArchiveLabel => previewArchiveFormat.HasValue
         ? $"{ArchiveFormatSupport.GetDisplayName(previewArchiveFormat.Value)} archive"
@@ -2217,7 +2219,7 @@ else
         try
         {
             var normalizedPath = ResolveBrowserPath(previewLoadedPath);
-            var result = await WritePreviewFileAsync(normalizedPath, previewText);
+            var result = await WritePreviewFileAsync(normalizedPath, previewText, previewTextEncodingName);
             loadedPreviewText = previewText;
             previewLoadedPath = normalizedPath;
             previewMessage = $"Saved {selectedItem.Name} at {result.CompletedAtUtc.ToLocalTime():HH:mm:ss}.";
@@ -2264,6 +2266,7 @@ else
         previewText = string.Empty;
         loadedPreviewText = string.Empty;
         previewLoadedPath = string.Empty;
+        previewTextEncodingName = "utf-8";
         previewMessage = string.Empty;
         previewMessageTone = "info";
         await InvokeAsync(StateHasChanged);
@@ -2344,6 +2347,9 @@ else
                 }
 
                 previewLoadedPath = ResolveBrowserPath(fileContent.FullPath);
+                previewTextEncodingName = string.IsNullOrWhiteSpace(fileContent.EncodingName)
+                    ? "utf-8"
+                    : fileContent.EncodingName;
                 previewIsText = LooksLikeTextContent(fileContent.Content, item.Name);
                 if (previewIsText)
                 {
@@ -2357,7 +2363,7 @@ else
                 }
                 else
                 {
-                    previewMessage = "This file does not look like plain UTF-8 text, so the editor is disabled.";
+                    previewMessage = "This file does not look like supported editable text, so the editor is disabled.";
                     previewMessageTone = "warning";
                 }
             }
@@ -2425,6 +2431,7 @@ else
         previewText = string.Empty;
         loadedPreviewText = string.Empty;
         previewLoadedPath = string.Empty;
+        previewTextEncodingName = "utf-8";
         previewMessage = string.Empty;
         previewMessageTone = "info";
 
@@ -4279,13 +4286,14 @@ else
             ArchivePreviewMaxEntries,
             cancellationToken);
 
-    private async Task<SftpWriteResult> WritePreviewFileAsync(string path, string content) =>
+    private async Task<SftpWriteResult> WritePreviewFileAsync(string path, string content, string? encodingName) =>
         await FileAccessService.WriteFileAsync(
             browser!.Host,
             path,
             content,
             BuildConnectionProfile(),
-            createDirectories: false);
+            createDirectories: false,
+            encodingName: encodingName);
 
     private async Task CreateDirectoryAsync(string path)
     {
@@ -5461,6 +5469,21 @@ else
             _ => "Text"
         };
     }
+
+    private static string FormatTextEncodingLabel(string? encodingName) =>
+        (encodingName ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            "utf-8-bom" => "UTF-8 BOM",
+            "utf-16le" => "UTF-16 LE",
+            "utf-16le-bom" => "UTF-16 LE BOM",
+            "utf-16be" => "UTF-16 BE",
+            "utf-16be-bom" => "UTF-16 BE BOM",
+            "utf-32le" => "UTF-32 LE",
+            "utf-32le-bom" => "UTF-32 LE BOM",
+            "utf-32be" => "UTF-32 BE",
+            "utf-32be-bom" => "UTF-32 BE BOM",
+            _ => "UTF-8"
+        };
 
     private static string? ResolveVisualPreviewContentType(string? fileName)
     {

@@ -143,6 +143,8 @@ public class Program
             return;
         }
 
+        RegisterStartupConsoleSummary(app);
+
         // Configure the HTTP request pipeline.
         if (!app.Environment.IsDevelopment())
         {
@@ -920,6 +922,23 @@ public class Program
         }
 
         builder.WebHost.UseUrls(configuredUrls);
+    }
+
+    private static void RegisterStartupConsoleSummary(WebApplication app)
+    {
+        app.Lifetime.ApplicationStarted.Register(() =>
+        {
+            var urls = app.Urls
+                .OrderBy(static url => url, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (urls.Length == 0)
+            {
+                Console.WriteLine("Linux Made Sane started. No bound URLs were reported by Kestrel.");
+                return;
+            }
+
+            Console.WriteLine($"Linux Made Sane listening on: {string.Join(", ", urls)}");
+        });
     }
 
     private static bool TryHandleConsoleCommand(string[] args, IServiceProvider services)

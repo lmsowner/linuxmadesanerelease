@@ -17,6 +17,8 @@ The following browser assets are vendored under `src/LinuxMadeSane.Web/wwwroot/l
 | hls.js | `wwwroot/lib/media-player/vendor/hls.min.js` | `https://github.com/video-dev/hls.js` | Apache License 2.0. |
 | mpegts.js | `wwwroot/lib/media-player/vendor/mpegts.min.js` | `https://github.com/xqq/mpegts.js` | Apache License 2.0. |
 | h265web.js | `wwwroot/lib/media-player/h265web` | `https://github.com/numberwolf/h265web.js` | CYL_Free-1.0 / upstream free usage agreement. This is a non-standard license. Review before using it in a paid redistribution, appliance, or customer-facing hosted product. |
+| GitHub Invertocat mark | `wwwroot/images/brand/github-invertocat-black.svg` | `https://brand.github.com/foundations/logo` | GitHub, the GitHub logo design, Invertocat, Octocat, and related marks are trademarks of GitHub, Inc.; the Octocat design is the exclusive property of GitHub, Inc. Used only as a social link to the public GitHub project. |
+| LinkedIn [in] logo | `wwwroot/images/brand/linkedin-in-bug.png` | `https://brand.linkedin.com/in-logo` | LinkedIn logo copyright LinkedIn Corporation. Used only as a hyperlink to the project owner's LinkedIn profile, subject to LinkedIn Brand and User Agreements. |
 | h265web.js bundled dependencies | `wwwroot/lib/media-player/h265web` | h265web.js distribution | Includes bundled dependencies with embedded MIT and Apache-2.0 notices, including `es6-promise`, `m3u8-parser`, `mpd-parser`, `video.js`, `vtt.js`, `@videojs/http-streaming`, `aes-decrypter`, and `pkcs7`. Preserve embedded notices. |
 
 ## NuGet Packages

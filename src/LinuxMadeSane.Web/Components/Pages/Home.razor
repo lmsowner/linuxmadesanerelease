@@ -108,10 +108,10 @@
                                                  Rel="@integrationsLink.Rel"
                                                  Variant="UiButtonVariant.Action" />
                             }
-                            @if (TryGetLmsLifecycleLink(details.Host) is { } lifecycleLink)
+                            @if (TryGetLmsLifecycleLink(details) is { } lifecycleLink)
                             {
                                 <UiCommandButton Label="@lifecycleLink.Label"
-                                                 Glyph="UiIconGlyph.Download"
+                                                 Glyph="@lifecycleLink.Glyph"
                                                  Href="@lifecycleLink.Href"
                                                  Title="@lifecycleLink.Title"
                                                  Disabled="@lifecycleLink.Disabled"
@@ -169,7 +169,7 @@
     private IReadOnlyList<DashboardHostRow> hostRows = [];
     private CancellationTokenSource? healthLoadCancellationTokenSource;
     private Task? healthLoadTask;
-    private Task? lmsWebAccessLoadTask;
+    private Task? lmsLifecycleLoadTask;
     private Guid? lmsConnectHostId;
     private string lmsConnectStatus = string.Empty;
     private string lmsConnectTone = "info";
@@ -188,7 +188,7 @@
 
         healthLoadCancellationTokenSource = new CancellationTokenSource();
         healthLoadTask = LoadHealthSnapshotsAsync(healthLoadCancellationTokenSource.Token);
-        lmsWebAccessLoadTask = LoadLmsWebAccessAsync(healthLoadCancellationTokenSource.Token);
+        lmsLifecycleLoadTask = LoadLmsLifecycleAsync(healthLoadCancellationTokenSource.Token);
     }
 
     private static string BuildConnectionSummary(HostConnectionTestResult connection) =>
@@ -243,7 +243,7 @@
     }
 
     private static bool CanOpenLmsDirectly(DashboardHostRow row) =>
-        row.LmsWebAccess?.IsDirectWebAvailable == true;
+        row.LmsUpdate?.IsDirectWebAvailable == true;
 
     private static bool CanConnectRemoteLmsHostThroughSsh(ManagedHost host) =>
         !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
@@ -261,7 +261,7 @@
     {
         var capabilities = ManagedHostCapabilities.Describe(row.Host);
         return capabilities is { IsLmsHost: true, IsLocalLmsHost: false } &&
-               row.LmsWebAccess is { IsDirectWebAvailable: false };
+               row.LmsUpdate is { IsDirectWebAvailable: false };
     }
 
     private static DashboardLink? TryGetIntegrationsLink(DashboardHostRow row)
@@ -277,19 +277,27 @@
             : new DashboardLink($"/integrations?hostId={row.Host.Id}");
     }
 
-    private static DashboardLifecycleLink? TryGetLmsLifecycleLink(ManagedHost host)
+    private static DashboardLifecycleLink? TryGetLmsLifecycleLink(DashboardHostRow row)
     {
+        var host = row.Host;
         var capabilities = ManagedHostCapabilities.Describe(host);
         if (!capabilities.IsLmsHost)
         {
             return capabilities.SupportsLmsInstall
-                ? new DashboardLifecycleLink("Install LMS", $"/hosts/{host.Id}?install=lms")
-                : new DashboardLifecycleLink("Install blocked", null, capabilities.LmsInstallSupportMessage, true);
+                ? new DashboardLifecycleLink("Install LMS", $"/hosts/{host.Id}?install=lms", Glyph: UiIconGlyph.Download)
+                : new DashboardLifecycleLink("Install blocked", null, capabilities.LmsInstallSupportMessage, true, UiIconGlyph.Download);
         }
 
-        return capabilities.IsLocalLmsHost || AiLocalMachine.IsLoopbackHostname(host.Hostname)
-            ? new DashboardLifecycleLink("Update LMS", "/updates")
-            : new DashboardLifecycleLink("Update LMS", $"/hosts/{host.Id}?update=lms");
+        if (capabilities.IsLocalLmsHost || AiLocalMachine.IsLoopbackHostname(host.Hostname))
+        {
+            return row.LmsUpdate?.IsUpdateAvailable == true
+                ? new DashboardLifecycleLink("Update LMS", "/updates", row.LmsUpdate.Detail, Glyph: UiIconGlyph.Download)
+                : new DashboardLifecycleLink("Updates", "/updates", "Open update status and checks.", Glyph: UiIconGlyph.Refresh);
+        }
+
+        return row.LmsUpdate?.IsUpdateAvailable == true
+            ? new DashboardLifecycleLink("Update LMS", $"/hosts/{host.Id}?update=lms", row.LmsUpdate.Detail, Glyph: UiIconGlyph.Download)
+            : null;
     }
 
     private static string BuildDirectLmsRootUrl(ManagedHost host) =>
@@ -564,10 +572,10 @@
         });
     }
 
-    private async Task LoadLmsWebAccessAsync(CancellationToken cancellationToken)
+    private async Task LoadLmsLifecycleAsync(CancellationToken cancellationToken)
     {
         var hostsToRefresh = hostRows
-            .Where(row => ManagedHostCapabilities.Describe(row.Host) is { IsLmsHost: true, IsLocalLmsHost: false })
+            .Where(row => ManagedHostCapabilities.IsLmsHost(row.Host))
             .Select(row => row.Host)
             .ToArray();
 
@@ -578,14 +586,14 @@
 
         try
         {
-            var results = await LmsUpdateAvailabilityService.CheckDirectWebAccessAsync(hostsToRefresh, cancellationToken);
+            var results = await LmsUpdateAvailabilityService.CheckHostsAsync(hostsToRefresh, cancellationToken);
             await InvokeAsync(() =>
             {
                 foreach (var row in hostRows)
                 {
                     if (results.TryGetValue(row.Host.Id, out var result))
                     {
-                        row.LmsWebAccess = result;
+                        row.LmsUpdate = result;
                     }
                 }
 
@@ -734,11 +742,11 @@
             }
         }
 
-        if (lmsWebAccessLoadTask is not null)
+        if (lmsLifecycleLoadTask is not null)
         {
             try
             {
-                await lmsWebAccessLoadTask;
+                await lmsLifecycleLoadTask;
             }
             catch (OperationCanceledException)
             {
@@ -758,7 +766,7 @@
 
         public bool IsHealthLoading { get; set; }
 
-        public LmsHostWebAccessStatus? LmsWebAccess { get; set; }
+        public LmsHostUpdateAvailability? LmsUpdate { get; set; }
     }
 
     private sealed record HostHealthProbeResult(
@@ -769,5 +777,10 @@
 
     private sealed record DashboardLink(string Href, string? Target = null, string? Rel = null);
 
-    private sealed record DashboardLifecycleLink(string Label, string? Href, string? Title = null, bool Disabled = false);
+    private sealed record DashboardLifecycleLink(
+        string Label,
+        string? Href,
+        string? Title = null,
+        bool Disabled = false,
+        UiIconGlyph Glyph = UiIconGlyph.Download);
 }

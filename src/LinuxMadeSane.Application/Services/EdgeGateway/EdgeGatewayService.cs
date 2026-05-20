@@ -40,11 +40,11 @@ public sealed class EdgeGatewayService(
 
     public async Task<EdgeGatewayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default)
     {
-        var settings = await settingsStore.GetAsync(cancellationToken);
-        var gatewaySubdomain = NormalizeGatewaySubdomain(settings.GatewaySubdomain);
+        var settings = await GetGatewaySettingsAsync(cancellationToken);
+        var gatewaySubdomain = settings.GatewaySubdomain;
         var routes = await store.ListRoutesAsync(cancellationToken);
         var auditEntries = await store.ListAuditEntriesAsync(take: 80, cancellationToken: cancellationToken);
-        var cloudflare = await BuildCloudflareStatusAsync(gatewaySubdomain, cancellationToken);
+        var cloudflare = await BuildCloudflareStatusAsync(settings, cancellationToken);
         var generatedCaddyfile = caddyfileGenerator.Generate(routes);
         var runtime = await BuildRuntimeStatusAsync(cancellationToken);
         var firstDomain = routes.Select(static route => route.DomainName)
@@ -69,22 +69,181 @@ public sealed class EdgeGatewayService(
 
     public async Task<EdgeGatewaySettingsEditor> GetSettingsEditorAsync(CancellationToken cancellationToken = default)
     {
-        var settings = await settingsStore.GetAsync(cancellationToken);
+        var settings = await GetGatewaySettingsAsync(cancellationToken);
         return new EdgeGatewaySettingsEditor
         {
-            GatewaySubdomain = NormalizeGatewaySubdomain(settings.GatewaySubdomain)
+            GatewaySubdomain = settings.GatewaySubdomain
         };
     }
 
     public async Task SaveSettingsAsync(EdgeGatewaySettingsEditor editor, CancellationToken cancellationToken = default)
     {
-        var current = await settingsStore.GetAsync(cancellationToken);
+        var current = await GetGatewaySettingsAsync(cancellationToken);
         var gatewaySubdomain = NormalizeGatewaySubdomain(editor.GatewaySubdomain);
         await settingsStore.SaveAsync(current with
         {
             GatewaySubdomain = gatewaySubdomain,
             UpdatedAtUtc = DateTimeOffset.UtcNow
         }, cancellationToken);
+    }
+
+    public Task<CloudflareValidationResult> ValidateCloudflareTokenAsync(
+        string apiToken,
+        bool saveToken,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(apiToken))
+        {
+            throw new InvalidOperationException("Paste a Cloudflare API token before validating.");
+        }
+
+        return exposedServiceManager.ValidateTokenAsync(
+            AiLocalMachine.ManagedHostId,
+            apiToken.Trim(),
+            saveToken,
+            cancellationToken);
+    }
+
+    public async Task ResetSetupAsync(CancellationToken cancellationToken = default)
+    {
+        var current = await GetGatewaySettingsAsync(cancellationToken);
+        var routes = await store.ListRoutesAsync(cancellationToken);
+        await ResetLiveCloudflareResourcesAsync(current, routes, cancellationToken);
+
+        foreach (var route in routes)
+        {
+            await store.DeleteRouteAsync(route.Id, cancellationToken);
+        }
+
+        var caddyApplyResult = await ApplyCaddyConfigurationAsync(cancellationToken);
+        if (!caddyApplyResult.Success)
+        {
+            throw new InvalidOperationException($"Cloudflare resources were reset, but Caddy did not reload cleanly: {caddyApplyResult.Summary}");
+        }
+
+        await exposedServiceManager.ForgetSavedTokenAsync(AiLocalMachine.ManagedHostId, cancellationToken);
+
+        var now = DateTimeOffset.UtcNow;
+        await settingsStore.SaveAsync(
+            current with
+            {
+                GatewaySubdomain = EdgeGatewayDefaultNamespace.BuildForMachineName(Environment.MachineName),
+                TunnelInstanceId = Guid.NewGuid().ToString("N"),
+                UpdatedAtUtc = now
+            },
+            cancellationToken);
+    }
+
+    private async Task ResetLiveCloudflareResourcesAsync(
+        EdgeGatewaySettings settings,
+        IReadOnlyList<EdgeGatewayRoute> routes,
+        CancellationToken cancellationToken)
+    {
+        string apiToken;
+        try
+        {
+            apiToken = await ResolveSavedCloudflareTokenAsync(cancellationToken);
+        }
+        catch (InvalidOperationException exception) when (
+            exception.Message.Contains("No saved Cloudflare API token", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var validation = await exposedServiceManager.ValidateTokenAsync(AiLocalMachine.ManagedHostId, null, cancellationToken);
+        foreach (var zone in validation.Zones)
+        {
+            var account = ResolveCloudflareAccount(validation.Accounts, zone);
+            if (account is null)
+            {
+                throw new InvalidOperationException($"Cloudflare did not return an account that owns {zone.Name}.");
+            }
+
+            await ResetLiveCloudflareZoneAsync(apiToken, account, zone, settings, routes, cancellationToken);
+        }
+    }
+
+    private async Task ResetLiveCloudflareZoneAsync(
+        string apiToken,
+        CloudflareAccount account,
+        CloudflareZone zone,
+        EdgeGatewaySettings settings,
+        IReadOnlyList<EdgeGatewayRoute> routes,
+        CancellationToken cancellationToken)
+    {
+        string gatewayDomainName;
+        try
+        {
+            gatewayDomainName = BuildGatewayDomainName(zone.Name, settings.GatewaySubdomain);
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+
+        var wildcardHostname = $"*.{gatewayDomainName}";
+        var tunnelBaseName = BuildEdgeTunnelBaseName(gatewayDomainName, settings.TunnelInstanceId);
+        var tunnels = await cloudflareTunnelService.ListTunnelsAsync(apiToken, account.Id, cancellationToken);
+        var records = await cloudflareDnsService.ListRecordsAsync(apiToken, zone.Id, cancellationToken);
+        var relayNamespaceTunnelIds = records
+            .Where(record => record.Type.Equals("CNAME", StringComparison.OrdinalIgnoreCase) &&
+                             IsDnsRecordInRelayNamespace(record, gatewayDomainName))
+            .Select(record => TryExtractTunnelIdFromDnsTarget(record.Content))
+            .Where(static tunnelId => !string.IsNullOrWhiteSpace(tunnelId))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var ownedTunnels = tunnels
+            .Where(tunnel => !tunnel.IsDeleted &&
+                             (tunnel.Name.Equals(tunnelBaseName, StringComparison.OrdinalIgnoreCase) ||
+                              relayNamespaceTunnelIds.Contains(tunnel.Id)))
+            .ToArray();
+        var ownedTunnelDnsTargets = ownedTunnels
+            .Select(static tunnel => $"{tunnel.Id}.cfargotunnel.com")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var routeHostnames = routes
+            .Where(route => route.DomainName.Equals(zone.Name, StringComparison.OrdinalIgnoreCase))
+            .Select(static route => EdgeGatewayRouteValidator.NormalizeHostname(route.Hostname))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var routeRelayHostnames = routes
+            .Where(route => route.DomainName.Equals(zone.Name, StringComparison.OrdinalIgnoreCase))
+            .Select(route => $"{ResolveRelativeHostname(EdgeGatewayRouteValidator.NormalizeHostname(route.Hostname), zone.Name)}.{gatewayDomainName}")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var recordsToDelete = records
+            .Where(record => IsDnsRecordInRelayNamespace(record, gatewayDomainName) ||
+                             IsDnsRecordPointingIntoRelayNamespace(record, gatewayDomainName) ||
+                             IsResettableEdgeGatewayDnsRecord(record, routeHostnames, routeRelayHostnames, ownedTunnelDnsTargets))
+            .GroupBy(static record => record.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(static group => group.First())
+            .ToArray();
+
+        foreach (var record in recordsToDelete)
+        {
+            await cloudflareDnsService.DeleteRecordAsync(apiToken, zone.Id, record.Id, cancellationToken);
+        }
+
+        var tunnelRouteHostnames = recordsToDelete
+            .Select(static record => (record.Name ?? string.Empty).Trim().TrimEnd('.'))
+            .Where(static hostname => !string.IsNullOrWhiteSpace(hostname))
+            .Concat(routeHostnames)
+            .Append(wildcardHostname)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var tunnel in ownedTunnels)
+        {
+            var configuration = await cloudflareTunnelService.GetConfigurationAsync(apiToken, account.Id, tunnel.Id, cancellationToken);
+            var updatedRoutes = RemoveTunnelRoutes(configuration.Routes, tunnelRouteHostnames);
+            if (updatedRoutes.Count != configuration.Routes.Count)
+            {
+                await cloudflareTunnelService.UpdateConfigurationAsync(
+                    apiToken,
+                    account.Id,
+                    tunnel.Id,
+                    new CloudflareTunnelConfiguration(updatedRoutes),
+                    cancellationToken);
+            }
+
+            await cloudflareTunnelService.DeleteTunnelAsync(apiToken, account.Id, tunnel.Id, cancellationToken);
+        }
     }
 
     public async Task<EdgeGatewayRouteEditor> GetEditorAsync(Guid? routeId, CancellationToken cancellationToken = default)
@@ -173,7 +332,7 @@ public sealed class EdgeGatewayService(
     }
 
     private async Task<EdgeGatewayCloudflareStatus> BuildCloudflareStatusAsync(
-        string gatewaySubdomain,
+        EdgeGatewaySettings settings,
         CancellationToken cancellationToken)
     {
         try
@@ -186,29 +345,30 @@ public sealed class EdgeGatewayService(
                     false,
                     validation.HasSavedToken
                         ? "The saved Cloudflare token validated but did not return any zones. Check the token zone scope."
-                        : "No saved Cloudflare token is registered yet. Configure Cloudflare from Integrations first.",
+                        : "No saved Cloudflare token is registered yet. Validate a token in Edge Gateway Setup first.",
                     []);
             }
 
             var apiToken = validation.HasSavedToken
                 ? await ResolveSavedCloudflareTokenAsync(cancellationToken)
                 : string.Empty;
+            var connectorStatus = await TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
             var domainTasks = validation.Zones
                 .OrderBy(static zone => zone.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(zone => BuildCloudflareDomainOptionAsync(zone, validation.Accounts, apiToken, gatewaySubdomain, cancellationToken))
+                .Select(zone => BuildCloudflareDomainOptionAsync(zone, validation.Accounts, apiToken, settings, connectorStatus, cancellationToken))
                 .ToArray();
             var domains = await Task.WhenAll(domainTasks);
 
             return new EdgeGatewayCloudflareStatus(
                 validation.HasSavedToken,
                 true,
-                "Cloudflare domains loaded from the saved token in Integrations.",
+                "Cloudflare domains loaded from the saved Edge Gateway token.",
                 domains);
         }
         catch (Exception exception)
         {
             var message = exception.Message.Contains("Cloudflare API token", StringComparison.OrdinalIgnoreCase)
-                ? "No saved Cloudflare token is registered yet. Configure Cloudflare from Integrations first."
+                ? "No saved Cloudflare token is registered yet. Validate a token in Edge Gateway Setup first."
                 : $"Cloudflare domains could not be loaded: {exception.Message}";
             return new EdgeGatewayCloudflareStatus(false, false, message, []);
         }
@@ -306,12 +466,17 @@ public sealed class EdgeGatewayService(
         CloudflareZone zone,
         IReadOnlyList<CloudflareAccount> accounts,
         string apiToken,
-        string gatewaySubdomain,
+        EdgeGatewaySettings settings,
+        CloudflaredConnectorStatus? connectorStatus,
         CancellationToken cancellationToken)
     {
-        var gatewayDomainName = BuildGatewayDomainName(zone.Name, gatewaySubdomain);
+        var gatewayDomainName = BuildGatewayDomainName(zone.Name, settings.GatewaySubdomain);
         var relayDnsTarget = string.Empty;
         var relayUsesCloudflareTunnel = false;
+        var relayTunnelId = string.Empty;
+        var relayTunnelName = string.Empty;
+        var relayOwnedByThisLms = false;
+        var relayOwnershipSummary = string.Empty;
         if (!string.IsNullOrWhiteSpace(apiToken))
         {
             try
@@ -322,6 +487,39 @@ public sealed class EdgeGatewayService(
                 relayUsesCloudflareTunnel = relayRecord is not null &&
                                             relayRecord.Type.Equals("CNAME", StringComparison.OrdinalIgnoreCase) &&
                                             relayDnsTarget.EndsWith(".cfargotunnel.com", StringComparison.OrdinalIgnoreCase);
+                if (relayUsesCloudflareTunnel)
+                {
+                    relayTunnelId = TryExtractTunnelIdFromDnsTarget(relayDnsTarget) ?? string.Empty;
+                    var account = ResolveCloudflareAccount(accounts, zone);
+                    if (account is null)
+                    {
+                        relayOwnershipSummary = "Cloudflare did not return the account that owns this zone.";
+                    }
+                    else if (string.IsNullOrWhiteSpace(relayTunnelId))
+                    {
+                        relayOwnershipSummary = $"*.{gatewayDomainName} points at a Cloudflare Tunnel target, but the tunnel ID could not be read.";
+                    }
+                    else
+                    {
+                        var tunnels = await cloudflareTunnelService.ListTunnelsAsync(apiToken, account.Id, cancellationToken);
+                        var relayTunnel = tunnels.FirstOrDefault(tunnel =>
+                            !tunnel.IsDeleted &&
+                            tunnel.Id.Equals(relayTunnelId, StringComparison.OrdinalIgnoreCase));
+                        relayTunnelName = relayTunnel?.Name ?? string.Empty;
+                        relayOwnedByThisLms = IsRelayTunnelOwnedByThisLms(relayTunnel, gatewayDomainName, settings.TunnelInstanceId, connectorStatus);
+                        relayOwnershipSummary = relayTunnel is null
+                            ? $"Cloudflare Tunnel {relayTunnelId} was not returned by this account."
+                            : relayOwnedByThisLms
+                                ? IsLocalConnectorTunnel(relayTunnel, connectorStatus)
+                                    ? $"Owned by this LMS host via the local cloudflared connector tunnel {relayTunnel.Name}."
+                                    : $"Owned by this LMS instance via tunnel {relayTunnel.Name}."
+                                : $"Points at Cloudflare Tunnel {relayTunnel.Name}, which is not owned by this LMS instance.";
+                    }
+                }
+                else if (relayRecord is not null)
+                {
+                    relayOwnershipSummary = $"*.{gatewayDomainName} exists but does not point at a Cloudflare Tunnel target.";
+                }
             }
             catch (OperationCanceledException)
             {
@@ -331,6 +529,10 @@ public sealed class EdgeGatewayService(
             {
                 relayDnsTarget = string.Empty;
                 relayUsesCloudflareTunnel = false;
+                relayTunnelId = string.Empty;
+                relayTunnelName = string.Empty;
+                relayOwnedByThisLms = false;
+                relayOwnershipSummary = "LMS could not inspect relay ownership for this zone.";
             }
         }
 
@@ -347,7 +549,11 @@ public sealed class EdgeGatewayService(
             false,
             !string.IsNullOrWhiteSpace(relayDnsTarget),
             relayDnsTarget,
-            relayUsesCloudflareTunnel);
+            relayUsesCloudflareTunnel,
+            relayTunnelId,
+            relayTunnelName,
+            relayOwnedByThisLms,
+            relayOwnershipSummary);
     }
 
     public async Task<EdgeGatewayCloudflareSetupResult> ProvisionCloudflareDomainAsync(
@@ -356,7 +562,8 @@ public sealed class EdgeGatewayService(
         CancellationToken cancellationToken = default)
     {
         var normalizedDomain = EdgeGatewayRouteValidator.NormalizeDomainName(domainName);
-        var gatewaySubdomain = await GetGatewaySubdomainAsync(cancellationToken);
+        var gatewaySettings = await GetGatewaySettingsAsync(cancellationToken);
+        var gatewaySubdomain = gatewaySettings.GatewaySubdomain;
         var steps = new List<string>();
         var warnings = new List<string>();
         var apiToken = await ResolveSavedCloudflareTokenAsync(cancellationToken);
@@ -403,38 +610,31 @@ public sealed class EdgeGatewayService(
 
         var existingRecords = await cloudflareDnsService.ListRecordsAsync(apiToken, zone.Id, cancellationToken);
         var existingWildcardRecord = existingRecords.FirstOrDefault(record => IsWildcardRecordForDomain(record, gatewayDomainName));
-        var existingTunnelId = TryExtractTunnelIdFromDnsTarget(existingWildcardRecord?.Content);
         var tunnels = await cloudflareTunnelService.ListTunnelsAsync(apiToken, account.Id, cancellationToken);
         var connectorStatus = await TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
-        var connectorTunnel = ResolveConnectorTunnel(tunnels, connectorStatus);
-        var tunnelBaseName = BuildEdgeTunnelBaseName(gatewayDomainName);
+        var tunnelBaseName = BuildEdgeTunnelBaseName(gatewayDomainName, gatewaySettings.TunnelInstanceId);
         var tunnelName = BuildUniqueEdgeTunnelName(tunnelBaseName, tunnels);
-        var tunnel = connectorTunnel;
+        var connectorTunnel = ResolveConnectorTunnel(tunnels, connectorStatus);
+        var tunnel = ResolveDesiredEdgeGatewayTunnel(tunnels, connectorTunnel, tunnelBaseName);
         if (tunnel is not null)
         {
-            steps.Add(connectorStatus?.IsRunning == true
-                ? $"Reused the local cloudflared connector tunnel {tunnel.Name}."
-                : $"Reused the local cloudflared connector tunnel {tunnel.Name}, but the service is not active.");
+            steps.Add(IsLocalConnectorTunnel(tunnel, connectorStatus)
+                ? connectorStatus?.IsRunning == true
+                    ? $"Local cloudflared already uses the LMS Edge Gateway tunnel {tunnel.Name}."
+                    : $"Local cloudflared already uses the LMS Edge Gateway tunnel {tunnel.Name}, but the service is not active."
+                : $"Reused Cloudflare Tunnel {tunnel.Name} for this LMS relay namespace.");
         }
 
-        if (tunnel is null && !string.IsNullOrWhiteSpace(existingTunnelId))
-        {
-            tunnel = tunnels.FirstOrDefault(item => item.Id.Equals(existingTunnelId, StringComparison.OrdinalIgnoreCase));
-            if (tunnel is not null)
-            {
-                steps.Add($"Reused Cloudflare Tunnel {tunnel.Name} from the existing relay DNS record.");
-            }
-        }
-
-        tunnel ??= tunnels.FirstOrDefault(item => item.Name.Equals(tunnelBaseName, StringComparison.OrdinalIgnoreCase) && !item.IsDeleted);
         if (tunnel is null)
         {
             tunnel = await cloudflareTunnelService.CreateTunnelAsync(apiToken, account.Id, tunnelName, cancellationToken);
             steps.Add($"Created Cloudflare Tunnel {tunnel.Name}.");
         }
-        else if (connectorTunnel is null && string.IsNullOrWhiteSpace(existingTunnelId))
+
+        var replaceExistingConnector = ShouldReplaceLocalCloudflaredConnector(connectorStatus, tunnel.Id);
+        if (replaceExistingConnector)
         {
-            steps.Add($"Reused Cloudflare Tunnel {tunnel.Name}.");
+            steps.Add(BuildCloudflaredReplacementStep(connectorStatus, tunnel.Name));
         }
 
         var dnsTarget = $"{tunnel.Id}.cfargotunnel.com";
@@ -513,6 +713,7 @@ public sealed class EdgeGatewayService(
             tunnel.Id,
             tunnel.Name,
             connectorStatus,
+            replaceExistingConnector,
             cancellationToken);
         if (!connectorResult.Succeeded)
         {
@@ -544,7 +745,8 @@ public sealed class EdgeGatewayService(
         CancellationToken cancellationToken = default)
     {
         var normalizedDomain = EdgeGatewayRouteValidator.NormalizeDomainName(domainName);
-        var gatewaySubdomain = await GetGatewaySubdomainAsync(cancellationToken);
+        var gatewaySettings = await GetGatewaySettingsAsync(cancellationToken);
+        var gatewaySubdomain = gatewaySettings.GatewaySubdomain;
         var gatewayDomainName = BuildGatewayDomainName(normalizedDomain, gatewaySubdomain);
         var wildcardHostname = $"*.{gatewayDomainName}";
         var steps = new List<string>();
@@ -580,47 +782,63 @@ public sealed class EdgeGatewayService(
         var records = await cloudflareDnsService.ListRecordsAsync(apiToken, zone.Id, cancellationToken);
         var relayRecord = records.FirstOrDefault(record => IsWildcardRecordForDomain(record, gatewayDomainName));
         var tunnelId = TryExtractTunnelIdFromDnsTarget(relayRecord?.Content);
-        if (relayRecord is not null)
+        if (relayRecord is null)
         {
-            await cloudflareDnsService.DeleteRecordAsync(apiToken, zone.Id, relayRecord.Id, cancellationToken);
-            steps.Add($"Deleted scoped wildcard DNS record {relayRecord.Name} -> {relayRecord.Content}.");
+            steps.Add($"No scoped wildcard DNS record was found for {wildcardHostname}.");
+            return new EdgeGatewayCloudflareRelayRemovalResult(
+                true,
+                false,
+                normalizedDomain,
+                gatewayDomainName,
+                wildcardHostname,
+                $"No Edge Gateway relay DNS record exists for {gatewayDomainName}.",
+                steps,
+                warnings);
+        }
+
+        var tunnels = await cloudflareTunnelService.ListTunnelsAsync(apiToken, account.Id, cancellationToken);
+        var tunnel = string.IsNullOrWhiteSpace(tunnelId)
+            ? null
+            : tunnels.FirstOrDefault(item => item.Id.Equals(tunnelId, StringComparison.OrdinalIgnoreCase));
+        var connectorStatus = await TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(tunnelId) &&
+            !IsRelayTunnelOwnedByThisLms(tunnel, gatewayDomainName, gatewaySettings.TunnelInstanceId, connectorStatus))
+        {
+            warnings.Add(tunnel is null
+                ? $"Cloudflare Tunnel {tunnelId} was not returned by the account."
+                : $"Cloudflare Tunnel {tunnel.Name} ({tunnel.Id}) is not owned by this LMS instance.");
+            warnings.Add($"Existing scoped wildcard DNS record: {relayRecord.Type} {relayRecord.Name} -> {relayRecord.Content}.");
+        }
+        else if (string.IsNullOrWhiteSpace(tunnelId))
+        {
+            warnings.Add($"Existing scoped wildcard DNS record does not point at a Cloudflare Tunnel target: {relayRecord.Type} {relayRecord.Name} -> {relayRecord.Content}.");
+        }
+
+        await cloudflareDnsService.DeleteRecordAsync(apiToken, zone.Id, relayRecord.Id, cancellationToken);
+        steps.Add($"Deleted scoped wildcard DNS record {relayRecord.Name} -> {relayRecord.Content}.");
+
+        if (tunnel is null)
+        {
+            warnings.Add("LMS could not remove tunnel ingress because the relay tunnel could not be identified from the DNS record.");
         }
         else
         {
-            steps.Add($"No scoped wildcard DNS record was found for {wildcardHostname}.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(tunnelId))
-        {
-            var tunnels = await cloudflareTunnelService.ListTunnelsAsync(apiToken, account.Id, cancellationToken);
-            var tunnel = tunnels.FirstOrDefault(item => item.Id.Equals(tunnelId, StringComparison.OrdinalIgnoreCase));
-            if (tunnel is null)
+            var configuration = await cloudflareTunnelService.GetConfigurationAsync(apiToken, account.Id, tunnel.Id, cancellationToken);
+            var updatedRoutes = RemoveWildcardTunnelRoute(configuration.Routes, wildcardHostname);
+            if (updatedRoutes.Count == configuration.Routes.Count)
             {
-                warnings.Add($"Cloudflare Tunnel {tunnelId} was not returned by the account, so LMS could not remove tunnel ingress.");
+                steps.Add($"No tunnel ingress matched {wildcardHostname}.");
             }
             else
             {
-                var configuration = await cloudflareTunnelService.GetConfigurationAsync(apiToken, account.Id, tunnel.Id, cancellationToken);
-                var updatedRoutes = RemoveWildcardTunnelRoute(configuration.Routes, wildcardHostname);
-                if (updatedRoutes.Count == configuration.Routes.Count)
-                {
-                    steps.Add($"No tunnel ingress matched {wildcardHostname}.");
-                }
-                else
-                {
-                    await cloudflareTunnelService.UpdateConfigurationAsync(
-                        apiToken,
-                        account.Id,
-                        tunnel.Id,
-                        new CloudflareTunnelConfiguration(updatedRoutes),
-                        cancellationToken);
-                    steps.Add($"Removed tunnel ingress for {wildcardHostname} from {tunnel.Name}.");
-                }
+                await cloudflareTunnelService.UpdateConfigurationAsync(
+                    apiToken,
+                    account.Id,
+                    tunnel.Id,
+                    new CloudflareTunnelConfiguration(updatedRoutes),
+                    cancellationToken);
+                steps.Add($"Removed tunnel ingress for {wildcardHostname} from {tunnel.Name}.");
             }
-        }
-        else if (relayRecord is not null)
-        {
-            warnings.Add($"Deleted DNS for {wildcardHostname}, but it did not point at a Cloudflare Tunnel target.");
         }
 
         return new EdgeGatewayCloudflareRelayRemovalResult(
@@ -644,7 +862,8 @@ public sealed class EdgeGatewayService(
         EdgeGatewayRouteValidator.ValidateRoute(route);
 
         var normalizedDomain = EdgeGatewayRouteValidator.NormalizeDomainName(route.DomainName);
-        var gatewaySubdomain = await GetGatewaySubdomainAsync(cancellationToken);
+        var gatewaySettings = await GetGatewaySettingsAsync(cancellationToken);
+        var gatewaySubdomain = gatewaySettings.GatewaySubdomain;
         var normalizedHostname = EdgeGatewayRouteValidator.NormalizeHostname(route.Hostname);
         var relativeHostname = ResolveRelativeHostname(normalizedHostname, normalizedDomain);
         var gatewayDomainName = BuildGatewayDomainName(normalizedDomain, gatewaySubdomain);
@@ -689,6 +908,7 @@ public sealed class EdgeGatewayService(
             zone,
             normalizedDomain,
             gatewaySubdomain,
+            gatewaySettings.TunnelInstanceId,
             replaceExistingDnsRecord,
             installConnector: true,
             cancellationToken);
@@ -840,7 +1060,8 @@ public sealed class EdgeGatewayService(
         var normalizedDomain = EdgeGatewayRouteValidator.NormalizeDomainName(domainName);
         var normalizedHostname = EdgeGatewayRouteValidator.NormalizeHostname(hostname);
         _ = ResolveRelativeHostname(normalizedHostname, normalizedDomain);
-        var gatewaySubdomain = await GetGatewaySubdomainAsync(cancellationToken);
+        var gatewaySettings = await GetGatewaySettingsAsync(cancellationToken);
+        var gatewaySubdomain = gatewaySettings.GatewaySubdomain;
         var steps = new List<string>();
         var warnings = new List<string>();
         var apiToken = await ResolveSavedCloudflareTokenAsync(cancellationToken);
@@ -864,6 +1085,7 @@ public sealed class EdgeGatewayService(
             zone,
             normalizedDomain,
             gatewaySubdomain,
+            gatewaySettings.TunnelInstanceId,
             replaceExistingDnsRecord: false,
             installConnector: true,
             cancellationToken);
@@ -1599,6 +1821,7 @@ public sealed class EdgeGatewayService(
         CloudflareZone zone,
         string normalizedDomain,
         string gatewaySubdomain,
+        string tunnelInstanceId,
         bool replaceExistingDnsRecord,
         bool installConnector,
         CancellationToken cancellationToken)
@@ -1610,38 +1833,31 @@ public sealed class EdgeGatewayService(
         var caddyServiceUrl = ResolveCaddyServiceUrl();
         var existingRecords = await cloudflareDnsService.ListRecordsAsync(apiToken, zone.Id, cancellationToken);
         var existingWildcardRecord = existingRecords.FirstOrDefault(record => IsWildcardRecordForDomain(record, gatewayDomainName));
-        var existingTunnelId = TryExtractTunnelIdFromDnsTarget(existingWildcardRecord?.Content);
         var tunnels = await cloudflareTunnelService.ListTunnelsAsync(apiToken, account.Id, cancellationToken);
         var connectorStatus = await TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
-        var connectorTunnel = ResolveConnectorTunnel(tunnels, connectorStatus);
-        var tunnelBaseName = BuildEdgeTunnelBaseName(gatewayDomainName);
+        var tunnelBaseName = BuildEdgeTunnelBaseName(gatewayDomainName, tunnelInstanceId);
         var tunnelName = BuildUniqueEdgeTunnelName(tunnelBaseName, tunnels);
-        var tunnel = connectorTunnel;
+        var connectorTunnel = ResolveConnectorTunnel(tunnels, connectorStatus);
+        var tunnel = ResolveDesiredEdgeGatewayTunnel(tunnels, connectorTunnel, tunnelBaseName);
         if (tunnel is not null)
         {
-            steps.Add(connectorStatus?.IsRunning == true
-                ? $"Reused the local cloudflared connector tunnel {tunnel.Name}."
-                : $"Reused the local cloudflared connector tunnel {tunnel.Name}, but the service is not active.");
+            steps.Add(IsLocalConnectorTunnel(tunnel, connectorStatus)
+                ? connectorStatus?.IsRunning == true
+                    ? $"Local cloudflared already uses the LMS Edge Gateway tunnel {tunnel.Name}."
+                    : $"Local cloudflared already uses the LMS Edge Gateway tunnel {tunnel.Name}, but the service is not active."
+                : $"Reused Cloudflare Tunnel {tunnel.Name} for this LMS relay namespace.");
         }
 
-        if (tunnel is null && !string.IsNullOrWhiteSpace(existingTunnelId))
-        {
-            tunnel = tunnels.FirstOrDefault(item => item.Id.Equals(existingTunnelId, StringComparison.OrdinalIgnoreCase));
-            if (tunnel is not null)
-            {
-                steps.Add($"Reused Cloudflare Tunnel {tunnel.Name} from the existing relay DNS record.");
-            }
-        }
-
-        tunnel ??= tunnels.FirstOrDefault(item => item.Name.Equals(tunnelBaseName, StringComparison.OrdinalIgnoreCase) && !item.IsDeleted);
         if (tunnel is null)
         {
             tunnel = await cloudflareTunnelService.CreateTunnelAsync(apiToken, account.Id, tunnelName, cancellationToken);
             steps.Add($"Created Cloudflare Tunnel {tunnel.Name}.");
         }
-        else if (connectorTunnel is null && string.IsNullOrWhiteSpace(existingTunnelId))
+
+        var replaceExistingConnector = ShouldReplaceLocalCloudflaredConnector(connectorStatus, tunnel.Id);
+        if (installConnector && replaceExistingConnector)
         {
-            steps.Add($"Reused Cloudflare Tunnel {tunnel.Name}.");
+            steps.Add(BuildCloudflaredReplacementStep(connectorStatus, tunnel.Name));
         }
 
         var dnsTarget = $"{tunnel.Id}.cfargotunnel.com";
@@ -1719,6 +1935,7 @@ public sealed class EdgeGatewayService(
                 tunnel.Id,
                 tunnel.Name,
                 connectorStatus,
+                replaceExistingConnector,
                 cancellationToken);
             connectorSucceeded = connectorResult.Succeeded;
             if (!connectorResult.Succeeded)
@@ -1745,26 +1962,70 @@ public sealed class EdgeGatewayService(
     }
 
     private async Task<string> GetGatewaySubdomainAsync(CancellationToken cancellationToken) =>
-        NormalizeGatewaySubdomain((await settingsStore.GetAsync(cancellationToken)).GatewaySubdomain);
+        (await GetGatewaySettingsAsync(cancellationToken)).GatewaySubdomain;
 
-    private static string BuildGatewayDomainName(string zoneDomainName, string gatewaySubdomain) =>
-        EdgeGatewayRouteValidator.NormalizeDomainName(
-            $"{NormalizeGatewaySubdomain(gatewaySubdomain)}.{EdgeGatewayRouteValidator.NormalizeDomainName(zoneDomainName)}");
+    private async Task<EdgeGatewaySettings> GetGatewaySettingsAsync(CancellationToken cancellationToken)
+    {
+        var settings = await settingsStore.GetAsync(cancellationToken);
+        var gatewaySubdomain = NormalizeGatewaySubdomain(settings.GatewaySubdomain);
+        var tunnelInstanceId = NormalizeTunnelInstanceId(settings.TunnelInstanceId);
+        if (settings.GatewaySubdomain == gatewaySubdomain &&
+            settings.TunnelInstanceId == tunnelInstanceId)
+        {
+            return settings;
+        }
+
+        var updated = settings with
+        {
+            GatewaySubdomain = gatewaySubdomain,
+            TunnelInstanceId = tunnelInstanceId,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        await settingsStore.SaveAsync(updated, cancellationToken);
+        return updated;
+    }
+
+    private static string BuildGatewayDomainName(string zoneDomainName, string gatewaySubdomain)
+    {
+        var normalizedZoneDomain = EdgeGatewayRouteValidator.NormalizeDomainName(zoneDomainName);
+        var normalizedNamespace = NormalizeGatewaySubdomain(gatewaySubdomain);
+        if (normalizedNamespace.Equals(normalizedZoneDomain, StringComparison.OrdinalIgnoreCase) ||
+            normalizedNamespace.EndsWith($".{normalizedZoneDomain}", StringComparison.OrdinalIgnoreCase))
+        {
+            return EdgeGatewayRouteValidator.NormalizeDomainName(normalizedNamespace);
+        }
+
+        if (normalizedNamespace.Contains('.', StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Edge Gateway relay namespace {normalizedNamespace} is outside Cloudflare zone {normalizedZoneDomain}. Enter a single label such as relay or a hostname under {normalizedZoneDomain}.");
+        }
+
+        return EdgeGatewayRouteValidator.NormalizeDomainName($"{normalizedNamespace}.{normalizedZoneDomain}");
+    }
 
     private static string NormalizeGatewaySubdomain(string? gatewaySubdomain)
     {
         var value = string.IsNullOrWhiteSpace(gatewaySubdomain)
-            ? "relay"
-            : gatewaySubdomain.Trim().Trim('.').ToLowerInvariant();
+            ? EdgeGatewayDefaultNamespace.BuildForMachineName(Environment.MachineName)
+            : gatewaySubdomain.Trim().TrimEnd('.').ToLowerInvariant();
+        if (value.StartsWith("*.", StringComparison.Ordinal))
+        {
+            value = value[2..];
+        }
+
+        value = value.Trim('.');
         if (value.Contains('*') ||
             value.Contains('/') ||
             value.Contains('\\') ||
             value.Contains(' '))
         {
-            throw new InvalidOperationException("Edge Gateway subdomain must be a hostname prefix such as relay.");
+            throw new InvalidOperationException("Edge Gateway relay namespace must be a DNS label such as lms-host-relay, or a hostname under the selected Cloudflare zone.");
         }
 
-        _ = EdgeGatewayRouteValidator.NormalizeDomainName($"{value}.example.test");
+        _ = value.Contains('.', StringComparison.Ordinal)
+            ? EdgeGatewayRouteValidator.NormalizeDomainName(value)
+            : EdgeGatewayRouteValidator.NormalizeHostname($"{value}.example.test");
         return value;
     }
 
@@ -1792,7 +2053,7 @@ public sealed class EdgeGatewayService(
         return $"{baseName}-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
     }
 
-    private string BuildEdgeTunnelBaseName(string domainName)
+    private string BuildEdgeTunnelBaseName(string domainName, string tunnelInstanceId)
     {
         var slug = string.Concat(
                 domainName
@@ -1809,7 +2070,75 @@ public sealed class EdgeGatewayService(
         var prefix = string.IsNullOrWhiteSpace(cloudflareOptions.ManagedTunnelNamePrefix)
             ? "linux-made-sane"
             : cloudflareOptions.ManagedTunnelNamePrefix.Trim();
-        return $"{prefix}-edge-{slug[..Math.Min(slug.Length, 32)]}";
+        var instanceSlug = BuildTunnelInstanceSlug(tunnelInstanceId);
+        return $"{prefix}-edge-{slug[..Math.Min(slug.Length, 32)]}-{instanceSlug}";
+    }
+
+    private bool IsRelayTunnelOwnedByThisLms(
+        CloudflareTunnel? tunnel,
+        string gatewayDomainName,
+        string tunnelInstanceId,
+        CloudflaredConnectorStatus? connectorStatus) =>
+        tunnel is not null &&
+        !tunnel.IsDeleted &&
+        (tunnel.Name.Equals(BuildEdgeTunnelBaseName(gatewayDomainName, tunnelInstanceId), StringComparison.OrdinalIgnoreCase) ||
+         IsLocalConnectorTunnel(tunnel, connectorStatus));
+
+    private static bool IsLocalConnectorTunnel(
+        CloudflareTunnel tunnel,
+        CloudflaredConnectorStatus? connectorStatus) =>
+        connectorStatus is { IsInstalled: true } &&
+        !string.IsNullOrWhiteSpace(connectorStatus.TunnelId) &&
+        tunnel.Id.Equals(connectorStatus.TunnelId, StringComparison.OrdinalIgnoreCase);
+
+    private static CloudflareTunnel? ResolveDesiredEdgeGatewayTunnel(
+        IReadOnlyList<CloudflareTunnel> tunnels,
+        CloudflareTunnel? connectorTunnel,
+        string tunnelBaseName)
+    {
+        if (connectorTunnel is not null)
+        {
+            return connectorTunnel;
+        }
+
+        return tunnels.FirstOrDefault(tunnel =>
+            !tunnel.IsDeleted &&
+            tunnel.Name.Equals(tunnelBaseName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool ShouldReplaceLocalCloudflaredConnector(
+        CloudflaredConnectorStatus? connectorStatus,
+        string desiredTunnelId) =>
+        connectorStatus is { IsInstalled: true } &&
+        (string.IsNullOrWhiteSpace(connectorStatus.TunnelId) ||
+         !connectorStatus.TunnelId.Equals(desiredTunnelId, StringComparison.OrdinalIgnoreCase));
+
+    private static string BuildCloudflaredReplacementStep(
+        CloudflaredConnectorStatus? connectorStatus,
+        string tunnelName)
+    {
+        if (connectorStatus is not { IsInstalled: true })
+        {
+            return $"LMS will install cloudflared for Edge Gateway tunnel {tunnelName}.";
+        }
+
+        return string.IsNullOrWhiteSpace(connectorStatus.TunnelId)
+            ? $"Local cloudflared is already installed without a readable tunnel id; LMS will replace it with Edge Gateway tunnel {tunnelName}."
+            : $"Local cloudflared is attached to tunnel {connectorStatus.TunnelId}; LMS will replace it with Edge Gateway tunnel {tunnelName}.";
+    }
+
+    private static string NormalizeTunnelInstanceId(string? tunnelInstanceId)
+    {
+        var normalized = string.Concat((tunnelInstanceId ?? string.Empty)
+            .Where(static character => char.IsLetterOrDigit(character)))
+            .ToLowerInvariant();
+        return normalized.Length >= 8 ? normalized : Guid.NewGuid().ToString("N");
+    }
+
+    private static string BuildTunnelInstanceSlug(string tunnelInstanceId)
+    {
+        var normalized = NormalizeTunnelInstanceId(tunnelInstanceId);
+        return normalized[..Math.Min(normalized.Length, 12)];
     }
 
     private static CloudflareAccount? ResolveCloudflareAccount(
@@ -1857,6 +2186,51 @@ public sealed class EdgeGatewayService(
         record.Type.Equals("CNAME", StringComparison.OrdinalIgnoreCase) &&
         record.Content.Trim().TrimEnd('.').Equals(dnsTarget.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase);
 
+    private bool IsResettableEdgeGatewayDnsRecord(
+        CloudflareDnsRecord record,
+        ISet<string> routeHostnames,
+        ISet<string> routeRelayHostnames,
+        ISet<string> ownedTunnelDnsTargets)
+    {
+        if (!IsManagedCloudflareDnsRecord(record))
+        {
+            return false;
+        }
+
+        var name = NormalizeDnsHostname(record.Name);
+        var content = NormalizeDnsHostname(record.Content);
+        return ownedTunnelDnsTargets.Contains(content) ||
+               (routeHostnames.Contains(name) && routeRelayHostnames.Contains(content));
+    }
+
+    private static bool IsDnsRecordInRelayNamespace(CloudflareDnsRecord record, string gatewayDomainName) =>
+        IsWildcardRecordForDomain(record, gatewayDomainName) ||
+        IsHostnameInsideDomain(record.Name, gatewayDomainName);
+
+    private static bool IsDnsRecordPointingIntoRelayNamespace(CloudflareDnsRecord record, string gatewayDomainName) =>
+        record.Type.Equals("CNAME", StringComparison.OrdinalIgnoreCase) &&
+        IsHostnameInsideDomain(record.Content, gatewayDomainName);
+
+    private static bool IsHostnameInsideDomain(string? hostname, string domainName)
+    {
+        var normalizedHostname = NormalizeDnsHostname(hostname);
+        if (string.IsNullOrWhiteSpace(normalizedHostname))
+        {
+            return false;
+        }
+
+        var normalizedDomain = NormalizeDnsHostname(domainName);
+        return normalizedHostname.Equals(normalizedDomain, StringComparison.OrdinalIgnoreCase) ||
+               normalizedHostname.EndsWith($".{normalizedDomain}", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeDnsHostname(string? hostname) =>
+        (hostname ?? string.Empty).Trim().TrimEnd('.');
+
+    private bool IsManagedCloudflareDnsRecord(CloudflareDnsRecord record) =>
+        !string.IsNullOrWhiteSpace(record.Comment) &&
+        record.Comment.Contains(cloudflareOptions.ManagedRecordComment, StringComparison.OrdinalIgnoreCase);
+
     private static string? TryExtractTunnelIdFromDnsTarget(string? dnsTarget)
     {
         if (string.IsNullOrWhiteSpace(dnsTarget) ||
@@ -1890,6 +2264,22 @@ public sealed class EdgeGatewayService(
         var routes = existingRoutes
             .Where(route => string.IsNullOrWhiteSpace(route.Hostname) ||
                             !route.Hostname.Equals(wildcardHostname, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (routes.All(static route => !string.IsNullOrWhiteSpace(route.Hostname)))
+        {
+            routes.Add(new CloudflareTunnelRoute(string.Empty, "http_status:404"));
+        }
+
+        return routes;
+    }
+
+    private static IReadOnlyList<CloudflareTunnelRoute> RemoveTunnelRoutes(
+        IReadOnlyList<CloudflareTunnelRoute> existingRoutes,
+        ISet<string> hostnames)
+    {
+        var routes = existingRoutes
+            .Where(route => string.IsNullOrWhiteSpace(route.Hostname) ||
+                            !hostnames.Contains(route.Hostname.Trim().TrimEnd('.')))
             .ToList();
         if (routes.All(static route => !string.IsNullOrWhiteSpace(route.Hostname)))
         {
@@ -1953,6 +2343,7 @@ public sealed class EdgeGatewayService(
         string tunnelId,
         string tunnelName,
         CloudflaredConnectorStatus? connectorStatus,
+        bool replaceExistingConnector,
         CancellationToken cancellationToken)
     {
         if (connectorStatus is { IsInstalled: true })
@@ -1968,11 +2359,64 @@ public sealed class EdgeGatewayService(
                 return await TryStartLocalCloudflaredServiceAsync(tunnelName, cancellationToken);
             }
 
+            if (replaceExistingConnector)
+            {
+                var replacement = await ReplaceLocalCloudflaredConnectorAsync(
+                    apiToken,
+                    accountId,
+                    tunnelId,
+                    connectorStatus.TunnelId,
+                    cancellationToken);
+                return replacement.Succeeded
+                    ? replacement with { Summary = $"Replaced existing cloudflared connector with LMS Edge Gateway tunnel {tunnelName}." }
+                    : replacement;
+            }
+
             return new CloudflaredInstallAttempt(
                 false,
                 string.IsNullOrWhiteSpace(connectorStatus.TunnelId)
                     ? "cloudflared is already installed on this LMS host, so Edge Gateway did not attempt a second service install."
                     : $"cloudflared is already installed for tunnel {connectorStatus.TunnelId}. Edge Gateway must reuse that tunnel or the public hostname will return Cloudflare 1033.");
+        }
+
+        return await TryInstallLocalCloudflaredConnectorAsync(apiToken, accountId, tunnelId, cancellationToken);
+    }
+
+    private async Task<CloudflaredInstallAttempt> ReplaceLocalCloudflaredConnectorAsync(
+        string apiToken,
+        string accountId,
+        string tunnelId,
+        string? previousTunnelId,
+        CancellationToken cancellationToken)
+    {
+        var script = string.Join(
+            '\n',
+            [
+                "sudo systemctl stop cloudflared.service >/dev/null 2>&1 || true",
+                "if command -v cloudflared >/dev/null 2>&1; then",
+                "  sudo cloudflared service uninstall >/dev/null 2>&1 || true",
+                "fi",
+                "sudo systemctl daemon-reload >/dev/null 2>&1 || true"
+            ]);
+
+        try
+        {
+            var result = await commandExecutionService.ExecuteAsync(
+                AiLocalMachine.CreateManagedHost(),
+                WrapShellCommand(script),
+                cancellationToken: cancellationToken);
+            if (!result.IsSuccess)
+            {
+                return new CloudflaredInstallAttempt(
+                    false,
+                    $"cloudflared is installed for tunnel {previousTunnelId ?? "unknown"}, but LMS could not remove the legacy service: {FirstNonEmpty(result.StandardError, result.StandardOutput, $"exit {result.ExitCode}")}");
+            }
+        }
+        catch (Exception exception)
+        {
+            return new CloudflaredInstallAttempt(
+                false,
+                $"cloudflared is installed for tunnel {previousTunnelId ?? "unknown"}, but LMS could not remove the legacy service: {exception.Message}");
         }
 
         return await TryInstallLocalCloudflaredConnectorAsync(apiToken, accountId, tunnelId, cancellationToken);

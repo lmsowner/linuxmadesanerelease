@@ -6,7 +6,8 @@ namespace LinuxMadeSane.Infrastructure.Persistence.Entities;
 public sealed class EdgeGatewaySettingsEntity
 {
     public int Id { get; set; }
-    public string GatewaySubdomain { get; set; } = "relay";
+    public string GatewaySubdomain { get; set; } = string.Empty;
+    public string TunnelInstanceId { get; set; } = string.Empty;
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }

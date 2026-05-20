@@ -184,16 +184,17 @@ public sealed class SshSftpFileBrowsingService(
         var buffer = new byte[safeMaxBytes];
         var bytesRead = stream.Read(buffer, 0, buffer.Length);
         var isTruncated = attributes.Size > bytesRead;
-        var content = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+        var decoded = TextFileEncoding.Decode(buffer.AsSpan(0, bytesRead));
 
         client.Disconnect();
 
         return new SftpFileContent(
             normalizedPath,
-            content,
+            decoded.Content,
             attributes.Size,
             attributes.LastWriteTimeUtc == DateTime.MinValue ? null : new DateTimeOffset(attributes.LastWriteTimeUtc, TimeSpan.Zero),
-            isTruncated);
+            isTruncated,
+            decoded.EncodingName);
     }
 
     public async Task<SftpBinaryFileContent> ReadBinaryFileAsync(
@@ -320,6 +321,7 @@ public sealed class SshSftpFileBrowsingService(
         string? privateKeyPassphrase,
         bool preferStoredCredentials,
         bool createDirectories,
+        string? encodingName = null,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -333,7 +335,7 @@ public sealed class SshSftpFileBrowsingService(
             EnsureDirectoryExists(client, GetDirectoryName(normalizedPath));
         }
 
-        var bytes = Encoding.UTF8.GetBytes(content);
+        var bytes = TextFileEncoding.Encode(content, encodingName);
         using (var stream = client.OpenWrite(normalizedPath))
         {
             stream.SetLength(0);

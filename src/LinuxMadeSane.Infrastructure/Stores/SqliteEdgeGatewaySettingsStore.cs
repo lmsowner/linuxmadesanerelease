@@ -3,13 +3,16 @@
 
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models.EdgeGateway;
+using LinuxMadeSane.Application.Contracts.EdgeGateway;
 using LinuxMadeSane.Infrastructure.Persistence;
 using LinuxMadeSane.Infrastructure.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace LinuxMadeSane.Infrastructure.Stores;
 
-public sealed class SqliteEdgeGatewaySettingsStore(LinuxMadeSaneDbContext dbContext) : IEdgeGatewaySettingsStore
+public sealed class SqliteEdgeGatewaySettingsStore(
+    LinuxMadeSaneDbContext dbContext,
+    EdgeGatewayOptions options) : IEdgeGatewaySettingsStore
 {
     private const int SettingsRowId = 1;
 
@@ -24,7 +27,8 @@ public sealed class SqliteEdgeGatewaySettingsStore(LinuxMadeSaneDbContext dbCont
         }
 
         var now = DateTimeOffset.UtcNow;
-        return new EdgeGatewaySettings(SettingsRowId, "relay", now, now);
+        var configuredDefault = EdgeGatewayDefaultNamespace.ResolveConfiguredDefault(options.GatewaySubdomain);
+        return new EdgeGatewaySettings(SettingsRowId, configuredDefault, string.Empty, now, now);
     }
 
     public async Task SaveAsync(EdgeGatewaySettings settings, CancellationToken cancellationToken = default)
@@ -37,6 +41,7 @@ public sealed class SqliteEdgeGatewaySettingsStore(LinuxMadeSaneDbContext dbCont
             {
                 Id = SettingsRowId,
                 GatewaySubdomain = settings.GatewaySubdomain,
+                TunnelInstanceId = settings.TunnelInstanceId,
                 CreatedAtUtc = settings.CreatedAtUtc,
                 UpdatedAtUtc = settings.UpdatedAtUtc
             });
@@ -44,6 +49,7 @@ public sealed class SqliteEdgeGatewaySettingsStore(LinuxMadeSaneDbContext dbCont
         else
         {
             entity.GatewaySubdomain = settings.GatewaySubdomain;
+            entity.TunnelInstanceId = settings.TunnelInstanceId;
             entity.UpdatedAtUtc = settings.UpdatedAtUtc;
         }
 
@@ -51,5 +57,5 @@ public sealed class SqliteEdgeGatewaySettingsStore(LinuxMadeSaneDbContext dbCont
     }
 
     private static EdgeGatewaySettings Map(EdgeGatewaySettingsEntity entity) =>
-        new(entity.Id, entity.GatewaySubdomain, entity.CreatedAtUtc, entity.UpdatedAtUtc);
+        new(entity.Id, entity.GatewaySubdomain, entity.TunnelInstanceId, entity.CreatedAtUtc, entity.UpdatedAtUtc);
 }

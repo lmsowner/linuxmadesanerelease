@@ -14,4 +14,8 @@ public sealed record EdgeGatewayCloudflareDomainOption(
     bool IsSavedDefault,
     bool RelayConfigured,
     string RelayDnsTarget,
-    bool RelayUsesCloudflareTunnel);
+    bool RelayUsesCloudflareTunnel,
+    string RelayTunnelId,
+    string RelayTunnelName,
+    bool RelayOwnedByThisLms,
+    string RelayOwnershipSummary);

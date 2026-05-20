@@ -287,34 +287,50 @@ else
                             <div class="table-header">
                                 <div>
                                     <p class="eyebrow">Integrations</p>
-                                    <h2>External access and service publishing</h2>
+                                    <h2>Edge Gateway publishing</h2>
+                                    <p class="meta-text">@BuildHostIntegrationsSummary()</p>
                                 </div>
                             </div>
 
-                            <TabControl ActiveValue="@activeIntegrationTab"
-                                        ActiveValueChanged="HandleIntegrationTabChangedAsync"
-                                        Class="integration-tab-control"
-                                        PanelClass="integration-tab-panel">
-                                <ChildContent>
-                                    @if (details.Capabilities.SupportsCaddyIntegration)
+                            <div class="host-edge-gateway-card">
+                                <div>
+                                    <p class="eyebrow">Managed edge runtime</p>
+                                    <h3>Caddy and Cloudflare are configured from Edge Gateway</h3>
+                                    <p class="meta-text">LMS owns the Cloudflare token, relay namespace, tunnel connector, Caddy routes, and published app records from one place.</p>
+                                </div>
+                                <div class="host-edge-gateway-actions">
+                                    @if (details.Capabilities.IsLocalLmsHost)
                                     {
-                                        <TabPage Value="@CaddyTabValue" Title="Caddy">
-                                            <ChildContent>
-                                                <CaddyIntegrationWorkspace HostId="@HostId" @key="HostId" />
-                                            </ChildContent>
-                                        </TabPage>
+                                        <UiCommandButton Label="Open Edge Gateway"
+                                                         Glyph="UiIconGlyph.Connect"
+                                                         Href="/edge-gateway" />
                                     }
-
-                                    @if (details.Capabilities.SupportsCloudflarePublishing)
+                                    else if (CanConnectToRemoteLmsHost)
                                     {
-                                        <TabPage Value="@CloudflareTabValue" Title="Cloudflare">
-                                            <ChildContent>
-                                                <CloudflareExposeServicePage HostId="@HostId" />
-                                            </ChildContent>
-                                        </TabPage>
+                                        @if (CanOpenRemoteLmsDirectly)
+                                        {
+                                            <UiCommandButton Label="Open remote Edge Gateway"
+                                                             Glyph="UiIconGlyph.Connect"
+                                                             Href="@BuildDirectLmsEdgeGatewayUrl(details.Host)"
+                                                             Target="_blank"
+                                                             Rel="noreferrer" />
+                                        }
+                                        else
+                                        {
+                                            <UiCommandButton Label="Open remote Edge Gateway"
+                                                             Glyph="UiIconGlyph.Connect"
+                                                             Disabled="@(!CanRunRemoteLmsTunnel || isRemoteLmsConnectBusy)"
+                                                             OnClick="@(() => ConnectToRemoteLmsAsync("/edge-gateway"))" />
+                                        }
                                     }
-                                </ChildContent>
-                            </TabControl>
+                                    else
+                                    {
+                                        <UiCommandButton Label="Open local Edge Gateway"
+                                                         Glyph="UiIconGlyph.Connect"
+                                                         Href="/edge-gateway" />
+                                    }
+                                </div>
+                            </div>
                         </section>
                     </ChildContent>
                 </TabPage>
@@ -326,8 +342,6 @@ else
 @code {
     private const string OverviewTabValue = "overview";
     private const string IntegrationsTabValue = "integrations";
-    private const string CaddyTabValue = "caddy";
-    private const string CloudflareTabValue = "cloudflare";
 
     [Parameter]
     public Guid HostId { get; set; }
@@ -343,7 +357,6 @@ else
 
     private ManagedHostDetailsViewModel? details;
     private string activeTab = OverviewTabValue;
-    private string activeIntegrationTab = CaddyTabValue;
     private ManagedHostLmsInstallOptions lmsInstallOptions = new();
     private ManagedHostLmsUninstallOptions lmsUninstallOptions = new();
     private ManagedHostLmsInstallResult? lmsInstallResult;
@@ -412,6 +425,9 @@ else
     private static string BuildDirectLmsAiSetupUrl(ManagedHost host) =>
         BuildDirectLmsUrl(host, "/ai/engine");
 
+    private static string BuildDirectLmsEdgeGatewayUrl(ManagedHost host) =>
+        BuildDirectLmsUrl(host, "/edge-gateway");
+
     private static string BuildDirectLmsUrl(ManagedHost host, string path)
     {
         var endpoint = host.Hostname.Trim();
@@ -429,6 +445,26 @@ else
 
     private bool ShouldShowLmsInstallPanel =>
         !isBackgroundLmsUpdate && (showLmsInstallPrompt || isInstallingLms || lmsInstallResult is not null);
+
+    private string BuildHostIntegrationsSummary()
+    {
+        if (details is null)
+        {
+            return string.Empty;
+        }
+
+        if (details.Capabilities.IsLocalLmsHost)
+        {
+            return "Configure the local Cloudflare token, relay namespace, Caddy routing, and published apps in Edge Gateway.";
+        }
+
+        if (details.Capabilities.IsLmsHost)
+        {
+            return "Open this remote LMS instance and configure its Cloudflare token, relay namespace, Caddy routing, and published apps there.";
+        }
+
+        return "Use the LMS Edge Gateway page to publish services from this SSH host. Caddy and Cloudflare are no longer configured separately here.";
+    }
 
     private string LmsOperationEyebrow => isLmsUninstallMode
         ? "Host uninstall"
@@ -514,12 +550,6 @@ else
         if (details is null)
         {
             return;
-        }
-
-        if (!details.Capabilities.SupportsCaddyIntegration &&
-            string.Equals(activeIntegrationTab, CaddyTabValue, StringComparison.Ordinal))
-        {
-            activeIntegrationTab = CloudflareTabValue;
         }
 
         remoteLmsWebAccess = details.Capabilities is { IsLmsHost: true, IsLocalLmsHost: false }
@@ -790,16 +820,6 @@ else
     private Task HandleTabChangedAsync(string? value)
     {
         activeTab = string.IsNullOrWhiteSpace(value) ? OverviewTabValue : value;
-        return Task.CompletedTask;
-    }
-
-    private Task HandleIntegrationTabChangedAsync(string? value)
-    {
-        activeIntegrationTab = string.IsNullOrWhiteSpace(value)
-            ? details?.Capabilities.SupportsCaddyIntegration == true
-                ? CaddyTabValue
-                : CloudflareTabValue
-            : value;
         return Task.CompletedTask;
     }
 

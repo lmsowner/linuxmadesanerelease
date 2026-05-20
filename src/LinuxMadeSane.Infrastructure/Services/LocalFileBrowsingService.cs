@@ -98,14 +98,15 @@ public sealed class LocalFileBrowsingService(
         await using var stream = fileInfo.OpenRead();
         var buffer = new byte[safeMaxBytes];
         var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
-        var content = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+        var decoded = TextFileEncoding.Decode(buffer.AsSpan(0, bytesRead));
 
         return new SftpFileContent(
             normalizedPath,
-            content,
+            decoded.Content,
             fileInfo.Length,
             fileInfo.LastWriteTimeUtc == DateTime.MinValue ? null : new DateTimeOffset(fileInfo.LastWriteTimeUtc, TimeSpan.Zero),
-            fileInfo.Length > bytesRead);
+            fileInfo.Length > bytesRead,
+            decoded.EncodingName);
     }
 
     public async Task<SftpBinaryFileContent> ReadBinaryFileAsync(
@@ -194,6 +195,7 @@ public sealed class LocalFileBrowsingService(
         string path,
         string content,
         bool createDirectories,
+        string? encodingName = null,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -212,9 +214,10 @@ public sealed class LocalFileBrowsingService(
             }
         }
 
-        await File.WriteAllTextAsync(normalizedPath, content, cancellationToken);
+        var bytes = TextFileEncoding.Encode(content, encodingName);
+        await File.WriteAllBytesAsync(normalizedPath, bytes, cancellationToken);
 
-        return new SftpWriteResult(normalizedPath, Encoding.UTF8.GetByteCount(content), DateTimeOffset.UtcNow);
+        return new SftpWriteResult(normalizedPath, bytes.Length, DateTimeOffset.UtcNow);
     }
 
     public Task<string> CreateDirectoryAsync(

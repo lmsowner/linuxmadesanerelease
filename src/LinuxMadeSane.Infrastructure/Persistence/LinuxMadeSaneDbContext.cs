@@ -368,7 +368,8 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
         {
             entity.ToTable("edge_gateway_settings");
             entity.HasKey(settings => settings.Id);
-            entity.Property(settings => settings.GatewaySubdomain).HasMaxLength(63);
+            entity.Property(settings => settings.GatewaySubdomain).HasMaxLength(253);
+            entity.Property(settings => settings.TunnelInstanceId).HasMaxLength(64);
         });
 
         modelBuilder.Entity<MessagingEmailSettingsEntity>(entity =>

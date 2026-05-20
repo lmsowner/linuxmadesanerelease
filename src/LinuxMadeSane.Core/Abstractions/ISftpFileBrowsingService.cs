@@ -84,6 +84,7 @@ public interface ISftpFileBrowsingService
         string? privateKeyPassphrase,
         bool preferStoredCredentials,
         bool createDirectories,
+        string? encodingName = null,
         CancellationToken cancellationToken = default);
 
     Task<string> CreateDirectoryAsync(

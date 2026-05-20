@@ -8,11 +8,22 @@
 <div class="@ShellClass" @attributes="AdditionalAttributes">
     <label class="ui-checkbox-hit">
         <span class="ui-checkbox-control">
-            <InputCheckbox Value="@Value"
-                           ValueChanged="@ValueChanged"
-                           ValueExpression="@ValueExpression"
-                           class="ui-checkbox-input"
-                           disabled="@Disabled" />
+            @if (ValueExpression is not null)
+            {
+                <InputCheckbox Value="@Value"
+                               ValueChanged="@ValueChanged"
+                               ValueExpression="@ValueExpression"
+                               class="ui-checkbox-input"
+                               disabled="@Disabled" />
+            }
+            else
+            {
+                <input type="checkbox"
+                       checked="@Value"
+                       class="ui-checkbox-input"
+                       disabled="@Disabled"
+                       @onchange="HandleChangedAsync" />
+            }
             <span class="ui-checkbox-box" aria-hidden="true">
                 <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M2.2 6.2 4.8 8.7 9.8 3.5" />
@@ -52,6 +63,19 @@
     [CascadingParameter] private EditContext? CurrentEditContext { get; set; }
 
     private string ShellClass => string.Join(" ", GetClasses().Where(static value => !string.IsNullOrWhiteSpace(value)));
+
+    private Task HandleChangedAsync(ChangeEventArgs args)
+    {
+        var nextValue = args.Value switch
+        {
+            bool value => value,
+            string value => value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                            value.Equals("on", StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
+
+        return ValueChanged.InvokeAsync(nextValue);
+    }
 
     private IEnumerable<string?> GetClasses()
     {
