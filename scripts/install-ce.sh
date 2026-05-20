@@ -80,6 +80,26 @@ CURRENT_DIR="$INSTALL_ROOT_ABS/current"
 ENV_FILE="$CONFIG_ROOT_ABS/service.env"
 UNIT_FILE="$SYSTEMD_ROOT_ABS/$SERVICE_UNIT"
 EXECUTABLE_PATH="$CURRENT_DIR/LinuxMadeSane.Web"
+PREVIOUS_CURRENT_TARGET="$(lms_current_release_target "$CURRENT_DIR")"
+SERVICE_WAS_ACTIVE=false
+if lms_systemctl_is_active "$SERVICE_UNIT"; then
+  SERVICE_WAS_ACTIVE=true
+fi
+ROLLBACK_ARMED=false
+
+rollback_failed_install() {
+  local exit_code="$?"
+  [[ "$ROLLBACK_ARMED" == "true" ]] || exit "$exit_code"
+
+  ROLLBACK_ARMED=false
+  local restart_previous="$START_SERVICE"
+  if [[ "$SERVICE_WAS_ACTIVE" == "true" ]]; then
+    restart_previous=true
+  fi
+
+  lms_rollback_current_release "$CURRENT_DIR" "$SERVICE_UNIT" "$PREVIOUS_CURRENT_TARGET" "$restart_previous"
+  exit "$exit_code"
+}
 
 mkdir -p "$RELEASE_DIR" "$DATA_ROOT_ABS" "$CONFIG_ROOT_ABS" "$SYSTEMD_ROOT_ABS"
 
@@ -95,6 +115,9 @@ if lms_is_truthy "$CONFIGURE_LOCAL_SSH"; then
 fi
 
 lms_detect_installer_identity
+
+ROLLBACK_ARMED=true
+trap rollback_failed_install ERR
 
 cp -a "$APP_SOURCE"/. "$RELEASE_DIR"/
 ln -sfn "$RELEASE_DIR" "$CURRENT_DIR"
@@ -144,6 +167,9 @@ lms_maybe_systemctl_enable "$SERVICE_UNIT"
 if [[ "$START_SERVICE" == "true" ]]; then
   lms_maybe_systemctl_restart "$SERVICE_UNIT"
 fi
+
+ROLLBACK_ARMED=false
+trap - ERR
 
 lms_log "CE install complete"
 printf 'version: %s\nservice unit: %s\ninstall root: %s\ndata root: %s\nconfig file: %s\nport: %s\n' \

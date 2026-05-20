@@ -367,18 +367,67 @@ public sealed class ApplicationUpdateService(
         }
 
         var installScriptUrl = NormalizeAbsoluteUrl(options.InstallScriptUrl, "https://www.linuxmadesane.com/install.sh");
-        var installCommand = $"curl -fsSL {ShellQuote(installScriptUrl)} | env LMS_SOURCE=lms-auto-update bash -s -- --install";
         if (OperatingSystem.IsLinux() &&
             Directory.Exists("/run/systemd/system") &&
             (File.Exists("/usr/bin/systemd-run") || File.Exists("/bin/systemd-run")))
         {
             var sudoPrefix = isRoot ? string.Empty : "sudo -n ";
+            var detachedInstallCommand = BuildPublicInstallerFallbackScript(installScriptUrl, runsAsRoot: true);
             var unitName = $"linux-made-sane-self-update-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
-            return $"{sudoPrefix}systemd-run --unit={ShellQuote(unitName)} --collect --wait --pipe --property=Type=exec bash -lc {ShellQuote(installCommand)}";
+            return $"{sudoPrefix}systemd-run --unit={ShellQuote(unitName)} --collect --wait --pipe --property=Type=exec bash -lc {ShellQuote(detachedInstallCommand)}";
         }
 
-        var directSudoPrefix = isRoot ? string.Empty : "sudo -n ";
-        return $"curl -fsSL {ShellQuote(installScriptUrl)} | {directSudoPrefix}env LMS_SOURCE=lms-auto-update bash -s -- --install";
+        return BuildPublicInstallerFallbackScript(installScriptUrl, isRoot);
+    }
+
+    private static string BuildPublicInstallerFallbackScript(string installScriptUrl, bool runsAsRoot)
+    {
+        var sudoPrefix = runsAsRoot ? string.Empty : "sudo -n ";
+        return string.Join(
+            "\n",
+            "set -euo pipefail",
+            "SERVICE_UNIT='linux-made-sane.service'",
+            "CURRENT_DIR='/opt/linuxmadesane/ce/current'",
+            "PREVIOUS_CURRENT_TARGET=''",
+            "SERVICE_WAS_ACTIVE=false",
+            "if [[ -e \"$CURRENT_DIR\" || -L \"$CURRENT_DIR\" ]]; then",
+            "  PREVIOUS_CURRENT_TARGET=\"$(readlink -f \"$CURRENT_DIR\" 2>/dev/null || true)\"",
+            "fi",
+            $"if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]] && {sudoPrefix}systemctl is-active --quiet \"$SERVICE_UNIT\"; then",
+            "  SERVICE_WAS_ACTIVE=true",
+            "fi",
+            "rollback_self_update() {",
+            "  local reason=\"$1\"",
+            "  echo \"Linux Made Sane self-update failed: $reason\" >&2",
+            "  if [[ -n \"$PREVIOUS_CURRENT_TARGET\" && -d \"$PREVIOUS_CURRENT_TARGET\" ]]; then",
+            "    echo \"Rolling back to $PREVIOUS_CURRENT_TARGET\" >&2",
+            $"    {sudoPrefix}ln -sfn \"$PREVIOUS_CURRENT_TARGET\" \"$CURRENT_DIR\" || true",
+            "  fi",
+            "  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]] && { [[ \"$SERVICE_WAS_ACTIVE\" == \"true\" ]] || [[ -n \"$PREVIOUS_CURRENT_TARGET\" ]]; }; then",
+            $"    {sudoPrefix}systemctl daemon-reload >/dev/null 2>&1 || true",
+            $"    {sudoPrefix}systemctl restart \"$SERVICE_UNIT\" >/dev/null 2>&1 || true",
+            "  fi",
+            "}",
+            "verify_self_update_active() {",
+            "  command -v systemctl >/dev/null 2>&1 || return 0",
+            "  [[ -d /run/systemd/system ]] || return 0",
+            "  for _ in $(seq 1 30); do",
+            $"    if {sudoPrefix}systemctl is-active --quiet \"$SERVICE_UNIT\"; then",
+            "      return 0",
+            "    fi",
+            "    sleep 1",
+            "  done",
+            $"  {sudoPrefix}systemctl --no-pager --full status \"$SERVICE_UNIT\" >&2 || true",
+            "  return 1",
+            "}",
+            $"if ! curl -fsSL {ShellQuote(installScriptUrl)} | {sudoPrefix}env LMS_SOURCE=lms-auto-update bash -s -- --install; then",
+            "  rollback_self_update 'installer returned a non-zero exit code'",
+            "  exit 1",
+            "fi",
+            "if ! verify_self_update_active; then",
+            "  rollback_self_update 'service did not become active after install'",
+            "  exit 1",
+            "fi");
     }
 
     private void SetStatus(Func<ApplicationUpdateStatus, ApplicationUpdateStatus> update)

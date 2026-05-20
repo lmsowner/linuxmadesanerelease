@@ -257,6 +257,9 @@ set -euo pipefail
 
 INSTALL_URL="\${LMS_INSTALL_URL:-$base_url/install.sh}"
 SOURCE="\${LMS_SOURCE:-lms-auto-update}"
+SERVICE_UNIT="\${LMS_SERVICE_UNIT:-linux-made-sane.service}"
+CURRENT_DIR="\${LMS_CURRENT_DIR:-/opt/linuxmadesane/ce/current}"
+EXPECT_SERVICE_ACTIVE=true
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required" >&2
@@ -274,7 +277,65 @@ if [[ -z "\${LMS_UPDATE_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&
     env LMS_UPDATE_DETACHED=1 LMS_INSTALL_URL="\$INSTALL_URL" LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" "\$0" "\$@"
 fi
 
-curl -fsSL "\$INSTALL_URL" | env LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" bash -s -- --install "\$@"
+for argument in "\$@"; do
+  case "\$argument" in
+    --no-start|--uninstall|--purge)
+      EXPECT_SERVICE_ACTIVE=false
+      ;;
+    --start)
+      EXPECT_SERVICE_ACTIVE=true
+      ;;
+  esac
+done
+
+PREVIOUS_CURRENT_TARGET=""
+SERVICE_WAS_ACTIVE=false
+if [[ -e "\$CURRENT_DIR" || -L "\$CURRENT_DIR" ]]; then
+  PREVIOUS_CURRENT_TARGET="\$(readlink -f "\$CURRENT_DIR" 2>/dev/null || true)"
+fi
+
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]] && systemctl is-active --quiet "\$SERVICE_UNIT"; then
+  SERVICE_WAS_ACTIVE=true
+fi
+
+rollback_self_update() {
+  local reason="\$1"
+  echo "Linux Made Sane self-update failed: \$reason" >&2
+  if [[ -n "\$PREVIOUS_CURRENT_TARGET" && -d "\$PREVIOUS_CURRENT_TARGET" ]]; then
+    echo "Rolling back to \$PREVIOUS_CURRENT_TARGET" >&2
+    ln -sfn "\$PREVIOUS_CURRENT_TARGET" "\$CURRENT_DIR" || true
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]] && { [[ "\$SERVICE_WAS_ACTIVE" == "true" ]] || [[ -n "\$PREVIOUS_CURRENT_TARGET" ]]; }; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart "\$SERVICE_UNIT" >/dev/null 2>&1 || true
+  fi
+}
+
+verify_self_update_active() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  [[ -d /run/systemd/system ]] || return 0
+  for _ in \$(seq 1 30); do
+    if systemctl is-active --quiet "\$SERVICE_UNIT"; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  systemctl --no-pager --full status "\$SERVICE_UNIT" >&2 || true
+  return 1
+}
+
+if ! curl -fsSL "\$INSTALL_URL" | env LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" bash -s -- --install "\$@"; then
+  rollback_self_update "installer returned a non-zero exit code"
+  exit 1
+fi
+
+if [[ "\$EXPECT_SERVICE_ACTIVE" == "true" ]] && ! verify_self_update_active; then
+  rollback_self_update "service did not become active after install"
+  exit 1
+fi
 HELPER
   chmod 755 "$helper_path"
   chown root:root "$helper_path" 2>/dev/null || true
@@ -617,12 +678,54 @@ lms_maybe_systemctl_enable() {
   systemctl enable "$unit_name"
 }
 
+lms_current_release_target() {
+  local current_dir="$1"
+  if [[ -e "$current_dir" || -L "$current_dir" ]]; then
+    readlink -f "$current_dir" 2>/dev/null || true
+  fi
+}
+
+lms_systemctl_is_active() {
+  local unit_name="$1"
+  [[ "${LMS_DEST_ROOT:-}" == "" ]] || return 1
+  lms_has_systemd || return 1
+  systemctl is-active --quiet "$unit_name"
+}
+
+lms_rollback_current_release() {
+  local current_dir="$1"
+  local unit_name="$2"
+  local previous_current_target="$3"
+  local should_restart="${4:-true}"
+
+  lms_log "Install failed; attempting to restore the previous release"
+  if [[ -n "$previous_current_target" && -d "$previous_current_target" ]]; then
+    ln -sfn "$previous_current_target" "$current_dir" || true
+    lms_log "Restored current release link to $previous_current_target"
+  fi
+
+  if lms_is_truthy "$should_restart" && lms_has_systemd; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart "$unit_name" >/dev/null 2>&1 || true
+  fi
+}
+
 lms_maybe_systemctl_restart() {
   local unit_name="$1"
   if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
     return
   fi
 
-  command -v systemctl >/dev/null 2>&1 || return
+  lms_has_systemd || return
   systemctl restart "$unit_name"
+  for _ in $(seq 1 30); do
+    if systemctl is-active --quiet "$unit_name"; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  systemctl --no-pager --full status "$unit_name" >&2 || true
+  return 1
 }

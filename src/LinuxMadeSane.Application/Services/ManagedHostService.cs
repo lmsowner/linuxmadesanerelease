@@ -636,7 +636,11 @@ public sealed class ManagedHostService(
             installerArguments.Add("--install");
         }
 
-        if (!options.StartService)
+        if (options.StartService)
+        {
+            installerArguments.Add("--start");
+        }
+        else
         {
             installerArguments.Add("--no-start");
         }
@@ -654,7 +658,8 @@ public sealed class ManagedHostService(
             installUrl,
             "lms-host-conversion",
             installerArguments,
-            canUseStoredSudoPassword);
+            canUseStoredSudoPassword,
+            options.StartService);
     }
 
     private static string BuildLmsUninstallCommand(
@@ -670,19 +675,26 @@ public sealed class ManagedHostService(
             installUrl,
             "lms-host-uninstall",
             installerArguments,
-            canUseStoredSudoPassword);
+            canUseStoredSudoPassword,
+            false);
     }
 
     private static string BuildRemoteLmsInstallerCommand(
         string installUrl,
         string source,
         IReadOnlyCollection<string> installerArguments,
-        bool canUseStoredSudoPassword)
+        bool canUseStoredSudoPassword,
+        bool expectServiceActive)
     {
         var quotedInstallerArguments = string.Join(" ", installerArguments.Select(QuoteShellArgument));
+        var expectServiceActiveValue = expectServiceActive ? "true" : "false";
         var script = string.Join(
             "\n",
             "set -euo pipefail",
+            "REMOTE_LMS_SERVICE_UNIT='linux-made-sane.service'",
+            "REMOTE_LMS_CURRENT_DIR='/opt/linuxmadesane/ce/current'",
+            "REMOTE_LMS_PREVIOUS_CURRENT=''",
+            "REMOTE_LMS_SERVICE_WAS_ACTIVE=false",
             "if [ \"$(id -u)\" -eq 0 ]; then",
             "  SUDO=''",
             "elif command -v sudo >/dev/null 2>&1; then",
@@ -702,7 +714,44 @@ public sealed class ManagedHostService(
             "    exit 127",
             "  fi",
             "fi",
-            $"curl -fsSL {QuoteShellArgument(installUrl)} | $SUDO env LMS_SOURCE={source} bash -s -- {quotedInstallerArguments}");
+            "if [ -e \"$REMOTE_LMS_CURRENT_DIR\" ] || [ -L \"$REMOTE_LMS_CURRENT_DIR\" ]; then",
+            "  REMOTE_LMS_PREVIOUS_CURRENT=\"$(readlink -f \"$REMOTE_LMS_CURRENT_DIR\" 2>/dev/null || true)\"",
+            "fi",
+            "if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && $SUDO systemctl is-active --quiet \"$REMOTE_LMS_SERVICE_UNIT\"; then",
+            "  REMOTE_LMS_SERVICE_WAS_ACTIVE=true",
+            "fi",
+            "rollback_remote_lms() {",
+            "  local reason=\"$1\"",
+            "  echo \"Remote LMS update failed: $reason\" >&2",
+            "  if [ -n \"$REMOTE_LMS_PREVIOUS_CURRENT\" ] && [ -d \"$REMOTE_LMS_PREVIOUS_CURRENT\" ]; then",
+            "    echo \"Rolling remote LMS back to $REMOTE_LMS_PREVIOUS_CURRENT\" >&2",
+            "    $SUDO ln -sfn \"$REMOTE_LMS_PREVIOUS_CURRENT\" \"$REMOTE_LMS_CURRENT_DIR\" || true",
+            "  fi",
+            "  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && { [ \"$REMOTE_LMS_SERVICE_WAS_ACTIVE\" = true ] || [ -n \"$REMOTE_LMS_PREVIOUS_CURRENT\" ]; }; then",
+            "    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true",
+            "    $SUDO systemctl restart \"$REMOTE_LMS_SERVICE_UNIT\" >/dev/null 2>&1 || true",
+            "  fi",
+            "}",
+            "verify_remote_lms_active() {",
+            "  command -v systemctl >/dev/null 2>&1 || return 0",
+            "  [ -d /run/systemd/system ] || return 0",
+            "  for _ in $(seq 1 30); do",
+            "    if $SUDO systemctl is-active --quiet \"$REMOTE_LMS_SERVICE_UNIT\"; then",
+            "      return 0",
+            "    fi",
+            "    sleep 1",
+            "  done",
+            "  $SUDO systemctl --no-pager --full status \"$REMOTE_LMS_SERVICE_UNIT\" >&2 || true",
+            "  return 1",
+            "}",
+            $"if ! curl -fsSL {QuoteShellArgument(installUrl)} | $SUDO env LMS_SOURCE={source} bash -s -- {quotedInstallerArguments}; then",
+            "  rollback_remote_lms 'installer returned a non-zero exit code'",
+            "  exit 1",
+            "fi",
+            $"if [ '{expectServiceActiveValue}' = true ] && ! verify_remote_lms_active; then",
+            "  rollback_remote_lms 'service did not become active after install'",
+            "  exit 1",
+            "fi");
 
         return $"bash -lc {QuoteShellArgument(script)}";
     }
