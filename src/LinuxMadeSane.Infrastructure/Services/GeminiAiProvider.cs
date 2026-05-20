@@ -88,7 +88,8 @@ public sealed class GeminiAiProvider(
                         {
                             ["name"] = tool.Name,
                             ["description"] = tool.Description,
-                            ["parameters"] = AiToolJsonSchemaCatalog.ParseParametersSchema(tool)
+                            ["parameters"] = NormalizeParametersSchemaForGemini(
+                                AiToolJsonSchemaCatalog.ParseParametersSchema(tool))
                         })
                         .ToArray<JsonNode?>())
             });
@@ -153,24 +154,36 @@ public sealed class GeminiAiProvider(
                     break;
 
                 case AiProviderToolCallInputItem toolCall:
+                    var functionCall = new JsonObject
+                    {
+                        ["name"] = toolCall.ToolName,
+                        ["args"] = ParseJsonObject(toolCall.ArgumentsJson)
+                    };
+                    if (!string.IsNullOrWhiteSpace(toolCall.ToolCallId))
+                    {
+                        functionCall["id"] = toolCall.ToolCallId.Trim();
+                    }
+
                     AppendPart("model", new JsonObject
                     {
-                        ["functionCall"] = new JsonObject
-                        {
-                            ["name"] = toolCall.ToolName,
-                            ["args"] = ParseJsonObject(toolCall.ArgumentsJson)
-                        }
+                        ["functionCall"] = functionCall
                     });
                     break;
 
                 case AiProviderToolOutputInputItem toolOutput:
+                    var functionResponse = new JsonObject
+                    {
+                        ["name"] = toolOutput.ToolName,
+                        ["response"] = BuildFunctionResponse(toolOutput.OutputJson)
+                    };
+                    if (!string.IsNullOrWhiteSpace(toolOutput.ToolCallId))
+                    {
+                        functionResponse["id"] = toolOutput.ToolCallId.Trim();
+                    }
+
                     AppendPart("user", new JsonObject
                     {
-                        ["functionResponse"] = new JsonObject
-                        {
-                            ["name"] = toolOutput.ToolName,
-                            ["response"] = BuildFunctionResponse(toolOutput.OutputJson)
-                        }
+                        ["functionResponse"] = functionResponse
                     });
                     break;
 
@@ -181,6 +194,86 @@ public sealed class GeminiAiProvider(
 
         return contents;
     }
+
+    internal static JsonNode NormalizeParametersSchemaForGemini(JsonNode schema)
+    {
+        var clone = schema.DeepClone();
+        NormalizeGeminiSchemaNode(clone);
+        return clone;
+    }
+
+    private static void NormalizeGeminiSchemaNode(JsonNode node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var propertyName in obj.Select(item => item.Key).ToArray())
+                {
+                    if (IsSupportedGeminiSchemaProperty(propertyName))
+                    {
+                        continue;
+                    }
+
+                    obj.Remove(propertyName);
+                }
+
+                if (obj["properties"] is JsonObject properties)
+                {
+                    foreach (var (_, propertySchema) in properties)
+                    {
+                        if (propertySchema is not null)
+                        {
+                            NormalizeGeminiSchemaNode(propertySchema);
+                        }
+                    }
+
+                    if (obj["required"] is JsonArray required)
+                    {
+                        var validPropertyNames = properties.Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
+                        var validRequired = new JsonArray();
+                        foreach (var requiredItem in required)
+                        {
+                            var requiredName = requiredItem?.GetValue<string>();
+                            if (!string.IsNullOrWhiteSpace(requiredName) &&
+                                validPropertyNames.Contains(requiredName))
+                            {
+                                validRequired.Add(requiredName);
+                            }
+                        }
+
+                        if (validRequired.Count == 0)
+                        {
+                            obj.Remove("required");
+                        }
+                        else
+                        {
+                            obj["required"] = validRequired;
+                        }
+                    }
+                }
+
+                if (obj["items"] is JsonNode items)
+                {
+                    NormalizeGeminiSchemaNode(items);
+                }
+
+                break;
+
+            case JsonArray array:
+                foreach (var item in array)
+                {
+                    if (item is not null)
+                    {
+                        NormalizeGeminiSchemaNode(item);
+                    }
+                }
+
+                break;
+        }
+    }
+
+    private static bool IsSupportedGeminiSchemaProperty(string propertyName) =>
+        propertyName is "type" or "description" or "properties" or "items" or "enum" or "required";
 
     private static JsonObject BuildFunctionResponse(string outputJson)
     {
@@ -282,7 +375,7 @@ public sealed class GeminiAiProvider(
                 : errorMessage);
     }
 
-    private static AiProviderTurnResult MapResult(string responseBody, AiProviderTurnRequest request)
+    internal static AiProviderTurnResult MapResult(string responseBody, AiProviderTurnRequest request)
     {
         var document = JsonNode.Parse(responseBody)?.AsObject()
             ?? throw new InvalidOperationException("Gemini returned an invalid JSON response.");
@@ -317,8 +410,11 @@ public sealed class GeminiAiProvider(
                 functionCall["name"]?.GetValue<string>() is { Length: > 0 } toolName)
             {
                 toolIndex++;
+                var toolCallId = functionCall["id"]?.GetValue<string>();
                 toolCalls.Add(new AiProviderToolCallRequest(
-                    $"{responseId}:tool:{toolIndex}",
+                    string.IsNullOrWhiteSpace(toolCallId)
+                        ? $"{responseId}:tool:{toolIndex}"
+                        : toolCallId.Trim(),
                     toolName.Trim(),
                     (functionCall["args"] ?? new JsonObject()).ToJsonString(JsonOptions)));
             }

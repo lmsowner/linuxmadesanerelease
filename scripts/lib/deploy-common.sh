@@ -274,7 +274,7 @@ if [[ -z "\${LMS_UPDATE_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&
     env LMS_UPDATE_DETACHED=1 LMS_INSTALL_URL="\$INSTALL_URL" LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" "\$0" "\$@"
 fi
 
-curl -fsSL "\$INSTALL_URL" | env LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" bash -s -- --install --start "\$@"
+curl -fsSL "\$INSTALL_URL" | env LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" bash -s -- --install "\$@"
 HELPER
   chmod 755 "$helper_path"
   chown root:root "$helper_path" 2>/dev/null || true

@@ -23,6 +23,7 @@ public static class DependencyInjection
         services.AddScoped<ILocalAiEngineManagerService, LocalAiEngineManagerService>();
         services.AddScoped<LinuxMadeSane.Core.Abstractions.ILocalAiEngineService, LocalAiEngineManagerService>();
         services.AddScoped<ITerminalAiAssistantService, TerminalAiAssistantService>();
+        services.AddScoped<IRunbookAiDraftService, RunbookAiDraftService>();
         services.AddScoped<IAiThreadService, AiThreadService>();
         services.AddScoped<ISecuritySettingsService, SecuritySettingsService>();
         services.AddScoped<ISecurityAuthenticationService, SecurityAuthenticationService>();

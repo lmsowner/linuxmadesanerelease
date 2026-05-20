@@ -18,6 +18,7 @@ PUBLIC_SITE_APPSETTINGS="$PUBLIC_SITE_ROOT/appsettings.json"
 APP_VERSION="$(lms_resolve_version)"
 RUNTIMES="${RUNTIMES:-linux-x64 linux-arm64 linux-arm}"
 PACKAGE_DIR="${PACKAGE_DIR:-$REPO_ROOT/artifacts/packages}"
+STAGE_EDITIONS="${STAGE_EDITIONS:-${EDITIONS:-community pro}}"
 
 read_public_site_setting() {
   local key="$1"
@@ -48,6 +49,29 @@ COMMUNITY_ASSET_DIR="$COMMUNITY_RELEASE_ROOT/$APP_VERSION"
 PRO_ASSET_DIR="$PRO_RELEASE_ROOT/$APP_VERSION"
 
 lms_validate_version "$APP_VERSION"
+
+stage_enabled() {
+  local target="$1"
+  local requested
+
+  for requested in $STAGE_EDITIONS; do
+    case "$requested" in
+      ce|community)
+        [[ "$target" == "community" ]] && return 0
+        ;;
+      pro)
+        [[ "$target" == "pro" ]] && return 0
+        ;;
+      portal-local|public-site)
+        ;;
+      *)
+        lms_die "unknown public release staging edition: $requested"
+        ;;
+    esac
+  done
+
+  return 1
+}
 
 stage_edition() {
   local edition="$1"
@@ -112,5 +136,16 @@ stage_edition() {
     "$APP_VERSION" "$edition" "$destination_dir" "$checksum_path" "$manifest_path"
 }
 
-stage_edition "community" "linux-made-sane-ce" "$COMMUNITY_ASSET_DIR" "Community"
-stage_edition "pro" "linux-made-sane-pro" "$PRO_ASSET_DIR" "Pro"
+staged_any=false
+
+if stage_enabled community; then
+  stage_edition "community" "linux-made-sane-ce" "$COMMUNITY_ASSET_DIR" "Community"
+  staged_any=true
+fi
+
+if stage_enabled pro; then
+  stage_edition "pro" "linux-made-sane-pro" "$PRO_ASSET_DIR" "Pro"
+  staged_any=true
+fi
+
+[[ "$staged_any" == true ]] || lms_die "no public release editions selected for staging"

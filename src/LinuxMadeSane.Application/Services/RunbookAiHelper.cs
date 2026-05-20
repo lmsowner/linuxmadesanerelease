@@ -212,6 +212,69 @@ public static class RunbookAiHelper
             .Distinct(StringComparer.Ordinal)
             .ToArray() ?? [];
 
+    public static bool TryExtractScriptDraft(string? content, out string script)
+    {
+        script = string.Empty;
+        if (!TryExtractCodeBlock(content, out var language, out var block))
+        {
+            return false;
+        }
+
+        if (!language.Contains("bash", StringComparison.OrdinalIgnoreCase) &&
+            !language.Contains("sh", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        script = RunbookExecutionCommandBuilder.NormalizeStoredScript(block);
+        return script.Length > 0;
+    }
+
+    public static bool TryExtractCommandDraft(string? content, out string command)
+    {
+        command = string.Empty;
+        if (TryExtractCodeBlock(content, out var language, out var block))
+        {
+            var normalizedBlock = block.Trim();
+            if (normalizedBlock.Length > 0 &&
+                normalizedBlock.IndexOf('\n') < 0 &&
+                (language.Length == 0 ||
+                 language.Contains("sh", StringComparison.OrdinalIgnoreCase) ||
+                 language.Contains("shell", StringComparison.OrdinalIgnoreCase) ||
+                 language.Contains("bash", StringComparison.OrdinalIgnoreCase)))
+            {
+                command = normalizedBlock;
+                return true;
+            }
+        }
+
+        var inlineCodeStart = content?.IndexOf('`') ?? -1;
+        if (inlineCodeStart >= 0)
+        {
+            var inlineCodeEnd = content!.IndexOf('`', inlineCodeStart + 1);
+            if (inlineCodeEnd > inlineCodeStart + 1)
+            {
+                var inline = content[(inlineCodeStart + 1)..inlineCodeEnd].Trim();
+                if (inline.Length > 0 && inline.IndexOf('\n') < 0)
+                {
+                    command = inline;
+                    return true;
+                }
+            }
+        }
+
+        var firstLine = content?
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(firstLine) && firstLine!.IndexOf('\n') < 0)
+        {
+            command = firstLine.Trim();
+            return true;
+        }
+
+        return false;
+    }
+
     private static IReadOnlyList<string> ResolveSelectedHostNames(RunbookEditor editor, IReadOnlyList<ManagedHost> hosts)
     {
         var selectedHostIds = editor.IsTemplate
@@ -319,5 +382,38 @@ public static class RunbookAiHelper
         }
 
         return masked;
+    }
+
+    private static bool TryExtractCodeBlock(string? content, out string language, out string block)
+    {
+        language = string.Empty;
+        block = string.Empty;
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        var start = content.IndexOf("```", StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return false;
+        }
+
+        var languageStart = start + 3;
+        var languageEnd = content.IndexOf('\n', languageStart);
+        if (languageEnd < 0)
+        {
+            return false;
+        }
+
+        var end = content.IndexOf("```", languageEnd + 1, StringComparison.Ordinal);
+        if (end < 0)
+        {
+            return false;
+        }
+
+        language = content[languageStart..languageEnd].Trim();
+        block = content[(languageEnd + 1)..end];
+        return true;
     }
 }

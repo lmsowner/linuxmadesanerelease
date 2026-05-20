@@ -367,7 +367,7 @@ public sealed class ApplicationUpdateService(
         }
 
         var installScriptUrl = NormalizeAbsoluteUrl(options.InstallScriptUrl, "https://www.linuxmadesane.com/install.sh");
-        var installCommand = $"curl -fsSL {ShellQuote(installScriptUrl)} | env LMS_SOURCE=lms-auto-update bash -s -- --install --start";
+        var installCommand = $"curl -fsSL {ShellQuote(installScriptUrl)} | env LMS_SOURCE=lms-auto-update bash -s -- --install";
         if (OperatingSystem.IsLinux() &&
             Directory.Exists("/run/systemd/system") &&
             (File.Exists("/usr/bin/systemd-run") || File.Exists("/bin/systemd-run")))
@@ -378,7 +378,7 @@ public sealed class ApplicationUpdateService(
         }
 
         var directSudoPrefix = isRoot ? string.Empty : "sudo -n ";
-        return $"curl -fsSL {ShellQuote(installScriptUrl)} | {directSudoPrefix}env LMS_SOURCE=lms-auto-update bash -s -- --install --start";
+        return $"curl -fsSL {ShellQuote(installScriptUrl)} | {directSudoPrefix}env LMS_SOURCE=lms-auto-update bash -s -- --install";
     }
 
     private void SetStatus(Func<ApplicationUpdateStatus, ApplicationUpdateStatus> update)
