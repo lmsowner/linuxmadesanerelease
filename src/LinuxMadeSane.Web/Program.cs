@@ -323,7 +323,7 @@ public class Program
 
             if (!launchTicketStore.TryConsume(ticket, out var safeReturnUrl))
             {
-                return Results.NotFound();
+                safeReturnUrl = "/desktop-assistant?fromTray=1";
             }
 
             context.Response.Headers.CacheControl = "no-store";

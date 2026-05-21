@@ -10,7 +10,9 @@ namespace LinuxMadeSane.Web.Services;
 public sealed class DesktopAssistantLaunchTicketStore : IDesktopAssistantLaunchTicketStore
 {
     private static readonly TimeSpan TicketLifetime = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan DuplicateBrowserLaunchGrace = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, DesktopAssistantLaunchTicket> tickets = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DesktopAssistantLaunchTicket> recentlyConsumedTickets = new(StringComparer.Ordinal);
 
     public DesktopAssistantLaunchTicket Issue(string returnUrl)
     {
@@ -33,13 +35,26 @@ public sealed class DesktopAssistantLaunchTicketStore : IDesktopAssistantLaunchT
             return false;
         }
 
-        if (!tickets.TryRemove(token.Trim(), out var ticket) ||
-            ticket.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+        var normalizedToken = token.Trim();
+        var now = DateTimeOffset.UtcNow;
+        if (tickets.TryRemove(normalizedToken, out var ticket) &&
+            ticket.ExpiresAtUtc > now)
+        {
+            returnUrl = ticket.ReturnUrl;
+            recentlyConsumedTickets[normalizedToken] = ticket with
+            {
+                ExpiresAtUtc = now.Add(DuplicateBrowserLaunchGrace)
+            };
+            return true;
+        }
+
+        if (!recentlyConsumedTickets.TryGetValue(normalizedToken, out var recentlyConsumed) ||
+            recentlyConsumed.ExpiresAtUtc <= now)
         {
             return false;
         }
 
-        returnUrl = ticket.ReturnUrl;
+        returnUrl = recentlyConsumed.ReturnUrl;
         return true;
     }
 
@@ -49,6 +64,11 @@ public sealed class DesktopAssistantLaunchTicketStore : IDesktopAssistantLaunchT
         foreach (var ticket in tickets.Values.Where(ticket => ticket.ExpiresAtUtc <= now).ToArray())
         {
             tickets.TryRemove(ticket.Token, out _);
+        }
+
+        foreach (var ticket in recentlyConsumedTickets.Values.Where(ticket => ticket.ExpiresAtUtc <= now).ToArray())
+        {
+            recentlyConsumedTickets.TryRemove(ticket.Token, out _);
         }
     }
 

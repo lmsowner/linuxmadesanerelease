@@ -33,8 +33,9 @@ The Desktop Assistant helper runs inside the signed-in Linux graphical session. 
 The installer writes a systemd user service and an XDG autostart file, but the helper is still bound by LMS authentication and approval rules:
 
 - tray launch opens the local LMS web UI and does not bypass sign-in
-- tray launch uses local, short-lived, one-time launch tickets
-- missing, reused, expired, non-local, or bad-host launch attempts are rejected
+- tray launch uses local, short-lived launch tickets with a short duplicate-request grace window for browser retries
+- non-local or bad-host launch attempts are rejected
+- missing or stale local launch tickets cannot supply a return URL and only fall back to the normal Desktop Assistant route
 - the helper is not an arbitrary shell command channel
 - desktop-changing actions must be explicit LMS actions with approval, fixed arguments, timeout handling, and audit history
 
