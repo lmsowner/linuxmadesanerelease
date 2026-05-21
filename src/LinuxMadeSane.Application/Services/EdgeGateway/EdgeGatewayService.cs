@@ -40,13 +40,22 @@ public sealed class EdgeGatewayService(
 
     public async Task<EdgeGatewayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default)
     {
-        var settings = await GetGatewaySettingsAsync(cancellationToken);
+        var settingsTask = GetGatewaySettingsAsync(cancellationToken);
+        var routesTask = store.ListRoutesAsync(cancellationToken);
+        var auditEntriesTask = store.ListAuditEntriesAsync(take: 80, cancellationToken: cancellationToken);
+
+        var settings = await settingsTask;
+        var connectorStatusTask = TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
         var gatewaySubdomain = settings.GatewaySubdomain;
-        var routes = await store.ListRoutesAsync(cancellationToken);
-        var auditEntries = await store.ListAuditEntriesAsync(take: 80, cancellationToken: cancellationToken);
-        var cloudflare = await BuildCloudflareStatusAsync(settings, cancellationToken);
+        var cloudflareTask = BuildCloudflareStatusAsync(settings, connectorStatusTask, cancellationToken);
+        var runtimeTask = BuildRuntimeStatusAsync(connectorStatusTask, cancellationToken);
+
+        await Task.WhenAll(routesTask, auditEntriesTask, cloudflareTask, runtimeTask);
+        var routes = await routesTask;
+        var auditEntries = await auditEntriesTask;
+        var cloudflare = await cloudflareTask;
+        var runtime = await runtimeTask;
         var generatedCaddyfile = caddyfileGenerator.Generate(routes);
-        var runtime = await BuildRuntimeStatusAsync(cancellationToken);
         var firstDomain = routes.Select(static route => route.DomainName)
             .Concat(cloudflare.Domains.Select(static domain => domain.GatewayDomainName))
             .FirstOrDefault(static domain => !string.IsNullOrWhiteSpace(domain));
@@ -333,6 +342,7 @@ public sealed class EdgeGatewayService(
 
     private async Task<EdgeGatewayCloudflareStatus> BuildCloudflareStatusAsync(
         EdgeGatewaySettings settings,
+        Task<CloudflaredConnectorStatus?> connectorStatusTask,
         CancellationToken cancellationToken)
     {
         try
@@ -352,7 +362,7 @@ public sealed class EdgeGatewayService(
             var apiToken = validation.HasSavedToken
                 ? await ResolveSavedCloudflareTokenAsync(cancellationToken)
                 : string.Empty;
-            var connectorStatus = await TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
+            var connectorStatus = await connectorStatusTask;
             var domainTasks = validation.Zones
                 .OrderBy(static zone => zone.Name, StringComparer.OrdinalIgnoreCase)
                 .Select(zone => BuildCloudflareDomainOptionAsync(zone, validation.Accounts, apiToken, settings, connectorStatus, cancellationToken))
@@ -365,6 +375,10 @@ public sealed class EdgeGatewayService(
                 "Cloudflare domains loaded from the saved Edge Gateway token.",
                 domains);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             var message = exception.Message.Contains("Cloudflare API token", StringComparison.OrdinalIgnoreCase)
@@ -374,10 +388,16 @@ public sealed class EdgeGatewayService(
         }
     }
 
-    private async Task<EdgeGatewayRuntimeStatus> BuildRuntimeStatusAsync(CancellationToken cancellationToken)
+    private async Task<EdgeGatewayRuntimeStatus> BuildRuntimeStatusAsync(
+        Task<CloudflaredConnectorStatus?> connectorStatusTask,
+        CancellationToken cancellationToken)
     {
-        var caddyStatus = await BuildCaddyRuntimeStatusAsync(cancellationToken);
-        var cloudflaredStatus = await BuildCloudflaredRuntimeStatusAsync(cancellationToken);
+        var caddyStatusTask = BuildCaddyRuntimeStatusAsync(cancellationToken);
+        var cloudflaredStatusTask = BuildCloudflaredRuntimeStatusAsync(connectorStatusTask);
+
+        await Task.WhenAll(caddyStatusTask, cloudflaredStatusTask);
+        var caddyStatus = await caddyStatusTask;
+        var cloudflaredStatus = await cloudflaredStatusTask;
         var canAttemptPublish = caddyStatus.Status != EdgeGatewayDiagnosticStatus.Broken &&
                                 cloudflaredStatus.Status != EdgeGatewayDiagnosticStatus.Broken;
         var summary = caddyStatus.Status == EdgeGatewayDiagnosticStatus.Good &&
@@ -424,6 +444,10 @@ public sealed class EdgeGatewayService(
                     ? "Caddy is installed, running, and its configuration validates."
                     : $"Caddy {caddy.InstalledVersion} is installed, running, and its configuration validates.");
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             return new EdgeGatewayRuntimeComponentStatus(
@@ -433,9 +457,10 @@ public sealed class EdgeGatewayService(
         }
     }
 
-    private async Task<EdgeGatewayRuntimeComponentStatus> BuildCloudflaredRuntimeStatusAsync(CancellationToken cancellationToken)
+    private static async Task<EdgeGatewayRuntimeComponentStatus> BuildCloudflaredRuntimeStatusAsync(
+        Task<CloudflaredConnectorStatus?> connectorStatusTask)
     {
-        var connectorStatus = await TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
+        var connectorStatus = await connectorStatusTask;
         if (connectorStatus is null or { IsInstalled: false })
         {
             return new EdgeGatewayRuntimeComponentStatus(
@@ -2557,6 +2582,10 @@ public sealed class EdgeGatewayService(
             }
 
             return ParseCloudflaredConnectorStatus(result.StandardOutput);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch
         {

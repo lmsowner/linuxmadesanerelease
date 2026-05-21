@@ -6,6 +6,10 @@ Linux Made Sane Community Edition is source-available under the Business Source 
 
 Redistributions must preserve the root license, notice, trademark, commercial licensing, and third-party notices.
 
+Desktop Assistant and the local Desktop Helper are part of Community Edition. Future paid desktop functionality may add remote desktop help, team workflows, or managed support paths, but the local GUI-session helper belongs in the CE baseline.
+
+The Desktop Helper uses GtkSharp and related GTK binding packages for the Linux tray integration. Those packages and native GTK runtime libraries remain under their own upstream or distribution licenses; preserve `THIRD-PARTY-NOTICES.md` when redistributing LMS.
+
 Included projects:
 
 - `src/LinuxMadeSane.Web`
@@ -13,6 +17,7 @@ Included projects:
 - `src/LinuxMadeSane.Infrastructure`
 - `src/LinuxMadeSane.Core`
 - `src/LinuxMadeSane.Connect.Protocol`
+- `src/LinuxMadeSane.DesktopHelper`
 
 Not included:
 
@@ -27,6 +32,7 @@ Build from source:
 ```bash
 dotnet restore src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj
 dotnet build src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj
+dotnet build src/LinuxMadeSane.DesktopHelper/LinuxMadeSane.DesktopHelper.csproj
 ```
 
 Run locally:

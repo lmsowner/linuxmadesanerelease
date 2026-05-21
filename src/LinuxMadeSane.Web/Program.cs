@@ -31,6 +31,7 @@ namespace LinuxMadeSane.Web;
 public class Program
 {
     private const string OriginalConnectionRemoteIpAddressItemKey = "LmsOriginalConnectionRemoteIpAddress";
+    private const string OriginalRequestHostItemKey = "LmsOriginalRequestHost";
 
     public static void Main(string[] args)
     {
@@ -99,6 +100,11 @@ public class Program
                     }));
         });
         builder.Services.AddSingleton<ITransientConnectionSecretStore, TransientConnectionSecretStore>();
+        builder.Services.AddSingleton<DesktopAssistantLaunchTicketStore>();
+        builder.Services.AddSingleton<IDesktopAssistantLaunchTicketStore>(serviceProvider =>
+            serviceProvider.GetRequiredService<DesktopAssistantLaunchTicketStore>());
+        builder.Services.AddSingleton<IDesktopAssistantLaunchTicketIssuer>(serviceProvider =>
+            serviceProvider.GetRequiredService<DesktopAssistantLaunchTicketStore>());
         builder.Services.AddSingleton<TerminalWorkspaceRegistry>();
         builder.Services.AddSingleton<FileBrowserWorkspaceRegistry>();
         builder.Services.AddSingleton<FileActionQueueService>();
@@ -157,6 +163,7 @@ public class Program
         app.Use(async (context, next) =>
         {
             context.Items[OriginalConnectionRemoteIpAddressItemKey] = context.Connection.RemoteIpAddress;
+            context.Items[OriginalRequestHostItemKey] = context.Request.Host;
             await next();
         });
         app.UseForwardedHeaders();
@@ -303,6 +310,29 @@ public class Program
             name = "Linux Made Sane",
             version = ResolveProductVersion()
         }));
+        app.MapGet("/desktop-assistant/launch", (
+            HttpContext context,
+            string? ticket,
+            IDesktopAssistantLaunchTicketStore launchTicketStore) =>
+        {
+            if (!IsOriginalLoopbackRequest(context) ||
+                !IsOriginalLoopbackRequestHost(context))
+            {
+                return Results.NotFound();
+            }
+
+            if (!launchTicketStore.TryConsume(ticket, out var safeReturnUrl))
+            {
+                return Results.NotFound();
+            }
+
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers.Pragma = "no-cache";
+
+            return context.User.Identity?.IsAuthenticated == true
+                ? Results.Redirect(safeReturnUrl)
+                : Results.Redirect(BuildLoginRedirectTarget(safeReturnUrl, null, null));
+        });
         app.MapPost("/internal/lms-tunnel/grants", async (
             HttpContext context,
             RemoteLmsTunnelAccessService tunnelAccessService) =>
@@ -1046,6 +1076,7 @@ public class Program
 
         if (path.StartsWithSegments("/access-denied") ||
             path.StartsWithSegments("/healthz") ||
+            path.StartsWithSegments("/desktop-assistant/launch") ||
             path.StartsWithSegments("/edge-auth/check") ||
             path.StartsWithSegments("/api/passkeys/login") ||
             path.StartsWithSegments("/internal/lms-tunnel") ||
@@ -1189,6 +1220,16 @@ public class Program
 
     private static bool IsLoopbackRequest(IPAddress? remoteIpAddress) =>
         remoteIpAddress is not null && IPAddress.IsLoopback(remoteIpAddress);
+
+    private static bool IsOriginalLoopbackRequest(HttpContext context) =>
+        context.Items[OriginalConnectionRemoteIpAddressItemKey] is IPAddress originalRemoteIpAddress
+            ? IsLoopbackRequest(originalRemoteIpAddress)
+            : IsLoopbackRequest(context.Connection.RemoteIpAddress);
+
+    private static bool IsOriginalLoopbackRequestHost(HttpContext context) =>
+        context.Items[OriginalRequestHostItemKey] is HostString originalHost
+            ? IsLoopbackRequestHost(originalHost)
+            : IsLoopbackRequestHost(context.Request.Host);
 
     private static bool ShouldApplyHttpsRedirection(
         HttpContext context,

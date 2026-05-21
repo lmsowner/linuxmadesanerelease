@@ -10,7 +10,8 @@ public sealed class DesktopInspectionService(
     ILinuxCommandRunner commandRunner,
     IPackageManagementService packageManagementService,
     IServiceManagementService serviceManagementService,
-    ISessionConfigurationService sessionConfigurationService) : IDesktopInspectionService
+    ISessionConfigurationService sessionConfigurationService,
+    IDesktopSessionBroker desktopSessionBroker) : IDesktopInspectionService
 {
     public async Task<DesktopInspectionReport> InspectAsync(CancellationToken cancellationToken = default)
     {
@@ -43,6 +44,7 @@ public sealed class DesktopInspectionService(
             xrdpService?.IsEnabled ?? false,
             xrdpService?.IsActive ?? false,
             sessionConfiguration,
+            desktopSessionBroker.GetSnapshot(),
             packages,
             services,
             BuildLikelyGains(gnomeInstalled, xfceInstalled, sessionConfiguration.XrdpUsesXfce),

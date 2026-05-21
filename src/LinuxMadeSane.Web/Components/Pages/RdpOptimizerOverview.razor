@@ -1,303 +1,596 @@
 @* Copyright (c) Richard D. Kiernan.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
+@page "/desktop-assistant"
 @page "/rdp-optimizer"
 @rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts.Ai
+@using LinuxMadeSane.Application.Contracts.DesktopAssistant
 @using LinuxMadeSane.Application.Contracts.RdpOptimizer
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
 @using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.Ai
+@using LinuxMadeSane.Core.Models.DesktopSession
 @using LinuxMadeSane.Core.Models.RdpOptimizer
+@using Microsoft.AspNetCore.Hosting
+@using Microsoft.Extensions.Configuration
+@implements IAsyncDisposable
 @inject IRdpOptimizationService RdpOptimizationService
+@inject IDesktopAssistantChatService DesktopAssistantChatService
+@inject IAiThreadService ThreadService
+@inject IJSRuntime JSRuntime
+@inject IWebHostEnvironment WebHostEnvironment
+@inject IConfiguration Configuration
+@inject NavigationManager NavigationManager
 
-<PageTitle>Desktop Manager | Linux Made Sane</PageTitle>
+<PageTitle>Desktop Assistant | Linux Made Sane</PageTitle>
 
 <div class="page-shell">
-    <UiHeroPanel Title="Desktop Manager" Compact="true" />
+    <UiHeroPanel Title="Desktop Assistant" Compact="true" />
 
     @if (viewModel is null)
     {
         <section class="surface-card">
-            <p class="meta-text">Loading desktop manager...</p>
+            <p class="meta-text">Opening Desktop Assistant...</p>
         </section>
     }
     else
     {
-        <section class="summary-pill-row">
-            <ServiceMetricComponent Eyebrow="Current mode" Value="@viewModel.CurrentModeLabel" Meta="@viewModel.CurrentModeSummary" Tone="UiPillTone.Success" />
-            <ServiceMetricComponent Eyebrow="Desktops installed" Value="@string.Join(", ", viewModel.Inspection.InstalledDesktopEnvironments)" Meta="@($"Display manager: {viewModel.Inspection.DisplayManager ?? "none"}")" />
-            <ServiceMetricComponent Eyebrow="XRDP" Value="@(viewModel.Inspection.XrdpInstalled ? "Installed" : "Missing")" Meta="@($"Service active: {(viewModel.Inspection.XrdpServiceActive ? "yes" : "no")}")" Tone="@(viewModel.Inspection.XrdpInstalled ? UiPillTone.Success : UiPillTone.Warning)" />
-            <ServiceMetricComponent Eyebrow="Latest snapshot" Value="@(viewModel.LatestSnapshot is null ? "None" : viewModel.LatestSnapshot.CreatedAt.ToLocalTime().ToString("g"))" Meta="Created before non-trivial mode switches when enabled" />
-        </section>
+        @if (!string.Equals(activeDesktopAssistantTab, "assistant", StringComparison.Ordinal))
+        {
+            <section class="summary-pill-row">
+                <ServiceMetricComponent Eyebrow="Current mode" Value="@viewModel.CurrentModeLabel" Meta="@viewModel.CurrentModeSummary" Tone="UiPillTone.Success" />
+                <ServiceMetricComponent Eyebrow="Desktops installed" Value="@string.Join(", ", viewModel.Inspection.InstalledDesktopEnvironments)" Meta="@($"Display manager: {viewModel.Inspection.DisplayManager ?? "none"}")" />
+                <ServiceMetricComponent Eyebrow="GUI session" Value="@GetDesktopHelperValue()" Meta="@GetDesktopHelperMeta()" Tone="@GetDesktopHelperTone()" />
+                <ServiceMetricComponent Eyebrow="XRDP" Value="@(viewModel.Inspection.XrdpInstalled ? "Installed" : "Missing")" Meta="@($"Service active: {(viewModel.Inspection.XrdpServiceActive ? "yes" : "no")}")" Tone="@(viewModel.Inspection.XrdpInstalled ? UiPillTone.Success : UiPillTone.Warning)" />
+                <ServiceMetricComponent Eyebrow="Latest snapshot" Value="@(viewModel.LatestSnapshot is null ? "None" : viewModel.LatestSnapshot.CreatedAt.ToLocalTime().ToString("g"))" Meta="Created before non-trivial mode switches when enabled" />
+            </section>
+        }
 
-        <div class="dashboard-columns desktop-mode-layout">
-            <section class="surface-card">
-                <div class="table-header">
-                    <h2>Mode options</h2>
-                    <span>@viewModel.Options.Count choices</span>
-                </div>
-
-                <div class="desktop-mode-grid">
-                    @foreach (var option in viewModel.Options)
+        <TabControl ActiveValue="@activeDesktopAssistantTab"
+                    ActiveValueChanged="SetDesktopAssistantTabAsync"
+                    Class="desktop-assistant-tab-control"
+                    PanelClass="desktop-assistant-tab-panel">
+            <TabPage Title="Assistant" Value="assistant">
+                <section class="surface-card desktop-chat-surface">
+                    @if (desktopChatWorkspace is null)
                     {
-                        <article class="surface-subcard desktop-mode-card @(editor.Profile == option.Profile ? "selected" : null)">
-                            <div class="desktop-mode-card-header">
-                                <div class="stack-tight">
-                                    <strong>@option.Title</strong>
-                                    <span class="meta-text">@option.Summary</span>
+                        <p class="meta-text">Loading Desktop Assistant chat...</p>
+                    }
+                    else
+                    {
+                        <div class="desktop-chat-shell">
+                            <aside class="desktop-chat-sidebar">
+                                <div class="desktop-chat-sidebar-header">
+                                    <div>
+                                        <strong>Chat sessions</strong>
+                                        <span class="meta-text">@desktopChatWorkspace.Sessions.Count saved</span>
+                                    </div>
+                                    <CompactUIButton Label="New" Glyph="UiIconGlyph.Plus" OnClick="CreateDesktopChatSessionAsync" Disabled="@(!desktopChatWorkspace.HasProvider || isDesktopChatBusy)" />
                                 </div>
-                                <div class="token-row">
-                                    @if (option.IsCurrent)
+
+                                <div class="desktop-chat-session-list">
+                                    @if (desktopChatWorkspace.Sessions.Count == 0)
                                     {
-                                        <UiPill Tone="UiPillTone.Success">Current</UiPill>
+                                        <p class="meta-text desktop-chat-empty-copy">No saved Desktop Assistant chats yet.</p>
                                     }
-                                    @if (!option.IsReady)
+                                    else
                                     {
-                                        <UiPill Tone="UiPillTone.Warning">Installs packages</UiPill>
+                                        @foreach (var session in desktopChatWorkspace.Sessions)
+                                        {
+                                            <button class="desktop-chat-session @(session.Id == desktopChatWorkspace.ActiveSessionId ? "active" : null)"
+                                                    type="button"
+                                                    @onclick="@(() => SelectDesktopChatSessionAsync(session.Id))">
+                                                <strong>@session.Title</strong>
+                                                <span>@session.MessageCount messages - @session.UpdatedAtUtc.ToLocalTime():g</span>
+                                            </button>
+                                        }
                                     }
                                 </div>
+                            </aside>
+
+                            <section class="desktop-chat-main">
+                                <div class="desktop-chat-head">
+                                    <div class="desktop-chat-title-block">
+                                        <strong>Ask your desktop</strong>
+                                        <div class="desktop-chat-status-row">
+                                            <UiPill Tone="@GetDesktopHelperTone()">@GetDesktopAssistantStatusLabel()</UiPill>
+                                            <span class="meta-text">@GetDesktopAssistantStatusText()</span>
+                                        </div>
+                                    </div>
+                                    @if (isDesktopProviderContextLoading)
+                                    {
+                                        <p class="meta-text">Loading AI providers...</p>
+                                    }
+                                    else if (AvailableDesktopAiProviders.Count == 0)
+                                    {
+                                        <div class="callout warning desktop-chat-provider-warning">No enabled runnable AI provider is configured.</div>
+                                    }
+                                    else
+                                    {
+                                        <AiProviderSwitcher Providers="@AvailableDesktopAiProviders"
+                                                            Models="@(desktopAiProviderContext?.Models ?? [])"
+                                                            ProviderKey="@selectedDesktopProviderKey"
+                                                            ProviderKeyChanged="HandleDesktopProviderSelectionChangedAsync"
+                                                            ModelId="@selectedDesktopModelId"
+                                                            ModelIdChanged="HandleDesktopModelSelectionChangedAsync"
+                                                            Disabled="@isDesktopChatBusy"
+                                                            ProviderLabel="AI provider"
+                                                            ModelLabel="Model"
+                                                            Class="desktop-chat-provider-switcher" />
+                                    }
+                                </div>
+
+                                @if (!desktopChatWorkspace.HasProvider)
+                                {
+                                    <div class="callout warning">Configure an AI provider before starting a Desktop Assistant chat.</div>
+                                }
+
+                                @if (!HasDesktopHelperSession)
+                                {
+                                    <div class="callout info desktop-chat-connection-note">
+                                        The desktop agent is connecting. When this page is opened from the tray it links to the current graphical session automatically.
+                                    </div>
+                                }
+
+                                @if (pendingDesktopFix is not null)
+                                {
+                                    <div class="callout warning desktop-chat-approval">
+                                        <div>
+                                            <strong>@pendingDesktopFix.Title</strong>
+                                            <p>@pendingDesktopFix.Description</p>
+                                        </div>
+                                        <div class="toolbar-row">
+                                            <UiCommandButton Label="Approve fix"
+                                                             Glyph="UiIconGlyph.Repair"
+                                                             Variant="UiButtonVariant.ActionSubtle"
+                                                             OnClick="ApprovePendingDesktopFixAsync"
+                                                             Disabled="@isDesktopChatBusy" />
+                                            <UiCommandButton Label="Cancel"
+                                                             Glyph="UiIconGlyph.Clear"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             OnClick="CancelPendingDesktopFix"
+                                                             Disabled="@isDesktopChatBusy" />
+                                        </div>
+                                    </div>
+                                }
+
+                                <div class="desktop-chat-message-list">
+                                    @if (DesktopAssistantMessages.Count == 0)
+                                    {
+                                        <div class="empty-state compact-empty-state desktop-chat-empty-state">
+                                            <p>Tell LMS what is wrong with the desktop.</p>
+                                            <p class="meta-text">Display layout, scaling, drivers, keyboard, XFCE behavior, apps not opening, tray issues, remote desktop oddities.</p>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        @foreach (var message in DesktopAssistantMessages)
+                                        {
+                                            <article class="desktop-chat-message @GetDesktopChatMessageClass(message)">
+                                                <div class="desktop-chat-message-header">
+                                                    <UiPill Tone="@GetDesktopChatMessageTone(message.Role)">@GetDesktopChatRoleLabel(message.Role)</UiPill>
+                                                    <span>@message.CreatedAtUtc.ToLocalTime():g</span>
+                                                </div>
+                                                <p>@message.Content</p>
+                                            </article>
+                                        }
+                                    }
+                                </div>
+
+                                @if (!string.IsNullOrWhiteSpace(desktopChatError))
+                                {
+                                    <div class="callout error">@desktopChatError</div>
+                                }
+
+                                <div class="desktop-chat-composer">
+                                    <textarea class="ui-control-input ui-control-textarea"
+                                              @bind="desktopChatPrompt"
+                                              @bind:event="oninput"
+                                              placeholder="Example: my monitor layout is wrong, scaling is tiny, the keymap resets, or an app will not open..."></textarea>
+                                    <div class="desktop-chat-composer-actions">
+                                        <div class="toolbar-row desktop-chat-primary-actions">
+                                            <UiCommandButton Label="@(isDesktopChatBusy ? "Working..." : "Ask AI")"
+                                                             Glyph="UiIconGlyph.Send"
+                                                             OnClick="SendDesktopChatMessageAsync"
+                                                             Disabled="@(!HasDesktopHelperSession || !desktopChatWorkspace.HasProvider || isDesktopChatBusy || string.IsNullOrWhiteSpace(desktopChatPrompt))" />
+                                            <UiCommandButton Label="Diagnose"
+                                                             Glyph="UiIconGlyph.Analyze"
+                                                             Variant="UiButtonVariant.Toolbar"
+                                                             OnClick="SendDesktopDiagnosisAsync"
+                                                             Disabled="@(!HasDesktopHelperSession || !desktopChatWorkspace.HasProvider || isDesktopChatBusy)" />
+                                            <UiCommandButton Label="Deep Fix"
+                                                             Glyph="UiIconGlyph.Repair"
+                                                             Variant="UiButtonVariant.Toolbar"
+                                                             OnClick="RunDesktopDeepFixAsync"
+                                                             Disabled="@(!HasDesktopHelperSession || !desktopChatWorkspace.HasProvider || isDesktopChatBusy)" />
+                                        </div>
+                                        <span class="meta-text">Desktop changes still require explicit approval.</span>
+                                    </div>
+                                </div>
+                            </section>
+                        </div>
+                    }
+                </section>
+            </TabPage>
+
+            <TabPage Title="Setup" Value="setup">
+                <section class="surface-card desktop-assistant-setup">
+                    <div class="table-header">
+                        <div>
+                            <h2>Setup Assistant</h2>
+                            <p class="meta-text">@GetDesktopSetupSummary()</p>
+                        </div>
+                        <div class="token-row">
+                            <UiPill Tone="@GetDesktopHelperTone()">@GetDesktopSetupStatus()</UiPill>
+                        </div>
+                    </div>
+
+                    <div class="desktop-assistant-setup-grid">
+                        <div class="desktop-assistant-step">
+                            <span class="desktop-assistant-step-index">1</span>
+                            <div>
+                                <div class="desktop-assistant-step-header">
+                                    <strong>Helper installed</strong>
+                                    <UiPill Tone="UiPillTone.Success">Installer managed</UiPill>
+                                </div>
+                                <p class="meta-text">LMS ships the Desktop Assistant helper with the app and registers it for graphical login sessions.</p>
+                            </div>
+                        </div>
+                        <div class="desktop-assistant-step">
+                            <span class="desktop-assistant-step-index">2</span>
+                            <div>
+                                <div class="desktop-assistant-step-header">
+                                    <strong>Desktop user trusted</strong>
+                                    <UiPill Tone="UiPillTone.Warning">May need login refresh</UiPill>
+                                </div>
+                                <p class="meta-text">The installer grants the desktop user access to the protected LMS helper socket when it can identify that user.</p>
+                            </div>
+                        </div>
+                        <div class="desktop-assistant-step">
+                            <span class="desktop-assistant-step-index">3</span>
+                            <div>
+                                <div class="desktop-assistant-step-header">
+                                    <strong>Session connected</strong>
+                                    <UiPill Tone="@GetDesktopHelperTone()">@GetDesktopSetupStatus()</UiPill>
+                                </div>
+                                <p class="meta-text">After the next desktop login, LMS should see your XFCE/X11 or Wayland session without manual shell work.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="desktop-assistant-action-grid">
+                        <div>
+                            <strong>@GetDesktopSetupActionTitle()</strong>
+                            <p class="meta-text">@GetDesktopSetupActionText()</p>
+                        </div>
+                        <div class="toolbar-row">
+                            <UiPill Tone="UiPillTone.Neutral">Auto-detected</UiPill>
+                        </div>
+                    </div>
+
+                    <div class="desktop-assistant-manual-start">
+                        <div class="desktop-assistant-manual-header">
+                            <div>
+                                <strong>Manual fallback from your XFCE terminal</strong>
+                                <p class="meta-text">Use Run helper directly when the systemd user unit is missing. Use the service commands after LMS has installed the helper unit.</p>
+                            </div>
+                            @if (!string.IsNullOrWhiteSpace(desktopHelperCopyStatus))
+                            {
+                                <UiPill Tone="UiPillTone.Success">@desktopHelperCopyStatus</UiPill>
+                            }
+                        </div>
+
+                        <div class="desktop-assistant-command-list">
+                            @foreach (var command in DesktopHelperCommands)
+                            {
+                                <article class="desktop-assistant-command-row">
+                                    <div>
+                                        <strong>@command.Label</strong>
+                                        <code>@command.Command</code>
+                                    </div>
+                                    <CompactUIButton Label="Copy"
+                                                     Title="@($"Copy {command.Label.ToLowerInvariant()} command")"
+                                                     Glyph="UiIconGlyph.Copy"
+                                                     OnClick="@(() => CopyDesktopHelperCommandAsync(command))" />
+                                </article>
+                            }
+                        </div>
+                    </div>
+
+                    <div class="desktop-assistant-security-strip">
+                        <span>Security boundary</span>
+                        <p>Current helper reports capability and supports read-only chat context. Desktop-changing AI actions must use per-user authorization, peer identity checks, allow-lists, audit records, and timeouts.</p>
+                    </div>
+                </section>
+            </TabPage>
+
+            <TabPage Title="Desktop Option" Value="desktop" Disabled="@(!HasDesktopHelperSession)">
+                @if (!HasDesktopHelperSession)
+                {
+                    <section class="surface-card desktop-assistant-gate">
+                        <div>
+                            <h2>Desktop options unlock when Assistant is ready</h2>
+                            <p class="meta-text">Connect the GUI-session helper first so LMS can reason about the real desktop session.</p>
+                        </div>
+                        <CompactUIButton Label="Setup" Glyph="UiIconGlyph.Connection" OnClick="@(() => SetDesktopAssistantTabAsync("setup"))" />
+                    </section>
+                }
+                else
+                {
+                    <div class="dashboard-columns desktop-mode-layout">
+                        <section class="surface-card">
+                            <div class="table-header">
+                                <h2>Mode options</h2>
+                                <span>@viewModel.Options.Count choices</span>
                             </div>
 
-                            @if (option.MissingPackages.Count > 0)
-                            {
-                                <p class="meta-text">Missing: @string.Join(", ", option.MissingPackages)</p>
-                            }
-
-                            <ul class="desktop-mode-highlights">
-                                @foreach (var highlight in option.Highlights)
+                            <div class="desktop-mode-grid">
+                                @foreach (var option in viewModel.Options)
                                 {
-                                    <li>@highlight</li>
+                                    <article class="surface-subcard desktop-mode-card @(editor.Profile == option.Profile ? "selected" : null)">
+                                        <div class="desktop-mode-card-header">
+                                            <div class="stack-tight">
+                                                <strong>@option.Title</strong>
+                                                <span class="meta-text">@option.Summary</span>
+                                            </div>
+                                            <div class="token-row">
+                                                @if (option.IsCurrent)
+                                                {
+                                                    <UiPill Tone="UiPillTone.Success">Current</UiPill>
+                                                }
+                                                @if (!option.IsReady)
+                                                {
+                                                    <UiPill Tone="UiPillTone.Warning">Installs packages</UiPill>
+                                                }
+                                            </div>
+                                        </div>
+
+                                        @if (option.MissingPackages.Count > 0)
+                                        {
+                                            <p class="meta-text">Missing: @string.Join(", ", option.MissingPackages)</p>
+                                        }
+
+                                        <ul class="desktop-mode-highlights">
+                                            @foreach (var highlight in option.Highlights)
+                                            {
+                                                <li>@highlight</li>
+                                            }
+                                        </ul>
+
+                                        <div class="toolbar-row">
+                                            <UiCommandButton Label="@(editor.Profile == option.Profile ? "Selected" : "Select mode")"
+                                                             Glyph="@(editor.Profile == option.Profile ? UiIconGlyph.Connect : UiIconGlyph.Connection)"
+                                                             Variant="@(editor.Profile == option.Profile ? UiButtonVariant.Primary : UiButtonVariant.Ghost)"
+                                                             OnClick="@(() => SelectMode(option.Profile))" />
+                                        </div>
+                                    </article>
                                 }
-                            </ul>
+                            </div>
+                        </section>
+
+                        <section class="surface-card">
+                            <div class="table-header">
+                                <h2>Apply selected mode</h2>
+                                <span>@GetSelectedOption().Title</span>
+                            </div>
+
+                            <p class="meta-text">@GetSelectedOption().Summary</p>
+
+                            <div class="desktop-mode-option-list">
+                                <UiCheckboxField @bind-Value="editor.CreateSnapshotBeforeChanges"
+                                                 Label="Create snapshot first"
+                                                 Helper="Recommended before changing login managers or XRDP session files."
+                                                 Card="true"
+                                                 Compact="true"
+                                                 Class="desktop-mode-option-row" />
+
+                                <UiCheckboxField @bind-Value="editor.DryRun"
+                                                 Label="Dry-run"
+                                                 Helper="Preview the exact commands and file writes without applying anything."
+                                                 Card="true"
+                                                 Compact="true"
+                                                 Class="desktop-mode-option-row" />
+                            </div>
+
+                            @if (viewModel.Recommendations.Count > 0)
+                            {
+                                <div class="decision-list">
+                                    @foreach (var recommendation in viewModel.Recommendations.Take(4))
+                                    {
+                                        <InfoPill Text="@recommendation" />
+                                    }
+                                </div>
+                            }
 
                             <div class="toolbar-row">
-                                <UiCommandButton Label="@(editor.Profile == option.Profile ? "Selected" : "Select mode")"
-                                                 Glyph="@(editor.Profile == option.Profile ? UiIconGlyph.Connect : UiIconGlyph.Connection)"
-                                                 Variant="@(editor.Profile == option.Profile ? UiButtonVariant.Primary : UiButtonVariant.Ghost)"
-                                                 OnClick="@(() => SelectMode(option.Profile))" />
+                                <UiCommandButton Label="Preview changes" Glyph="UiIconGlyph.Analyze" OnClick="PreviewAsync" />
+                                <UiCommandButton Label="Apply mode" Glyph="UiIconGlyph.Connect" Variant="UiButtonVariant.Ghost" OnClick="ExecuteAsync" />
                             </div>
-                        </article>
-                    }
-                </div>
-            </section>
-
-            <section class="surface-card">
-                <div class="table-header">
-                    <h2>Apply selected mode</h2>
-                    <span>@GetSelectedOption().Title</span>
-                </div>
-
-                <p class="meta-text">@GetSelectedOption().Summary</p>
-
-                <div class="desktop-mode-option-list">
-                    <UiCheckboxField @bind-Value="editor.CreateSnapshotBeforeChanges"
-                                     Label="Create snapshot first"
-                                     Helper="Recommended before changing login managers or XRDP session files."
-                                     Card="true"
-                                     Compact="true"
-                                     Class="desktop-mode-option-row" />
-
-                    <UiCheckboxField @bind-Value="editor.DryRun"
-                                     Label="Dry-run"
-                                     Helper="Preview the exact commands and file writes without applying anything."
-                                     Card="true"
-                                     Compact="true"
-                                     Class="desktop-mode-option-row" />
-                </div>
-
-                @if (viewModel.Recommendations.Count > 0)
-                {
-                    <div class="decision-list">
-                        @foreach (var recommendation in viewModel.Recommendations.Take(4))
-                        {
-                            <InfoPill Text="@recommendation" />
-                        }
+                        </section>
                     </div>
-                }
 
-                <div class="toolbar-row">
-                    <UiCommandButton Label="Preview changes" Glyph="UiIconGlyph.Analyze" OnClick="PreviewAsync" />
-                    <UiCommandButton Label="Apply mode" Glyph="UiIconGlyph.Connect" Variant="UiButtonVariant.Ghost" OnClick="ExecuteAsync" />
-                </div>
-            </section>
-        </div>
-
-        @if (plan is not null)
-        {
-            <section class="surface-card">
-                <div class="table-header">
-                    <h2>Planned changes</h2>
-                    <span>@GetProfileTitle(plan.Profile)</span>
-                </div>
-
-                @if (plan.Warnings.Count > 0)
-                {
-                    <div class="decision-list">
-                        @foreach (var warning in plan.Warnings)
-                        {
-                            <InfoPill Text="@warning" />
-                        }
-                    </div>
-                }
-
-                <div class="dashboard-columns">
-                    <section class="surface-subcard">
-                        <div class="table-header">
-                            <h3>Package actions</h3>
-                            <span>@plan.PackageActions.Count</span>
-                        </div>
-                        <div class="stack-list">
-                            @if (plan.PackageActions.Count == 0)
-                            {
-                                <p class="meta-text">No package changes.</p>
-                            }
-                            else
-                            {
-                                @foreach (var action in plan.PackageActions)
-                                {
-                                    <InfoPill TagName="div" Title="@($"{action.Action} {action.PackageName}")" Text="@action.Reason">
-                                        <code>@action.PlannedCommand</code>
-                                    </InfoPill>
-                                }
-                            }
-                        </div>
-                    </section>
-
-                    <section class="surface-subcard">
-                        <div class="table-header">
-                            <h3>Service actions</h3>
-                            <span>@plan.ServiceActions.Count</span>
-                        </div>
-                        <div class="stack-list">
-                            @if (plan.ServiceActions.Count == 0)
-                            {
-                                <p class="meta-text">No service changes.</p>
-                            }
-                            else
-                            {
-                                @foreach (var action in plan.ServiceActions)
-                                {
-                                    <InfoPill TagName="div" Title="@($"{action.Action} {action.ServiceName}")" Text="@action.Reason">
-                                        <code>@action.PlannedCommand</code>
-                                    </InfoPill>
-                                }
-                            }
-                        </div>
-                    </section>
-                </div>
-
-                <section class="surface-subcard">
-                    <div class="table-header">
-                        <h3>Session and file changes</h3>
-                        <span>@plan.SessionChanges.Count</span>
-                    </div>
-                    <div class="stack-list">
-                        @if (plan.SessionChanges.Count == 0)
-                        {
-                            <p class="meta-text">No session-file changes.</p>
-                        }
-                        else
-                        {
-                            @foreach (var change in plan.SessionChanges)
-                            {
-                                <InfoPill TagName="div" Title="@change.FilePath" Text="@change.Description">
-                                    <code>@change.ContentPreview</code>
-                                </InfoPill>
-                            }
-                        }
-                    </div>
-                </section>
-            </section>
-        }
-
-        <div class="dashboard-columns">
-            <section class="surface-card">
-                <div class="table-header">
-                    <h2>Recent snapshots</h2>
-                    <span>@viewModel.Snapshots.Count</span>
-                </div>
-                <div class="stack-list">
-                    @if (viewModel.Snapshots.Count == 0)
+                    @if (plan is not null)
                     {
-                        <p class="meta-text">No snapshots captured yet.</p>
-                    }
-                    else
-                    {
-                        @foreach (var snapshot in viewModel.Snapshots.Take(4))
-                        {
-                            <article class="surface-subcard">
-                                <div class="desktop-mode-card-header">
-                                    <div class="stack-tight">
-                                        <strong>@GetProfileTitle(snapshot.ProfileApplied)</strong>
-                                        <span class="meta-text">@snapshot.CreatedAt.ToLocalTime():g</span>
-                                    </div>
-                                    <div class="toolbar-row">
-                                        <UiCommandButton Label="Dry-run restore" Glyph="UiIconGlyph.Analyze" Variant="UiButtonVariant.Action" OnClick="@(() => RestoreAsync(snapshot.SnapshotId, true))" />
-                                        <UiCommandButton Label="Restore now" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Toolbar" OnClick="@(() => RestoreAsync(snapshot.SnapshotId, false))" />
-                                    </div>
+                        <section class="surface-card">
+                            <div class="table-header">
+                                <h2>Planned changes</h2>
+                                <span>@GetProfileTitle(plan.Profile)</span>
+                            </div>
+
+                            @if (plan.Warnings.Count > 0)
+                            {
+                                <div class="decision-list">
+                                    @foreach (var warning in plan.Warnings)
+                                    {
+                                        <InfoPill Text="@warning" />
+                                    }
                                 </div>
-                                <p class="meta-text">@snapshot.SnapshotId</p>
-                            </article>
-                        }
-                    }
-                </div>
-            </section>
+                            }
 
-            <section class="surface-card">
-                <div class="table-header">
-                    <h2>Recent runs</h2>
-                    <span>@viewModel.Runs.Count</span>
-                </div>
-                <div class="stack-list">
-                    @if (viewModel.Runs.Count == 0)
-                    {
-                        <p class="meta-text">No desktop mode runs recorded yet.</p>
-                    }
-                    else
-                    {
-                        @foreach (var run in viewModel.Runs.Take(6))
-                        {
-                            <article class="surface-subcard">
-                                <div class="desktop-mode-card-header">
-                                    <div class="stack-tight">
-                                        <strong>@GetProfileTitle(run.Profile)</strong>
-                                        <span class="meta-text">@run.StartedAt.ToLocalTime():g</span>
+                            <div class="dashboard-columns">
+                                <section class="surface-subcard">
+                                    <div class="table-header">
+                                        <h3>Package actions</h3>
+                                        <span>@plan.PackageActions.Count</span>
                                     </div>
-                                    <div class="token-row">
-                                        <UiPill Tone="@(run.Success ? UiPillTone.Success : UiPillTone.Warning)">@(run.Success ? "Success" : "Review")</UiPill>
-                                        <UiPill Tone="@(run.DryRun ? UiPillTone.Warning : UiPillTone.Neutral)">@(run.DryRun ? "Dry-run" : "Applied")</UiPill>
+                                    <div class="stack-list">
+                                        @if (plan.PackageActions.Count == 0)
+                                        {
+                                            <p class="meta-text">No package changes.</p>
+                                        }
+                                        else
+                                        {
+                                            @foreach (var action in plan.PackageActions)
+                                            {
+                                                <InfoPill TagName="div" Title="@($"{action.Action} {action.PackageName}")" Text="@action.Reason">
+                                                    <code>@action.PlannedCommand</code>
+                                                </InfoPill>
+                                            }
+                                        }
                                     </div>
+                                </section>
+
+                                <section class="surface-subcard">
+                                    <div class="table-header">
+                                        <h3>Service actions</h3>
+                                        <span>@plan.ServiceActions.Count</span>
+                                    </div>
+                                    <div class="stack-list">
+                                        @if (plan.ServiceActions.Count == 0)
+                                        {
+                                            <p class="meta-text">No service changes.</p>
+                                        }
+                                        else
+                                        {
+                                            @foreach (var action in plan.ServiceActions)
+                                            {
+                                                <InfoPill TagName="div" Title="@($"{action.Action} {action.ServiceName}")" Text="@action.Reason">
+                                                    <code>@action.PlannedCommand</code>
+                                                </InfoPill>
+                                            }
+                                        }
+                                    </div>
+                                </section>
+                            </div>
+
+                            <section class="surface-subcard">
+                                <div class="table-header">
+                                    <h3>Session and file changes</h3>
+                                    <span>@plan.SessionChanges.Count</span>
                                 </div>
-                                <p class="meta-text">@string.Join("; ", run.Warnings.DefaultIfEmpty("No warnings recorded."))</p>
-                            </article>
-                        }
+                                <div class="stack-list">
+                                    @if (plan.SessionChanges.Count == 0)
+                                    {
+                                        <p class="meta-text">No session-file changes.</p>
+                                    }
+                                    else
+                                    {
+                                        @foreach (var change in plan.SessionChanges)
+                                        {
+                                            <InfoPill TagName="div" Title="@change.FilePath" Text="@change.Description">
+                                                <code>@change.ContentPreview</code>
+                                            </InfoPill>
+                                        }
+                                    }
+                                </div>
+                            </section>
+                        </section>
                     }
-                </div>
-            </section>
-        </div>
 
-        @if (result is not null || restoreResult is not null)
-        {
-            var activeResult = restoreResult ?? result!;
-            <section class="surface-card">
-                <div class="table-header">
-                    <h2>Latest result</h2>
-                    <span>@(activeResult.Success ? "Success" : "Needs review")</span>
-                </div>
+                    <div class="dashboard-columns">
+                        <section class="surface-card">
+                            <div class="table-header">
+                                <h2>Recent snapshots</h2>
+                                <span>@viewModel.Snapshots.Count</span>
+                            </div>
+                            <div class="stack-list">
+                                @if (viewModel.Snapshots.Count == 0)
+                                {
+                                    <p class="meta-text">No snapshots captured yet.</p>
+                                }
+                                else
+                                {
+                                    @foreach (var snapshot in viewModel.Snapshots.Take(4))
+                                    {
+                                        <article class="surface-subcard">
+                                            <div class="desktop-mode-card-header">
+                                                <div class="stack-tight">
+                                                    <strong>@GetProfileTitle(snapshot.ProfileApplied)</strong>
+                                                    <span class="meta-text">@snapshot.CreatedAt.ToLocalTime():g</span>
+                                                </div>
+                                                <div class="toolbar-row">
+                                                    <UiCommandButton Label="Dry-run restore" Glyph="UiIconGlyph.Analyze" Variant="UiButtonVariant.Action" OnClick="@(() => RestoreAsync(snapshot.SnapshotId, true))" />
+                                                    <UiCommandButton Label="Restore now" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Toolbar" OnClick="@(() => RestoreAsync(snapshot.SnapshotId, false))" />
+                                                </div>
+                                            </div>
+                                            <p class="meta-text">@snapshot.SnapshotId</p>
+                                        </article>
+                                    }
+                                }
+                            </div>
+                        </section>
 
-                <div class="summary-pill-row">
-                    <ServiceMetricComponent Eyebrow="Mode" Value="@GetProfileTitle(activeResult.Profile)" Meta="@($"Dry-run: {(activeResult.DryRun ? "yes" : "no")}")" Tone="@(activeResult.Success ? UiPillTone.Success : UiPillTone.Warning)" />
-                    <ServiceMetricComponent Eyebrow="Snapshot" Value="@(activeResult.SnapshotId?.ToString("N")[..8] ?? "none")" Meta="Restore snapshot captured before changes when enabled" />
-                </div>
-
-                <section class="surface-subcard">
-                    <div class="table-header">
-                        <h3>Operation log</h3>
-                        <span>@activeResult.OperationLogs.Count entries</span>
+                        <section class="surface-card">
+                            <div class="table-header">
+                                <h2>Recent runs</h2>
+                                <span>@viewModel.Runs.Count</span>
+                            </div>
+                            <div class="stack-list">
+                                @if (viewModel.Runs.Count == 0)
+                                {
+                                    <p class="meta-text">No desktop mode runs recorded yet.</p>
+                                }
+                                else
+                                {
+                                    @foreach (var run in viewModel.Runs.Take(6))
+                                    {
+                                        <article class="surface-subcard">
+                                            <div class="desktop-mode-card-header">
+                                                <div class="stack-tight">
+                                                    <strong>@GetProfileTitle(run.Profile)</strong>
+                                                    <span class="meta-text">@run.StartedAt.ToLocalTime():g</span>
+                                                </div>
+                                                <div class="token-row">
+                                                    <UiPill Tone="@(run.Success ? UiPillTone.Success : UiPillTone.Warning)">@(run.Success ? "Success" : "Review")</UiPill>
+                                                    <UiPill Tone="@(run.DryRun ? UiPillTone.Warning : UiPillTone.Neutral)">@(run.DryRun ? "Dry-run" : "Applied")</UiPill>
+                                                </div>
+                                            </div>
+                                            <p class="meta-text">@string.Join("; ", run.Warnings.DefaultIfEmpty("No warnings recorded."))</p>
+                                        </article>
+                                    }
+                                }
+                            </div>
+                        </section>
                     </div>
-                    <code class="block-code log-panel">@string.Join(Environment.NewLine + Environment.NewLine, activeResult.OperationLogs.Select(FormatLog))</code>
-                </section>
-            </section>
-        }
+
+                    @if (result is not null || restoreResult is not null)
+                    {
+                        var activeResult = restoreResult ?? result!;
+                        <section class="surface-card">
+                            <div class="table-header">
+                                <h2>Latest result</h2>
+                                <span>@(activeResult.Success ? "Success" : "Needs review")</span>
+                            </div>
+
+                            <div class="summary-pill-row">
+                                <ServiceMetricComponent Eyebrow="Mode" Value="@GetProfileTitle(activeResult.Profile)" Meta="@($"Dry-run: {(activeResult.DryRun ? "yes" : "no")}")" Tone="@(activeResult.Success ? UiPillTone.Success : UiPillTone.Warning)" />
+                                <ServiceMetricComponent Eyebrow="Snapshot" Value="@(activeResult.SnapshotId?.ToString("N")[..8] ?? "none")" Meta="Restore snapshot captured before changes when enabled" />
+                            </div>
+
+                            <section class="surface-subcard">
+                                <div class="table-header">
+                                    <h3>Operation log</h3>
+                                    <span>@activeResult.OperationLogs.Count entries</span>
+                                </div>
+                                <code class="block-code log-panel">@string.Join(Environment.NewLine + Environment.NewLine, activeResult.OperationLogs.Select(FormatLog))</code>
+                            </section>
+                        </section>
+                    }
+                }
+            </TabPage>
+        </TabControl>
     }
 </div>
 
@@ -307,6 +600,32 @@
     private RdpOptimizationPlan? plan;
     private RdpOptimizationResult? result;
     private RdpOptimizationResult? restoreResult;
+    private string desktopHelperCopyStatus = string.Empty;
+    private string activeDesktopAssistantTab = "assistant";
+    private DesktopAssistantChatWorkspaceViewModel? desktopChatWorkspace;
+    private Guid? activeDesktopChatSessionId;
+    private string desktopChatPrompt = string.Empty;
+    private string desktopChatError = string.Empty;
+    private bool isDesktopChatBusy;
+    private bool isDesktopProviderContextLoading;
+    private AiChatThreadEditorContextViewModel? desktopAiProviderContext;
+    private string selectedDesktopProviderKey = string.Empty;
+    private string selectedDesktopModelId = string.Empty;
+    private PendingDesktopFix? pendingDesktopFix;
+    private CancellationTokenSource? desktopHelperAutoRefreshCancellation;
+
+    private IReadOnlyList<AiChatMessage> DesktopAssistantMessages =>
+        desktopChatWorkspace?.Messages
+            .Where(message => message.Role is AiChatMessageRole.User or AiChatMessageRole.Assistant)
+            .ToArray() ?? [];
+
+    private IReadOnlyList<DesktopHelperCommand> DesktopHelperCommands =>
+    [
+        new("Run helper directly", BuildDirectHelperCommand()),
+        new("Start helper service", "systemctl --user daemon-reload && systemctl --user enable --now linux-made-sane-desktop-helper.service"),
+        new("Restart helper service", "systemctl --user restart linux-made-sane-desktop-helper.service"),
+        new("Check helper service", "systemctl --user status linux-made-sane-desktop-helper.service")
+    ];
 
     protected override async Task OnInitializedAsync()
     {
@@ -317,6 +636,9 @@
     {
         viewModel = await RdpOptimizationService.GetWorkspaceAsync();
         editor = viewModel.Editor;
+        await EnsureDesktopProviderContextAsync();
+        await LoadDesktopAssistantChatAsync();
+        UpdateDesktopHelperAutoRefreshLoop();
     }
 
     private void SelectMode(RdpOptimizationProfile profile)
@@ -346,7 +668,9 @@
         await RefreshWorkspaceAsync();
     }
 
-    private async Task RefreshWorkspaceAsync()
+    private Task RefreshWorkspaceAsync() => RefreshWorkspaceAsync(manageAutoRefresh: true);
+
+    private async Task RefreshWorkspaceAsync(bool manageAutoRefresh)
     {
         if (viewModel is null)
         {
@@ -357,12 +681,503 @@
         viewModel = await RdpOptimizationService.GetWorkspaceAsync();
         editor = viewModel.Editor;
         editor.Profile = selectedProfile;
+        await EnsureDesktopProviderContextAsync();
+        await LoadDesktopAssistantChatAsync();
+        if (manageAutoRefresh)
+        {
+            UpdateDesktopHelperAutoRefreshLoop();
+        }
     }
+
+    private Task SetDesktopAssistantTabAsync(string? tab)
+    {
+        activeDesktopAssistantTab = string.IsNullOrWhiteSpace(tab) ? "assistant" : tab;
+        if (!HasDesktopHelperSession && string.Equals(activeDesktopAssistantTab, "desktop", StringComparison.Ordinal))
+        {
+            activeDesktopAssistantTab = "setup";
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadDesktopAssistantChatAsync()
+    {
+        if (viewModel is null)
+        {
+            return;
+        }
+
+        desktopChatWorkspace = await DesktopAssistantChatService.GetWorkspaceAsync(
+            activeDesktopChatSessionId,
+            viewModel.Inspection.DesktopSessionBroker);
+        activeDesktopChatSessionId = desktopChatWorkspace.ActiveSessionId;
+        SyncDesktopProviderSelectionFromWorkspace();
+
+        UpdateDesktopHelperAutoRefreshLoop();
+    }
+
+    private async Task CreateDesktopChatSessionAsync()
+    {
+        desktopChatError = string.Empty;
+
+        try
+        {
+            SyncDesktopProviderSelection();
+            activeDesktopChatSessionId = await DesktopAssistantChatService.CreateSessionAsync(
+                selectedDesktopProviderKey,
+                selectedDesktopModelId);
+            await LoadDesktopAssistantChatAsync();
+        }
+        catch (Exception ex)
+        {
+            desktopChatError = ex.Message;
+        }
+    }
+
+    private async Task SelectDesktopChatSessionAsync(Guid sessionId)
+    {
+        if (isDesktopChatBusy)
+        {
+            return;
+        }
+
+        activeDesktopChatSessionId = sessionId;
+        desktopChatError = string.Empty;
+        await LoadDesktopAssistantChatAsync();
+    }
+
+    private async Task SendDesktopChatMessageAsync()
+    {
+        if (viewModel is null || string.IsNullOrWhiteSpace(desktopChatPrompt))
+        {
+            return;
+        }
+
+        var prompt = desktopChatPrompt.Trim();
+        if (TryResolveKeyboardLayoutFix(prompt, out var layout))
+        {
+            SetPendingKeyboardLayoutFix(layout);
+            desktopChatPrompt = string.Empty;
+            desktopChatError = string.Empty;
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        isDesktopChatBusy = true;
+        pendingDesktopFix = null;
+        desktopChatError = string.Empty;
+        desktopChatPrompt = string.Empty;
+
+        try
+        {
+            desktopChatWorkspace = await DesktopAssistantChatService.SendMessageAsync(
+                activeDesktopChatSessionId,
+                prompt,
+                viewModel.Inspection.DesktopSessionBroker,
+                selectedDesktopProviderKey,
+                selectedDesktopModelId);
+            activeDesktopChatSessionId = desktopChatWorkspace.ActiveSessionId;
+            SyncDesktopProviderSelectionFromWorkspace();
+        }
+        catch (Exception ex)
+        {
+            desktopChatPrompt = prompt;
+            desktopChatError = ex.Message;
+        }
+        finally
+        {
+            isDesktopChatBusy = false;
+        }
+    }
+
+    private Task SendDesktopPresetAsync(string prompt)
+    {
+        if (isDesktopChatBusy)
+        {
+            return Task.CompletedTask;
+        }
+
+        desktopChatPrompt = prompt;
+        return SendDesktopChatMessageAsync();
+    }
+
+    private Task SendDesktopDiagnosisAsync() =>
+        SendDesktopPresetAsync("Diagnose this graphical desktop from the LMS session agent evidence. Start with the most likely issue areas, then give the single best next LMS action. Keep it short and do not ask me to copy commands.");
+
+    private Task RunDesktopDeepFixAsync()
+    {
+        var issue = desktopChatPrompt.Trim();
+        if (TryResolveKeyboardLayoutFix(issue, out var layout))
+        {
+            SetPendingKeyboardLayoutFix(layout);
+            desktopChatError = string.Empty;
+            return InvokeAsync(StateHasChanged);
+        }
+
+        var prompt = string.IsNullOrWhiteSpace(issue)
+            ? "Deep Fix this desktop session. Use LMS-collected evidence first. Give the single next LMS fix or approval needed. Keep it short and do not give command-copy instructions."
+            : $"""
+Deep Fix this desktop problem:
+{issue}
+
+Use LMS-collected helper diagnostics and desktop evidence first. Give the single next LMS fix or approval needed. Keep it short and do not give command-copy instructions.
+""";
+
+        return SendDesktopPresetAsync(prompt);
+    }
+
+    private void SetPendingKeyboardLayoutFix(string layout)
+    {
+        pendingDesktopFix = new PendingDesktopFix(
+            DesktopSessionActionKinds.SetKeyboardLayout,
+            layout,
+            $"Set keyboard layout to {layout}",
+            $"LMS will set the live desktop keyboard layout to {layout} and persist the XFCE/GNOME input-source setting where those tools are available.");
+    }
+
+    private async Task ApprovePendingDesktopFixAsync()
+    {
+        if (viewModel is null || pendingDesktopFix is null)
+        {
+            return;
+        }
+
+        isDesktopChatBusy = true;
+        desktopChatError = string.Empty;
+        var fix = pendingDesktopFix;
+
+        try
+        {
+            if (fix.Kind == DesktopSessionActionKinds.SetKeyboardLayout)
+            {
+                desktopChatWorkspace = await DesktopAssistantChatService.ApplyKeyboardLayoutAsync(
+                    activeDesktopChatSessionId,
+                    fix.Layout,
+                    viewModel.Inspection.DesktopSessionBroker,
+                    selectedDesktopProviderKey,
+                    selectedDesktopModelId);
+                activeDesktopChatSessionId = desktopChatWorkspace.ActiveSessionId;
+                pendingDesktopFix = null;
+                desktopChatPrompt = string.Empty;
+                await RefreshWorkspaceAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            desktopChatError = ex.Message;
+        }
+        finally
+        {
+            isDesktopChatBusy = false;
+        }
+    }
+
+    private Task CancelPendingDesktopFix()
+    {
+        pendingDesktopFix = null;
+        return Task.CompletedTask;
+    }
+
+    private static bool TryResolveKeyboardLayoutFix(string prompt, out string layout)
+    {
+        layout = string.Empty;
+        var normalized = prompt.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalized) ||
+            (!normalized.Contains("keymap", StringComparison.Ordinal) &&
+             !normalized.Contains("keyboard", StringComparison.Ordinal) &&
+             !normalized.Contains("layout", StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        if (normalized.Contains("gb", StringComparison.Ordinal) ||
+            normalized.Contains("uk", StringComparison.Ordinal) ||
+            normalized.Contains("british", StringComparison.Ordinal))
+        {
+            layout = "gb";
+            return true;
+        }
+
+        return false;
+    }
+
+    private void UpdateDesktopHelperAutoRefreshLoop()
+    {
+        if (HasDesktopHelperSession)
+        {
+            desktopHelperAutoRefreshCancellation?.Cancel();
+            desktopHelperAutoRefreshCancellation?.Dispose();
+            desktopHelperAutoRefreshCancellation = null;
+            return;
+        }
+
+        if (desktopHelperAutoRefreshCancellation is not null)
+        {
+            return;
+        }
+
+        desktopHelperAutoRefreshCancellation = new CancellationTokenSource();
+        _ = RefreshUntilDesktopHelperReadyAsync(desktopHelperAutoRefreshCancellation.Token);
+    }
+
+    private async Task RefreshUntilDesktopHelperReadyAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            for (var attempt = 0; attempt < 18 && !cancellationToken.IsCancellationRequested; attempt++)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                await InvokeAsync(async () =>
+                {
+                    if (viewModel is null || HasDesktopHelperSession)
+                    {
+                        return;
+                    }
+
+                    await RefreshWorkspaceAsync(manageAutoRefresh: false);
+                    StateHasChanged();
+                });
+
+                if (HasDesktopHelperSession)
+                {
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            if (desktopHelperAutoRefreshCancellation?.Token == cancellationToken)
+            {
+                desktopHelperAutoRefreshCancellation?.Dispose();
+                desktopHelperAutoRefreshCancellation = null;
+            }
+        }
+    }
+
+    private async Task EnsureDesktopProviderContextAsync()
+    {
+        if (desktopAiProviderContext is not null || isDesktopProviderContextLoading)
+        {
+            return;
+        }
+
+        isDesktopProviderContextLoading = true;
+        try
+        {
+            desktopAiProviderContext = await ThreadService.GetEditorAsync();
+            SyncDesktopProviderSelection();
+        }
+        catch (Exception ex)
+        {
+            desktopChatError = ex.Message;
+        }
+        finally
+        {
+            isDesktopProviderContextLoading = false;
+        }
+    }
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> AvailableDesktopAiProviders =>
+        BuildAvailableDesktopAiProviders(selectedDesktopProviderKey);
+
+    private Task HandleDesktopProviderSelectionChangedAsync(string providerKey)
+    {
+        ApplyDesktopProviderSelection(providerKey, string.Empty);
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private Task HandleDesktopModelSelectionChangedAsync(string modelId)
+    {
+        ApplyDesktopProviderSelection(selectedDesktopProviderKey, modelId);
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> BuildAvailableDesktopAiProviders(string selectedProviderKey)
+    {
+        if (desktopAiProviderContext is null)
+        {
+            return [];
+        }
+
+        return desktopAiProviderContext.ConfiguredProviders
+            .Where(provider =>
+                (provider.IsEnabled &&
+                 desktopAiProviderContext.SupportedProviders.FirstOrDefault(definition => definition.ProviderType == provider.ProviderType)?.IsRuntimeImplemented != false) ||
+                provider.ProviderKey.Equals(selectedProviderKey, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(provider => provider.IsDefault)
+            .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private void SyncDesktopProviderSelectionFromWorkspace()
+    {
+        if (desktopChatWorkspace is null)
+        {
+            SyncDesktopProviderSelection();
+            return;
+        }
+
+        ApplyDesktopProviderSelection(desktopChatWorkspace.ActiveProviderKey, desktopChatWorkspace.ModelId);
+    }
+
+    private void SyncDesktopProviderSelection()
+    {
+        if (desktopAiProviderContext is null)
+        {
+            return;
+        }
+
+        ApplyDesktopProviderSelection(selectedDesktopProviderKey, selectedDesktopModelId);
+    }
+
+    private void ApplyDesktopProviderSelection(string? providerKey, string? modelId)
+    {
+        if (desktopAiProviderContext is null)
+        {
+            selectedDesktopProviderKey = providerKey?.Trim() ?? string.Empty;
+            selectedDesktopModelId = modelId?.Trim() ?? string.Empty;
+            return;
+        }
+
+        var selection = AiProviderSelectionResolver.Resolve(
+            providerKey,
+            modelId,
+            desktopAiProviderContext.Editor.ProviderKey,
+            desktopAiProviderContext.Editor.ModelId,
+            BuildAvailableDesktopAiProviders(providerKey?.Trim() ?? string.Empty),
+            desktopAiProviderContext.Models);
+
+        selectedDesktopProviderKey = selection.ProviderKey;
+        selectedDesktopModelId = selection.ModelId;
+    }
+
+    private async Task CopyDesktopHelperCommandAsync(DesktopHelperCommand command)
+    {
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", command.Command);
+        desktopHelperCopyStatus = copied ? $"{command.Label} copied" : "Copy failed";
+    }
+
+    private string BuildDirectHelperCommand() =>
+        $"env LMS_DESKTOP_HELPER_SOCKET={ShellQuote(GetDesktopHelperSocketPath())} LMS_DESKTOP_HELPER_LMS_URL={ShellQuote(GetDesktopHelperLocalLmsUrl())} LMS_DESKTOP_HELPER_TRAY_ICON={ShellQuote(GetDesktopHelperTrayIconPath())} {ShellQuote(ResolveDesktopHelperExecutablePath())}";
+
+    private string GetDesktopHelperSocketPath() =>
+        string.IsNullOrWhiteSpace(Configuration["DesktopSession:SocketPath"])
+            ? "/run/linuxmadesane/desktop-session.sock"
+            : Configuration["DesktopSession:SocketPath"]!.Trim();
+
+    private string GetDesktopHelperLocalLmsUrl()
+    {
+        var browserBaseUri = new Uri(NavigationManager.BaseUri);
+        var scheme = string.Equals(browserBaseUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            ? Uri.UriSchemeHttps
+            : Uri.UriSchemeHttp;
+        var port = browserBaseUri.IsDefaultPort
+            ? -1
+            : browserBaseUri.Port;
+        var localUri = new UriBuilder(scheme, "127.0.0.1", port, "desktop-assistant");
+        return localUri.Uri.ToString();
+    }
+
+    private string GetDesktopHelperTrayIconPath() =>
+        Path.Combine(WebHostEnvironment.ContentRootPath, "wwwroot", "images", "lms-logo-192.png");
+
+    private string ResolveDesktopHelperExecutablePath()
+    {
+        var installedPath = Path.Combine(WebHostEnvironment.ContentRootPath, "desktop-helper", "LinuxMadeSane.DesktopHelper");
+        if (File.Exists(installedPath))
+        {
+            return installedPath;
+        }
+
+        foreach (var configuration in new[] { "Debug", "Release" })
+        {
+            var devPath = Path.GetFullPath(Path.Combine(
+                WebHostEnvironment.ContentRootPath,
+                "..",
+                "LinuxMadeSane.DesktopHelper",
+                "bin",
+                configuration,
+                "net10.0",
+                "LinuxMadeSane.DesktopHelper"));
+            if (File.Exists(devPath))
+            {
+                return devPath;
+            }
+        }
+
+        return "/opt/linuxmadesane/ce/current/desktop-helper/LinuxMadeSane.DesktopHelper";
+    }
+
+    private static string ShellQuote(string value) =>
+        $"'{value.Replace("'", "'\"'\"'")}'";
 
     private RdpDesktopModeOptionViewModel GetSelectedOption() =>
         viewModel?.Options.FirstOrDefault(option => option.Profile == editor.Profile) ??
         viewModel?.Options.First() ??
         new RdpDesktopModeOptionViewModel(RdpOptimizationProfile.Default, "Inspect", string.Empty, false, true, [], []);
+
+    private bool HasDesktopHelperSession =>
+        viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession is not null;
+
+    private string GetDesktopSetupStatus() =>
+        HasDesktopHelperSession ? "Ready" : "Connecting";
+
+    private string GetDesktopAssistantStatusLabel() =>
+        HasDesktopHelperSession ? "Live session" : "Connecting";
+
+    private string GetDesktopAssistantStatusText()
+    {
+        var session = viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession;
+        return session is null
+            ? "Waiting for the tray agent to attach to this graphical login."
+            : $"{session.CapabilityReport.DisplayServer} session for {session.CapabilityReport.UserName} on {session.CapabilityReport.MachineName}.";
+    }
+
+    private string GetDesktopSetupSummary()
+    {
+        if (HasDesktopHelperSession)
+        {
+            var session = viewModel!.Inspection.DesktopSessionBroker.BestAvailableSession!;
+            return $"Connected to the {session.CapabilityReport.DisplayServer} desktop session for {session.CapabilityReport.UserName}.";
+        }
+
+        return "Waiting for the signed-in graphical session to attach to Desktop Assistant.";
+    }
+
+    private string GetDesktopSetupActionTitle() =>
+        HasDesktopHelperSession ? "Desktop Assistant is connected" : "Waiting for your desktop session";
+
+    private string GetDesktopSetupActionText() =>
+        HasDesktopHelperSession
+            ? "The tray agent is attached and Desktop Assistant can use GUI-session context."
+            : "If the tray agent has just been installed, it should attach automatically from the next graphical login.";
+
+    private string GetDesktopHelperValue()
+    {
+        var session = viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession;
+        return session is null ? "Not connected" : $"{session.CapabilityReport.DisplayServer} as {session.CapabilityReport.UserName}";
+    }
+
+    private string GetDesktopHelperMeta()
+    {
+        var snapshot = viewModel?.Inspection.DesktopSessionBroker;
+        var session = snapshot?.BestAvailableSession;
+        if (session is null)
+        {
+            var count = snapshot?.Sessions.Count ?? 0;
+            return count == 0 ? "Tray agent not attached yet" : $"{count} agent report(s), waiting for GUI-ready session";
+        }
+
+        return $"Last seen {session.LastSeenAtUtc.ToLocalTime():g}";
+    }
+
+    private UiPillTone GetDesktopHelperTone() =>
+        viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession is null
+            ? UiPillTone.Warning
+            : UiPillTone.Success;
 
     private static string GetProfileTitle(RdpOptimizationProfile profile) => profile switch
     {
@@ -373,6 +1188,15 @@
         RdpOptimizationProfile.RestoreFullDesktop => "Restore snapshot",
         _ => "Inspect"
     };
+
+    private static string GetDesktopChatRoleLabel(AiChatMessageRole role) =>
+        role == AiChatMessageRole.Assistant ? "Assistant" : "You";
+
+    private static string GetDesktopChatMessageClass(AiChatMessage message) =>
+        message.Role == AiChatMessageRole.Assistant ? "assistant" : "user";
+
+    private static UiPillTone GetDesktopChatMessageTone(AiChatMessageRole role) =>
+        role == AiChatMessageRole.Assistant ? UiPillTone.Neutral : UiPillTone.Success;
 
     private static string FormatLog(OperationLogEntry log)
     {
@@ -394,4 +1218,20 @@
 
         return string.Join(Environment.NewLine, parts);
     }
+
+    public ValueTask DisposeAsync()
+    {
+        desktopHelperAutoRefreshCancellation?.Cancel();
+        desktopHelperAutoRefreshCancellation?.Dispose();
+        desktopHelperAutoRefreshCancellation = null;
+        return ValueTask.CompletedTask;
+    }
+
+    private sealed record DesktopHelperCommand(string Label, string Command);
+
+    private sealed record PendingDesktopFix(
+        string Kind,
+        string Layout,
+        string Title,
+        string Description);
 }

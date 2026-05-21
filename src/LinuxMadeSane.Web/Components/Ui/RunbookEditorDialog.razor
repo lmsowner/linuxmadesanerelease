@@ -8,6 +8,7 @@
 @using LinuxMadeSane.Application.Services
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
 @inject IJSRuntime JSRuntime
 @inject IAiThreadService ThreadService
 @inject IRunbookAiDraftService RunbookAiDraftService
@@ -20,6 +21,23 @@
          Draggable="true"
          CloseOnBackdrop="false"
          OnClose="HandleCloseAsync">
+    <HeaderActions>
+        @if (!Editor.IsTemplate)
+        {
+            <div class="runbook-editor-header-toggle">
+                <UiCompactCheckbox Label="Host favourite"
+                                   Value="@Editor.IsQuickAccess"
+                                   ValueChanged="SetQuickAccessAsync" />
+                <span>Host favourite</span>
+            </div>
+            <div class="runbook-editor-header-toggle">
+                <UiCompactCheckbox Label="Global favourite"
+                                   Value="@Editor.IsGlobalFavorite"
+                                   ValueChanged="SetGlobalFavoriteAsync" />
+                <span>Global favourite</span>
+            </div>
+        }
+    </HeaderActions>
     <ChildContent>
         <EditForm id="@formId" Model="@Editor" OnValidSubmit="HandleSaveAsync" class="runbook-editor-form">
             <DataAnnotationsValidator />
@@ -97,24 +115,6 @@
                         }
                     </UiComboboxField>
                 }
-                else
-                {
-                    <UiCheckboxField Value="@Editor.IsQuickAccess"
-                                     ValueChanged="SetQuickAccessAsync"
-                                     ValueExpression="@(() => Editor.IsQuickAccess)"
-                                     Label="Host favourite"
-                                     Helper="Shows in terminal Runbooks menus for the selected target machines."
-                                     Compact="true"
-                                     Class="runbook-editor-field-favourite" />
-
-                    <UiCheckboxField Value="@Editor.IsGlobalFavorite"
-                                     ValueChanged="SetGlobalFavoriteAsync"
-                                     ValueExpression="@(() => Editor.IsGlobalFavorite)"
-                                     Label="Global favourite"
-                                     Helper="Shows in every terminal Runbooks menu. Use for generic actions such as reboot or updates."
-                                     Compact="true"
-                                     Class="runbook-editor-field-global-favourite" />
-                }
             </div>
 
             @if (!Editor.IsTemplate && Editor.RequiresSudo)
@@ -126,13 +126,8 @@
 
             @if (!Editor.IsTemplate)
             {
-                <section class="surface-subcard runbook-editor-host-card">
-                    <div class="runbook-editor-section-header">
-                        <div class="stack-tight">
-                            <strong>Target machines</strong>
-                            <span class="helper-text">Pick the machines that should have this runbook available. One edit updates the whole set.</span>
-                        </div>
-                    </div>
+                <section class="runbook-editor-host-card" aria-label="Target machines">
+                    <span class="runbook-editor-host-label">Targets</span>
 
                     <div class="runbook-editor-host-grid">
                         @foreach (var host in OrderedHosts)
@@ -160,9 +155,8 @@
                             <span class="helper-text">Use tokens like <code>{{service_name}}</code> or <code>{{folder_path}}</code> in the script below. LMS will turn the template into a concrete bash runbook later.</span>
                         </div>
 
-                        <UiCommandButton Label="Add parameter"
+                        <CompactUIButton Label="Add parameter"
                                          Glyph="UiIconGlyph.Plus"
-                                         Variant="UiButtonVariant.ActionSubtle"
                                          OnClick="AddParameterAsync" />
                     </div>
 
@@ -231,9 +225,9 @@
                                                                ValueChanged="@((bool value) => SetParameterRequiredAsync(parameterIndex, value))" />
                                             <span>Required</span>
                                         </label>
-                                        <UiCommandButton Label="Remove"
+                                        <CompactUIButton Label="Remove"
                                                          Glyph="UiIconGlyph.Delete"
-                                                         Variant="UiButtonVariant.Danger"
+                                                         Class="runbook-editor-action-danger"
                                                          OnClick="@(() => RemoveParameterAsync(parameterIndex))" />
                                     </div>
                                 </div>
@@ -291,7 +285,7 @@
                             ? "Keep the template source here. LMS resolves the tokens into a concrete bash script when you create a runnable runbook from it."
                             : IsInstantiatedTemplate
                                 ? "This concrete runbook is rendered from the selected template values."
-                                : "LMS stores the script in its database and materializes a temporary file only when the runbook executes.")</span>
+                                : "Edit the bash script here. Use the AI helper on the right for follow-up changes.")</span>
                     </div>
                 </div>
 
@@ -312,13 +306,10 @@
                                              Placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;systemctl restart nginx"
                                              Rows="11"
                                              Compact="true"
+                                             Class="runbook-editor-script-field"
                                              InputClass="runbook-editor-script-input" />
                         }
 
-                        <div class="runbook-editor-storage-note">
-                            <UiGlyphIcon Glyph="UiIconGlyph.Info" />
-                            <span>LMS stores this script in its database and materializes a temporary file only when the runbook executes.</span>
-                        </div>
                     </div>
 
                     <div class="ui-pane-splitter ui-pane-splitter-vertical runbook-editor-ai-splitter"
@@ -353,9 +344,8 @@
                             <div class="empty-state compact-empty-state runbook-editor-ai-empty">
                                 <p>No enabled AI provider is configured.</p>
                                 <p class="meta-text">Configure a provider first, then come back here and draft the runbook inline.</p>
-                                <UiCommandButton Label="Configure AI"
+                                <CompactUIButton Label="Configure AI"
                                                  Glyph="UiIconGlyph.Ai"
-                                                 Variant="UiButtonVariant.Ghost"
                                                  Href="/ai/providers" />
                             </div>
                         }
@@ -373,6 +363,23 @@
                                                     ModelLabel="Model"
                                                     Class="runbook-editor-ai-provider-switcher" />
 
+                                @if (aiConversationTurns.Count > 0)
+                                {
+                                    <div class="runbook-editor-ai-history" aria-label="AI helper conversation history">
+                                        @foreach (var turn in aiConversationTurns)
+                                        {
+                                            <article class="runbook-editor-ai-message user" @key="@($"user-{turn.Id}")">
+                                                <span class="runbook-editor-ai-role">You</span>
+                                                <p>@turn.UserPrompt</p>
+                                            </article>
+                                            <article class="runbook-editor-ai-message assistant" @key="@($"assistant-{turn.Id}")">
+                                                <span class="runbook-editor-ai-role">@turn.ProviderDisplayName</span>
+                                                <p>@turn.AssistantText</p>
+                                            </article>
+                                        }
+                                    </div>
+                                }
+
                                 <div class="runbook-editor-ai-compose-form">
                                     <UiTextAreaField Value="@aiComposer.Content"
                                                      ValueChanged="SetAiPromptAsync"
@@ -380,10 +387,11 @@
                                                      Label="Update request"
                                                      Placeholder="@ResolveAiPromptPlaceholder()"
                                                      Rows="4"
-                                                     Compact="true" />
+                                                     Compact="true"
+                                                     Class="runbook-editor-ai-prompt-field" />
 
                                     <div class="runbook-editor-ai-compose-actions">
-                                        <UiCommandButton Label="@(isAiSending ? "Asking..." : "Ask AI")"
+                                        <CompactUIButton Label="@(isAiSending ? "Asking..." : "Ask AI")"
                                                          Glyph="UiIconGlyph.Send"
                                                          Disabled="@isAiSending"
                                                          OnClick="HandleAiSendAsync" />
@@ -405,20 +413,19 @@
             }
 
             <div class="runbook-editor-actions">
-                <UiCommandButton Label="Close"
+                <CompactUIButton Label="Close"
                                  Glyph="UiIconGlyph.Clear"
-                                 Variant="UiButtonVariant.Ghost"
                                  Disabled="@IsBusy"
                                  OnClick="HandleCloseAsync" />
                 @if (Editor.Id.HasValue)
                 {
-                    <UiCommandButton Label="Delete"
+                    <CompactUIButton Label="Delete"
                                      Glyph="UiIconGlyph.Delete"
-                                     Variant="UiButtonVariant.Danger"
+                                     Class="runbook-editor-action-danger"
                                      Disabled="@IsBusy"
                                      OnClick="OnDelete" />
                 }
-                <UiCommandButton Label="@(IsBusy ? "Saving..." : "Save runbook")"
+                <CompactUIButton Label="@(IsBusy ? "Saving..." : "Save runbook")"
                                  Glyph="UiIconGlyph.Save"
                                  Disabled="@IsBusy"
                                  Type="submit"
@@ -430,9 +437,12 @@
 
 @code {
     private readonly string formId = $"runbook-editor-form-{Guid.NewGuid():N}";
+    private const int MaxAiConversationTurns = 12;
     private RunbookEditor? trackedEditor;
     private AiChatThreadEditorContextViewModel? aiThreadEditorContext;
     private readonly AiChatMessageComposer aiComposer = new();
+    private readonly List<RunbookAiConversationTurn> aiConversationTurns = [];
+    private Guid aiConversationThreadId = Guid.NewGuid();
     private DotNetObjectReference<RunbookEditorDialog>? aiPaneInteropReference;
     private ElementReference workspaceElement;
     private int aiPaneSizePx = 420;
@@ -780,6 +790,7 @@
             return;
         }
 
+        var userPrompt = aiComposer.Content.Trim();
         isAiSending = true;
         aiStatusMessage = "Asking AI to update the script...";
         aiStatusTone = "info";
@@ -789,18 +800,21 @@
             var result = await RunbookAiDraftService.DraftAsync(new RunbookAiDraftRequest(
                 Editor,
                 OrderedHosts,
-                aiComposer.Content,
+                userPrompt,
                 aiThreadEditorContext?.Editor.ProviderKey ?? string.Empty,
-                aiThreadEditorContext?.Editor.ModelId ?? string.Empty));
+                aiThreadEditorContext?.Editor.ModelId ?? string.Empty,
+                BuildAiMessageHistory()));
 
             if (string.IsNullOrWhiteSpace(result.ScriptDraft))
             {
+                AddAiConversationTurn(userPrompt, result.AssistantText, result.ProviderDisplayName);
                 aiStatusMessage = "AI replied, but did not return a bash script block. The runbook was not changed.";
                 aiStatusTone = "warning";
                 return;
             }
 
             var addedParameterCount = ApplyScriptDraft(result.ScriptDraft);
+            AddAiConversationTurn(userPrompt, result.AssistantText, result.ProviderDisplayName);
             aiComposer.Content = string.Empty;
             var parameterSuffix = addedParameterCount > 0
                 ? $" Added {addedParameterCount} template parameter{(addedParameterCount == 1 ? string.Empty : "s")} from new LMS tokens."
@@ -824,6 +838,54 @@
         finally
         {
             isAiSending = false;
+        }
+    }
+
+    private IReadOnlyList<AiChatMessage> BuildAiMessageHistory()
+    {
+        if (aiConversationTurns.Count == 0)
+        {
+            return [];
+        }
+
+        var messages = new List<AiChatMessage>(aiConversationTurns.Count * 2);
+        var sequenceNumber = 1;
+        foreach (var turn in aiConversationTurns)
+        {
+            messages.Add(new AiChatMessage(
+                Guid.NewGuid(),
+                aiConversationThreadId,
+                sequenceNumber++,
+                AiChatMessageRole.User,
+                turn.UserPrompt,
+                turn.CreatedAtUtc));
+            messages.Add(new AiChatMessage(
+                Guid.NewGuid(),
+                aiConversationThreadId,
+                sequenceNumber++,
+                AiChatMessageRole.Assistant,
+                turn.AssistantText,
+                turn.CreatedAtUtc));
+        }
+
+        return messages;
+    }
+
+    private void AddAiConversationTurn(
+        string userPrompt,
+        string assistantText,
+        string providerDisplayName)
+    {
+        aiConversationTurns.Add(new RunbookAiConversationTurn(
+            Guid.NewGuid(),
+            userPrompt.Trim(),
+            assistantText.Trim(),
+            string.IsNullOrWhiteSpace(providerDisplayName) ? "AI" : providerDisplayName.Trim(),
+            DateTimeOffset.UtcNow));
+
+        while (aiConversationTurns.Count > MaxAiConversationTurns)
+        {
+            aiConversationTurns.RemoveAt(0);
         }
     }
 
@@ -934,6 +996,8 @@
     private void ResetAiState()
     {
         aiThreadEditorContext = null;
+        aiConversationTurns.Clear();
+        aiConversationThreadId = Guid.NewGuid();
         aiComposer.Content = string.Empty;
         aiStatusMessage = string.Empty;
         aiStatusTone = "info";
@@ -982,17 +1046,17 @@
 
     private string ResolveDialogSubtitle() =>
         Editor.IsTemplate
-            ? "Define parameter tokens once, then spin up concrete bash runbooks from the template when you need them."
+            ? "Draft the template script and parameters."
             : IsInstantiatedTemplate
-                ? "Fill the template values, pick the machines, and LMS will save a concrete bash runbook."
-                : "Store the bash runbook in LMS, keep the list compact, and only expand the full script when it matters.";
+                ? "Fill the template values and review the generated script."
+                : "Edit the script and use AI for follow-up changes.";
 
     private string ResolveAiHelperSubtitle() =>
         Editor.IsTemplate
-            ? "Build reusable runbook templates interactively. Keep reusable values as LMS tokens like {{service_name}} and the editor will carry those parameters with the draft."
+            ? "Keeps prior turns while drafting reusable LMS tokens."
         : IsInstantiatedTemplate
-            ? "Refine this concrete runbook with AI. Because it came from a template, the helper should keep the final draft fully concrete with no unresolved LMS tokens."
-            : "Build a concrete bash script interactively. Returned bash drafts update the script editor automatically.";
+            ? "Keeps prior turns while refining this generated script."
+            : "Keeps prior turns and applies returned bash drafts to the editor.";
 
     private string ResolveAiPromptPlaceholder() =>
         Editor.IsTemplate
@@ -1102,6 +1166,13 @@
 
     private int SyncTemplateParametersFromContent() =>
         RunbookAiHelper.SyncTemplateParametersFromContent(Editor);
+
+    private sealed record RunbookAiConversationTurn(
+        Guid Id,
+        string UserPrompt,
+        string AssistantText,
+        string ProviderDisplayName,
+        DateTimeOffset CreatedAtUtc);
 
     public ValueTask DisposeAsync()
     {

@@ -22,10 +22,11 @@ VERSION_REVISION="$(lms_resolve_version_revision)"
 PACKAGE_NAME="linux-made-sane-ce-${APP_VERSION}-${RUNTIME}"
 PACKAGE_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/artifacts/publish/$PACKAGE_NAME}"
 PACKAGE_TARBALL="${PACKAGE_TARBALL:-$REPO_ROOT/artifacts/packages/${PACKAGE_NAME}.tar.gz}"
+DESKTOP_HELPER_OUTPUT_DIR="$PACKAGE_ROOT/app/desktop-helper"
 
 lms_validate_version "$APP_VERSION"
 lms_reset_dir "$PACKAGE_ROOT"
-mkdir -p "$PACKAGE_ROOT/app"
+mkdir -p "$PACKAGE_ROOT/app" "$DESKTOP_HELPER_OUTPUT_DIR"
 
 lms_log "Publishing CE package to $PACKAGE_ROOT/app"
 dotnet publish \
@@ -38,6 +39,17 @@ dotnet publish \
   /p:LinuxMadeSaneVersionDate="$VERSION_DATE" \
   /p:LinuxMadeSaneVersionRevision="$VERSION_REVISION" \
   /p:LinuxMadeSaneSkipPluginPackaging=true
+
+lms_log "Publishing desktop session helper to $DESKTOP_HELPER_OUTPUT_DIR"
+dotnet publish \
+  "$REPO_ROOT/src/LinuxMadeSane.DesktopHelper/LinuxMadeSane.DesktopHelper.csproj" \
+  -c "$CONFIGURATION" \
+  -r "$RUNTIME" \
+  --self-contained "$SELF_CONTAINED" \
+  -o "$DESKTOP_HELPER_OUTPUT_DIR" \
+  /p:LinuxMadeSaneVersion="$APP_VERSION" \
+  /p:LinuxMadeSaneVersionDate="$VERSION_DATE" \
+  /p:LinuxMadeSaneVersionRevision="$VERSION_REVISION"
 
 printf 'ce\n' > "$PACKAGE_ROOT/edition.txt"
 printf '%s\n' "$APP_VERSION" > "$PACKAGE_ROOT/version.txt"

@@ -232,6 +232,35 @@ lms_detect_installer_identity() {
   fi
 }
 
+lms_prepare_desktop_helper_access() {
+  local service_group="$1"
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    lms_log "Skipping desktop helper group membership while staging under LMS_DEST_ROOT"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    lms_log "Skipping desktop helper group membership because the installer is not running as root"
+    return
+  fi
+
+  local username="${LMS_INSTALLER_USERNAME:-}"
+  if [[ -z "$username" || "$username" == "root" ]]; then
+    lms_log "Desktop helper installed; add each GUI user that should report sessions to the $service_group group"
+    return
+  fi
+
+  if ! id "$username" >/dev/null 2>&1; then
+    lms_log "Desktop helper installed; installer user $username was not found for group membership"
+    return
+  fi
+
+  usermod -a -G "$service_group" "$username" >/dev/null 2>&1 || true
+  lms_log "Granted $username access to the LMS desktop helper socket via group $service_group"
+  lms_log "The user must log out and back in before the new desktop helper group membership is active"
+}
+
 lms_write_update_helper() {
   local service_user="$1"
   local base_url="${2:-https://www.linuxmadesane.com}"
@@ -611,6 +640,22 @@ lms_render_systemd_unit() {
     -e "s|__SERVICE_GROUP__|$(printf '%s' "$service_group" | sed 's/[&|]/\\&/g')|g" \
     -e "s|__WORKING_DIRECTORY__|$(printf '%s' "$working_directory" | sed 's/[&|]/\\&/g')|g" \
     -e "s|__ENV_FILE__|$(printf '%s' "$env_file" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__EXEC_START__|$(printf '%s' "$exec_start" | sed 's/[&|]/\\&/g')|g" \
+    "$template_path" > "$destination_path"
+}
+
+lms_render_desktop_helper_file() {
+  local template_path="$1"
+  local destination_path="$2"
+  local socket_path="$3"
+  local exec_start="$4"
+  local local_lms_url="${5:-http://127.0.0.1:5080/desktop-assistant}"
+  local tray_icon_path="${6:-}"
+
+  sed \
+    -e "s|__SOCKET_PATH__|$(printf '%s' "$socket_path" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__LOCAL_LMS_URL__|$(printf '%s' "$local_lms_url" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__TRAY_ICON_PATH__|$(printf '%s' "$tray_icon_path" | sed 's/[&|]/\\&/g')|g" \
     -e "s|__EXEC_START__|$(printf '%s' "$exec_start" | sed 's/[&|]/\\&/g')|g" \
     "$template_path" > "$destination_path"
 }

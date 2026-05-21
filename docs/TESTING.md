@@ -17,6 +17,7 @@ Record:
 - selected release asset
 - whether `/healthz` returns HTTP 200
 - first-run database path
+- whether the Desktop Assistant helper files were installed on GUI-capable machines
 - any missing optional host packages
 
 ## Raspberry Pi Notes
@@ -40,6 +41,7 @@ uname -a
 cat /etc/os-release
 systemctl status linux-made-sane.service
 journalctl -u linux-made-sane.service -n 200 --no-pager
+systemctl --user status linux-made-sane-desktop-helper.service
 ls -lah /opt/linuxmadesane/ce /var/lib/linuxmadesane/ce /etc/linuxmadesane/ce
 ```
 

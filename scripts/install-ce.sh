@@ -31,6 +31,9 @@ RUNNER_HOME="${RUNNER_HOME:-/var/lib/linuxmadesane/runner}"
 RUNNER_WORKSPACE="${RUNNER_WORKSPACE:-${RUNNER_HOME}/workspace}"
 LMS_BASE_URL="${LMS_BASE_URL:-https://www.linuxmadesane.com}"
 UPDATE_HELPER_PATH="${UPDATE_HELPER_PATH:-/usr/local/sbin/linux-made-sane-update}"
+INSTALL_DESKTOP_HELPER="${INSTALL_DESKTOP_HELPER:-true}"
+DESKTOP_HELPER_UNIT="${DESKTOP_HELPER_UNIT:-linux-made-sane-desktop-helper.service}"
+DESKTOP_HELPER_SOCKET_PATH="${DESKTOP_HELPER_SOCKET_PATH:-/run/linuxmadesane/desktop-session.sock}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,9 +47,12 @@ while [[ $# -gt 0 ]]; do
     --skip-system-packages) INSTALL_SYSTEM_PACKAGES=false; shift ;;
     --no-local-ssh) CONFIGURE_LOCAL_SSH=false; shift ;;
     --no-local-sudo) ENABLE_LOCAL_SUDO=false; shift ;;
+    --no-desktop-helper) INSTALL_DESKTOP_HELPER=false; shift ;;
     *) lms_die "unknown argument: $1" ;;
   esac
 done
+
+DESKTOP_HELPER_LOCAL_LMS_URL="${DESKTOP_HELPER_LOCAL_LMS_URL:-http://127.0.0.1:${SERVICE_PORT}/desktop-assistant}"
 
 if [[ -z "$ARTIFACT_PATH" ]]; then
   ARTIFACT_PATH="$(lms_find_latest_artifact "linux-made-sane-ce-*.tar.gz" "$REPO_ROOT/artifacts/packages" || true)"
@@ -74,12 +80,17 @@ INSTALL_ROOT_ABS="${PREFIX}${INSTALL_ROOT}"
 DATA_ROOT_ABS="${PREFIX}${DATA_ROOT}"
 CONFIG_ROOT_ABS="${PREFIX}${CONFIG_ROOT}"
 SYSTEMD_ROOT_ABS="${PREFIX}/etc/systemd/system"
+SYSTEMD_USER_ROOT_ABS="${PREFIX}/etc/systemd/user"
+XDG_AUTOSTART_ROOT_ABS="${PREFIX}/etc/xdg/autostart"
 RELEASE_ID="${PACKAGE_VERSION_SAFE}-$(date -u +%Y%m%d%H%M%S)"
 RELEASE_DIR="$INSTALL_ROOT_ABS/releases/$RELEASE_ID"
 CURRENT_DIR="$INSTALL_ROOT_ABS/current"
 ENV_FILE="$CONFIG_ROOT_ABS/service.env"
 UNIT_FILE="$SYSTEMD_ROOT_ABS/$SERVICE_UNIT"
+DESKTOP_HELPER_UNIT_FILE="$SYSTEMD_USER_ROOT_ABS/$DESKTOP_HELPER_UNIT"
+DESKTOP_HELPER_AUTOSTART_FILE="$XDG_AUTOSTART_ROOT_ABS/linux-made-sane-desktop-helper.desktop"
 EXECUTABLE_PATH="$CURRENT_DIR/LinuxMadeSane.Web"
+DESKTOP_HELPER_EXECUTABLE_PATH="$CURRENT_DIR/desktop-helper/LinuxMadeSane.DesktopHelper"
 PREVIOUS_CURRENT_TARGET="$(lms_current_release_target "$CURRENT_DIR")"
 SERVICE_WAS_ACTIVE=false
 if lms_systemctl_is_active "$SERVICE_UNIT"; then
@@ -102,6 +113,9 @@ rollback_failed_install() {
 }
 
 mkdir -p "$RELEASE_DIR" "$DATA_ROOT_ABS" "$CONFIG_ROOT_ABS" "$SYSTEMD_ROOT_ABS"
+if [[ "$INSTALL_DESKTOP_HELPER" == "true" ]]; then
+  mkdir -p "$SYSTEMD_USER_ROOT_ABS" "$XDG_AUTOSTART_ROOT_ABS"
+fi
 
 lms_install_host_packages sudo openssh-server openssh-client caddy ffmpeg samba-common-bin smbclient cifs-utils
 
@@ -115,6 +129,9 @@ if lms_is_truthy "$CONFIGURE_LOCAL_SSH"; then
 fi
 
 lms_detect_installer_identity
+if [[ "$INSTALL_DESKTOP_HELPER" == "true" ]]; then
+  lms_prepare_desktop_helper_access "$SERVICE_GROUP"
+fi
 
 ROLLBACK_ARMED=true
 trap rollback_failed_install ERR
@@ -144,7 +161,8 @@ lms_write_env_file \
   "ApplicationUpdates__Rid=linux-x64" \
   "ApplicationUpdates__CheckIntervalMinutes=360" \
   "ApplicationUpdates__InstallAutomatically=false" \
-  "ApplicationUpdates__UpdateHelperPath=${UPDATE_HELPER_PATH}"
+  "ApplicationUpdates__UpdateHelperPath=${UPDATE_HELPER_PATH}" \
+  "DesktopSession__SocketPath=${DESKTOP_HELPER_SOCKET_PATH}"
 
 lms_render_systemd_unit \
   "$REPO_ROOT/deploy/systemd/linux-made-sane.service.template" \
@@ -155,6 +173,23 @@ lms_render_systemd_unit \
   "$CURRENT_DIR" \
   "$ENV_FILE" \
   "$EXECUTABLE_PATH"
+
+if [[ "$INSTALL_DESKTOP_HELPER" == "true" && -x "$RELEASE_DIR/desktop-helper/LinuxMadeSane.DesktopHelper" ]]; then
+  lms_render_desktop_helper_file \
+    "$REPO_ROOT/deploy/systemd/linux-made-sane-desktop-helper.service.template" \
+    "$DESKTOP_HELPER_UNIT_FILE" \
+    "$DESKTOP_HELPER_SOCKET_PATH" \
+    "$DESKTOP_HELPER_EXECUTABLE_PATH" \
+    "$DESKTOP_HELPER_LOCAL_LMS_URL" \
+    "$CURRENT_DIR/wwwroot/images/lms-logo-192.png"
+  lms_render_desktop_helper_file \
+    "$REPO_ROOT/deploy/xdg/linux-made-sane-desktop-helper.desktop.template" \
+    "$DESKTOP_HELPER_AUTOSTART_FILE" \
+    "$DESKTOP_HELPER_SOCKET_PATH" \
+    "$DESKTOP_HELPER_EXECUTABLE_PATH" \
+    "$DESKTOP_HELPER_LOCAL_LMS_URL" \
+    "$CURRENT_DIR/wwwroot/images/lms-logo-192.png"
+fi
 
 lms_write_update_helper "$SERVICE_USER" "$LMS_BASE_URL" "$UPDATE_HELPER_PATH"
 
@@ -175,5 +210,11 @@ lms_log "CE install complete"
 printf 'version: %s\nservice unit: %s\ninstall root: %s\ndata root: %s\nconfig file: %s\nport: %s\n' \
   "$PACKAGE_VERSION" "$SERVICE_UNIT" "$INSTALL_ROOT_ABS" "$DATA_ROOT_ABS" "$ENV_FILE" "$SERVICE_PORT"
 printf 'local SSH runner: %s@localhost:22\n' "$RUNNER_USER"
+if [[ "$INSTALL_DESKTOP_HELPER" == "true" && -f "$DESKTOP_HELPER_UNIT_FILE" ]]; then
+  printf 'desktop helper: %s\n' "$DESKTOP_HELPER_UNIT_FILE"
+  printf 'desktop helper socket: %s\n' "$DESKTOP_HELPER_SOCKET_PATH"
+  printf 'desktop tray URL: %s\n' "$DESKTOP_HELPER_LOCAL_LMS_URL"
+  printf 'start helper in the current GUI session: systemctl --user enable --now %s\n' "$DESKTOP_HELPER_UNIT"
+fi
 lms_print_access_urls "$SERVICE_PORT"
 printf 'update command: sudo %s\n' "$UPDATE_HELPER_PATH"

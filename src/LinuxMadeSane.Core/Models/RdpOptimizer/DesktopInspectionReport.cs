@@ -1,6 +1,8 @@
 // Copyright (c) Richard D. Kiernan.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using LinuxMadeSane.Core.Models.DesktopSession;
+
 namespace LinuxMadeSane.Core.Models.RdpOptimizer;
 
 public sealed record DesktopInspectionReport(
@@ -16,6 +18,7 @@ public sealed record DesktopInspectionReport(
     bool XrdpServiceEnabled,
     bool XrdpServiceActive,
     DesktopSessionConfiguration SessionConfiguration,
+    DesktopSessionBrokerSnapshot DesktopSessionBroker,
     IReadOnlyList<PackageState> Packages,
     IReadOnlyList<ServiceState> Services,
     OptimizationGainEstimate LikelyGains,

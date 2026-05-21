@@ -26,6 +26,20 @@ For remote managed hosts, use deliberate key-based access. Avoid shared human pa
 
 sudo-marked LMS runbooks use non-interactive sudo. If the runner account is not allowed to elevate without a password, the operation should fail clearly instead of hanging on a password prompt.
 
+## Desktop Assistant Helper
+
+The Desktop Assistant helper runs inside the signed-in Linux graphical session. It lets LMS reason about GUI-session details that the background service cannot reliably see, such as X11 or Wayland state, keyboard layout, monitor layout, and desktop settings.
+
+The installer writes a systemd user service and an XDG autostart file, but the helper is still bound by LMS authentication and approval rules:
+
+- tray launch opens the local LMS web UI and does not bypass sign-in
+- tray launch uses local, short-lived, one-time launch tickets
+- missing, reused, expired, non-local, or bad-host launch attempts are rejected
+- the helper is not an arbitrary shell command channel
+- desktop-changing actions must be explicit LMS actions with approval, fixed arguments, timeout handling, and audit history
+
+Use `--no-desktop-helper` or `LMS_INSTALL_DESKTOP_HELPER=false` during install when the machine should not run the GUI-session helper.
+
 ## Credential Handling
 
 LMS should keep credentials in protected secret storage and out of logs. Do not place API keys, private keys, OTP secrets, passwords, database files, or local configuration in the public release repository.

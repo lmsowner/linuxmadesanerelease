@@ -61,6 +61,9 @@ public static class DependencyInjection
         services.AddSingleton(new ShareMountStorageSettings(Path.Combine(contentRootPath, "data", "share-mounts")));
         services.AddSingleton(new SftpBackupStorageSettings(Path.Combine(contentRootPath, "data", "sftp-backups")));
         services.AddSingleton(new HttpServiceDiscoveryStorageSettings(Path.Combine(contentRootPath, "data", "http-service-discovery")));
+        services.Configure<DesktopSessionBrokerOptions>(configuration.GetSection("DesktopSession"));
+        services.AddSingleton<IDesktopSessionBroker, DesktopSessionBroker>();
+        services.AddHostedService<DesktopSessionBrokerHostedService>();
         services.AddHostedService<TemporaryShareMountCleanupService>();
         services.AddScoped<IAiConversationStore, SqliteAiConversationStore>();
         services.AddScoped<IAiProviderSettingsStore, SqliteAiProviderSettingsStore>();

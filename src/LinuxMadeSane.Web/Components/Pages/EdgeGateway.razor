@@ -2,7 +2,8 @@
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/edge-gateway"
-@rendermode InteractiveServer
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IDisposable
 @using System.Net
 @using System.Net.Http
 @using System.Text
@@ -32,8 +33,18 @@
 
     @if (dashboard is null)
     {
-        <section class="surface-card">
-            <p class="meta-text">Loading Edge Gateway...</p>
+        <section class="surface-card edge-loading-card" aria-busy="@isDashboardLoading">
+            @if (isDashboardLoading)
+            {
+                <span class="edge-loading-progress">
+                    <span class="edge-loading-progress-fill"></span>
+                </span>
+            }
+            <p class="meta-text">
+                @(string.IsNullOrWhiteSpace(dashboardLoadError)
+                    ? "Loading Edge Gateway..."
+                    : $"Edge Gateway could not load: {dashboardLoadError}")
+            </p>
         </section>
     }
     else
@@ -969,13 +980,17 @@
     private EdgeGatewayCloudflareRelayRemovalResult? cloudflareRelayRemovalResult;
     private EdgeGatewaySettingsEditor edgeSettingsEditor = new();
     private IReadOnlyList<LocalHttpServiceEndpoint> httpServiceSuggestions = [];
+    private CancellationTokenSource? dashboardLoadCancellation;
     private string activeTab = PublishedAppsTabValue;
     private string userMessage = string.Empty;
+    private string dashboardLoadError = string.Empty;
     private string? httpServiceDiscoveryMessage;
     private string httpServiceDiscoveryStatus = string.Empty;
     private int httpServiceScanFoundCount;
     private int httpServiceScanProbedCount;
     private int httpServiceScanTotalCount;
+    private bool isDisposed;
+    private bool isDashboardLoading;
     private bool showRouteModal;
     private bool isHttpServicePickerOpen;
     private bool isDiscoveringHttpServices;
@@ -1086,12 +1101,92 @@
         SelectedRelaySetupCloudflareDomain is { } domain &&
         domain.DomainName.Equals(provisioningCloudflareDomainName, StringComparison.OrdinalIgnoreCase);
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    protected override void OnInitialized() => BeginDashboardLoad();
+
+    public void Dispose()
+    {
+        isDisposed = true;
+        dashboardLoadCancellation?.Cancel();
+        dashboardLoadCancellation?.Dispose();
+    }
+
+    private void BeginDashboardLoad()
+    {
+        dashboardLoadCancellation?.Cancel();
+        dashboardLoadCancellation?.Dispose();
+        dashboardLoadCancellation = new CancellationTokenSource();
+        isDashboardLoading = true;
+        dashboardLoadError = string.Empty;
+        _ = LoadDashboardInBackgroundAsync(dashboardLoadCancellation.Token);
+    }
+
+    private async Task LoadDashboardInBackgroundAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Yield();
+            var snapshot = await LoadDashboardSnapshotAsync(cancellationToken);
+            await InvokeAsync(() =>
+            {
+                if (isDisposed || cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                ApplyDashboardSnapshot(snapshot);
+                isDashboardLoading = false;
+                StateHasChanged();
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            await InvokeAsync(() =>
+            {
+                if (isDisposed)
+                {
+                    return;
+                }
+
+                dashboardLoadError = exception.Message;
+                userMessage = exception.Message;
+                isDashboardLoading = false;
+                StateHasChanged();
+            });
+        }
+    }
 
     private async Task LoadAsync()
     {
-        dashboard = await EdgeGatewayService.GetDashboardAsync();
-        edgeSettingsEditor = await EdgeGatewayService.GetSettingsEditorAsync();
+        isDashboardLoading = true;
+        dashboardLoadError = string.Empty;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var snapshot = await LoadDashboardSnapshotAsync();
+            ApplyDashboardSnapshot(snapshot);
+        }
+        finally
+        {
+            isDashboardLoading = false;
+        }
+    }
+
+    private async Task<EdgeGatewayDashboardSnapshot> LoadDashboardSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        var dashboardTask = EdgeGatewayService.GetDashboardAsync(cancellationToken);
+        var settingsTask = EdgeGatewayService.GetSettingsEditorAsync(cancellationToken);
+        await Task.WhenAll(dashboardTask, settingsTask);
+        return new EdgeGatewayDashboardSnapshot(await dashboardTask, await settingsTask);
+    }
+
+    private void ApplyDashboardSnapshot(EdgeGatewayDashboardSnapshot snapshot)
+    {
+        dashboard = snapshot.Dashboard;
+        edgeSettingsEditor = snapshot.SettingsEditor;
         relayNamespaceUnlocked = false;
         if (CloudflareDomains.Count > 0 &&
             !CloudflareDomains.Any(domain => domain.DomainName.Equals(selectedDomainName, StringComparison.OrdinalIgnoreCase)))
@@ -2418,4 +2513,8 @@
     {
         public int EnabledCount => Routes.Count(route => route.Enabled);
     }
+
+    private sealed record EdgeGatewayDashboardSnapshot(
+        EdgeGatewayDashboardViewModel Dashboard,
+        EdgeGatewaySettingsEditor SettingsEditor);
 }

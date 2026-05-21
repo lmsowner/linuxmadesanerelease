@@ -2,7 +2,7 @@
 
 This repository is the public Community Edition release and documentation surface for Linux Made Sane.
 
-Linux Made Sane is a local-first Linux administration web app for managing hosts, terminals, files, services, shares, remote access, AI-assisted operations, and media-library workflows.
+Linux Made Sane is a local-first Linux administration web app for managing hosts, terminals, files, services, shares, remote access, AI-assisted operations, media-library workflows, and local Linux desktop assistance.
 
 Current Community downloads are served by the public website:
 
@@ -69,6 +69,7 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 509
 - installs useful host packages on apt-based systems unless disabled
 - configures localhost SSH access for LMS automation unless disabled
 - creates a writable local runner workspace for terminals, files, runbooks, and scheduled jobs
+- installs the Desktop Assistant helper for signed-in Linux GUI sessions unless disabled
 - installs the local update helper used by LMS-managed updates
 - stops an existing service before replacing files during an update
 
@@ -90,6 +91,7 @@ Build from source:
 
 ```bash
 dotnet build src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj
+dotnet build src/LinuxMadeSane.DesktopHelper/LinuxMadeSane.DesktopHelper.csproj
 ```
 
 ## More Docs
@@ -105,6 +107,8 @@ dotnet build src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj
 Linux Made Sane Community Edition is source-available under the Business Source License 1.1.
 
 It is free for personal, homelab, educational, non-profit, and internal commercial use.
+
+Desktop Assistant and the local Desktop Helper are included in Community Edition. Future Pro or Enterprise desktop work may add remote desktop help, team workflows, or managed support paths, but the local GUI-session helper is part of the CE baseline.
 
 A commercial license from Richard D. Kiernan is required for hosted, MSP, SaaS, white-label, resale, or third-party managed-service use.
 

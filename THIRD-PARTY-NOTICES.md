@@ -41,8 +41,13 @@ Known package license metadata at the time of this review:
 | BouncyCastle.Cryptography | MIT |
 | NSec.Cryptography | MIT |
 | SQLitePCLRaw packages | Apache License 2.0 package metadata; SQLite itself is public-domain software where applicable |
+| GtkSharp, AtkSharp, CairoSharp, GdkSharp, GioSharp, GLibSharp, PangoSharp | LGPL v2.0 package family used by the Desktop Assistant helper tray integration |
 | Newtonsoft.Json | MIT |
 | xUnit and .NET test packages | Test-only dependencies; retain package notices if redistributed in a test bundle |
+
+## Desktop Runtime Packages
+
+The Desktop Assistant helper uses GtkSharp for the Linux tray surface. GtkSharp is a .NET binding layer for GTK and related libraries. The native GTK, GLib, GDK, ATK, Cairo, and Pango runtime libraries are expected to come from the user's Linux distribution and are not owned by Linux Made Sane. Preserve upstream package notices and review distro package license metadata when redistributing a complete appliance image.
 
 ## Release Checklist
 

@@ -37,13 +37,16 @@ public sealed class RunbookAiDraftService(
             request.Hosts,
             request.UserPrompt,
             includeSecretValues);
+        var secretValues = RunbookAiHelper.CollectSecretValues(request.Editor.Parameters);
         var sanitization = promptSanitizer.Sanitize(
             builtPrompt,
             provider.Settings.ProviderType,
-            RunbookAiHelper.CollectSecretValues(request.Editor.Parameters));
+            secretValues);
+        var messageHistory = BuildMessageHistory(request, provider.Settings.ProviderType, secretValues);
         var now = DateTimeOffset.UtcNow;
+        var threadId = messageHistory.FirstOrDefault()?.ThreadId ?? Guid.NewGuid();
         var thread = new AiChatThread(
-            Guid.NewGuid(),
+            threadId,
             BuildThreadTitle(request.Editor),
             provider.ProviderKey,
             provider.Definition.ProviderType,
@@ -64,7 +67,7 @@ public sealed class RunbookAiDraftService(
         var result = await provider.ExecuteTurnAsync(
             new AiProviderTurnRequest(
                 thread,
-                Array.Empty<AiChatMessage>(),
+                messageHistory,
                 attachedServers,
                 inputItems,
                 Array.Empty<AiToolDefinition>(),
@@ -98,6 +101,26 @@ public sealed class RunbookAiDraftService(
             assistantText,
             scriptDraft,
             sanitization.Summary);
+    }
+
+    private IReadOnlyList<AiChatMessage> BuildMessageHistory(
+        RunbookAiDraftRequest request,
+        AiProviderType providerType,
+        IReadOnlyList<string> secretValues)
+    {
+        if (request.MessageHistory is null || request.MessageHistory.Count == 0)
+        {
+            return [];
+        }
+
+        return request.MessageHistory
+            .OrderBy(message => message.SequenceNumber)
+            .Select(message => message with
+            {
+                Content = promptSanitizer.Sanitize(message.Content, providerType, secretValues).Content
+            })
+            .Where(static message => !string.IsNullOrWhiteSpace(message.Content))
+            .ToArray();
     }
 
     private async Task<IAiProvider?> ResolveProviderAsync(
