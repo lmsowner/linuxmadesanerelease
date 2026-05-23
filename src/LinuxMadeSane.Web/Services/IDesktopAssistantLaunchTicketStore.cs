@@ -8,4 +8,6 @@ namespace LinuxMadeSane.Web.Services;
 public interface IDesktopAssistantLaunchTicketStore : IDesktopAssistantLaunchTicketIssuer
 {
     bool TryConsume(string? token, out string returnUrl);
+
+    bool TryValidate(string? token);
 }

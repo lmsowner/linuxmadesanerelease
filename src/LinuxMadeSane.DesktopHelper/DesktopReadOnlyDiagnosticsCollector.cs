@@ -10,6 +10,7 @@ namespace LinuxMadeSane.DesktopHelper;
 internal static class DesktopReadOnlyDiagnosticsCollector
 {
     private const int CommandTimeoutMilliseconds = 1500;
+    private const int MaxConcurrentCommands = 6;
     private const int MaxOutputChars = 2400;
 
     private static readonly IReadOnlyList<DiagnosticCommand> Commands =
@@ -80,31 +81,110 @@ internal static class DesktopReadOnlyDiagnosticsCollector
             }
         }
 
-        foreach (var command in Commands)
-        {
-            if (!availableTools.Contains(command.Executable))
-            {
-                continue;
-            }
+        using var throttle = new SemaphoreSlim(MaxConcurrentCommands);
+        var commandTasks = BuildCommands(report)
+            .Where(command => availableTools.Contains(command.Executable))
+            .Select(command => RunThrottledAsync(command, throttle, cancellationToken))
+            .ToArray();
 
-            var output = await RunAsync(command, cancellationToken);
-            if (!string.IsNullOrWhiteSpace(output))
+        foreach (var result in await Task.WhenAll(commandTasks))
+        {
+            if (!string.IsNullOrWhiteSpace(result.Output))
             {
-                diagnostics[command.Name] = output;
+                diagnostics[result.Name] = result.Output;
             }
         }
 
         return diagnostics;
     }
 
+    private static async Task<DiagnosticResult> RunThrottledAsync(
+        DiagnosticCommand command,
+        SemaphoreSlim throttle,
+        CancellationToken cancellationToken)
+    {
+        await throttle.WaitAsync(cancellationToken);
+        try
+        {
+            return new DiagnosticResult(command.Name, await RunAsync(command, cancellationToken));
+        }
+        finally
+        {
+            throttle.Release();
+        }
+    }
+
+    private static IEnumerable<DiagnosticCommand> BuildCommands(DesktopSessionCapabilityReport report)
+    {
+        foreach (var command in Commands)
+        {
+            yield return command;
+        }
+
+        if (!string.IsNullOrWhiteSpace(report.UserName) &&
+            !string.Equals(report.UserName, "unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return new DiagnosticCommand(
+                "process.user-top-memory",
+                "ps",
+                [
+                    "-u",
+                    report.UserName,
+                    "-o",
+                    "pid=,ppid=,comm=,%cpu=,%mem=,rss=,vsz=,etimes=,stat=,args=",
+                    "--sort=-rss"
+                ]);
+        }
+
+        yield return new DiagnosticCommand("process.system-memory", "free", ["-h"]);
+        yield return new DiagnosticCommand(
+            "process.system-top-memory",
+            "ps",
+            [
+                "-eo",
+                "pid=,user=,comm=,%cpu=,%mem=,rss=,stat=,args=",
+                "--sort=-rss"
+            ]);
+        yield return new DiagnosticCommand("windows.wmctrl", "wmctrl", ["-lpG"]);
+        yield return new DiagnosticCommand("input.xinput", "xinput", ["--list"]);
+        yield return new DiagnosticCommand("audio.pactl-info", "pactl", ["info"]);
+        yield return new DiagnosticCommand("audio.pactl-sinks", "pactl", ["list", "short", "sinks"]);
+        yield return new DiagnosticCommand("audio.pactl-sources", "pactl", ["list", "short", "sources"]);
+        yield return new DiagnosticCommand("bluetooth.controllers", "bluetoothctl", ["--timeout", "1", "list"]);
+        yield return new DiagnosticCommand("bluetooth.default-controller", "bluetoothctl", ["--timeout", "1", "show"]);
+        yield return new DiagnosticCommand("bluetooth.devices", "bluetoothctl", ["--timeout", "1", "devices"]);
+        yield return new DiagnosticCommand("bluetooth.paired-devices", "bluetoothctl", ["--timeout", "1", "paired-devices"]);
+        yield return new DiagnosticCommand("bluetooth.connected-devices", "bluetoothctl", ["--timeout", "1", "devices", "Connected"]);
+        yield return new DiagnosticCommand("bluetooth.rfkill", "rfkill", ["list", "bluetooth"]);
+        yield return new DiagnosticCommand(
+            "bluetooth.system-service",
+            "systemctl",
+            [
+                "show",
+                "bluetooth.service",
+                "-p",
+                "ActiveState",
+                "-p",
+                "SubState",
+                "-p",
+                "UnitFileState",
+                "--no-pager"
+            ]);
+        yield return new DiagnosticCommand("network.nmcli-devices", "nmcli", ["device", "status"]);
+        yield return new DiagnosticCommand("power.upower-devices", "upower", ["-e"]);
+        yield return new DiagnosticCommand("services.user-failed", "systemctl", ["--user", "--failed", "--no-pager"]);
+        yield return new DiagnosticCommand("logs.user-warnings", "journalctl", ["--user", "-p", "warning", "-n", "60", "--no-pager"]);
+    }
+
     private static async Task<string> RunAsync(DiagnosticCommand command, CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(CommandTimeoutMilliseconds);
+        Process? process = null;
 
         try
         {
-            using var process = new Process
+            process = new Process
             {
                 StartInfo = new ProcessStartInfo
                 {
@@ -131,9 +211,37 @@ internal static class DesktopReadOnlyDiagnosticsCollector
             var error = await errorTask;
             return NormalizeOutput(output, error);
         }
-        catch (Exception exception) when (exception is OperationCanceledException or InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            return string.Empty;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
         {
             return string.Empty;
+        }
+        finally
+        {
+            process?.Dispose();
+        }
+    }
+
+    private static void TryKill(Process? process)
+    {
+        if (process is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
         }
     }
 
@@ -160,4 +268,6 @@ internal static class DesktopReadOnlyDiagnosticsCollector
         string Name,
         string Executable,
         IReadOnlyList<string> Arguments);
+
+    private sealed record DiagnosticResult(string Name, string Output);
 }

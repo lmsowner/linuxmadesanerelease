@@ -3,10 +3,13 @@
 
 @using System.Text
 @using LinuxMadeSane.Application.Contracts.Caddy
+@using LinuxMadeSane.Application.Contracts.EdgeGateway
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.Ai
 @using LinuxMadeSane.Core.Models.RdpOptimizer
 @inject ICaddyIntegrationService CaddyIntegrationService
+@inject EdgeGatewayOptions EdgeGatewayOptions
 
 @if (!IsLocalHost)
 {
@@ -46,6 +49,11 @@ else
                                      Glyph="UiIconGlyph.Plus"
                                      Disabled="@(!dashboard.IsInstalled || IsBusy)"
                                      OnClick="OpenCreateRouteDialogAsync" />
+                    <UiCommandButton Label="Add port forward"
+                                     Glyph="UiIconGlyph.NetworkMount"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@(!dashboard.IsInstalled || IsBusy)"
+                                     OnClick="OpenCreatePortForwardDialogAsync" />
                     <UiCommandButton Label="Reload config"
                                      Glyph="UiIconGlyph.Refresh"
                                      Variant="UiButtonVariant.Ghost"
@@ -177,6 +185,7 @@ else
                                 <div class="caddy-route-copy">
                                     <div class="caddy-route-title-line">
                                         <strong>@route.Name</strong>
+                                        <span class="caddy-route-kind">@route.KindLabel</span>
                                         @if (!string.IsNullOrWhiteSpace(route.Description))
                                         {
                                             <span class="caddy-route-summary">@route.Description</span>
@@ -184,15 +193,25 @@ else
                                     </div>
 
                                     <div class="caddy-route-meta">
-                                        <span><strong>Public:</strong> @route.AddressLabel</span>
-                                        <span><strong>Upstream:</strong> @route.UpstreamUrl</span>
+                                        <span><strong>@GetRouteAddressLabel(route):</strong> @route.AddressLabel</span>
+                                        <span><strong>@GetRouteTargetLabel(route):</strong> @route.TargetLabel</span>
                                         <span><strong>Updated:</strong> @route.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
                                     </div>
+
+                                    @if (route.Warnings.Count > 0)
+                                    {
+                                        <div class="caddy-route-warnings">
+                                            @foreach (var warning in route.Warnings)
+                                            {
+                                                <span>@warning</span>
+                                            }
+                                        </div>
+                                    }
                                 </div>
 
                                 <div class="caddy-route-side">
                                     <span class="caddy-route-access @(route.EnableTls ? "caddy-route-access-secure" : "caddy-route-access-plain")">
-                                        @(route.EnableTls ? "https" : "http")
+                                        @(route.Kind == CaddyProxyRouteKind.PortForward ? "port" : route.EnableTls ? "https" : "http")
                                     </span>
 
                                     <div class="caddy-route-actions">
@@ -275,7 +294,7 @@ else
             <header class="caddy-dialog-header">
                 <div class="caddy-dialog-title-block">
                     <h2 id="@editorDialogTitleId">@(editor.Id.HasValue ? $"Edit {editor.Name}" : "Add Caddy route")</h2>
-                    <p>Define the public hostname and local upstream, then let LMS generate the managed Caddy block.</p>
+                    <p>@GetEditorSubtitle()</p>
                 </div>
                 <UiIconButton Label="Close" Glyph="UiIconGlyph.Clear" OnClick="CloseEditorDialogAsync" />
             </header>
@@ -293,11 +312,21 @@ else
                     }
 
                     <div class="caddy-editor-top-grid">
+                        <UiSelectField TValue="CaddyProxyRouteKind"
+                                       Value="@editor.Kind"
+                                       ValueChanged="SetEditorKindAsync"
+                                       ValueExpression="@(() => editor.Kind)"
+                                       Label="Mode"
+                                       Compact="true">
+                            <option value="@CaddyProxyRouteKind.HostnameReverseProxy">Hostname route</option>
+                            <option value="@CaddyProxyRouteKind.PortForward">Port forward</option>
+                        </UiSelectField>
+
                         <UiTextField Value="@editor.Name"
                                      ValueChanged="SetEditorNameAsync"
                                      ValueExpression="@(() => editor.Name)"
                                      Label="Route name"
-                                     Placeholder="App frontend"
+                                     Placeholder="@GetEditorNamePlaceholder()"
                                      Compact="true" />
 
                         <UiTextField Value="@editor.Description"
@@ -308,31 +337,90 @@ else
                                      Compact="true" />
                     </div>
 
-                    <div class="caddy-editor-address-grid">
-                        <UiTextField Value="@editor.Hostname"
-                                     ValueChanged="SetEditorHostnameAsync"
-                                     ValueExpression="@(() => editor.Hostname)"
-                                     Label="Public hostname"
-                                     Helper="For example app.example.com"
-                                     Placeholder="app.example.com"
-                                     Compact="true" />
+                    @if (editor.Kind == CaddyProxyRouteKind.PortForward)
+                    {
+                        <div class="caddy-editor-port-grid">
+                            <UiTextField Value="@editor.SourceIp"
+                                         ValueChanged="SetEditorSourceIpAsync"
+                                         ValueExpression="@(() => editor.SourceIp)"
+                                         Label="Source IP"
+                                         Helper="Local IP Caddy listens on; use a Tailnet IP for tailnet-only access."
+                                         Placeholder="127.0.0.1"
+                                         Compact="true" />
 
-                        <UiTextField Value="@editor.UpstreamUrl"
-                                     ValueChanged="SetEditorUpstreamUrlAsync"
-                                     ValueExpression="@(() => editor.UpstreamUrl)"
-                                     Label="Upstream URL"
-                                     Helper="For example http://127.0.0.1:3000"
-                                     Placeholder="http://127.0.0.1:3000"
-                                     Compact="true" />
-                    </div>
+                            <UiNumberField TValue="int"
+                                           Value="@editor.SourcePort"
+                                           ValueChanged="SetEditorSourcePortAsync"
+                                           ValueExpression="@(() => editor.SourcePort)"
+                                           Label="Source port"
+                                           Placeholder="8080"
+                                           Compact="true" />
 
-                    <UiCheckboxField Value="@editor.EnableTls"
-                                     ValueChanged="SetEditorEnableTlsAsync"
-                                     ValueExpression="@(() => editor.EnableTls)"
-                                     Label="Terminate TLS in Caddy"
-                                     Helper="Disable this only when you intentionally want a plain HTTP listener on the public side."
-                                     Compact="true"
-                                     Class="caddy-editor-toggle" />
+                            <UiSelectField TValue="CaddyProxyTargetScheme"
+                                           Value="@editor.DestinationScheme"
+                                           ValueChanged="SetEditorDestinationSchemeAsync"
+                                           ValueExpression="@(() => editor.DestinationScheme)"
+                                           Label="Destination"
+                                           Compact="true">
+                                <option value="@CaddyProxyTargetScheme.Http">HTTP</option>
+                                <option value="@CaddyProxyTargetScheme.Https">HTTPS</option>
+                            </UiSelectField>
+
+                            <UiTextField Value="@editor.DestinationIp"
+                                         ValueChanged="SetEditorDestinationIpAsync"
+                                         ValueExpression="@(() => editor.DestinationIp)"
+                                         Label="Destination IP"
+                                         Helper="Internal IP or hostname Caddy proxies to."
+                                         Placeholder="127.0.0.1"
+                                         Compact="true" />
+
+                            <UiNumberField TValue="int"
+                                           Value="@editor.DestinationPort"
+                                           ValueChanged="SetEditorDestinationPortAsync"
+                                           ValueExpression="@(() => editor.DestinationPort)"
+                                           Label="Destination port"
+                                           Placeholder="80"
+                                           Compact="true" />
+                        </div>
+
+                        @if (BuildEditorWarnings().Count > 0)
+                        {
+                            <div class="callout warning caddy-editor-warning-list">
+                                @foreach (var warning in BuildEditorWarnings())
+                                {
+                                    <span>@warning</span>
+                                }
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        <div class="caddy-editor-address-grid">
+                            <UiTextField Value="@editor.Hostname"
+                                         ValueChanged="SetEditorHostnameAsync"
+                                         ValueExpression="@(() => editor.Hostname)"
+                                         Label="Public hostname"
+                                         Helper="For example app.example.com"
+                                         Placeholder="app.example.com"
+                                         Compact="true" />
+
+                            <UiTextField Value="@editor.UpstreamUrl"
+                                         ValueChanged="SetEditorUpstreamUrlAsync"
+                                         ValueExpression="@(() => editor.UpstreamUrl)"
+                                         Label="Upstream URL"
+                                         Helper="For example http://127.0.0.1:3000"
+                                         Placeholder="http://127.0.0.1:3000"
+                                         Compact="true" />
+                        </div>
+
+                        <UiCheckboxField Value="@editor.EnableTls"
+                                         ValueChanged="SetEditorEnableTlsAsync"
+                                         ValueExpression="@(() => editor.EnableTls)"
+                                         Label="Terminate TLS in Caddy"
+                                         Helper="Disable this only when you intentionally want a plain HTTP listener on the public side."
+                                         Compact="true"
+                                         Class="caddy-editor-toggle" />
+                    }
 
                     <section class="surface-subcard caddy-editor-preview-card">
                         <div class="caddy-editor-preview-header">
@@ -340,8 +428,8 @@ else
                                 <strong>Generated Caddy block</strong>
                                 <span class="helper-text">This is the managed snippet LMS will write into the Caddy include.</span>
                             </div>
-                            <UiPill Tone="@(editor.EnableTls ? UiPillTone.Success : UiPillTone.Warning)">
-                                @(editor.EnableTls ? "https" : "http")
+                            <UiPill Tone="@(editor.Kind == CaddyProxyRouteKind.PortForward ? UiPillTone.Warning : editor.EnableTls ? UiPillTone.Success : UiPillTone.Warning)">
+                                @(editor.Kind == CaddyProxyRouteKind.PortForward ? "port" : editor.EnableTls ? "https" : "http")
                             </UiPill>
                         </div>
 
@@ -388,7 +476,7 @@ else
                 {
                     <div class="caddy-delete-copy">
                         <p>Delete <strong>@routePendingDelete.Name</strong>?</p>
-                        <p class="meta-text">@routePendingDelete.AddressLabel -> @routePendingDelete.UpstreamUrl</p>
+                        <p class="meta-text">@routePendingDelete.AddressLabel -> @routePendingDelete.TargetLabel</p>
                     </div>
                 }
             </div>
@@ -605,6 +693,26 @@ else
         showEditorModal = true;
     }
 
+    private async Task OpenCreatePortForwardDialogAsync()
+    {
+        if (dashboard?.IsInstalled != true)
+        {
+            return;
+        }
+
+        editor = await CaddyIntegrationService.GetEditorAsync(null);
+        editor.Kind = CaddyProxyRouteKind.PortForward;
+        editor.Name = "Tailnet port forward";
+        editor.SourceIp = "127.0.0.1";
+        editor.SourcePort = 8080;
+        editor.DestinationIp = "127.0.0.1";
+        editor.DestinationPort = 80;
+        editor.DestinationScheme = CaddyProxyTargetScheme.Http;
+        editorStatusMessage = string.Empty;
+        editorStatusIsError = false;
+        showEditorModal = true;
+    }
+
     private async Task OpenEditRouteDialogAsync(Guid routeId)
     {
         if (dashboard?.IsInstalled != true)
@@ -789,6 +897,40 @@ else
         return Task.CompletedTask;
     }
 
+    private Task SetEditorKindAsync(CaddyProxyRouteKind value)
+    {
+        editor.Kind = value;
+        if (value == CaddyProxyRouteKind.PortForward)
+        {
+            if (string.IsNullOrWhiteSpace(editor.Name))
+            {
+                editor.Name = "Tailnet port forward";
+            }
+
+            if (string.IsNullOrWhiteSpace(editor.SourceIp))
+            {
+                editor.SourceIp = "127.0.0.1";
+            }
+
+            if (editor.SourcePort is < 1 or > 65535)
+            {
+                editor.SourcePort = 8080;
+            }
+
+            if (string.IsNullOrWhiteSpace(editor.DestinationIp))
+            {
+                editor.DestinationIp = "127.0.0.1";
+            }
+
+            if (editor.DestinationPort is < 1 or > 65535)
+            {
+                editor.DestinationPort = 80;
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
     private Task SetEditorDescriptionAsync(string? value)
     {
         editor.Description = value ?? string.Empty;
@@ -813,8 +955,71 @@ else
         return Task.CompletedTask;
     }
 
+    private Task SetEditorSourceIpAsync(string? value)
+    {
+        editor.SourceIp = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetEditorSourcePortAsync(int value)
+    {
+        editor.SourcePort = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetEditorDestinationIpAsync(string? value)
+    {
+        editor.DestinationIp = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetEditorDestinationPortAsync(int value)
+    {
+        editor.DestinationPort = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetEditorDestinationSchemeAsync(CaddyProxyTargetScheme value)
+    {
+        editor.DestinationScheme = value;
+        return Task.CompletedTask;
+    }
+
     private string BuildEditorSnippet()
     {
+        if (editor.Kind == CaddyProxyRouteKind.PortForward)
+        {
+            var sourceIp = string.IsNullOrWhiteSpace(editor.SourceIp) ? "127.0.0.1" : editor.SourceIp.Trim();
+            var sourcePort = Math.Clamp(editor.SourcePort, 1, 65535);
+            var destinationIp = string.IsNullOrWhiteSpace(editor.DestinationIp) ? "127.0.0.1" : editor.DestinationIp.Trim();
+            var destinationPort = Math.Clamp(editor.DestinationPort, 1, 65535);
+            var scheme = editor.DestinationScheme == CaddyProxyTargetScheme.Https ? "https" : "http";
+            var target = $"{scheme}://{FormatHostForUri(destinationIp)}:{destinationPort}";
+            var portBuilder = new StringBuilder();
+            portBuilder.AppendLine($"http://:{sourcePort} {{");
+            if (!IsAnyAddress(sourceIp))
+            {
+                portBuilder.AppendLine($"    bind {sourceIp}");
+            }
+
+            portBuilder.AppendLine("    encode zstd gzip");
+            if (editor.DestinationScheme == CaddyProxyTargetScheme.Https)
+            {
+                portBuilder.AppendLine($"    reverse_proxy {target} {{");
+                portBuilder.AppendLine("        transport http {");
+                portBuilder.AppendLine("            tls_insecure_skip_verify");
+                portBuilder.AppendLine("        }");
+                portBuilder.AppendLine("    }");
+            }
+            else
+            {
+                portBuilder.AppendLine($"    reverse_proxy {target}");
+            }
+
+            portBuilder.Append('}');
+            return portBuilder.ToString();
+        }
+
         var hostname = string.IsNullOrWhiteSpace(editor.Hostname)
             ? "app.example.com"
             : editor.Hostname.Trim().TrimEnd('/');
@@ -829,6 +1034,82 @@ else
         builder.AppendLine($"    reverse_proxy {upstream}");
         builder.Append('}');
         return builder.ToString();
+    }
+
+    private IReadOnlyList<string> BuildEditorWarnings()
+    {
+        if (editor.Kind != CaddyProxyRouteKind.PortForward)
+        {
+            return [];
+        }
+
+        var warnings = new List<string>();
+        var edgeGatewayPort = ResolveEdgeGatewayCaddyPort();
+        if (editor.SourcePort == edgeGatewayPort)
+        {
+            warnings.Add($"Source port {editor.SourcePort} is used by Edge Gateway.");
+        }
+
+        if (editor.SourcePort is 80 or 443)
+        {
+            warnings.Add("This uses a standard web port; check hostname routes before applying.");
+        }
+
+        if (IsAnyAddress(editor.SourceIp))
+        {
+            warnings.Add("0.0.0.0 listens on every interface. Use a Tailnet or LAN IP when possible.");
+        }
+
+        return warnings;
+    }
+
+    private int ResolveEdgeGatewayCaddyPort()
+    {
+        var value = EdgeGatewayOptions.CaddyLocalServiceUrl;
+        if (Uri.TryCreate(value, UriKind.Absolute, out var uri))
+        {
+            if (!uri.IsDefaultPort)
+            {
+                return Math.Clamp(uri.Port, 1, 65535);
+            }
+
+            return uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? 443 : 80;
+        }
+
+        return 8443;
+    }
+
+    private string GetEditorSubtitle() =>
+        editor.Kind == CaddyProxyRouteKind.PortForward
+            ? "Map a local Caddy listener to an internal HTTP/S service without touching Edge Gateway."
+            : "Define the public hostname and local upstream, then let LMS generate the managed Caddy block.";
+
+    private string GetEditorNamePlaceholder() =>
+        editor.Kind == CaddyProxyRouteKind.PortForward ? "Tailnet app forward" : "App frontend";
+
+    private static string GetRouteAddressLabel(CaddyProxyRouteListItem route) =>
+        route.Kind == CaddyProxyRouteKind.PortForward ? "Source" : "Public";
+
+    private static string GetRouteTargetLabel(CaddyProxyRouteListItem route) =>
+        route.Kind == CaddyProxyRouteKind.PortForward ? "Destination" : "Upstream";
+
+    private static bool IsAnyAddress(string value)
+    {
+        var normalized = (value ?? string.Empty).Trim();
+        return string.IsNullOrWhiteSpace(normalized) ||
+               normalized.Equals("*", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("::", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("[::]", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FormatHostForUri(string host)
+    {
+        var normalized = (host ?? string.Empty).Trim();
+        return normalized.Contains(':', StringComparison.Ordinal) &&
+               !normalized.StartsWith("[", StringComparison.Ordinal)
+            ? $"[{normalized.Trim('[', ']')}]"
+            : normalized;
     }
 
     private string GetInstallDetail()

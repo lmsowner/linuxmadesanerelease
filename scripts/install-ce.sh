@@ -21,7 +21,7 @@ SERVICE_GROUP="${SERVICE_GROUP:-linuxmadesane}"
 SERVICE_UNIT="${SERVICE_UNIT:-linux-made-sane.service}"
 SERVICE_DESCRIPTION="Linux Made Sane Service"
 SERVICE_PORT="${SERVICE_PORT:-5080}"
-START_SERVICE="${START_SERVICE:-false}"
+START_SERVICE="${START_SERVICE:-true}"
 INSTALL_SYSTEM_PACKAGES="${INSTALL_SYSTEM_PACKAGES:-true}"
 CONFIGURE_LOCAL_SSH="${CONFIGURE_LOCAL_SSH:-true}"
 ENABLE_LOCAL_SUDO="${ENABLE_LOCAL_SUDO:-true}"
@@ -44,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --dest-root) LMS_DEST_ROOT="$2"; shift 2 ;;
     --service-port) SERVICE_PORT="$2"; shift 2 ;;
     --start) START_SERVICE=true; shift ;;
+    --no-start) START_SERVICE=false; shift ;;
     --skip-system-packages) INSTALL_SYSTEM_PACKAGES=false; shift ;;
     --no-local-ssh) CONFIGURE_LOCAL_SSH=false; shift ;;
     --no-local-sudo) ENABLE_LOCAL_SUDO=false; shift ;;
@@ -91,6 +92,7 @@ DESKTOP_HELPER_UNIT_FILE="$SYSTEMD_USER_ROOT_ABS/$DESKTOP_HELPER_UNIT"
 DESKTOP_HELPER_AUTOSTART_FILE="$XDG_AUTOSTART_ROOT_ABS/linux-made-sane-desktop-helper.desktop"
 EXECUTABLE_PATH="$CURRENT_DIR/LinuxMadeSane.Web"
 DESKTOP_HELPER_EXECUTABLE_PATH="$CURRENT_DIR/desktop-helper/LinuxMadeSane.DesktopHelper"
+DESKTOP_HELPER_LAUNCHER_PATH="$CURRENT_DIR/desktop-helper/linux-made-sane-desktop-helper-launcher.sh"
 PREVIOUS_CURRENT_TARGET="$(lms_current_release_target "$CURRENT_DIR")"
 SERVICE_WAS_ACTIVE=false
 if lms_systemctl_is_active "$SERVICE_UNIT"; then
@@ -118,6 +120,9 @@ if [[ "$INSTALL_DESKTOP_HELPER" == "true" ]]; then
 fi
 
 lms_install_host_packages sudo openssh-server openssh-client caddy ffmpeg samba-common-bin smbclient cifs-utils
+if [[ "$INSTALL_DESKTOP_HELPER" == "true" ]]; then
+  lms_install_optional_host_packages libayatana-appindicator3-1 gnome-shell-extension-appindicator
+fi
 
 if [[ "$LMS_DEST_ROOT" == "" ]]; then
   lms_prepare_live_service_user "$SERVICE_USER" "$SERVICE_GROUP" "$INSTALL_ROOT"
@@ -175,18 +180,25 @@ lms_render_systemd_unit \
   "$EXECUTABLE_PATH"
 
 if [[ "$INSTALL_DESKTOP_HELPER" == "true" && -x "$RELEASE_DIR/desktop-helper/LinuxMadeSane.DesktopHelper" ]]; then
+  lms_write_desktop_helper_launcher \
+    "$DESKTOP_HELPER_LAUNCHER_PATH" \
+    "$SERVICE_GROUP" \
+    "$DESKTOP_HELPER_EXECUTABLE_PATH" \
+    "$DESKTOP_HELPER_SOCKET_PATH" \
+    "$DESKTOP_HELPER_LOCAL_LMS_URL" \
+    "$CURRENT_DIR/wwwroot/images/lms-logo-192.png"
   lms_render_desktop_helper_file \
     "$REPO_ROOT/deploy/systemd/linux-made-sane-desktop-helper.service.template" \
     "$DESKTOP_HELPER_UNIT_FILE" \
     "$DESKTOP_HELPER_SOCKET_PATH" \
-    "$DESKTOP_HELPER_EXECUTABLE_PATH" \
+    "$DESKTOP_HELPER_LAUNCHER_PATH" \
     "$DESKTOP_HELPER_LOCAL_LMS_URL" \
     "$CURRENT_DIR/wwwroot/images/lms-logo-192.png"
   lms_render_desktop_helper_file \
     "$REPO_ROOT/deploy/xdg/linux-made-sane-desktop-helper.desktop.template" \
     "$DESKTOP_HELPER_AUTOSTART_FILE" \
     "$DESKTOP_HELPER_SOCKET_PATH" \
-    "$DESKTOP_HELPER_EXECUTABLE_PATH" \
+    "$DESKTOP_HELPER_LAUNCHER_PATH" \
     "$DESKTOP_HELPER_LOCAL_LMS_URL" \
     "$CURRENT_DIR/wwwroot/images/lms-logo-192.png"
 fi
@@ -196,11 +208,24 @@ lms_write_update_helper "$SERVICE_USER" "$LMS_BASE_URL" "$UPDATE_HELPER_PATH"
 lms_maybe_chown "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_ROOT_ABS"
 lms_maybe_chown "$SERVICE_USER:$SERVICE_GROUP" "$DATA_ROOT_ABS"
 lms_maybe_chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_ROOT_ABS"
+lms_prepare_desktop_session_socket_directory "$DESKTOP_HELPER_SOCKET_PATH" "$SERVICE_USER" "$SERVICE_GROUP"
 
 lms_maybe_systemctl_reload
 lms_maybe_systemctl_enable "$SERVICE_UNIT"
 if [[ "$START_SERVICE" == "true" ]]; then
   lms_maybe_systemctl_restart "$SERVICE_UNIT"
+  if [[ "$INSTALL_DESKTOP_HELPER" == "true" && "$LMS_DEST_ROOT" == "" ]] && lms_has_systemd; then
+    if ! lms_wait_for_file_socket "$DESKTOP_HELPER_SOCKET_PATH" 30; then
+      lms_log "Desktop Assistant broker socket was not created at $DESKTOP_HELPER_SOCKET_PATH"
+      systemctl --no-pager --full status "$SERVICE_UNIT" >&2 || true
+      exit 1
+    fi
+  fi
+fi
+lms_enable_caddy_service
+if [[ "$INSTALL_DESKTOP_HELPER" == "true" && -f "$DESKTOP_HELPER_UNIT_FILE" ]]; then
+  lms_enable_desktop_helper_global_unit "$DESKTOP_HELPER_UNIT"
+  lms_try_start_desktop_helper_for_installer_user "$DESKTOP_HELPER_UNIT"
 fi
 
 ROLLBACK_ARMED=false

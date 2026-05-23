@@ -11,6 +11,7 @@ builder.Services.Configure<DesktopSessionHelperOptions>(builder.Configuration.Ge
 builder.Services.AddSingleton<DesktopSessionEnvironmentDetector>();
 builder.Services.AddSingleton<DesktopActionExecutor>();
 builder.Services.AddSingleton<DesktopAssistantLaunchTicketCache>();
+builder.Services.AddSingleton<DesktopAssistantNativeMessageBus>();
 builder.Services.AddHostedService<DesktopSessionClientHostedService>();
 builder.Services.AddHostedService<DesktopTrayHostedService>();
 

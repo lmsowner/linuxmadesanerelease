@@ -7,6 +7,8 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using LinuxMadeSane.Application;
+using LinuxMadeSane.Application.Contracts.Ai;
+using LinuxMadeSane.Application.Contracts.DesktopAssistant;
 using LinuxMadeSane.Application.Contracts.EdgeGateway;
 using LinuxMadeSane.Application.Contracts.Security;
 using LinuxMadeSane.Application.Interfaces;
@@ -14,6 +16,7 @@ using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
 using LinuxMadeSane.Core.Models.Ai;
+using LinuxMadeSane.Core.Models.DesktopSession;
 using LinuxMadeSane.Core.Models.Scheduling;
 using LinuxMadeSane.Core.Versioning;
 using LinuxMadeSane.Infrastructure;
@@ -101,6 +104,7 @@ public class Program
         });
         builder.Services.AddSingleton<ITransientConnectionSecretStore, TransientConnectionSecretStore>();
         builder.Services.AddSingleton<DesktopAssistantLaunchTicketStore>();
+        builder.Services.AddSingleton<DesktopAssistantNativeThemeStore>();
         builder.Services.AddSingleton<IDesktopAssistantLaunchTicketStore>(serviceProvider =>
             serviceProvider.GetRequiredService<DesktopAssistantLaunchTicketStore>());
         builder.Services.AddSingleton<IDesktopAssistantLaunchTicketIssuer>(serviceProvider =>
@@ -333,6 +337,166 @@ public class Program
                 ? Results.Redirect(safeReturnUrl)
                 : Results.Redirect(BuildLoginRedirectTarget(safeReturnUrl, null, null));
         });
+        app.MapGet("/api/desktop-assistant/native/workspace", async (
+            HttpContext context,
+            Guid? sessionId,
+            IDesktopAssistantLaunchTicketStore launchTicketStore,
+            DesktopAssistantNativeThemeStore themeStore,
+            IDesktopAssistantChatService desktopAssistantChatService,
+            IAiThreadService threadService,
+            IDesktopSessionBroker desktopSessionBroker) =>
+        {
+            if (!TryAuthorizeDesktopAssistantNativeRequest(context, launchTicketStore, out var rejection))
+            {
+                return rejection;
+            }
+
+            var providerContext = await threadService.GetEditorAsync(cancellationToken: context.RequestAborted);
+            var workspace = await desktopAssistantChatService.GetWorkspaceAsync(
+                sessionId,
+                desktopSessionBroker.GetSnapshot(),
+                context.RequestAborted);
+            return Results.Json(MapDesktopAssistantNativeWorkspace(workspace, providerContext, themeStore.Current));
+        }).DisableAntiforgery();
+        app.MapPost("/api/desktop-assistant/native/sessions", async (
+            HttpContext context,
+            IDesktopAssistantLaunchTicketStore launchTicketStore,
+            DesktopAssistantNativeThemeStore themeStore,
+            IDesktopAssistantChatService desktopAssistantChatService,
+            IAiThreadService threadService,
+            IDesktopSessionBroker desktopSessionBroker) =>
+        {
+            if (!TryAuthorizeDesktopAssistantNativeRequest(context, launchTicketStore, out var rejection))
+            {
+                return rejection;
+            }
+
+            var request = await context.Request.ReadFromJsonAsync<DesktopAssistantNativeCreateSessionRequest>(
+                cancellationToken: context.RequestAborted) ?? new DesktopAssistantNativeCreateSessionRequest(null, null);
+            var sessionId = await desktopAssistantChatService.CreateSessionAsync(
+                request.ProviderKey,
+                request.ModelId,
+                context.RequestAborted);
+            var providerContext = await threadService.GetEditorAsync(cancellationToken: context.RequestAborted);
+            var workspace = await desktopAssistantChatService.GetWorkspaceAsync(
+                sessionId,
+                desktopSessionBroker.GetSnapshot(),
+                context.RequestAborted);
+            return Results.Json(MapDesktopAssistantNativeWorkspace(workspace, providerContext, themeStore.Current));
+        }).DisableAntiforgery();
+        app.MapDelete("/api/desktop-assistant/native/sessions/{sessionId:guid}", async (
+            HttpContext context,
+            Guid sessionId,
+            IDesktopAssistantLaunchTicketStore launchTicketStore,
+            DesktopAssistantNativeThemeStore themeStore,
+            IDesktopAssistantChatService desktopAssistantChatService,
+            IAiThreadService threadService,
+            IDesktopSessionBroker desktopSessionBroker) =>
+        {
+            if (!TryAuthorizeDesktopAssistantNativeRequest(context, launchTicketStore, out var rejection))
+            {
+                return rejection;
+            }
+
+            var providerContext = await threadService.GetEditorAsync(cancellationToken: context.RequestAborted);
+            var workspace = await desktopAssistantChatService.DeleteSessionAsync(
+                sessionId,
+                desktopSessionBroker.GetSnapshot(),
+                context.RequestAborted);
+            return Results.Json(MapDesktopAssistantNativeWorkspace(workspace, providerContext, themeStore.Current));
+        }).DisableAntiforgery();
+        app.MapPost("/api/desktop-assistant/native/messages", async (
+            HttpContext context,
+            IDesktopAssistantLaunchTicketStore launchTicketStore,
+            DesktopAssistantNativeThemeStore themeStore,
+            IDesktopAssistantChatService desktopAssistantChatService,
+            IAiThreadService threadService,
+            IDesktopSessionBroker desktopSessionBroker) =>
+        {
+            if (!TryAuthorizeDesktopAssistantNativeRequest(context, launchTicketStore, out var rejection))
+            {
+                return rejection;
+            }
+
+            var request = await context.Request.ReadFromJsonAsync<DesktopAssistantNativeSendMessageRequest>(
+                cancellationToken: context.RequestAborted);
+            if (request is null || string.IsNullOrWhiteSpace(request.Message))
+            {
+                return Results.BadRequest();
+            }
+
+            var providerContext = await threadService.GetEditorAsync(cancellationToken: context.RequestAborted);
+            var workspace = await desktopAssistantChatService.SendMessageAsync(
+                request.SessionId,
+                request.Message,
+                desktopSessionBroker.GetSnapshot(),
+                request.ProviderKey,
+                request.ModelId,
+                context.RequestAborted);
+            return Results.Json(MapDesktopAssistantNativeWorkspace(workspace, providerContext, themeStore.Current));
+        }).DisableAntiforgery();
+        app.MapPost("/api/desktop-assistant/native/fixes/approve", async (
+            HttpContext context,
+            IDesktopAssistantLaunchTicketStore launchTicketStore,
+            DesktopAssistantNativeThemeStore themeStore,
+            IDesktopAssistantChatService desktopAssistantChatService,
+            IAiThreadService threadService,
+            IDesktopSessionBroker desktopSessionBroker) =>
+        {
+            if (!TryAuthorizeDesktopAssistantNativeRequest(context, launchTicketStore, out var rejection))
+            {
+                return rejection;
+            }
+
+            var request = await context.Request.ReadFromJsonAsync<DesktopAssistantNativeApproveFixRequest>(
+                cancellationToken: context.RequestAborted);
+            if (request?.Fix is null)
+            {
+                return Results.BadRequest();
+            }
+
+            var snapshot = desktopSessionBroker.GetSnapshot();
+            var providerContext = await threadService.GetEditorAsync(cancellationToken: context.RequestAborted);
+            DesktopAssistantChatWorkspaceViewModel workspace;
+            if (request.Fix.Kind == DesktopSessionActionKinds.SetKeyboardLayout)
+            {
+                workspace = await desktopAssistantChatService.ApplyKeyboardLayoutAsync(
+                    request.SessionId,
+                    request.Fix.Arguments.GetValueOrDefault("layout") ?? string.Empty,
+                    snapshot,
+                    request.ProviderKey,
+                    request.ModelId,
+                    context.RequestAborted);
+            }
+            else if (request.Fix.Kind == DesktopSessionActionKinds.InstallAptPackages)
+            {
+                var packageNames = (request.Fix.Arguments.GetValueOrDefault("packages") ?? string.Empty)
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                workspace = await desktopAssistantChatService.InstallAptPackagesAsync(
+                    request.SessionId,
+                    packageNames,
+                    snapshot,
+                    request.ProviderKey,
+                    request.ModelId,
+                    context.RequestAborted);
+            }
+            else if (request.Fix.Kind == DesktopSessionActionKinds.RepairAptSources)
+            {
+                workspace = await desktopAssistantChatService.RepairAptSourcesAsync(
+                    request.SessionId,
+                    request.Fix.Arguments,
+                    snapshot,
+                    request.ProviderKey,
+                    request.ModelId,
+                    context.RequestAborted);
+            }
+            else
+            {
+                return Results.BadRequest();
+            }
+
+            return Results.Json(MapDesktopAssistantNativeWorkspace(workspace, providerContext, themeStore.Current));
+        }).DisableAntiforgery();
         app.MapPost("/internal/lms-tunnel/grants", async (
             HttpContext context,
             RemoteLmsTunnelAccessService tunnelAccessService) =>
@@ -1077,6 +1241,7 @@ public class Program
         if (path.StartsWithSegments("/access-denied") ||
             path.StartsWithSegments("/healthz") ||
             path.StartsWithSegments("/desktop-assistant/launch") ||
+            path.StartsWithSegments("/api/desktop-assistant/native") ||
             path.StartsWithSegments("/edge-auth/check") ||
             path.StartsWithSegments("/api/passkeys/login") ||
             path.StartsWithSegments("/internal/lms-tunnel") ||
@@ -1220,6 +1385,98 @@ public class Program
 
     private static bool IsLoopbackRequest(IPAddress? remoteIpAddress) =>
         remoteIpAddress is not null && IPAddress.IsLoopback(remoteIpAddress);
+
+    private static bool TryAuthorizeDesktopAssistantNativeRequest(
+        HttpContext context,
+        IDesktopAssistantLaunchTicketStore launchTicketStore,
+        out IResult rejection)
+    {
+        if (!IsOriginalLoopbackRequest(context) ||
+            !IsOriginalLoopbackRequestHost(context))
+        {
+            rejection = Results.NotFound();
+            return false;
+        }
+
+        var ticket = context.Request.Headers.TryGetValue("X-LMS-Desktop-Ticket", out var values)
+            ? values.ToString()
+            : string.Empty;
+        if (!launchTicketStore.TryValidate(ticket))
+        {
+            rejection = Results.Unauthorized();
+            return false;
+        }
+
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
+        rejection = Results.Empty;
+        return true;
+    }
+
+    private static DesktopAssistantNativeWorkspaceResponse MapDesktopAssistantNativeWorkspace(
+        DesktopAssistantChatWorkspaceViewModel workspace,
+        AiChatThreadEditorContextViewModel providerContext,
+        DesktopAssistantNativeTheme theme)
+    {
+        var runtimeImplementedProviders = providerContext.SupportedProviders
+            .Where(provider => provider.IsRuntimeImplemented)
+            .Select(provider => provider.ProviderType)
+            .ToHashSet();
+        var providers = providerContext.ConfiguredProviders
+            .Where(provider =>
+                provider.IsEnabled &&
+                runtimeImplementedProviders.Contains(provider.ProviderType))
+            .OrderByDescending(provider => provider.IsDefault)
+            .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .Select(provider => new DesktopAssistantNativeProvider(
+                provider.ProviderKey,
+                provider.DisplayName,
+                provider.IsDefault,
+                provider.DefaultModelId))
+            .ToArray();
+        var models = providerContext.Models
+            .OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .Select(model => new DesktopAssistantNativeModel(
+                model.ProviderKey,
+                model.ModelId,
+                model.DisplayName))
+            .ToArray();
+
+        return new DesktopAssistantNativeWorkspaceResponse(
+            workspace.Sessions.Select(session => new DesktopAssistantNativeChatSession(
+                session.Id,
+                session.Title,
+                session.ProviderKey,
+                session.ProviderLabel,
+                session.ModelId,
+                session.MessageCount,
+                session.UpdatedAtUtc)).ToArray(),
+            workspace.ActiveSessionId,
+            workspace.Messages
+                .Where(message => message.Role is AiChatMessageRole.User or AiChatMessageRole.Assistant)
+                .Select(message => new DesktopAssistantNativeChatMessage(
+                    message.Id,
+                    message.Role.ToString().ToLowerInvariant(),
+                    message.Content,
+                    message.CreatedAtUtc))
+                .ToArray(),
+            workspace.IsReady,
+            workspace.HasProvider,
+            workspace.ActiveProviderKey,
+            workspace.ProviderLabel,
+            workspace.ModelId,
+            workspace.StatusSummary,
+            providers,
+            models,
+            theme,
+            workspace.ProposedFix is null
+                ? null
+                : new DesktopAssistantNativeProposedFix(
+                    workspace.ProposedFix.Kind,
+                    workspace.ProposedFix.Arguments,
+                    workspace.ProposedFix.Title,
+                    workspace.ProposedFix.Description));
+    }
 
     private static bool IsOriginalLoopbackRequest(HttpContext context) =>
         context.Items[OriginalConnectionRemoteIpAddressItemKey] is IPAddress originalRemoteIpAddress

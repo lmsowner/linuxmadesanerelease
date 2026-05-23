@@ -10,7 +10,8 @@ public interface IDesktopSessionBroker
     Task RegisterOrRefreshAsync(
         string connectionId,
         DesktopSessionCapabilityReport capabilityReport,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        bool preserveReadOnlyDiagnosticsWhenEmpty = false);
 
     void MarkDisconnected(string connectionId);
 
@@ -20,7 +21,22 @@ public interface IDesktopSessionBroker
         string connectionId,
         Func<DesktopSessionActionRequest, CancellationToken, Task> sendAsync);
 
+    void RegisterNotificationSender(
+        string connectionId,
+        Func<DesktopSessionBrokerMessage, CancellationToken, Task> sendAsync);
+
     void UnregisterActionSender(string connectionId);
+
+    void UnregisterNotificationSender(string connectionId);
+
+    Task PublishThemeChangedAsync(
+        DesktopAssistantNativeTheme theme,
+        CancellationToken cancellationToken = default);
+
+    Task<DesktopSessionBrokerSnapshot> RefreshEvidenceAsync(
+        string connectionId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default);
 
     Task<DesktopSessionActionResult> ExecuteActionAsync(
         string connectionId,
@@ -31,5 +47,11 @@ public interface IDesktopSessionBroker
     Task CompleteActionAsync(
         string connectionId,
         DesktopSessionActionResult result,
+        CancellationToken cancellationToken = default);
+
+    Task CompleteEvidenceRefreshAsync(
+        string connectionId,
+        Guid requestId,
+        DesktopSessionCapabilityReport capabilityReport,
         CancellationToken cancellationToken = default);
 }

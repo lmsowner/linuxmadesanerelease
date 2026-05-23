@@ -14,4 +14,11 @@ public sealed record DesktopAssistantChatWorkspaceViewModel(
     string ActiveProviderKey,
     string ProviderLabel,
     string ModelId,
-    string StatusSummary);
+    string StatusSummary,
+    DesktopAssistantProposedFixViewModel? ProposedFix = null);
+
+public sealed record DesktopAssistantProposedFixViewModel(
+    string Kind,
+    IReadOnlyDictionary<string, string> Arguments,
+    string Title,
+    string Description);

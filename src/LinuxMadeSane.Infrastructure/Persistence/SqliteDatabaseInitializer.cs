@@ -631,9 +631,15 @@ public sealed class SqliteDatabaseInitializer(
         const string caddyRoutesSql = """
             CREATE TABLE IF NOT EXISTS caddy_proxy_routes (
                 Id TEXT NOT NULL PRIMARY KEY,
+                RouteKind INTEGER NOT NULL DEFAULT 0,
                 Name TEXT NOT NULL,
                 Hostname TEXT NOT NULL,
                 UpstreamUrl TEXT NOT NULL,
+                SourceIp TEXT NOT NULL DEFAULT '',
+                SourcePort INTEGER NOT NULL DEFAULT 0,
+                DestinationIp TEXT NOT NULL DEFAULT '',
+                DestinationPort INTEGER NOT NULL DEFAULT 0,
+                DestinationScheme INTEGER NOT NULL DEFAULT 0,
                 Description TEXT NOT NULL,
                 EnableTls INTEGER NOT NULL,
                 CreatedAtUtc TEXT NOT NULL,
@@ -642,6 +648,12 @@ public sealed class SqliteDatabaseInitializer(
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(caddyRoutesSql, cancellationToken);
+        await EnsureColumnExistsAsync("caddy_proxy_routes", "RouteKind", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnExistsAsync("caddy_proxy_routes", "SourceIp", "TEXT NOT NULL DEFAULT ''", cancellationToken);
+        await EnsureColumnExistsAsync("caddy_proxy_routes", "SourcePort", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnExistsAsync("caddy_proxy_routes", "DestinationIp", "TEXT NOT NULL DEFAULT ''", cancellationToken);
+        await EnsureColumnExistsAsync("caddy_proxy_routes", "DestinationPort", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnExistsAsync("caddy_proxy_routes", "DestinationScheme", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
     }
 
     private async Task EnsureEdgeGatewayTablesAsync(CancellationToken cancellationToken)

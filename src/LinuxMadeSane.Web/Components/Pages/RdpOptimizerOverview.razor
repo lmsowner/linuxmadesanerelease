@@ -129,34 +129,86 @@
 
                                 @if (!HasDesktopHelperSession)
                                 {
+                                    var desktopDebugSnapshot = viewModel.Inspection.DesktopSessionBroker;
                                     <div class="callout info desktop-chat-connection-note">
                                         The desktop agent is connecting. When this page is opened from the tray it links to the current graphical session automatically.
                                     </div>
+                                    <details class="desktop-chat-debug-panel" open>
+                                        <summary>Temporary link debug</summary>
+                                        <dl>
+                                            <div>
+                                                <dt>Broker socket</dt>
+                                                <dd>@GetDesktopHelperSocketPath()</dd>
+                                            </div>
+                                            <div>
+                                                <dt>Socket status</dt>
+                                                <dd>@GetDesktopBrokerSocketStatus()</dd>
+                                            </div>
+                                            <div>
+                                                <dt>Snapshot generated</dt>
+                                                <dd>@desktopDebugSnapshot.GeneratedAtUtc.ToLocalTime():O</dd>
+                                            </div>
+                                            <div>
+                                                <dt>Reported sessions</dt>
+                                                <dd>@desktopDebugSnapshot.Sessions.Count</dd>
+                                            </div>
+                                        </dl>
+                                        @if (desktopDebugSnapshot.Sessions.Count == 0)
+                                        {
+                                            <p>No helper reports have reached this LMS instance yet.</p>
+                                        }
+                                        else
+                                        {
+                                            @foreach (var session in desktopDebugSnapshot.Sessions)
+                                            {
+                                                var report = session.CapabilityReport;
+                                                <section>
+                                                    <strong>@session.ConnectionId</strong>
+                                                    <dl>
+                                                        <div>
+                                                            <dt>Connected</dt>
+                                                            <dd>@FormatDesktopDebugBool(session.IsConnected)</dd>
+                                                        </div>
+                                                        <div>
+                                                            <dt>GUI ready</dt>
+                                                            <dd>@FormatDesktopDebugBool(report.IsGuiSessionAvailable)</dd>
+                                                        </div>
+                                                        <div>
+                                                            <dt>User</dt>
+                                                            <dd>@report.UserName (@FormatDesktopDebugValue(report.UserId?.ToString()))</dd>
+                                                        </div>
+                                                        <div>
+                                                            <dt>Machine / pid</dt>
+                                                            <dd>@report.MachineName / @report.ProcessId</dd>
+                                                        </div>
+                                                        <div>
+                                                            <dt>Display</dt>
+                                                            <dd>@report.DisplayServer, DISPLAY=@FormatDesktopDebugValue(report.Display), WAYLAND=@FormatDesktopDebugValue(report.WaylandDisplay)</dd>
+                                                        </div>
+                                                        <div>
+                                                            <dt>Runtime / bus</dt>
+                                                            <dd>@FormatDesktopDebugValue(report.XdgRuntimeDirectory), bus=@FormatDesktopDebugBool(report.HasSessionBus)</dd>
+                                                        </div>
+                                                        <div>
+                                                            <dt>Session</dt>
+                                                            <dd>type=@FormatDesktopDebugValue(report.SessionType), class=@FormatDesktopDebugValue(report.SessionClass), desktop=@FormatDesktopDebugValue(report.CurrentDesktop ?? report.DesktopSession), id=@FormatDesktopDebugValue(report.DesktopSessionId)</dd>
+                                                        </div>
+                                                        <div>
+                                                            <dt>First / last</dt>
+                                                            <dd>@session.FirstSeenAtUtc.ToLocalTime():O / @session.LastSeenAtUtc.ToLocalTime():O</dd>
+                                                        </div>
+                                                        <div>
+                                                            <dt>Warnings</dt>
+                                                            <dd>@(report.Warnings.Count == 0 ? "none" : string.Join(" | ", report.Warnings))</dd>
+                                                        </div>
+                                                    </dl>
+                                                </section>
+                                            }
+                                        }
+                                    </details>
                                 }
 
-                                @if (pendingDesktopFix is not null)
-                                {
-                                    <div class="callout warning desktop-chat-approval">
-                                        <div>
-                                            <strong>@pendingDesktopFix.Title</strong>
-                                            <p>@pendingDesktopFix.Description</p>
-                                        </div>
-                                        <div class="toolbar-row">
-                                            <UiCommandButton Label="Approve fix"
-                                                             Glyph="UiIconGlyph.Repair"
-                                                             Variant="UiButtonVariant.ActionSubtle"
-                                                             OnClick="ApprovePendingDesktopFixAsync"
-                                                             Disabled="@isDesktopChatBusy" />
-                                            <UiCommandButton Label="Cancel"
-                                                             Glyph="UiIconGlyph.Clear"
-                                                             Variant="UiButtonVariant.Ghost"
-                                                             OnClick="CancelPendingDesktopFix"
-                                                             Disabled="@isDesktopChatBusy" />
-                                        </div>
-                                    </div>
-                                }
-
-                                <div class="desktop-chat-message-list">
+                                <div class="desktop-chat-message-list" @ref="desktopChatMessageListElement">
                                     @if (DesktopAssistantMessages.Count == 0)
                                     {
                                         <div class="empty-state compact-empty-state desktop-chat-empty-state">
@@ -171,7 +223,16 @@
                                             <article class="desktop-chat-message @GetDesktopChatMessageClass(message)">
                                                 <div class="desktop-chat-message-header">
                                                     <UiPill Tone="@GetDesktopChatMessageTone(message.Role)">@GetDesktopChatRoleLabel(message.Role)</UiPill>
-                                                    <span>@message.CreatedAtUtc.ToLocalTime():g</span>
+                                                    <div class="desktop-chat-message-tools">
+                                                        <span>@message.CreatedAtUtc.ToLocalTime():g</span>
+                                                        @if (message.Role == AiChatMessageRole.User)
+                                                        {
+                                                            <CompactUIButton Label="Edit"
+                                                                             Glyph="UiIconGlyph.Edit"
+                                                                             OnClick="@(() => EditDesktopChatQuestion(message))"
+                                                                             Disabled="@isDesktopChatBusy" />
+                                                        }
+                                                    </div>
                                                 </div>
                                                 <p>@message.Content</p>
                                             </article>
@@ -184,29 +245,58 @@
                                     <div class="callout error">@desktopChatError</div>
                                 }
 
+                                @if (pendingDesktopFix is not null)
+                                {
+                                    <div class="callout warning desktop-chat-approval">
+                                        <div>
+                                            <strong>@pendingDesktopFix.Title</strong>
+                                            <p>@pendingDesktopFix.Description</p>
+                                        </div>
+                                        <div class="toolbar-row">
+                                            <CompactUIButton Label="Yes, fix it"
+                                                             Glyph="UiIconGlyph.Repair"
+                                                             OnClick="ApprovePendingDesktopFixAsync"
+                                                             Disabled="@isDesktopChatBusy" />
+                                            <CompactUIButton Label="No"
+                                                             Glyph="UiIconGlyph.Clear"
+                                                             OnClick="CancelPendingDesktopFix"
+                                                             Disabled="@isDesktopChatBusy" />
+                                        </div>
+                                    </div>
+                                }
+
                                 <div class="desktop-chat-composer">
+                                    @if (editingDesktopQuestionMessageId.HasValue)
+                                    {
+                                        <div class="desktop-chat-editing-strip">
+                                            <span>Editing previous question</span>
+                                            <CompactUIButton Label="Cancel"
+                                                             Glyph="UiIconGlyph.Clear"
+                                                             OnClick="CancelDesktopChatQuestionEdit"
+                                                             Disabled="@isDesktopChatBusy" />
+                                        </div>
+                                    }
                                     <textarea class="ui-control-input ui-control-textarea"
                                               @bind="desktopChatPrompt"
                                               @bind:event="oninput"
+                                              onkeydown="if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();document.getElementById('desktop-chat-send-button')?.click();}"
                                               placeholder="Example: my monitor layout is wrong, scaling is tiny, the keymap resets, or an app will not open..."></textarea>
                                     <div class="desktop-chat-composer-actions">
                                         <div class="toolbar-row desktop-chat-primary-actions">
-                                            <UiCommandButton Label="@(isDesktopChatBusy ? "Working..." : "Ask AI")"
+                                            <CompactUIButton id="desktop-chat-send-button"
+                                                             Label="@GetDesktopChatSendLabel()"
                                                              Glyph="UiIconGlyph.Send"
                                                              OnClick="SendDesktopChatMessageAsync"
                                                              Disabled="@(!HasDesktopHelperSession || !desktopChatWorkspace.HasProvider || isDesktopChatBusy || string.IsNullOrWhiteSpace(desktopChatPrompt))" />
-                                            <UiCommandButton Label="Diagnose"
+                                            <CompactUIButton Label="Diagnose"
                                                              Glyph="UiIconGlyph.Analyze"
-                                                             Variant="UiButtonVariant.Toolbar"
                                                              OnClick="SendDesktopDiagnosisAsync"
                                                              Disabled="@(!HasDesktopHelperSession || !desktopChatWorkspace.HasProvider || isDesktopChatBusy)" />
-                                            <UiCommandButton Label="Deep Fix"
+                                            <CompactUIButton Label="Deep Fix"
                                                              Glyph="UiIconGlyph.Repair"
-                                                             Variant="UiButtonVariant.Toolbar"
                                                              OnClick="RunDesktopDeepFixAsync"
                                                              Disabled="@(!HasDesktopHelperSession || !desktopChatWorkspace.HasProvider || isDesktopChatBusy)" />
                                         </div>
-                                        <span class="meta-text">Desktop changes still require explicit approval.</span>
                                     </div>
                                 </div>
                             </section>
@@ -613,23 +703,44 @@
     private string selectedDesktopModelId = string.Empty;
     private PendingDesktopFix? pendingDesktopFix;
     private CancellationTokenSource? desktopHelperAutoRefreshCancellation;
+    private ElementReference desktopChatMessageListElement;
+    private int lastDesktopChatMessageCount = -1;
+    private Guid? lastDesktopChatScrollSessionId;
+    private bool shouldScrollDesktopChatToBottom = true;
+    private Guid? editingDesktopQuestionMessageId;
 
     private IReadOnlyList<AiChatMessage> DesktopAssistantMessages =>
         desktopChatWorkspace?.Messages
             .Where(message => message.Role is AiChatMessageRole.User or AiChatMessageRole.Assistant)
             .ToArray() ?? [];
 
-    private IReadOnlyList<DesktopHelperCommand> DesktopHelperCommands =>
-    [
-        new("Run helper directly", BuildDirectHelperCommand()),
-        new("Start helper service", "systemctl --user daemon-reload && systemctl --user enable --now linux-made-sane-desktop-helper.service"),
-        new("Restart helper service", "systemctl --user restart linux-made-sane-desktop-helper.service"),
-        new("Check helper service", "systemctl --user status linux-made-sane-desktop-helper.service")
-    ];
+    private IReadOnlyList<DesktopHelperCommand> DesktopHelperCommands
+    {
+        get
+        {
+            var commands = new List<DesktopHelperCommand>();
+            var devInstallerPath = ResolveDevDesktopHelperInstallerPath();
+            if (File.Exists(devInstallerPath))
+            {
+                commands.Add(new DesktopHelperCommand("Install/restart dev service (no logout)", BuildDevDesktopHelperInstallerCommand(devInstallerPath)));
+            }
+
+            commands.Add(new DesktopHelperCommand("Run helper directly (no sudo)", BuildDirectHelperCommand()));
+            commands.Add(new DesktopHelperCommand("Start installed service", "systemctl --user daemon-reload && systemctl --user enable --now linux-made-sane-desktop-helper.service"));
+            commands.Add(new DesktopHelperCommand("Restart installed service", "systemctl --user restart linux-made-sane-desktop-helper.service"));
+            commands.Add(new DesktopHelperCommand("Check installed service", "systemctl --user status linux-made-sane-desktop-helper.service"));
+            return commands;
+        }
+    }
 
     protected override async Task OnInitializedAsync()
     {
         await LoadAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        await ScrollDesktopChatToBottomIfNeededAsync(firstRender);
     }
 
     private async Task LoadAsync()
@@ -697,6 +808,11 @@
             activeDesktopAssistantTab = "setup";
         }
 
+        if (string.Equals(activeDesktopAssistantTab, "assistant", StringComparison.Ordinal))
+        {
+            RequestDesktopChatScrollToBottom();
+        }
+
         return Task.CompletedTask;
     }
 
@@ -712,6 +828,7 @@
             viewModel.Inspection.DesktopSessionBroker);
         activeDesktopChatSessionId = desktopChatWorkspace.ActiveSessionId;
         SyncDesktopProviderSelectionFromWorkspace();
+        RequestDesktopChatScrollToBottom();
 
         UpdateDesktopHelperAutoRefreshLoop();
     }
@@ -723,6 +840,7 @@
         try
         {
             SyncDesktopProviderSelection();
+            ClearDesktopChatQuestionEdit();
             activeDesktopChatSessionId = await DesktopAssistantChatService.CreateSessionAsync(
                 selectedDesktopProviderKey,
                 selectedDesktopModelId);
@@ -743,6 +861,7 @@
 
         activeDesktopChatSessionId = sessionId;
         desktopChatError = string.Empty;
+        ClearDesktopChatQuestionEdit();
         await LoadDesktopAssistantChatAsync();
     }
 
@@ -754,15 +873,6 @@
         }
 
         var prompt = desktopChatPrompt.Trim();
-        if (TryResolveKeyboardLayoutFix(prompt, out var layout))
-        {
-            SetPendingKeyboardLayoutFix(layout);
-            desktopChatPrompt = string.Empty;
-            desktopChatError = string.Empty;
-            await InvokeAsync(StateHasChanged);
-            return;
-        }
-
         isDesktopChatBusy = true;
         pendingDesktopFix = null;
         desktopChatError = string.Empty;
@@ -777,7 +887,10 @@
                 selectedDesktopProviderKey,
                 selectedDesktopModelId);
             activeDesktopChatSessionId = desktopChatWorkspace.ActiveSessionId;
+            pendingDesktopFix = BuildPendingDesktopFix(desktopChatWorkspace.ProposedFix);
             SyncDesktopProviderSelectionFromWorkspace();
+            ClearDesktopChatQuestionEdit();
+            RequestDesktopChatScrollToBottom();
         }
         catch (Exception ex)
         {
@@ -797,9 +910,43 @@
             return Task.CompletedTask;
         }
 
+        ClearDesktopChatQuestionEdit();
         desktopChatPrompt = prompt;
         return SendDesktopChatMessageAsync();
     }
+
+    private Task EditDesktopChatQuestion(AiChatMessage message)
+    {
+        if (message.Role != AiChatMessageRole.User || isDesktopChatBusy)
+        {
+            return Task.CompletedTask;
+        }
+
+        editingDesktopQuestionMessageId = message.Id;
+        desktopChatPrompt = message.Content;
+        pendingDesktopFix = null;
+        desktopChatError = string.Empty;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private Task CancelDesktopChatQuestionEdit()
+    {
+        ClearDesktopChatQuestionEdit();
+        desktopChatPrompt = string.Empty;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private void ClearDesktopChatQuestionEdit()
+    {
+        editingDesktopQuestionMessageId = null;
+    }
+
+    private string GetDesktopChatSendLabel() =>
+        isDesktopChatBusy
+            ? "Working..."
+            : editingDesktopQuestionMessageId.HasValue
+                ? "Rerun"
+                : "Ask AI";
 
     private Task SendDesktopDiagnosisAsync() =>
         SendDesktopPresetAsync("Diagnose this graphical desktop from the LMS session agent evidence. Start with the most likely issue areas, then give the single best next LMS action. Keep it short and do not ask me to copy commands.");
@@ -807,13 +954,6 @@
     private Task RunDesktopDeepFixAsync()
     {
         var issue = desktopChatPrompt.Trim();
-        if (TryResolveKeyboardLayoutFix(issue, out var layout))
-        {
-            SetPendingKeyboardLayoutFix(layout);
-            desktopChatError = string.Empty;
-            return InvokeAsync(StateHasChanged);
-        }
-
         var prompt = string.IsNullOrWhiteSpace(issue)
             ? "Deep Fix this desktop session. Use LMS-collected evidence first. Give the single next LMS fix or approval needed. Keep it short and do not give command-copy instructions."
             : $"""
@@ -826,13 +966,25 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
         return SendDesktopPresetAsync(prompt);
     }
 
-    private void SetPendingKeyboardLayoutFix(string layout)
+    private static PendingDesktopFix? BuildPendingDesktopFix(DesktopAssistantProposedFixViewModel? proposedFix)
     {
-        pendingDesktopFix = new PendingDesktopFix(
-            DesktopSessionActionKinds.SetKeyboardLayout,
+        if (proposedFix is null)
+        {
+            return null;
+        }
+
+        var layout = proposedFix.Arguments.GetValueOrDefault("layout") ?? string.Empty;
+        var packageNames = (proposedFix.Arguments.GetValueOrDefault("packages") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToArray();
+
+        return new PendingDesktopFix(
+            proposedFix.Kind,
             layout,
-            $"Set keyboard layout to {layout}",
-            $"LMS will set the live desktop keyboard layout to {layout} and persist the XFCE/GNOME input-source setting where those tools are available.");
+            packageNames,
+            proposedFix.Arguments,
+            proposedFix.Title,
+            proposedFix.Description);
     }
 
     private async Task ApprovePendingDesktopFixAsync()
@@ -861,6 +1013,32 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
                 desktopChatPrompt = string.Empty;
                 await RefreshWorkspaceAsync();
             }
+            else if (fix.Kind == DesktopSessionActionKinds.InstallAptPackages)
+            {
+                desktopChatWorkspace = await DesktopAssistantChatService.InstallAptPackagesAsync(
+                    activeDesktopChatSessionId,
+                    fix.PackageNames,
+                    viewModel.Inspection.DesktopSessionBroker,
+                    selectedDesktopProviderKey,
+                    selectedDesktopModelId);
+                activeDesktopChatSessionId = desktopChatWorkspace.ActiveSessionId;
+                pendingDesktopFix = null;
+                desktopChatPrompt = string.Empty;
+                await RefreshWorkspaceAsync();
+            }
+            else if (fix.Kind == DesktopSessionActionKinds.RepairAptSources)
+            {
+                desktopChatWorkspace = await DesktopAssistantChatService.RepairAptSourcesAsync(
+                    activeDesktopChatSessionId,
+                    fix.Arguments,
+                    viewModel.Inspection.DesktopSessionBroker,
+                    selectedDesktopProviderKey,
+                    selectedDesktopModelId);
+                activeDesktopChatSessionId = desktopChatWorkspace.ActiveSessionId;
+                pendingDesktopFix = null;
+                desktopChatPrompt = string.Empty;
+                await RefreshWorkspaceAsync();
+            }
         }
         catch (Exception ex)
         {
@@ -878,27 +1056,41 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
         return Task.CompletedTask;
     }
 
-    private static bool TryResolveKeyboardLayoutFix(string prompt, out string layout)
+    private void RequestDesktopChatScrollToBottom()
     {
-        layout = string.Empty;
-        var normalized = prompt.Trim().ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(normalized) ||
-            (!normalized.Contains("keymap", StringComparison.Ordinal) &&
-             !normalized.Contains("keyboard", StringComparison.Ordinal) &&
-             !normalized.Contains("layout", StringComparison.Ordinal)))
+        shouldScrollDesktopChatToBottom = true;
+    }
+
+    private async Task ScrollDesktopChatToBottomIfNeededAsync(bool firstRender)
+    {
+        if (desktopChatWorkspace is null ||
+            !string.Equals(activeDesktopAssistantTab, "assistant", StringComparison.Ordinal))
         {
-            return false;
+            return;
         }
 
-        if (normalized.Contains("gb", StringComparison.Ordinal) ||
-            normalized.Contains("uk", StringComparison.Ordinal) ||
-            normalized.Contains("british", StringComparison.Ordinal))
+        var messageCount = DesktopAssistantMessages.Count;
+        var sessionId = desktopChatWorkspace.ActiveSessionId;
+        if (!firstRender &&
+            !shouldScrollDesktopChatToBottom &&
+            messageCount == lastDesktopChatMessageCount &&
+            sessionId == lastDesktopChatScrollSessionId)
         {
-            layout = "gb";
-            return true;
+            return;
         }
 
-        return false;
+        lastDesktopChatMessageCount = messageCount;
+        lastDesktopChatScrollSessionId = sessionId;
+        shouldScrollDesktopChatToBottom = false;
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.scrollElementToBottom", desktopChatMessageListElement);
+        }
+        catch (InvalidOperationException)
+        {
+            // JS interop can be unavailable while the interactive circuit is reconnecting.
+        }
     }
 
     private void UpdateDesktopHelperAutoRefreshLoop()
@@ -924,9 +1116,11 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
     {
         try
         {
-            for (var attempt = 0; attempt < 18 && !cancellationToken.IsCancellationRequested; attempt++)
+            var attempt = 0;
+            while (!cancellationToken.IsCancellationRequested)
             {
-                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                var delay = attempt++ < 30 ? TimeSpan.FromSeconds(1) : TimeSpan.FromSeconds(5);
+                await Task.Delay(delay, cancellationToken);
                 await InvokeAsync(async () =>
                 {
                     if (viewModel is null || HasDesktopHelperSession)
@@ -1061,7 +1255,18 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
     }
 
     private string BuildDirectHelperCommand() =>
-        $"env LMS_DESKTOP_HELPER_SOCKET={ShellQuote(GetDesktopHelperSocketPath())} LMS_DESKTOP_HELPER_LMS_URL={ShellQuote(GetDesktopHelperLocalLmsUrl())} LMS_DESKTOP_HELPER_TRAY_ICON={ShellQuote(GetDesktopHelperTrayIconPath())} {ShellQuote(ResolveDesktopHelperExecutablePath())}";
+        $"env NO_AT_BRIDGE=1 LMS_DESKTOP_HELPER_OPEN_WINDOW=true LMS_DESKTOP_HELPER_SOCKET={ShellQuote(GetDesktopHelperSocketPath())} LMS_DESKTOP_HELPER_LMS_URL={ShellQuote(GetDesktopHelperLocalLmsUrl())} LMS_DESKTOP_HELPER_TRAY_ICON={ShellQuote(GetDesktopHelperTrayIconPath())} {ShellQuote(ResolveDesktopHelperLaunchPath())}";
+
+    private string BuildDevDesktopHelperInstallerCommand(string scriptPath) =>
+        $"{ShellQuote(scriptPath)} --helper-path {ShellQuote(ResolveDesktopHelperExecutablePath())} --url {ShellQuote(GetDesktopHelperLocalLmsUrl())} --socket {ShellQuote(GetDesktopHelperSocketPath())} --tray-icon {ShellQuote(GetDesktopHelperTrayIconPath())}";
+
+    private string ResolveDevDesktopHelperInstallerPath() =>
+        Path.GetFullPath(Path.Combine(
+            WebHostEnvironment.ContentRootPath,
+            "..",
+            "..",
+            "scripts",
+            "install-dev-desktop-helper-service.sh"));
 
     private string GetDesktopHelperSocketPath() =>
         string.IsNullOrWhiteSpace(Configuration["DesktopSession:SocketPath"])
@@ -1109,6 +1314,14 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
         }
 
         return "/opt/linuxmadesane/ce/current/desktop-helper/LinuxMadeSane.DesktopHelper";
+    }
+
+    private string ResolveDesktopHelperLaunchPath()
+    {
+        var installedLauncher = Path.Combine(WebHostEnvironment.ContentRootPath, "desktop-helper", "linux-made-sane-desktop-helper-launcher.sh");
+        return File.Exists(installedLauncher)
+            ? installedLauncher
+            : ResolveDesktopHelperExecutablePath();
     }
 
     private static string ShellQuote(string value) =>
@@ -1174,6 +1387,47 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
         return $"Last seen {session.LastSeenAtUtc.ToLocalTime():g}";
     }
 
+    private static string FormatDesktopDebugBool(bool value) => value ? "yes" : "no";
+
+    private static string FormatDesktopDebugValue(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "none" : value;
+
+    private string GetDesktopBrokerSocketStatus()
+    {
+        var socketPath = GetDesktopHelperSocketPath();
+        var directory = Path.GetDirectoryName(socketPath);
+        var fileName = Path.GetFileName(socketPath);
+        if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(fileName))
+        {
+            return "invalid path";
+        }
+
+        try
+        {
+            var directoryExists = Directory.Exists(directory);
+            var entryExists = directoryExists &&
+                              Directory.EnumerateFileSystemEntries(directory, fileName).Any();
+            var mode = "unknown";
+            if (entryExists && OperatingSystem.IsLinux())
+            {
+                try
+                {
+                    mode = File.GetUnixFileMode(socketPath).ToString();
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+                {
+                    mode = exception.GetType().Name;
+                }
+            }
+
+            return $"dir={FormatDesktopDebugBool(directoryExists)}, entry={FormatDesktopDebugBool(entryExists)}, mode={mode}, webUser={Environment.UserName}";
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return $"unreadable: {exception.GetType().Name}, webUser={Environment.UserName}";
+        }
+    }
+
     private UiPillTone GetDesktopHelperTone() =>
         viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession is null
             ? UiPillTone.Warning
@@ -1232,6 +1486,8 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
     private sealed record PendingDesktopFix(
         string Kind,
         string Layout,
+        IReadOnlyList<string> PackageNames,
+        IReadOnlyDictionary<string, string> Arguments,
         string Title,
         string Description);
 }

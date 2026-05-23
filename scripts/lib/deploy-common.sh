@@ -25,6 +25,10 @@ lms_require_command() {
   command -v "$1" >/dev/null 2>&1 || lms_die "required command not found: $1"
 }
 
+lms_shell_quote() {
+  printf '%q' "$1"
+}
+
 lms_is_truthy() {
   case "${1:-}" in
     true|True|TRUE|1|yes|Yes|YES|on|On|ON) return 0 ;;
@@ -84,6 +88,75 @@ lms_install_host_packages() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -- "${missing[@]}"
 }
 
+lms_install_optional_host_packages() {
+  local packages=("$@")
+  [[ ${#packages[@]} -gt 0 ]] || return
+
+  case "${INSTALL_SYSTEM_PACKAGES:-true}" in
+    false|False|FALSE|0|no|No|NO|off|Off|OFF)
+      lms_log "Skipping optional host package install: ${packages[*]}"
+      return
+      ;;
+  esac
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    lms_log "Skipping optional host package install while staging under LMS_DEST_ROOT: ${packages[*]}"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    lms_log "Skipping optional host package install because the installer is not running as root: ${packages[*]}"
+    return
+  fi
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    lms_log "No supported package manager found for optional host packages: ${packages[*]}"
+    return
+  fi
+
+  local missing=()
+  local package
+  if command -v dpkg-query >/dev/null 2>&1; then
+    for package in "${packages[@]}"; do
+      if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+        missing+=("$package")
+      fi
+    done
+  else
+    missing=("${packages[@]}")
+  fi
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    lms_log "Optional host packages already installed: ${packages[*]}"
+    return
+  fi
+
+  local available=()
+  if command -v apt-cache >/dev/null 2>&1; then
+    for package in "${missing[@]}"; do
+      if apt-cache show "$package" >/dev/null 2>&1; then
+        available+=("$package")
+      else
+        lms_log "Optional host package is not available from configured apt sources: $package"
+      fi
+    done
+  else
+    available=("${missing[@]}")
+  fi
+
+  [[ ${#available[@]} -gt 0 ]] || return
+  lms_log "Installing optional host packages: ${available[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get update || {
+    lms_log "Could not refresh apt metadata for optional host packages"
+    return
+  }
+
+  for package in "${available[@]}"; do
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -- "$package" ||
+      lms_log "Optional host package could not be installed: $package"
+  done
+}
+
 lms_enable_openssh_server() {
   if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
     return
@@ -107,6 +180,86 @@ lms_enable_openssh_server() {
   fi
 
   lms_log "OpenSSH server unit was not found; install or start sshd before using local terminal sessions"
+}
+
+lms_enable_caddy_service() {
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return
+  fi
+
+  if ! lms_has_systemd; then
+    lms_log "systemd not detected; skipping Caddy service enable/start"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    lms_log "Skipping Caddy service enable/start because the installer is not running as root"
+    return
+  fi
+
+  if ! systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+    lms_log "Caddy service unit was not found; Edge Gateway will report Caddy as unavailable"
+    return
+  fi
+
+  lms_log "Enabling Caddy service"
+  if ! systemctl enable caddy.service >/dev/null 2>&1; then
+    lms_log "Caddy service is installed, but systemd could not enable it"
+    return
+  fi
+
+  if systemctl restart caddy.service >/dev/null 2>&1; then
+    return
+  fi
+
+  lms_log "Caddy service is installed and enabled, but it did not start cleanly; Edge Gateway will show the Caddy status inside LMS"
+  systemctl show caddy.service -p ActiveState -p SubState -p Result -p ExecMainStatus 2>/dev/null |
+    sed 's/^/[lms] Caddy /' >&2 || true
+  if [[ "${LMS_VERBOSE:-}" == "1" ]]; then
+    systemctl --no-pager --full status caddy.service >&2 || true
+  fi
+}
+
+lms_prepare_desktop_session_socket_directory() {
+  local socket_path="$1"
+  local service_user="$2"
+  local service_group="$3"
+  local socket_dir
+
+  [[ "${LMS_DEST_ROOT:-}" == "" ]] || return 0
+  [[ "$(id -u)" -eq 0 ]] || return 0
+  [[ -n "$socket_path" ]] || return 0
+
+  socket_dir="$(dirname "$socket_path")"
+  case "$socket_dir" in
+    /run/linuxmadesane|/run/linuxmadesane/*)
+      ;;
+    *)
+      lms_log "Desktop Assistant broker socket directory is custom; systemd must prepare $socket_dir"
+      return 0
+      ;;
+  esac
+
+  mkdir -p "$socket_dir"
+  chown "$service_user:$service_group" "$socket_dir" 2>/dev/null || true
+  chmod 0755 "$socket_dir" 2>/dev/null || true
+}
+
+lms_wait_for_file_socket() {
+  local socket_path="$1"
+  local timeout_seconds="${2:-30}"
+
+  [[ -n "$socket_path" ]] || return 1
+
+  for _ in $(seq 1 "$timeout_seconds"); do
+    if [[ -S "$socket_path" ]]; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  return 1
 }
 
 lms_prepare_local_ssh_runner() {
@@ -258,7 +411,249 @@ lms_prepare_desktop_helper_access() {
 
   usermod -a -G "$service_group" "$username" >/dev/null 2>&1 || true
   lms_log "Granted $username access to the LMS desktop helper socket via group $service_group"
-  lms_log "The user must log out and back in before the new desktop helper group membership is active"
+  lms_log "Desktop helper launcher will use the new group membership immediately when possible"
+}
+
+lms_disable_user_debug_desktop_helper_files() {
+  local username="$1"
+  local unit_name="$2"
+  local user_home="${LMS_INSTALLER_HOME:-}"
+  local passwd_entry primary_group backup_dir timestamp moved=false
+  local local_unit local_autostart wants_link
+
+  if [[ -z "$user_home" && -n "$username" ]] && command -v getent >/dev/null 2>&1; then
+    passwd_entry="$(getent passwd "$username" 2>/dev/null || true)"
+    if [[ -n "$passwd_entry" ]]; then
+      user_home="$(printf '%s' "$passwd_entry" | cut -d: -f6)"
+    fi
+  fi
+
+  [[ -n "$user_home" && -d "$user_home" ]] || return 0
+
+  backup_dir="$user_home/.local/share/linuxmadesane/disabled-desktop-helper-debug"
+  timestamp="$(date -u +%Y%m%d%H%M%S)"
+  local_unit="$user_home/.config/systemd/user/$unit_name"
+  wants_link="$user_home/.config/systemd/user/default.target.wants/$unit_name"
+  local_autostart="$user_home/.config/autostart/linux-made-sane-desktop-helper.desktop"
+
+  if [[ -f "$local_unit" ]] &&
+     grep -Eq 'local debug|dev-desktop-helper-launcher|/tmp/linux-made-sane-desktop-session\.sock' "$local_unit"; then
+    mkdir -p "$backup_dir"
+    mv "$local_unit" "$backup_dir/$unit_name.$timestamp"
+    rm -f "$wants_link"
+    moved=true
+  fi
+
+  if [[ -f "$local_autostart" ]] &&
+     grep -Eq 'local debug|dev-desktop-helper-launcher|/tmp/linux-made-sane-desktop-session\.sock' "$local_autostart"; then
+    mkdir -p "$backup_dir"
+    mv "$local_autostart" "$backup_dir/linux-made-sane-desktop-helper.desktop.$timestamp"
+    moved=true
+  fi
+
+  if [[ "$moved" == "true" ]]; then
+    primary_group="$(id -gn "$username" 2>/dev/null || true)"
+    if [[ -n "$primary_group" ]]; then
+      chown -R "$username:$primary_group" "$backup_dir" >/dev/null 2>&1 || true
+    fi
+
+    lms_log "Disabled stale local debug Desktop Assistant helper files for $username"
+  fi
+}
+
+lms_write_desktop_helper_launcher() {
+  local launcher_path="$1"
+  local service_group="$2"
+  local executable_path="$3"
+  local socket_path="${4:-/run/linuxmadesane/desktop-session.sock}"
+  local local_lms_url="${5:-http://127.0.0.1:5080/desktop-assistant}"
+  local tray_icon_path="${6:-}"
+  local launcher_dir executable_dir quoted_group quoted_executable quoted_executable_dir quoted_socket quoted_local_lms_url quoted_tray_icon
+
+  launcher_dir="$(dirname "$launcher_path")"
+  executable_dir="$(dirname "$executable_path")"
+  quoted_group="$(lms_shell_quote "$service_group")"
+  quoted_executable="$(lms_shell_quote "$executable_path")"
+  quoted_executable_dir="$(lms_shell_quote "$executable_dir")"
+  quoted_socket="$(lms_shell_quote "$socket_path")"
+  quoted_local_lms_url="$(lms_shell_quote "$local_lms_url")"
+  quoted_tray_icon="$(lms_shell_quote "$tray_icon_path")"
+
+  mkdir -p "$launcher_dir"
+  cat > "$launcher_path" <<LAUNCHER
+#!/usr/bin/env bash
+set -euo pipefail
+
+export NO_AT_BRIDGE=1
+export LMS_DESKTOP_HELPER_SOCKET=$quoted_socket
+export LMS_DESKTOP_HELPER_LMS_URL=$quoted_local_lms_url
+export LMS_DESKTOP_HELPER_TRAY_ICON=$quoted_tray_icon
+open_window="\${LMS_DESKTOP_HELPER_OPEN_WINDOW:-false}"
+
+if [[ "\${LMS_DESKTOP_HELPER_SG_ACTIVE:-}" != "1" ]] &&
+   command -v sg >/dev/null 2>&1 &&
+   getent group $quoted_group >/dev/null 2>&1 &&
+   ! id -nG | tr ' ' '\\n' | grep -qx $quoted_group; then
+  group_entry="\$(getent group $quoted_group)"
+  group_members="\${group_entry##*:}"
+  current_user="\$(id -un)"
+  if [[ ",\$group_members," == *",\$current_user,"* ]]; then
+    exec sg $quoted_group -c "LMS_DESKTOP_HELPER_SG_ACTIVE=1 LMS_DESKTOP_HELPER_OPEN_WINDOW=\$(printf '%q' "\$open_window") exec \$(printf '%q' "\$0")"
+  fi
+fi
+
+cd $quoted_executable_dir
+exec $quoted_executable
+LAUNCHER
+  chmod 755 "$launcher_path"
+}
+
+lms_run_as_user() {
+  local username="$1"
+  shift
+
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$username" -- "$@"
+    return
+  fi
+
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -u "$username" "$@"
+    return
+  fi
+
+  return 127
+}
+
+lms_enable_desktop_helper_global_unit() {
+  local unit_name="$1"
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return 0
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    return 0
+  fi
+
+  if ! lms_has_systemd; then
+    return 0
+  fi
+
+  systemctl --global enable "$unit_name" >/dev/null 2>&1 ||
+    lms_log "Desktop helper installed; could not enable the user service globally"
+}
+
+lms_add_desktop_helper_user() {
+  local candidate="$1"
+  local -n target_users="$2"
+  local existing
+
+  [[ -n "$candidate" && "$candidate" != "root" ]] || return 0
+  id "$candidate" >/dev/null 2>&1 || return 0
+
+  for existing in "${target_users[@]}"; do
+    if [[ "$existing" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+
+  target_users+=("$candidate")
+}
+
+lms_collect_desktop_helper_users() {
+  local -n target_users="$1"
+  local session_id username session_class session_state session_type
+
+  lms_add_desktop_helper_user "${LMS_INSTALLER_USERNAME:-}" target_users
+
+  command -v loginctl >/dev/null 2>&1 || return 0
+
+  while read -r session_id _; do
+    [[ -n "$session_id" ]] || continue
+    username="$(loginctl show-session "$session_id" -p Name --value 2>/dev/null || true)"
+    session_class="$(loginctl show-session "$session_id" -p Class --value 2>/dev/null || true)"
+    session_state="$(loginctl show-session "$session_id" -p State --value 2>/dev/null || true)"
+    session_type="$(loginctl show-session "$session_id" -p Type --value 2>/dev/null || true)"
+
+    [[ "$session_class" == "user" ]] || continue
+    [[ "$session_state" == "active" || "$session_state" == "online" || "$session_state" == "closing" ]] || continue
+    [[ "$session_type" == "x11" || "$session_type" == "wayland" || "$session_type" == "mir" || -z "$session_type" ]] || continue
+    lms_add_desktop_helper_user "$username" target_users
+  done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
+}
+
+lms_start_desktop_helper_for_user() {
+  local username="$1"
+  local unit_name="$2"
+  local user_id runtime_dir bus_path
+
+  if [[ -z "$username" || "$username" == "root" ]] || ! id "$username" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  user_id="$(id -u "$username" 2>/dev/null || true)"
+  runtime_dir="/run/user/$user_id"
+  bus_path="$runtime_dir/bus"
+  if [[ -z "$user_id" || ! -d "$runtime_dir" || ! -S "$bus_path" ]]; then
+    return 1
+  fi
+
+  local -a user_env=(
+    "XDG_RUNTIME_DIR=$runtime_dir"
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=$bus_path"
+  )
+
+  lms_run_as_user "$username" env "${user_env[@]}" systemctl --user disable "$unit_name" >/dev/null 2>&1 || true
+  lms_disable_user_debug_desktop_helper_files "$username" "$unit_name"
+
+  lms_run_as_user "$username" env "${user_env[@]}" systemctl --user import-environment \
+    DISPLAY \
+    WAYLAND_DISPLAY \
+    XDG_CURRENT_DESKTOP \
+    XDG_SESSION_DESKTOP \
+    DESKTOP_SESSION \
+    XDG_SESSION_TYPE \
+    XAUTHORITY >/dev/null 2>&1 || true
+
+  if lms_run_as_user "$username" env "${user_env[@]}" systemctl --user daemon-reload >/dev/null 2>&1 &&
+     lms_run_as_user "$username" env "${user_env[@]}" systemctl --user enable --now "$unit_name" >/dev/null 2>&1 &&
+     lms_run_as_user "$username" env "${user_env[@]}" systemctl --user restart "$unit_name" >/dev/null 2>&1; then
+    lms_log "Started Desktop Assistant helper for $username"
+    return 0
+  fi
+
+  return 1
+}
+
+lms_try_start_desktop_helper_for_installer_user() {
+  local unit_name="$1"
+  local username
+  local -a usernames=()
+  local started=false
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return 0
+  fi
+
+  if ! lms_has_systemd; then
+    lms_log "Desktop helper installed; it will start from desktop autostart on graphical login"
+    return 0
+  fi
+
+  lms_collect_desktop_helper_users usernames
+
+  for username in "${usernames[@]}"; do
+    if lms_start_desktop_helper_for_user "$username" "$unit_name"; then
+      started=true
+    fi
+  done
+
+  if [[ "$started" == "true" ]]; then
+    return 0
+  else
+    lms_log "Desktop helper installed; it will start automatically on the next graphical login"
+  fi
 }
 
 lms_write_update_helper() {

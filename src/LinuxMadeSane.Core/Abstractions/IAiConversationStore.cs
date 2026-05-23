@@ -10,6 +10,7 @@ public interface IAiConversationStore
     Task<IReadOnlyList<AiChatThread>> ListThreadsAsync(CancellationToken cancellationToken = default);
     Task<AiChatThread?> GetThreadAsync(Guid id, CancellationToken cancellationToken = default);
     Task SaveThreadAsync(AiChatThread thread, CancellationToken cancellationToken = default);
+    Task DeleteThreadAsync(Guid id, CancellationToken cancellationToken = default);
 
     Task<AiChatMessage?> GetMessageAsync(Guid id, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<AiChatMessage>> ListMessagesAsync(Guid? threadId = null, CancellationToken cancellationToken = default);

@@ -58,6 +58,21 @@ public sealed class DesktopAssistantLaunchTicketStore : IDesktopAssistantLaunchT
         return true;
     }
 
+    public bool TryValidate(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return false;
+        }
+
+        PruneExpired();
+        var normalizedToken = token.Trim();
+        var now = DateTimeOffset.UtcNow;
+        return tickets.TryGetValue(normalizedToken, out var ticket) && ticket.ExpiresAtUtc > now ||
+               recentlyConsumedTickets.TryGetValue(normalizedToken, out var recentlyConsumed) &&
+               recentlyConsumed.ExpiresAtUtc > now;
+    }
+
     private void PruneExpired()
     {
         var now = DateTimeOffset.UtcNow;

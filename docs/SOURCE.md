@@ -8,7 +8,7 @@ Redistributions must preserve the root license, notice, trademark, commercial li
 
 Desktop Assistant and the local Desktop Helper are part of Community Edition. Future paid desktop functionality may add remote desktop help, team workflows, or managed support paths, but the local GUI-session helper belongs in the CE baseline.
 
-The Desktop Helper uses GtkSharp and related GTK binding packages for the Linux tray integration. Those packages and native GTK runtime libraries remain under their own upstream or distribution licenses; preserve `THIRD-PARTY-NOTICES.md` when redistributing LMS.
+The Desktop Helper uses Avalonia and related rendering packages for the native Linux helper window and tray surface. Native tray/status-notifier support and desktop runtime libraries come from the user's Linux distribution and remain under their own upstream or distribution licenses; preserve `THIRD-PARTY-NOTICES.md` when redistributing LMS.
 
 Included projects:
 

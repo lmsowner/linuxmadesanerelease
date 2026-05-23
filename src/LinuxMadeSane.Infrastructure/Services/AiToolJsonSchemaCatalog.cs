@@ -208,6 +208,38 @@ public static class AiToolJsonSchemaCatalog
               "required": [ "serverId", "packageNames" ]
             }
             """,
+        AiToolNames.DesktopSetKeyboardLayout =>
+            """
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "layout": {
+                  "type": "string",
+                  "description": "The XKB keyboard layout code to apply to the signed-in desktop session, for example gb or us."
+                }
+              },
+              "required": [ "layout" ]
+            }
+            """,
+        AiToolNames.DesktopInstallAptPackages =>
+            """
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "packageNames": {
+                  "type": "array",
+                  "description": "The apt package names to install on the local LMS desktop machine.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "minItems": 1
+                }
+              },
+              "required": [ "packageNames" ]
+            }
+            """,
         _ => throw new InvalidOperationException($"Tool metadata is not defined for tool {definition.Name}.")
     };
 

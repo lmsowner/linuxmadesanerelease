@@ -58,7 +58,10 @@ public sealed class DesktopSessionBrokerHostedService(
             return;
         }
 
-        logger.LogInformation("Desktop session broker is listening on {SocketPath}.", socketPath);
+        logger.LogInformation(
+            "Desktop session broker is listening on {SocketPath}. Launch ticket issuer: {LaunchTicketIssuerState}.",
+            socketPath,
+            launchTicketIssuer is null ? "missing" : "ready");
 
         try
         {
@@ -82,6 +85,7 @@ public sealed class DesktopSessionBrokerHostedService(
     {
         var connectionId = Guid.NewGuid().ToString("N");
         var writerLock = new SemaphoreSlim(1, 1);
+        logger.LogInformation("Desktop helper broker connection {ConnectionId} accepted.", connectionId);
         try
         {
             using var stream = new NetworkStream(socket, ownsSocket: true);
@@ -93,6 +97,9 @@ public sealed class DesktopSessionBrokerHostedService(
             broker.RegisterActionSender(
                 connectionId,
                 (request, token) => SendActionRequestAsync(writer, writerLock, request, token));
+            broker.RegisterNotificationSender(
+                connectionId,
+                (message, token) => SendMessageAsync(writer, writerLock, message, token));
 
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -110,6 +117,10 @@ public sealed class DesktopSessionBrokerHostedService(
                 var message = JsonSerializer.Deserialize<DesktopSessionBrokerMessage>(line, JsonOptions);
                 if (message is null || !IsSupportedMessageType(message.MessageType))
                 {
+                    logger.LogWarning(
+                        "Desktop helper broker connection {ConnectionId} sent unsupported message type {MessageType}.",
+                        connectionId,
+                        message?.MessageType ?? "null");
                     continue;
                 }
 
@@ -117,6 +128,13 @@ public sealed class DesktopSessionBrokerHostedService(
                 {
                     if (message.ActionResult is not null)
                     {
+                        logger.LogInformation(
+                            "Desktop helper broker connection {ConnectionId} returned action result {RequestId} ({ActionKind}): success={Succeeded}, summary={Summary}.",
+                            connectionId,
+                            message.ActionResult.RequestId,
+                            message.ActionResult.ActionKind,
+                            message.ActionResult.Succeeded,
+                            message.ActionResult.Summary);
                         await broker.CompleteActionAsync(connectionId, message.ActionResult, cancellationToken);
                     }
 
@@ -125,14 +143,59 @@ public sealed class DesktopSessionBrokerHostedService(
 
                 if (message.CapabilityReport is not null)
                 {
-                    await broker.RegisterOrRefreshAsync(connectionId, message.CapabilityReport, cancellationToken);
+                    if (string.Equals(message.MessageType, DesktopSessionBrokerMessageTypes.Heartbeat, StringComparison.OrdinalIgnoreCase))
+                    {
+                        logger.LogDebug(
+                            "Desktop helper broker connection {ConnectionId} sent heartbeat: {ReportSummary}.",
+                            connectionId,
+                            FormatCapabilityReport(message.CapabilityReport));
+                    }
+                    else
+                    {
+                        logger.LogInformation(
+                            "Desktop helper broker connection {ConnectionId} sent {MessageType}: {ReportSummary}.",
+                            connectionId,
+                            message.MessageType,
+                            FormatCapabilityReport(message.CapabilityReport));
+                    }
+
+                    await broker.RegisterOrRefreshAsync(
+                        connectionId,
+                        message.CapabilityReport,
+                        cancellationToken,
+                        preserveReadOnlyDiagnosticsWhenEmpty: string.Equals(
+                            message.MessageType,
+                            DesktopSessionBrokerMessageTypes.Heartbeat,
+                            StringComparison.OrdinalIgnoreCase));
+                    if (string.Equals(message.MessageType, DesktopSessionBrokerMessageTypes.EvidenceReport, StringComparison.OrdinalIgnoreCase) &&
+                        message.EvidenceRequestId is { } evidenceRequestId)
+                    {
+                        await broker.CompleteEvidenceRefreshAsync(
+                            connectionId,
+                            evidenceRequestId,
+                            message.CapabilityReport,
+                            cancellationToken);
+                    }
+
                     if (launchTicketIssuer is not null)
                     {
+                        var ticket = launchTicketIssuer.Issue("/desktop-assistant?fromTray=1");
+                        logger.LogDebug(
+                            "Desktop helper broker connection {ConnectionId} issuing launch ticket {TokenPreview} expiring {ExpiresAtUtc}.",
+                            connectionId,
+                            PreviewToken(ticket.Token),
+                            ticket.ExpiresAtUtc);
                         await SendLaunchTicketAsync(
                             writer,
                             writerLock,
-                            launchTicketIssuer.Issue("/desktop-assistant?fromTray=1"),
+                            ticket,
                             cancellationToken);
+                    }
+                    else
+                    {
+                        logger.LogWarning(
+                            "Desktop helper broker connection {ConnectionId} cannot receive launch tickets because no issuer is registered.",
+                            connectionId);
                     }
                 }
             }
@@ -143,11 +206,11 @@ public sealed class DesktopSessionBrokerHostedService(
         }
         catch (IOException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            logger.LogDebug(exception, "Desktop helper disconnected.");
+            logger.LogDebug(exception, "Desktop helper broker connection {ConnectionId} disconnected.", connectionId);
         }
         catch (SocketException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            logger.LogDebug(exception, "Desktop helper socket disconnected.");
+            logger.LogDebug(exception, "Desktop helper broker connection {ConnectionId} socket disconnected.", connectionId);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -157,12 +220,14 @@ public sealed class DesktopSessionBrokerHostedService(
         {
             writerLock.Dispose();
             broker.MarkDisconnected(connectionId);
+            logger.LogInformation("Desktop helper broker connection {ConnectionId} marked disconnected.", connectionId);
         }
     }
 
     private static bool IsSupportedMessageType(string messageType) =>
         string.Equals(messageType, DesktopSessionBrokerMessageTypes.Hello, StringComparison.OrdinalIgnoreCase) ||
         string.Equals(messageType, DesktopSessionBrokerMessageTypes.Heartbeat, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(messageType, DesktopSessionBrokerMessageTypes.EvidenceReport, StringComparison.OrdinalIgnoreCase) ||
         string.Equals(messageType, DesktopSessionBrokerMessageTypes.ActionResult, StringComparison.OrdinalIgnoreCase);
 
     private static async Task SendActionRequestAsync(
@@ -178,17 +243,7 @@ public sealed class DesktopSessionBrokerHostedService(
         {
             ActionRequest = request
         };
-        var json = JsonSerializer.Serialize(message, JsonOptions);
-
-        await writerLock.WaitAsync(cancellationToken);
-        try
-        {
-            await writer.WriteLineAsync(json.AsMemory(), cancellationToken);
-        }
-        finally
-        {
-            writerLock.Release();
-        }
+        await SendMessageAsync(writer, writerLock, message, cancellationToken);
     }
 
     private static async Task SendLaunchTicketAsync(
@@ -204,8 +259,16 @@ public sealed class DesktopSessionBrokerHostedService(
         {
             LaunchTicket = ticket
         };
-        var json = JsonSerializer.Serialize(message, JsonOptions);
+        await SendMessageAsync(writer, writerLock, message, cancellationToken);
+    }
 
+    private static async Task SendMessageAsync(
+        TextWriter writer,
+        SemaphoreSlim writerLock,
+        DesktopSessionBrokerMessage message,
+        CancellationToken cancellationToken)
+    {
+        var json = JsonSerializer.Serialize(message, JsonOptions);
         await writerLock.WaitAsync(cancellationToken);
         try
         {
@@ -221,6 +284,16 @@ public sealed class DesktopSessionBrokerHostedService(
         string.IsNullOrWhiteSpace(configuredPath)
             ? "/run/linuxmadesane/desktop-session.sock"
             : configuredPath.Trim();
+
+    private static string FormatCapabilityReport(DesktopSessionCapabilityReport report) =>
+        $"user={report.UserName}, uid={report.UserId?.ToString() ?? "none"}, machine={report.MachineName}, pid={report.ProcessId}, displayServer={report.DisplayServer}, display={report.Display ?? "none"}, wayland={report.WaylandDisplay ?? "none"}, runtime={report.XdgRuntimeDirectory ?? "none"}, sessionType={report.SessionType ?? "none"}, sessionClass={report.SessionClass ?? "none"}, desktop={report.CurrentDesktop ?? report.DesktopSession ?? "none"}, hasDisplay={report.HasDisplay}, hasBus={report.HasSessionBus}, canLaunchGui={report.CanLaunchGuiApps}, warnings={report.Warnings.Count}";
+
+    private static string PreviewToken(string token) =>
+        string.IsNullOrWhiteSpace(token)
+            ? "none"
+            : token.Length <= 8
+                ? token
+                : $"{token[..8]}...";
 
     private bool TryPrepareSocketDirectory(string directoryPath)
     {

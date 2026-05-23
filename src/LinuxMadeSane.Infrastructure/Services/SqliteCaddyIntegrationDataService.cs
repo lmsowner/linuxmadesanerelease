@@ -301,14 +301,53 @@ public sealed class SqliteCaddyIntegrationDataService(
                 builder.AppendLine($"# {SanitizeComment(route.Description)}");
             }
 
-            var address = route.EnableTls ? route.Hostname : $"http://{route.Hostname}";
-            builder.AppendLine($"{address} {{");
-            builder.AppendLine("    encode zstd gzip");
-            builder.AppendLine($"    reverse_proxy {route.UpstreamUrl}");
-            builder.AppendLine("}");
+            if (route.Kind == CaddyProxyRouteKind.PortForward)
+            {
+                builder.Append(RenderPortForwardBlock(route));
+            }
+            else
+            {
+                var address = route.EnableTls ? route.Hostname : $"http://{route.Hostname}";
+                builder.AppendLine($"{address} {{");
+                builder.AppendLine("    encode zstd gzip");
+                builder.AppendLine($"    reverse_proxy {route.UpstreamUrl}");
+                builder.AppendLine("}");
+            }
+
             builder.AppendLine();
         }
 
+        return builder.ToString();
+    }
+
+    private static string RenderPortForwardBlock(CaddyProxyRouteDefinition route)
+    {
+        var builder = new StringBuilder();
+        var listenPort = Math.Clamp(route.SourcePort, 1, 65535);
+        var sourceIp = string.IsNullOrWhiteSpace(route.SourceIp) ? "127.0.0.1" : route.SourceIp.Trim();
+        var targetUrl = BuildPortForwardTargetUrl(route);
+
+        builder.AppendLine($"http://:{listenPort} {{");
+        if (!IsAnyAddress(sourceIp))
+        {
+            builder.AppendLine($"    bind {sourceIp}");
+        }
+
+        builder.AppendLine("    encode zstd gzip");
+        if (route.DestinationScheme == CaddyProxyTargetScheme.Https)
+        {
+            builder.AppendLine($"    reverse_proxy {targetUrl} {{");
+            builder.AppendLine("        transport http {");
+            builder.AppendLine("            tls_insecure_skip_verify");
+            builder.AppendLine("        }");
+            builder.AppendLine("    }");
+        }
+        else
+        {
+            builder.AppendLine($"    reverse_proxy {targetUrl}");
+        }
+
+        builder.AppendLine("}");
         return builder.ToString();
     }
 
@@ -465,7 +504,13 @@ public sealed class SqliteCaddyIntegrationDataService(
             entity.Description,
             entity.EnableTls,
             entity.CreatedAtUtc,
-            entity.UpdatedAtUtc);
+            entity.UpdatedAtUtc,
+            (CaddyProxyRouteKind)entity.RouteKind,
+            entity.SourceIp,
+            entity.SourcePort,
+            entity.DestinationIp,
+            entity.DestinationPort,
+            (CaddyProxyTargetScheme)entity.DestinationScheme);
 
     private static CaddyProxyRouteDefinition? MapOrNull(CaddyProxyRouteEntity? entity) =>
         entity is null ? null : Map(entity);
@@ -474,9 +519,15 @@ public sealed class SqliteCaddyIntegrationDataService(
         new()
         {
             Id = route.Id,
+            RouteKind = (int)route.Kind,
             Name = route.Name,
             Hostname = route.Hostname,
             UpstreamUrl = route.UpstreamUrl,
+            SourceIp = route.SourceIp,
+            SourcePort = route.SourcePort,
+            DestinationIp = route.DestinationIp,
+            DestinationPort = route.DestinationPort,
+            DestinationScheme = (int)route.DestinationScheme,
             Description = route.Description,
             EnableTls = route.EnableTls,
             CreatedAtUtc = route.CreatedAtUtc,
@@ -485,9 +536,15 @@ public sealed class SqliteCaddyIntegrationDataService(
 
     private static void Apply(CaddyProxyRouteEntity entity, CaddyProxyRouteDefinition route)
     {
+        entity.RouteKind = (int)route.Kind;
         entity.Name = route.Name;
         entity.Hostname = route.Hostname;
         entity.UpstreamUrl = route.UpstreamUrl;
+        entity.SourceIp = route.SourceIp;
+        entity.SourcePort = route.SourcePort;
+        entity.DestinationIp = route.DestinationIp;
+        entity.DestinationPort = route.DestinationPort;
+        entity.DestinationScheme = (int)route.DestinationScheme;
         entity.Description = route.Description;
         entity.EnableTls = route.EnableTls;
         entity.CreatedAtUtc = route.CreatedAtUtc;
@@ -513,4 +570,32 @@ public sealed class SqliteCaddyIntegrationDataService(
 
     private static string SanitizeComment(string value) =>
         value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+
+    private static bool IsAnyAddress(string value)
+    {
+        var normalized = (value ?? string.Empty).Trim();
+        return string.IsNullOrWhiteSpace(normalized) ||
+               normalized.Equals("*", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("::", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("[::]", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildPortForwardTargetUrl(CaddyProxyRouteDefinition route)
+    {
+        var scheme = route.DestinationScheme == CaddyProxyTargetScheme.Https ? "https" : "http";
+        return $"{scheme}://{FormatHostForUri(route.DestinationIp)}:{Math.Clamp(route.DestinationPort, 1, 65535)}";
+    }
+
+    private static string FormatHostForUri(string host)
+    {
+        var normalized = (host ?? string.Empty).Trim();
+        if (System.Net.IPAddress.TryParse(normalized, out var address) &&
+            address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            return $"[{normalized.Trim('[', ']')}]";
+        }
+
+        return normalized;
+    }
 }

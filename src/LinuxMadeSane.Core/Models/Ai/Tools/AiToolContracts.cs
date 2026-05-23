@@ -140,6 +140,16 @@ public sealed record RollbackSafeChangeToolResponse(
     int ExitCode,
     DateTimeOffset CompletedAtUtc) : IAiToolResponse;
 
+public sealed record DesktopSetKeyboardLayoutToolRequest(
+    string Layout) : IAiToolRequest;
+
+public sealed record DesktopInstallAptPackagesToolRequest(
+    IReadOnlyList<string> PackageNames) : IAiToolRequest;
+
+public sealed record DesktopActionProposalToolResponse(
+    string ActionKind,
+    string Summary) : IAiToolResponse;
+
 public sealed record SafeChangeFailureToolResponse(
     string Message) : IAiToolResponse;
 

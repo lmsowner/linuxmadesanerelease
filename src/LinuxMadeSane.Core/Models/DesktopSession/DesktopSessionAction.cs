@@ -6,6 +6,8 @@ namespace LinuxMadeSane.Core.Models.DesktopSession;
 public static class DesktopSessionActionKinds
 {
     public const string SetKeyboardLayout = "keyboard.set-layout";
+    public const string InstallAptPackages = "package.apt-install";
+    public const string RepairAptSources = "package.apt-source-repair";
 }
 
 public sealed record DesktopSessionActionRequest(

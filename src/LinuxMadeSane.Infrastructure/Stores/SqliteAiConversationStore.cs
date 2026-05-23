@@ -68,6 +68,50 @@ public sealed class SqliteAiConversationStore(LinuxMadeSaneDbContext dbContext) 
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task DeleteThreadAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var thread = await dbContext.AiChatThreads
+            .SingleOrDefaultAsync(existing => existing.Id == id, cancellationToken);
+        if (thread is null)
+        {
+            return;
+        }
+
+        var messageIds = await dbContext.AiChatMessages
+            .Where(message => message.ThreadId == id)
+            .Select(message => message.Id)
+            .ToListAsync(cancellationToken);
+
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+        await RemoveConversationArtifactsAsync(
+            id,
+            messageIds.ToHashSet(),
+            null,
+            clearAll: true,
+            cancellationToken);
+
+        var messages = await dbContext.AiChatMessages
+            .Where(message => message.ThreadId == id)
+            .ToListAsync(cancellationToken);
+        if (messages.Count > 0)
+        {
+            dbContext.AiChatMessages.RemoveRange(messages);
+        }
+
+        var attachedServers = await dbContext.AiAttachedServers
+            .Where(server => server.ThreadId == id)
+            .ToListAsync(cancellationToken);
+        if (attachedServers.Count > 0)
+        {
+            dbContext.AiAttachedServers.RemoveRange(attachedServers);
+        }
+
+        dbContext.AiChatThreads.Remove(thread);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public async Task<AiChatMessage?> GetMessageAsync(Guid id, CancellationToken cancellationToken = default)
     {
         var entity = await dbContext.AiChatMessages

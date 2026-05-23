@@ -10,32 +10,46 @@ public sealed class DesktopSessionEnvironmentDetector
     public static readonly IReadOnlyList<string> DiagnosticTools =
     [
         "dbus-send",
+        "bluetoothctl",
         "gdbus",
         "gsettings",
         "glxinfo",
         "loginctl",
         "nvidia-smi",
+        "free",
+        "journalctl",
+        "nmcli",
+        "pactl",
+        "ps",
+        "rfkill",
         "setxkbmap",
+        "systemctl",
+        "upower",
         "vainfo",
         "wayland-info",
+        "wmctrl",
         "xauth",
         "xdg-open",
         "xdpyinfo",
         "xfconf-query",
+        "xinput",
         "xrandr",
         "xset"
     ];
 
-    public DesktopSessionCapabilityReport DetectCurrent() =>
-        Detect(new DesktopSessionEnvironmentInput(
-            ReadEnvironment(),
+    public DesktopSessionCapabilityReport DetectCurrent()
+    {
+        var environment = ReadEnvironment();
+        return Detect(new DesktopSessionEnvironmentInput(
+            environment,
             CommandExistsOnPath,
             Environment.UserName,
-            TryParseInt(Environment.GetEnvironmentVariable("UID")),
+            ResolveCurrentUserId(environment),
             Environment.MachineName,
             Environment.ProcessId,
             DateTimeOffset.UtcNow,
             File.Exists));
+    }
 
     public DesktopSessionCapabilityReport Detect(DesktopSessionEnvironmentInput input)
     {
@@ -149,6 +163,41 @@ public sealed class DesktopSessionEnvironmentDetector
 
     private static int? TryParseInt(string? value) =>
         int.TryParse(value, out var parsed) ? parsed : null;
+
+    private static int? ResolveCurrentUserId(IReadOnlyDictionary<string, string?> environmentVariables)
+    {
+        var environmentUserId = TryParseInt(Read(environmentVariables, "UID"));
+        if (environmentUserId is not null)
+        {
+            return environmentUserId;
+        }
+
+        if (!OperatingSystem.IsLinux())
+        {
+            return null;
+        }
+
+        try
+        {
+            foreach (var line in File.ReadLines("/proc/self/status"))
+            {
+                if (!line.StartsWith("Uid:", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                return parts.Length > 1 && int.TryParse(parts[1], out var userId)
+                    ? userId
+                    : null;
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+
+        return null;
+    }
 
     private static bool CommandExistsOnPath(string command)
     {

@@ -41,13 +41,14 @@ Known package license metadata at the time of this review:
 | BouncyCastle.Cryptography | MIT |
 | NSec.Cryptography | MIT |
 | SQLitePCLRaw packages | Apache License 2.0 package metadata; SQLite itself is public-domain software where applicable |
-| GtkSharp, AtkSharp, CairoSharp, GdkSharp, GioSharp, GLibSharp, PangoSharp | LGPL v2.0 package family used by the Desktop Assistant helper tray integration |
+| Avalonia, Avalonia.Desktop, Avalonia.Themes.Fluent | MIT package family used by the Desktop Assistant helper native Linux UI and tray integration |
+| SkiaSharp, HarfBuzzSharp, MicroCom.Runtime, Tmds.DBus.Protocol | MIT package families pulled by Avalonia for Linux rendering, text shaping, native interop, and desktop bus integration |
 | Newtonsoft.Json | MIT |
 | xUnit and .NET test packages | Test-only dependencies; retain package notices if redistributed in a test bundle |
 
 ## Desktop Runtime Packages
 
-The Desktop Assistant helper uses GtkSharp for the Linux tray surface. GtkSharp is a .NET binding layer for GTK and related libraries. The native GTK, GLib, GDK, ATK, Cairo, and Pango runtime libraries are expected to come from the user's Linux distribution and are not owned by Linux Made Sane. Preserve upstream package notices and review distro package license metadata when redistributing a complete appliance image.
+The Desktop Assistant helper uses Avalonia for the native Linux helper window and tray surface. Avalonia and its NuGet rendering dependencies are bundled through normal .NET publish output. Native tray/status-notifier support and desktop runtime libraries are expected to come from the user's Linux distribution and are not owned by Linux Made Sane. Preserve upstream package notices and review distro package license metadata when redistributing a complete appliance image.
 
 ## Release Checklist
 

@@ -10,34 +10,33 @@ namespace LinuxMadeSane.DesktopHelper;
 
 public sealed partial class DesktopActionExecutor(DesktopSessionEnvironmentDetector detector)
 {
-    private const int CommandTimeoutMilliseconds = 3000;
-
+    private const int KeyboardCommandTimeoutMilliseconds = 3000;
     public async Task<DesktopSessionActionResult> ExecuteAsync(
         DesktopSessionActionRequest request,
         CancellationToken cancellationToken)
     {
-        if (!string.Equals(request.ActionKind, DesktopSessionActionKinds.SetKeyboardLayout, StringComparison.Ordinal))
+        if (string.Equals(request.ActionKind, DesktopSessionActionKinds.SetKeyboardLayout, StringComparison.Ordinal))
         {
-            return BuildResult(
-                request,
-                false,
-                "Desktop action is not allowed.",
-                $"Unsupported action: {request.ActionKind}",
-                new Dictionary<string, string>(StringComparer.Ordinal));
+            var layout = request.Arguments.GetValueOrDefault("layout")?.Trim().ToLowerInvariant() ?? string.Empty;
+            if (!KeyboardLayoutPattern().IsMatch(layout))
+            {
+                return BuildResult(
+                    request,
+                    false,
+                    "Keyboard layout was not changed.",
+                    "The requested keyboard layout code was invalid.",
+                    new Dictionary<string, string>(StringComparer.Ordinal));
+            }
+
+            return await SetKeyboardLayoutAsync(request, layout, cancellationToken);
         }
 
-        var layout = request.Arguments.GetValueOrDefault("layout")?.Trim().ToLowerInvariant() ?? string.Empty;
-        if (!KeyboardLayoutPattern().IsMatch(layout))
-        {
-            return BuildResult(
-                request,
-                false,
-                "Keyboard layout was not changed.",
-                "The requested keyboard layout code was invalid.",
-                new Dictionary<string, string>(StringComparer.Ordinal));
-        }
-
-        return await SetKeyboardLayoutAsync(request, layout, cancellationToken);
+        return BuildResult(
+            request,
+            false,
+            "Desktop action is not allowed.",
+            $"Unsupported action: {request.ActionKind}",
+            new Dictionary<string, string>(StringComparer.Ordinal));
     }
 
     private async Task<DesktopSessionActionResult> SetKeyboardLayoutAsync(
@@ -47,10 +46,10 @@ public sealed partial class DesktopActionExecutor(DesktopSessionEnvironmentDetec
     {
         var commandResults = new List<CommandResult>
         {
-            await RunAsync("setxkbmap", [layout], cancellationToken),
-            await RunAsync("xfconf-query", ["-c", "keyboard-layout", "-p", "/Default/XkbLayout", "-n", "-t", "string", "-s", layout], cancellationToken),
-            await RunAsync("xfconf-query", ["-c", "keyboard-layout", "-p", "/Default/XkbDisable", "-n", "-t", "bool", "-s", "false"], cancellationToken),
-            await RunAsync("gsettings", ["set", "org.gnome.desktop.input-sources", "sources", $"[('xkb', '{layout}')]"], cancellationToken)
+            await RunAsync("setxkbmap", [layout], KeyboardCommandTimeoutMilliseconds, cancellationToken),
+            await RunAsync("xfconf-query", ["-c", "keyboard-layout", "-p", "/Default/XkbLayout", "-n", "-t", "string", "-s", layout], KeyboardCommandTimeoutMilliseconds, cancellationToken),
+            await RunAsync("xfconf-query", ["-c", "keyboard-layout", "-p", "/Default/XkbDisable", "-n", "-t", "bool", "-s", "false"], KeyboardCommandTimeoutMilliseconds, cancellationToken),
+            await RunAsync("gsettings", ["set", "org.gnome.desktop.input-sources", "sources", $"[('xkb', '{layout}')]"], KeyboardCommandTimeoutMilliseconds, cancellationToken)
         };
         var successCount = commandResults.Count(result => result.Succeeded);
 
@@ -73,10 +72,11 @@ public sealed partial class DesktopActionExecutor(DesktopSessionEnvironmentDetec
     private static async Task<CommandResult> RunAsync(
         string executable,
         IReadOnlyList<string> arguments,
+        int timeoutMilliseconds,
         CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(CommandTimeoutMilliseconds);
+        timeout.CancelAfter(timeoutMilliseconds);
 
         try
         {
@@ -90,6 +90,7 @@ public sealed partial class DesktopActionExecutor(DesktopSessionEnvironmentDetec
                     UseShellExecute = false
                 }
             };
+            process.StartInfo.Environment["DEBIAN_FRONTEND"] = "noninteractive";
             foreach (var argument in arguments)
             {
                 process.StartInfo.ArgumentList.Add(argument);

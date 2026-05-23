@@ -11,6 +11,8 @@ public sealed class DesktopSessionHelperOptions
 
     public bool TrayEnabled { get; set; } = true;
 
+    public bool OpenWindowOnStart { get; set; }
+
     public string TrayIconPath { get; set; } = string.Empty;
 
     public string TrayIconName { get; set; } = "applications-system";

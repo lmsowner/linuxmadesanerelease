@@ -4,8 +4,10 @@
 @using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.JSInterop
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Web.Services
 @implements IAsyncDisposable
 @inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject DesktopAssistantNativeThemeStore NativeThemeStore
 @inject IJSRuntime JSRuntime
 
 <div class="display-preference-toolbar">
@@ -68,6 +70,13 @@
             darkModeEnabled = string.Equals(settings.Scheme, "dark", StringComparison.OrdinalIgnoreCase);
         }
 
+        NativeThemeStore.Update(
+            paletteId,
+            settings.PaletteName,
+            settings.Mode,
+            settings.Scheme,
+            fontScalePercent);
+
         dotNetReference = DotNetObjectReference.Create(this);
         themeObserverId = await JSRuntime.InvokeAsync<int>("lmsTheme.registerObserver", dotNetReference);
         StateHasChanged();
@@ -113,6 +122,8 @@
         {
             await UserDisplayPreferenceService.SaveAsync(userId.Value, paletteId, themeMode, fontScalePercent);
         }
+
+        NativeThemeStore.Update(paletteId, null, themeMode, themeMode, fontScalePercent);
     }
 
     [JSInvokable]
@@ -136,6 +147,12 @@
         fontScalePercent = nextFontScalePercent;
         storedThemeMode = nextMode;
         darkModeEnabled = nextDarkModeEnabled;
+        NativeThemeStore.Update(
+            nextPaletteId,
+            settings.PaletteName,
+            nextMode,
+            settings.Scheme,
+            nextFontScalePercent);
 
         return InvokeAsync(StateHasChanged);
     }
@@ -162,6 +179,7 @@
     public sealed class ThemePreferenceState
     {
         public string PaletteId { get; set; } = string.Empty;
+        public string PaletteName { get; set; } = string.Empty;
         public string Mode { get; set; } = string.Empty;
         public string Scheme { get; set; } = string.Empty;
         public int FontScalePercent { get; set; }

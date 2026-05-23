@@ -88,7 +88,7 @@ On machines with a signed-in Linux GUI session, the installer sets up:
 /etc/xdg/autostart/linux-made-sane-desktop-helper.desktop
 ```
 
-After install, log out and back into the desktop session so group membership and autostart are applied. To start it manually from a terminal inside the GUI session:
+The installer enables the user service globally and tries to start it for the active GUI user. To restart it manually from a terminal inside the GUI session:
 
 ```bash
 systemctl --user daemon-reload
