@@ -59,7 +59,7 @@ else
                                      Variant="UiButtonVariant.Ghost"
                                      Disabled="@(!dashboard.IsInstalled || IsBusy)"
                                      OnClick="ReloadAsync" />
-                    <UiCommandButton Label="Restart service"
+                    <UiCommandButton Label="@GetServiceActionLabel()"
                                      Glyph="UiIconGlyph.Restart"
                                      Variant="UiButtonVariant.Ghost"
                                      Disabled="@(!dashboard.IsInstalled || IsBusy)"
@@ -104,6 +104,21 @@ else
                     </UiPill>
                 </article>
             </div>
+
+            @if (dashboard.IsInstalled && !dashboard.IsServiceActive)
+            {
+                <div class="callout warning caddy-service-action-callout">
+                    <div>
+                        <strong>Caddy is installed but not running.</strong>
+                        <span>Start the service now. If systemd rejects it, LMS will show the exact command output below.</span>
+                    </div>
+                    <UiCommandButton Label="Start service"
+                                     Glyph="UiIconGlyph.Run"
+                                     Variant="UiButtonVariant.PrimaryMuted"
+                                     Disabled="@IsBusy"
+                                     OnClick="RestartAsync" />
+                </div>
+            }
 
             <section class="caddy-config-viewer" aria-label="Caddy config viewer">
                 <div class="caddy-config-toolbar">
@@ -1124,10 +1139,27 @@ else
             : dashboard.InstalledVersion;
     }
 
-    private string GetServiceDetail() =>
-        dashboard!.IsServiceEnabled
-            ? "Enabled at boot."
-            : "Not enabled at boot.";
+    private string GetServiceActionLabel() =>
+        dashboard?.IsServiceActive == true ? "Restart service" : "Start service";
+
+    private string GetServiceDetail()
+    {
+        if (dashboard is null || !dashboard.IsInstalled)
+        {
+            return "Install Caddy before managing the service.";
+        }
+
+        if (dashboard.IsServiceActive)
+        {
+            return dashboard.IsServiceEnabled
+                ? "Running and enabled at boot."
+                : "Running now; not enabled at boot.";
+        }
+
+        return dashboard.IsServiceEnabled
+            ? "Stopped now. Start service to bring Caddy online."
+            : "Stopped and not enabled. Start service before routing traffic.";
+    }
 
     private string GetRouteDetail()
     {
