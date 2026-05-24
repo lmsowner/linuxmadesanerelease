@@ -3,6 +3,8 @@
 
 using System.Text;
 using System.Text.Json;
+using System.Net;
+using System.Net.Sockets;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Caddy;
@@ -99,6 +101,71 @@ public sealed class SqliteCaddyIntegrationDataService(
         {
             await ApplyManagedConfigurationAsync(cancellationToken);
         }
+    }
+
+    public async Task<CaddyOperationResult> CheckRouteAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var route = await GetRouteAsync(id, cancellationToken);
+        if (route is null)
+        {
+            return new CaddyOperationResult(false, "Caddy route is not saved in LMS.", [
+                BuildLog(OperationLogLevel.Error, "Route is not present in the LMS database.")
+            ]);
+        }
+
+        var logs = new List<OperationLogEntry>();
+        var package = (await packageManagementService.InspectAsync([PackageName], cancellationToken)).FirstOrDefault();
+        if (package?.IsInstalled != true)
+        {
+            logs.Add(BuildLog(OperationLogLevel.Error, "Caddy is not installed on this LMS host."));
+            return BuildFailureResult(logs, "Caddy route check failed: Caddy is not installed.");
+        }
+
+        var services = await serviceManagementService.InspectAsync([ServiceName], cancellationToken);
+        var service = services.FirstOrDefault();
+        logs.Add(BuildLog(
+            service?.IsActive == true ? OperationLogLevel.Success : OperationLogLevel.Error,
+            service?.IsActive == true ? "Caddy service is active." : "Caddy service is not running."));
+
+        var mainConfigText = await ReadTextOrDefaultAsync(MainConfigPath, cancellationToken);
+        logs.Add(BuildLog(
+            mainConfigText.Contains(ManagedImportLine, StringComparison.Ordinal) ? OperationLogLevel.Success : OperationLogLevel.Error,
+            mainConfigText.Contains(ManagedImportLine, StringComparison.Ordinal)
+                ? "Main Caddyfile imports the LMS managed include."
+                : "Main Caddyfile does not import the LMS managed include."));
+
+        var managedConfigText = await ReadTextOrDefaultAsync(ManagedConfigPath, cancellationToken);
+        logs.Add(BuildLog(
+            ManagedConfigurationContainsRoute(managedConfigText, route) ? OperationLogLevel.Success : OperationLogLevel.Error,
+            ManagedConfigurationContainsRoute(managedConfigText, route)
+                ? "Managed Caddy include contains this route."
+                : "Managed Caddy include does not contain this route. Save or reload the route so LMS writes it to Caddy."));
+
+        var validation = await ValidateLiveConfigurationAsync(cancellationToken);
+        logs.AddRange(validation.Logs);
+
+        if (route.Kind == CaddyProxyRouteKind.PortForward)
+        {
+            logs.Add(await CheckTcpEndpointAsync(
+                "Destination target accepts TCP",
+                route.DestinationIp,
+                route.DestinationPort,
+                cancellationToken));
+
+            var sourceProbeHost = ResolveSourceProbeHost(route.SourceIp);
+            logs.Add(await CheckTcpEndpointAsync(
+                "Source listener accepts TCP",
+                sourceProbeHost,
+                route.SourcePort,
+                cancellationToken));
+
+            logs.Add(await CheckListenerSnapshotAsync(route, cancellationToken));
+        }
+
+        var failed = logs.FirstOrDefault(log => log.Level == OperationLogLevel.Error);
+        return failed is null
+            ? new CaddyOperationResult(true, "Caddy route check passed.", logs)
+            : BuildFailureResult(logs, $"Caddy route check found a problem: {failed.Message}");
     }
 
     public async Task<CaddyOperationResult> InstallAsync(CancellationToken cancellationToken = default)
@@ -552,6 +619,136 @@ public sealed class SqliteCaddyIntegrationDataService(
         entity.CreatedAtUtc = route.CreatedAtUtc;
         entity.UpdatedAtUtc = route.UpdatedAtUtc;
     }
+
+    private async Task<OperationLogEntry> CheckTcpEndpointAsync(
+        string label,
+        string host,
+        int port,
+        CancellationToken cancellationToken)
+    {
+        var normalizedHost = NormalizeConnectHost(host);
+        var normalizedPort = Math.Clamp(port, 1, 65535);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
+
+        try
+        {
+            using var client = new TcpClient();
+            await client.ConnectAsync(normalizedHost, normalizedPort, timeout.Token);
+            return BuildLog(OperationLogLevel.Success, $"{label}: {FormatEndpoint(normalizedHost, normalizedPort)}.");
+        }
+        catch (Exception exception) when (exception is SocketException or OperationCanceledException or IOException)
+        {
+            return BuildLog(
+                OperationLogLevel.Error,
+                $"{label} failed: {FormatEndpoint(normalizedHost, normalizedPort)} is not reachable.",
+                standardError: exception.Message);
+        }
+    }
+
+    private async Task<OperationLogEntry> CheckListenerSnapshotAsync(
+        CaddyProxyRouteDefinition route,
+        CancellationToken cancellationToken)
+    {
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "ss",
+                ["-H", "-ltn"],
+                false,
+                TimeSpan.FromSeconds(10),
+                "Inspect listening TCP sockets")
+            {
+                IsOptionalExternalTool = true
+            },
+            dryRun: false,
+            cancellationToken);
+
+        if (result.ExitCode != 0)
+        {
+            return new OperationLogEntry(
+                result.CompletedAt,
+                OperationLogLevel.Warning,
+                "Could not inspect listening sockets with ss.",
+                result.CommandText,
+                result.ExitCode,
+                result.StandardOutput,
+                result.StandardError);
+        }
+
+        var expectedPort = Math.Clamp(route.SourcePort, 1, 65535);
+        var expectedHosts = CaddyBindAddressFormatter.IsAnyAddressList(route.SourceIp)
+            ? ["0.0.0.0", "[::]", "*"]
+            : CaddyBindAddressFormatter.NormalizeMany(route.SourceIp).Select(FormatListenerAddress).ToArray();
+        var listenerLines = result.StandardOutput
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(line => line.Contains($":{expectedPort} ", StringComparison.Ordinal) ||
+                           line.EndsWith($":{expectedPort}", StringComparison.Ordinal))
+            .ToArray();
+
+        var hasExpectedListener = listenerLines.Any(line =>
+            expectedHosts.Any(host => line.Contains($"{host}:{expectedPort}", StringComparison.OrdinalIgnoreCase) ||
+                                      line.Contains($"*:{expectedPort}", StringComparison.OrdinalIgnoreCase)));
+
+        return new OperationLogEntry(
+            result.CompletedAt,
+            hasExpectedListener ? OperationLogLevel.Success : OperationLogLevel.Error,
+            hasExpectedListener
+                ? $"Caddy has a listening socket for {CaddyBindAddressFormatter.FormatEndpointLabel(route.SourceIp, expectedPort)}."
+                : $"No listening socket found for {CaddyBindAddressFormatter.FormatEndpointLabel(route.SourceIp, expectedPort)}.",
+            result.CommandText,
+            result.ExitCode,
+            string.Join(Environment.NewLine, listenerLines),
+            hasExpectedListener ? null : "Caddy did not expose the expected source bind/port in the current listener table.");
+    }
+
+    private static bool ManagedConfigurationContainsRoute(string managedConfigText, CaddyProxyRouteDefinition route) =>
+        managedConfigText.Contains($"# Route: {SanitizeComment(route.Name)}", StringComparison.Ordinal) &&
+        managedConfigText.Contains(route.Kind == CaddyProxyRouteKind.PortForward
+            ? $"http://:{Math.Clamp(route.SourcePort, 1, 65535)}"
+            : route.EnableTls ? route.Hostname : $"http://{route.Hostname}", StringComparison.Ordinal);
+
+    private static string ResolveSourceProbeHost(string sourceIp)
+    {
+        var addresses = CaddyBindAddressFormatter.NormalizeMany(sourceIp);
+        var first = addresses.FirstOrDefault() ?? "127.0.0.1";
+        return CaddyBindAddressFormatter.IsAnyAddressList(first) ? "127.0.0.1" : first;
+    }
+
+    private static string NormalizeConnectHost(string host)
+    {
+        var normalized = (host ?? string.Empty).Trim().Trim('[', ']');
+        if (string.IsNullOrWhiteSpace(normalized) ||
+            normalized.Equals("*", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("::", StringComparison.OrdinalIgnoreCase))
+        {
+            return "127.0.0.1";
+        }
+
+        return normalized;
+    }
+
+    private static string FormatEndpoint(string host, int port) =>
+        IPAddress.TryParse(host, out var address) && address.AddressFamily == AddressFamily.InterNetworkV6
+            ? $"[{address}]:{port}"
+            : $"{host}:{port}";
+
+    private static string FormatListenerAddress(string host)
+    {
+        var normalized = (host ?? string.Empty).Trim().Trim('[', ']');
+        return IPAddress.TryParse(normalized, out var address) && address.AddressFamily == AddressFamily.InterNetworkV6
+            ? $"[{address}]"
+            : normalized;
+    }
+
+    private static OperationLogEntry BuildLog(
+        OperationLogLevel level,
+        string message,
+        string? commandText = null,
+        int? exitCode = null,
+        string? standardOutput = null,
+        string? standardError = null) =>
+        new(DateTimeOffset.Now, level, message, commandText, exitCode, standardOutput, standardError);
 
     private static CaddyOperationResult BuildResult(IReadOnlyList<OperationLogEntry> logs, string successSummary)
     {

@@ -15,6 +15,8 @@ public interface ICaddyIntegrationDataService
 
     Task DeleteRouteAsync(Guid id, CancellationToken cancellationToken = default);
 
+    Task<CaddyOperationResult> CheckRouteAsync(Guid id, CancellationToken cancellationToken = default);
+
     Task<CaddyOperationResult> InstallAsync(CancellationToken cancellationToken = default);
 
     Task<CaddyOperationResult> ReloadAsync(CancellationToken cancellationToken = default);

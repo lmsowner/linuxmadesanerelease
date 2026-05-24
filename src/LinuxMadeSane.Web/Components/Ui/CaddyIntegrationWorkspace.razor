@@ -239,6 +239,11 @@ else
                                                          Variant="UiButtonVariant.Ghost"
                                                          Disabled="@IsBusy"
                                                          OnClick="@(() => ToggleRouteExpandedAsync(route.Id))" />
+                                        <UiCommandButton Label="@(checkingRouteId == route.Id ? "Checking..." : "Check")"
+                                                         Glyph="UiIconGlyph.Analyze"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@(!dashboard.IsInstalled || IsBusy)"
+                                                         OnClick="@(() => CheckRouteAsync(route.Id))" />
                                         <UiCommandButton Label="Edit"
                                                          Glyph="UiIconGlyph.Edit"
                                                          Variant="UiButtonVariant.Ghost"
@@ -589,9 +594,10 @@ else
     private bool isDeletingRoute;
     private bool isConfigLoading;
     private bool sourceIpPickerOpen;
+    private Guid? checkingRouteId;
 
     private bool IsLocalHost => AiLocalMachine.IsLocalMachine(HostId);
-    private bool IsBusy => isInstalling || isReloading || isRestarting || isSavingRoute || isDeletingRoute;
+    private bool IsBusy => isInstalling || isReloading || isRestarting || isSavingRoute || isDeletingRoute || checkingRouteId.HasValue;
     private CaddyConfigFileOption? SelectedConfigFile => configFileOptions.FirstOrDefault(option => option.Key == selectedConfigKey);
 
     protected override async Task OnParametersSetAsync()
@@ -940,6 +946,27 @@ else
         finally
         {
             isDeletingRoute = false;
+        }
+    }
+
+    private async Task CheckRouteAsync(Guid routeId)
+    {
+        checkingRouteId = routeId;
+
+        try
+        {
+            ApplyOperationResult(await CaddyIntegrationService.CheckRouteAsync(routeId));
+            await LoadDashboardAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusIsError = true;
+            lastOperationLogs = [];
+        }
+        finally
+        {
+            checkingRouteId = null;
         }
     }
 

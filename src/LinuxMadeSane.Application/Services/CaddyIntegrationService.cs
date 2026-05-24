@@ -87,6 +87,9 @@ public sealed class CaddyIntegrationService(
     public Task DeleteRouteAsync(Guid routeId, CancellationToken cancellationToken = default) =>
         dataService.DeleteRouteAsync(routeId, cancellationToken);
 
+    public async Task<CaddyOperationResultViewModel> CheckRouteAsync(Guid routeId, CancellationToken cancellationToken = default) =>
+        MapResult(await dataService.CheckRouteAsync(routeId, cancellationToken));
+
     public async Task<CaddyOperationResultViewModel> InstallAsync(CancellationToken cancellationToken = default) =>
         MapResult(await dataService.InstallAsync(cancellationToken));
 
