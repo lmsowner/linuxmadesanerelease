@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text;
+using System.Text.Json;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Caddy;
@@ -259,7 +260,7 @@ public sealed class SqliteCaddyIntegrationDataService(
         }
 
         return BuildFailureResult([Map(result, "Validate Caddy configuration")],
-            FirstNonEmptyLine(result.StandardError, result.StandardOutput) ?? "Caddy configuration is not valid.");
+            FirstCaddyProblemLine(result.StandardError, result.StandardOutput) ?? "Caddy configuration is not valid.");
     }
 
     private async Task ValidateConfigurationAsync(string mainConfigPath, CancellationToken cancellationToken)
@@ -283,7 +284,7 @@ public sealed class SqliteCaddyIntegrationDataService(
         }
 
         throw new InvalidOperationException(
-            FirstNonEmptyLine(result.StandardError, result.StandardOutput) ?? "Caddy rejected the staged configuration.");
+            FirstCaddyProblemLine(result.StandardError, result.StandardOutput) ?? "Caddy rejected the staged configuration.");
     }
 
     private static string RenderManagedConfiguration(IReadOnlyList<CaddyProxyRouteDefinition> routes)
@@ -568,6 +569,78 @@ public sealed class SqliteCaddyIntegrationDataService(
             .SelectMany(value => value.Split('\n'))
             .Select(line => line.Trim())
             .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
+
+    private static string? FirstCaddyProblemLine(params string[] values)
+    {
+        var fallback = string.Empty;
+        foreach (var line in values
+                     .SelectMany(value => (value ?? string.Empty).Split('\n'))
+                     .Select(static line => line.Trim())
+                     .Where(static line => !string.IsNullOrWhiteSpace(line)))
+        {
+            if (TryFormatCaddyJsonLine(line, out var formattedLine, out var isInformational))
+            {
+                if (isInformational)
+                {
+                    fallback = string.IsNullOrWhiteSpace(fallback) ? formattedLine : fallback;
+                    continue;
+                }
+
+                return formattedLine;
+            }
+
+            if (line.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains(" error", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains(" failed", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains(" invalid", StringComparison.OrdinalIgnoreCase))
+            {
+                return line;
+            }
+
+            fallback = string.IsNullOrWhiteSpace(fallback) ? line : fallback;
+        }
+
+        return string.IsNullOrWhiteSpace(fallback) ? null : fallback;
+    }
+
+    private static bool TryFormatCaddyJsonLine(string line, out string formattedLine, out bool isInformational)
+    {
+        formattedLine = line;
+        isInformational = false;
+
+        if (!line.StartsWith('{'))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            var level = root.TryGetProperty("level", out var levelProperty)
+                ? levelProperty.GetString() ?? string.Empty
+                : string.Empty;
+            var message = root.TryGetProperty("msg", out var messageProperty)
+                ? messageProperty.GetString() ?? string.Empty
+                : string.Empty;
+
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return true;
+            }
+
+            formattedLine = string.IsNullOrWhiteSpace(level)
+                ? message
+                : $"{level}: {message}";
+            isInformational = level.Equals("info", StringComparison.OrdinalIgnoreCase) ||
+                              level.Equals("debug", StringComparison.OrdinalIgnoreCase);
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 
     private static string SanitizeComment(string value) =>
         value.Replace('\r', ' ').Replace('\n', ' ').Trim();
