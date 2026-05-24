@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models.RdpOptimizer;
 using LinuxMadeSane.Core.Models.Services;
 using LinuxMadeSane.Infrastructure.Persistence;
 using LinuxMadeSane.Infrastructure.Persistence.Entities;
@@ -15,7 +16,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LinuxMadeSane.Infrastructure.Services;
 
-public sealed class SqliteLinuxServiceModuleDataService(LinuxMadeSaneDbContext dbContext) : ILinuxServiceModuleDataService
+public sealed class SqliteLinuxServiceModuleDataService(
+    LinuxMadeSaneDbContext dbContext,
+    ILinuxCommandRunner commandRunner) : ILinuxServiceModuleDataService
 {
     public async Task<IReadOnlyList<LinuxServiceDefinition>> ListServicesAsync(CancellationToken cancellationToken = default)
     {
@@ -109,18 +112,22 @@ public sealed class SqliteLinuxServiceModuleDataService(LinuxMadeSaneDbContext d
             _ => "restart"
         };
 
-        var result = await RunCommandResultAsync(
-            "systemctl",
-            [verb, service.UnitName],
-            cancellationToken,
-            allowFailure: true);
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "systemctl",
+                [verb, service.UnitName],
+                true,
+                TimeSpan.FromMinutes(2),
+                $"{action} {service.UnitName}"),
+            dryRun: false,
+            cancellationToken);
 
         var success = result.ExitCode == 0;
         var message = success
             ? $"{action} sent to {service.UnitName}."
             : string.IsNullOrWhiteSpace(result.StandardError)
                 ? $"systemctl {verb} {service.UnitName} failed with exit code {result.ExitCode}."
-                : result.StandardError.Trim();
+                : NormalizeControlFailure(result.StandardError.Trim());
 
         return new ServiceControlResult(service.Id, service.UnitName, action, success, message);
     }
@@ -591,6 +598,18 @@ public sealed class SqliteLinuxServiceModuleDataService(LinuxMadeSaneDbContext d
 
     private static string GetProperty(IReadOnlyDictionary<string, string> properties, string key, string fallback = "") =>
         properties.TryGetValue(key, out var value) ? value : fallback;
+
+    private static string NormalizeControlFailure(string standardError)
+    {
+        if (standardError.Contains("a password is required", StringComparison.OrdinalIgnoreCase) ||
+            standardError.Contains("a terminal is required", StringComparison.OrdinalIgnoreCase) ||
+            standardError.Contains("interactive authentication required", StringComparison.OrdinalIgnoreCase))
+        {
+            return "LMS could not control this service because the LMS service account does not have non-interactive sudo rights. Re-run the LMS installer to restore /etc/sudoers.d/linux-made-sane.";
+        }
+
+        return standardError;
+    }
 
     private static int ParseInt(string? value) =>
         int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
