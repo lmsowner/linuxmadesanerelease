@@ -8,8 +8,11 @@ window.lmsClipboard = (() => {
         }
 
         if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(text);
-            return true;
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch {
+            }
         }
 
         const fallbackElement = document.createElement("textarea");

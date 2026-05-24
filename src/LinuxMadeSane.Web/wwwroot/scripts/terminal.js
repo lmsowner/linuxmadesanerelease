@@ -218,8 +218,8 @@ window.lmsTerminal = (() => {
     async function copySelection(id) {
         const state = getState(id);
         const text = state?.terminal.getSelection() ?? "";
-        if (text && navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(text);
+        if (text) {
+            await writeClipboardText(text);
         }
     }
 
@@ -228,12 +228,143 @@ window.lmsTerminal = (() => {
         return state?.terminal.getSelection() ?? "";
     }
 
-    async function readClipboard() {
-        if (navigator.clipboard?.readText) {
-            return await navigator.clipboard.readText();
+    async function writeClipboardText(text) {
+        if (navigator.clipboard?.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch {
+            }
         }
 
-        return "";
+        const fallbackElement = document.createElement("textarea");
+        fallbackElement.value = text;
+        fallbackElement.setAttribute("readonly", "");
+        fallbackElement.style.position = "fixed";
+        fallbackElement.style.left = "-9999px";
+        fallbackElement.style.top = "0";
+        fallbackElement.style.opacity = "0";
+
+        document.body.appendChild(fallbackElement);
+        fallbackElement.select();
+
+        try {
+            return document.execCommand("copy");
+        } catch {
+            return false;
+        } finally {
+            document.body.removeChild(fallbackElement);
+        }
+    }
+
+    function captureClipboardPaste() {
+        return new Promise(resolve => {
+            const shell = document.createElement("div");
+            const label = document.createElement("div");
+            const input = document.createElement("textarea");
+            let completed = false;
+
+            shell.setAttribute("role", "dialog");
+            shell.setAttribute("aria-modal", "true");
+            shell.style.position = "fixed";
+            shell.style.left = "50%";
+            shell.style.top = "50%";
+            shell.style.transform = "translate(-50%, -50%)";
+            shell.style.zIndex = "2147483647";
+            shell.style.width = "min(360px, calc(100vw - 32px))";
+            shell.style.padding = "12px";
+            shell.style.border = `1px solid ${getCssValue("--color-border") || "rgba(255,255,255,.18)"}`;
+            shell.style.borderRadius = "8px";
+            shell.style.background = getCssValue("--color-surface") || "#ffffff";
+            shell.style.boxShadow = "0 16px 40px rgba(0,0,0,.35)";
+
+            label.textContent = "Press Ctrl+V to paste";
+            label.style.marginBottom = "8px";
+            label.style.fontSize = "13px";
+            label.style.fontWeight = "700";
+            label.style.color = getCssValue("--color-text") || "#1f2937";
+
+            input.setAttribute("aria-label", "Paste terminal clipboard text");
+            input.style.boxSizing = "border-box";
+            input.style.width = "100%";
+            input.style.minHeight = "76px";
+            input.style.resize = "vertical";
+            input.style.border = `1px solid ${getCssValue("--color-border-strong") || "#9ca3af"}`;
+            input.style.borderRadius = "6px";
+            input.style.padding = "8px";
+            input.style.background = getCssValue("--color-input-bg") || "#ffffff";
+            input.style.color = getCssValue("--color-text") || "#111827";
+            input.style.font = "13px monospace";
+            input.style.outline = "none";
+
+            const finish = value => {
+                if (completed) {
+                    return;
+                }
+
+                completed = true;
+                window.clearTimeout(timeout);
+                input.removeEventListener("paste", handlePaste);
+                input.removeEventListener("input", handleInput);
+                input.removeEventListener("keydown", handleKeydown);
+                document.removeEventListener("mousedown", handleOutsideMouseDown, true);
+                shell.remove();
+                resolve(value ?? "");
+            };
+
+            const handlePaste = event => {
+                const pastedText = event.clipboardData?.getData("text") ?? "";
+                if (pastedText) {
+                    event.preventDefault();
+                    finish(pastedText);
+                    return;
+                }
+
+                window.setTimeout(() => finish(input.value), 0);
+            };
+
+            const handleInput = () => {
+                if (input.value) {
+                    finish(input.value);
+                }
+            };
+
+            const handleKeydown = event => {
+                if (event.key === "Escape") {
+                    event.preventDefault();
+                    finish("");
+                }
+            };
+
+            const handleOutsideMouseDown = event => {
+                if (!shell.contains(event.target)) {
+                    finish("");
+                }
+            };
+
+            shell.appendChild(label);
+            shell.appendChild(input);
+            document.body.appendChild(shell);
+
+            input.addEventListener("paste", handlePaste);
+            input.addEventListener("input", handleInput);
+            input.addEventListener("keydown", handleKeydown);
+            document.addEventListener("mousedown", handleOutsideMouseDown, true);
+
+            const timeout = window.setTimeout(() => finish(""), 15000);
+            input.focus({ preventScroll: true });
+        });
+    }
+
+    async function readClipboard() {
+        if (navigator.clipboard?.readText) {
+            try {
+                return await navigator.clipboard.readText();
+            } catch {
+            }
+        }
+
+        return await captureClipboardPaste();
     }
 
     function clear(id) {
