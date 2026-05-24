@@ -16,6 +16,8 @@ Record:
 - CPU architecture from `uname -m`
 - selected release asset
 - whether `/healthz` returns HTTP 200
+- whether `caddy.service` is active
+- whether Integrations > Caddy loads and shows Caddy status
 - first-run database path
 - whether the Desktop Assistant helper files were installed on GUI-capable machines
 - any missing optional host packages
@@ -40,6 +42,7 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env RID=linux-arm bas
 uname -a
 cat /etc/os-release
 systemctl status linux-made-sane.service
+systemctl status caddy.service
 journalctl -u linux-made-sane.service -n 200 --no-pager
 systemctl --user status linux-made-sane-desktop-helper.service
 ls -lah /opt/linuxmadesane/ce /var/lib/linuxmadesane/ce /etc/linuxmadesane/ce

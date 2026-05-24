@@ -2,7 +2,7 @@
 
 This repository is the public Community Edition release and documentation surface for Linux Made Sane.
 
-Linux Made Sane is a local-first Linux administration web app for managing hosts, terminals, files, services, shares, remote access, AI-assisted operations, media-library workflows, and local Linux desktop assistance.
+Linux Made Sane is a local-first Linux administration web app for managing hosts, terminals, files, services, shares, remote access, local Caddy reverse proxy routes, AI-assisted operations, media-library workflows, and local Linux desktop assistance.
 
 Current Community downloads are served by the public website:
 
@@ -67,6 +67,7 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 509
 - writes config to `/etc/linuxmadesane/ce/service.env`
 - creates and manages the `linux-made-sane.service` systemd unit
 - installs useful host packages on apt-based systems unless disabled
+- installs and starts Caddy for local reverse proxy and Edge Gateway workflows unless system package installation is disabled
 - configures localhost SSH access for LMS automation unless disabled
 - creates a writable local runner workspace for terminals, files, runbooks, and scheduled jobs
 - installs the Desktop Assistant helper for signed-in Linux GUI sessions unless disabled

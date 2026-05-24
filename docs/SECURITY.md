@@ -41,6 +41,17 @@ The installer writes a systemd user service and an XDG autostart file, but the h
 
 Use `--no-desktop-helper` or `LMS_INSTALL_DESKTOP_HELPER=false` during install when the machine should not run the GUI-session helper.
 
+## Caddy And Edge Gateway
+
+The Community installer can install Caddy because LMS uses it for local reverse proxy routes and Edge Gateway publishing.
+
+Basic Caddy routes under Integrations > Caddy are routing rules, not an authentication layer. A hostname route or port-forward route can expose an internal service if the source address and network boundary allow it.
+
+- prefer private or tailnet source addresses for port-forward routes
+- review generated Caddy blocks before reloading or restarting Caddy
+- use Edge Gateway or another identity layer when a route needs MFA/passkey protection
+- avoid putting admin tools behind a basic Caddy route without separate access control
+
 ## Credential Handling
 
 LMS should keep credentials in protected secret storage and out of logs. Do not place API keys, private keys, OTP secrets, passwords, database files, or local configuration in the public release repository.

@@ -22,6 +22,7 @@ The public installer:
 - writes config to `/etc/linuxmadesane/ce/service.env`
 - creates the `linux-made-sane.service` systemd unit
 - creates a dedicated `linuxmadesane` service account for the LMS web service
+- installs and starts Caddy for local reverse proxy and Edge Gateway workflows unless system package installation is disabled
 - configures localhost SSH runner access for terminal, runbook, and scheduled automation workflows unless disabled
 - creates `/var/lib/linuxmadesane/runner/workspace` as the default writable local runner workspace
 - installs the Desktop Assistant helper under `/opt/linuxmadesane/ce/current/desktop-helper`
@@ -72,6 +73,7 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --purge
 
 ```bash
 sudo systemctl status linux-made-sane.service
+sudo systemctl status caddy.service
 sudo systemctl start linux-made-sane.service
 sudo systemctl stop linux-made-sane.service
 sudo systemctl restart linux-made-sane.service
