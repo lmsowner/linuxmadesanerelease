@@ -27,7 +27,7 @@ public sealed class CaddyProxyRouteEditor
 
     public bool EnableTls { get; set; } = true;
 
-    [StringLength(96)]
+    [StringLength(512)]
     public string SourceIp { get; set; } = "127.0.0.1";
 
     [Range(1, 65535)]

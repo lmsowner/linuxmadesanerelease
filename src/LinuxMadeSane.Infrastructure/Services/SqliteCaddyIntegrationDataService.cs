@@ -324,13 +324,13 @@ public sealed class SqliteCaddyIntegrationDataService(
     {
         var builder = new StringBuilder();
         var listenPort = Math.Clamp(route.SourcePort, 1, 65535);
-        var sourceIp = string.IsNullOrWhiteSpace(route.SourceIp) ? "127.0.0.1" : route.SourceIp.Trim();
+        var sourceIp = CaddyBindAddressFormatter.NormalizeCsv(route.SourceIp);
         var targetUrl = BuildPortForwardTargetUrl(route);
 
         builder.AppendLine($"http://:{listenPort} {{");
-        if (!IsAnyAddress(sourceIp))
+        if (!CaddyBindAddressFormatter.IsAnyAddressList(sourceIp))
         {
-            builder.AppendLine($"    bind {sourceIp}");
+            builder.AppendLine($"    bind {CaddyBindAddressFormatter.ToCaddyBindArguments(sourceIp)}");
         }
 
         builder.AppendLine("    encode zstd gzip");
@@ -571,16 +571,6 @@ public sealed class SqliteCaddyIntegrationDataService(
 
     private static string SanitizeComment(string value) =>
         value.Replace('\r', ' ').Replace('\n', ' ').Trim();
-
-    private static bool IsAnyAddress(string value)
-    {
-        var normalized = (value ?? string.Empty).Trim();
-        return string.IsNullOrWhiteSpace(normalized) ||
-               normalized.Equals("*", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("::", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("[::]", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static string BuildPortForwardTargetUrl(CaddyProxyRouteDefinition route)
     {

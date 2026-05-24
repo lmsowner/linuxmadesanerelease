@@ -134,14 +134,14 @@ public sealed class CaddyIntegrationService(
     private static string BuildPortForwardSnippet(CaddyProxyRouteDefinition route)
     {
         var listenPort = Math.Clamp(route.SourcePort, 1, 65535);
-        var sourceIp = string.IsNullOrWhiteSpace(route.SourceIp) ? "127.0.0.1" : route.SourceIp.Trim();
+        var sourceIp = CaddyBindAddressFormatter.NormalizeCsv(route.SourceIp);
         var targetUrl = BuildPortForwardTargetUrl(route);
         var builder = new StringBuilder();
 
         builder.AppendLine($"http://:{listenPort} {{");
-        if (!IsAnyAddress(sourceIp))
+        if (!CaddyBindAddressFormatter.IsAnyAddressList(sourceIp))
         {
-            builder.AppendLine($"    bind {sourceIp}");
+            builder.AppendLine($"    bind {CaddyBindAddressFormatter.ToCaddyBindArguments(sourceIp)}");
         }
 
         builder.AppendLine("    encode zstd gzip");
@@ -187,7 +187,7 @@ public sealed class CaddyIntegrationService(
         DateTimeOffset createdAtUtc,
         DateTimeOffset updatedAtUtc)
     {
-        var sourceIp = NormalizeSourceIp(editor.SourceIp);
+        var sourceIp = CaddyBindAddressFormatter.NormalizeCsv(editor.SourceIp);
         var sourcePort = NormalizePort(editor.SourcePort, "source port");
         var destinationIp = NormalizeDestinationHost(editor.DestinationIp);
         var destinationPort = NormalizePort(editor.DestinationPort, "destination port");
@@ -196,7 +196,7 @@ public sealed class CaddyIntegrationService(
         return new CaddyProxyRouteDefinition(
             routeId,
             NormalizeName(editor.Name),
-            FormatEndpointLabel(sourceIp, sourcePort),
+            CaddyBindAddressFormatter.FormatEndpointLabel(sourceIp, sourcePort),
             targetUrl,
             editor.Description.Trim(),
             false,
@@ -245,7 +245,7 @@ public sealed class CaddyIntegrationService(
             warnings.Add("Uses a standard web port; check existing Caddy hostname routes before applying.");
         }
 
-        if (IsAnyAddress(route.SourceIp))
+        if (CaddyBindAddressFormatter.IsAnyAddressList(route.SourceIp))
         {
             warnings.Add("Listens on all interfaces. Use a Tailnet or LAN IP when the forward should not be public.");
         }
@@ -271,7 +271,7 @@ public sealed class CaddyIntegrationService(
 
     private static string BuildAddressLabel(CaddyProxyRouteDefinition route) =>
         route.Kind == CaddyProxyRouteKind.PortForward
-            ? FormatEndpointLabel(route.SourceIp, route.SourcePort)
+            ? CaddyBindAddressFormatter.FormatEndpointLabel(route.SourceIp, route.SourcePort)
             : route.EnableTls ? route.Hostname : $"http://{route.Hostname}";
 
     private static string BuildTargetLabel(CaddyProxyRouteDefinition route) =>
@@ -347,27 +347,6 @@ public sealed class CaddyIntegrationService(
         return uri.ToString().TrimEnd('/');
     }
 
-    private static string NormalizeSourceIp(string value)
-    {
-        var normalized = (value ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(normalized) || normalized.Equals("localhost", StringComparison.OrdinalIgnoreCase))
-        {
-            return "127.0.0.1";
-        }
-
-        if (normalized == "*")
-        {
-            return "0.0.0.0";
-        }
-
-        if (IPAddress.TryParse(normalized, out _))
-        {
-            return normalized;
-        }
-
-        throw new InvalidOperationException("Enter a source IP address such as 127.0.0.1, a Tailnet IP, or 0.0.0.0.");
-    }
-
     private static string NormalizeDestinationHost(string value)
     {
         var normalized = (value ?? string.Empty).Trim();
@@ -408,16 +387,6 @@ public sealed class CaddyIntegrationService(
         }
 
         return value;
-    }
-
-    private static bool IsAnyAddress(string value)
-    {
-        var normalized = (value ?? string.Empty).Trim();
-        return string.IsNullOrWhiteSpace(normalized) ||
-               normalized.Equals("*", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("::", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("[::]", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string FormatEndpointLabel(string host, int port) =>

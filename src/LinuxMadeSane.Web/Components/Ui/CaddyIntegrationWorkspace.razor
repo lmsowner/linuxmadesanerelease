@@ -1,12 +1,16 @@
 @* Copyright (c) Richard D. Kiernan.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
+@using System.Net
+@using System.Net.NetworkInformation
+@using System.Net.Sockets
 @using System.Text
 @using LinuxMadeSane.Application.Contracts.Caddy
 @using LinuxMadeSane.Application.Contracts.EdgeGateway
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.Ai
+@using LinuxMadeSane.Core.Models.Caddy
 @using LinuxMadeSane.Core.Models.RdpOptimizer
 @inject ICaddyIntegrationService CaddyIntegrationService
 @inject EdgeGatewayOptions EdgeGatewayOptions
@@ -355,13 +359,53 @@ else
                     @if (editor.Kind == CaddyProxyRouteKind.PortForward)
                     {
                         <div class="caddy-editor-port-grid">
-                            <UiTextField Value="@editor.SourceIp"
-                                         ValueChanged="SetEditorSourceIpAsync"
-                                         ValueExpression="@(() => editor.SourceIp)"
-                                         Label="Source IP"
-                                         Helper="Use a Tailnet IP for tailnet-only access."
-                                         Placeholder="127.0.0.1"
-                                         Compact="true" />
+                            <UiField Label="Source interfaces"
+                                     Helper="Bind Caddy to one or more local interface IPs."
+                                     Compact="true"
+                                     Class="caddy-source-bind-field">
+                                <ChildContent>
+                                    <div class="caddy-source-bind-combo @(sourceIpPickerOpen ? "open" : null)">
+                                        <button class="caddy-source-bind-button"
+                                                type="button"
+                                                role="combobox"
+                                                aria-expanded="@sourceIpPickerOpen"
+                                                @onclick="ToggleSourceIpPickerAsync">
+                                            <span class="caddy-source-bind-selected">
+                                                @foreach (var selectedSourceIp in GetSelectedSourceIps())
+                                                {
+                                                    <span class="caddy-source-bind-pill">@selectedSourceIp</span>
+                                                }
+                                            </span>
+                                            <span class="caddy-source-bind-summary">@GetSelectedSourceIpSummary()</span>
+                                        </button>
+
+                                        @if (sourceIpPickerOpen)
+                                        {
+                                            <div class="caddy-source-bind-menu" role="listbox" aria-multiselectable="true">
+                                                @foreach (var option in GetSourceBindOptions())
+                                                {
+                                                    var selected = IsSourceIpSelected(option.Value);
+                                                    <button class="caddy-source-bind-option @(selected ? "selected" : null)"
+                                                            type="button"
+                                                            role="option"
+                                                            aria-selected="@selected"
+                                                            @onclick="@(() => ToggleSourceIpAsync(option.Value))">
+                                                        <span class="caddy-source-bind-check" aria-hidden="true"></span>
+                                                        <span class="caddy-source-bind-option-copy">
+                                                            <strong>@option.Title</strong>
+                                                            <span>@option.Subtitle</span>
+                                                        </span>
+                                                        <span class="caddy-source-bind-state">@(selected ? "Bound" : "Bind")</span>
+                                                    </button>
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                </ChildContent>
+                                <ValidationContent>
+                                    <ValidationMessage For="@(() => editor.SourceIp)" />
+                                </ValidationContent>
+                            </UiField>
 
                             <UiNumberField TValue="int"
                                            Value="@editor.SourcePort"
@@ -527,6 +571,7 @@ else
     private Guid? loadedHostId;
     private IReadOnlyList<OperationLogEntry> lastOperationLogs = [];
     private IReadOnlyList<CaddyConfigFileOption> configFileOptions = [];
+    private IReadOnlyList<CaddySourceBindOption> sourceBindOptions = [];
     private string statusMessage = string.Empty;
     private string editorStatusMessage = string.Empty;
     private string selectedConfigKey = string.Empty;
@@ -543,6 +588,7 @@ else
     private bool isSavingRoute;
     private bool isDeletingRoute;
     private bool isConfigLoading;
+    private bool sourceIpPickerOpen;
 
     private bool IsLocalHost => AiLocalMachine.IsLocalMachine(HostId);
     private bool IsBusy => isInstalling || isReloading || isRestarting || isSavingRoute || isDeletingRoute;
@@ -568,6 +614,7 @@ else
         {
             dashboard = null;
             configFileOptions = [];
+            sourceBindOptions = [];
             selectedConfigKey = string.Empty;
             selectedConfigContent = "Caddy config files are only available on the local LMS host.";
             selectedConfigStatus = "Unavailable";
@@ -589,6 +636,7 @@ else
         }
 
         dashboard = await CaddyIntegrationService.GetDashboardAsync();
+        sourceBindOptions = BuildSourceBindOptions();
         await RefreshConfigFileOptionsAsync();
         isLoaded = true;
     }
@@ -651,6 +699,71 @@ else
         options.Add(new CaddyConfigFileOption(key, label, path, description));
     }
 
+    private static IReadOnlyList<CaddySourceBindOption> BuildSourceBindOptions()
+    {
+        var options = new List<CaddySourceBindOption>
+        {
+            new("0.0.0.0", "All IPv4 interfaces", "Bind every IPv4 address on this host", "all interfaces 0.0.0.0"),
+            new("127.0.0.1", "Loopback", "Local machine only", "loopback localhost 127.0.0.1")
+        };
+        var seen = options.Select(option => option.Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces()
+                         .Where(static item => item.OperationalStatus == OperationalStatus.Up)
+                         .OrderBy(static item => item.NetworkInterfaceType == NetworkInterfaceType.Loopback ? 1 : 0)
+                         .ThenBy(static item => item.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                IPInterfaceProperties properties;
+                try
+                {
+                    properties = networkInterface.GetIPProperties();
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (var addressInfo in properties.UnicastAddresses)
+                {
+                    var address = NormalizeInterfaceAddress(addressInfo.Address);
+                    if (!IsBindableInterfaceAddress(address) || !seen.Add(address.ToString()))
+                    {
+                        continue;
+                    }
+
+                    var interfaceLabel = string.IsNullOrWhiteSpace(networkInterface.Name)
+                        ? networkInterface.NetworkInterfaceType.ToString()
+                        : networkInterface.Name.Trim();
+                    var family = address.AddressFamily == AddressFamily.InterNetwork ? "IPv4" : "IPv6";
+                    options.Add(new CaddySourceBindOption(
+                        address.ToString(),
+                        address.ToString(),
+                        $"{interfaceLabel} - {family}",
+                        $"{networkInterface.Name} {networkInterface.Description} {networkInterface.NetworkInterfaceType} {address} {family}"));
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return options;
+    }
+
+    private static IPAddress NormalizeInterfaceAddress(IPAddress address) =>
+        address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+    private static bool IsBindableInterfaceAddress(IPAddress address) =>
+        (address.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) &&
+        !Equals(address, IPAddress.Any) &&
+        !Equals(address, IPAddress.IPv6Any) &&
+        !Equals(address, IPAddress.None) &&
+        !Equals(address, IPAddress.IPv6None) &&
+        !IPAddress.IsLoopback(address) &&
+        !address.IsIPv6LinkLocal;
+
     private async Task HandleConfigSelectionChangedAsync(ChangeEventArgs args)
     {
         selectedConfigKey = args.Value?.ToString() ?? string.Empty;
@@ -703,6 +816,8 @@ else
         }
 
         editor = await CaddyIntegrationService.GetEditorAsync(null);
+        sourceBindOptions = BuildSourceBindOptions();
+        sourceIpPickerOpen = false;
         editorStatusMessage = string.Empty;
         editorStatusIsError = false;
         showEditorModal = true;
@@ -716,6 +831,7 @@ else
         }
 
         editor = await CaddyIntegrationService.GetEditorAsync(null);
+        sourceBindOptions = BuildSourceBindOptions();
         editor.Kind = CaddyProxyRouteKind.PortForward;
         editor.Name = "Tailnet port forward";
         editor.SourceIp = "127.0.0.1";
@@ -723,6 +839,7 @@ else
         editor.DestinationIp = "127.0.0.1";
         editor.DestinationPort = 80;
         editor.DestinationScheme = CaddyProxyTargetScheme.Http;
+        sourceIpPickerOpen = false;
         editorStatusMessage = string.Empty;
         editorStatusIsError = false;
         showEditorModal = true;
@@ -736,6 +853,8 @@ else
         }
 
         editor = await CaddyIntegrationService.GetEditorAsync(routeId);
+        sourceBindOptions = BuildSourceBindOptions();
+        sourceIpPickerOpen = false;
         editorStatusMessage = string.Empty;
         editorStatusIsError = false;
         showEditorModal = true;
@@ -744,6 +863,7 @@ else
     private Task CloseEditorDialogAsync()
     {
         showEditorModal = false;
+        sourceIpPickerOpen = false;
         editorStatusMessage = string.Empty;
         editorStatusIsError = false;
         return Task.CompletedTask;
@@ -970,10 +1090,85 @@ else
         return Task.CompletedTask;
     }
 
-    private Task SetEditorSourceIpAsync(string? value)
+    private Task ToggleSourceIpPickerAsync()
     {
-        editor.SourceIp = value ?? string.Empty;
+        sourceIpPickerOpen = !sourceIpPickerOpen;
         return Task.CompletedTask;
+    }
+
+    private Task ToggleSourceIpAsync(string value)
+    {
+        var normalized = CaddyBindAddressFormatter.NormalizeMany(value)[0];
+        var selected = GetSelectedSourceIps().ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (CaddyBindAddressFormatter.IsAnyAddressList(normalized))
+        {
+            editor.SourceIp = selected.Contains(normalized)
+                ? "127.0.0.1"
+                : normalized;
+            return Task.CompletedTask;
+        }
+
+        selected.RemoveWhere(CaddyBindAddressFormatter.IsAnyAddressList);
+        if (!selected.Add(normalized))
+        {
+            selected.Remove(normalized);
+        }
+
+        editor.SourceIp = selected.Count == 0
+            ? "127.0.0.1"
+            : string.Join(", ", OrderSourceIps(selected));
+        return Task.CompletedTask;
+    }
+
+    private IReadOnlyList<string> GetSelectedSourceIps()
+    {
+        try
+        {
+            return CaddyBindAddressFormatter.NormalizeMany(editor.SourceIp).ToArray();
+        }
+        catch
+        {
+            return ["127.0.0.1"];
+        }
+    }
+
+    private bool IsSourceIpSelected(string value)
+    {
+        var normalized = CaddyBindAddressFormatter.NormalizeMany(value)[0];
+        return GetSelectedSourceIps().Contains(normalized, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private string GetSelectedSourceIpSummary()
+    {
+        var count = GetSelectedSourceIps().Count;
+        return count == 1 ? "1 bind" : $"{count} binds";
+    }
+
+    private IReadOnlyList<CaddySourceBindOption> GetSourceBindOptions()
+    {
+        var options = sourceBindOptions.ToList();
+        var seen = options.Select(option => option.Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var selected in GetSelectedSourceIps())
+        {
+            if (seen.Add(selected))
+            {
+                options.Add(new CaddySourceBindOption(selected, selected, "Saved value", selected));
+            }
+        }
+
+        return options;
+    }
+
+    private IEnumerable<string> OrderSourceIps(IEnumerable<string> values)
+    {
+        var order = sourceBindOptions
+            .Select((option, index) => new { option.Value, Index = index })
+            .ToDictionary(item => item.Value, item => item.Index, StringComparer.OrdinalIgnoreCase);
+
+        return values
+            .OrderBy(value => order.TryGetValue(value, out var index) ? index : int.MaxValue)
+            .ThenBy(static value => value, StringComparer.OrdinalIgnoreCase);
     }
 
     private Task SetEditorSourcePortAsync(int value)
@@ -1004,7 +1199,7 @@ else
     {
         if (editor.Kind == CaddyProxyRouteKind.PortForward)
         {
-            var sourceIp = string.IsNullOrWhiteSpace(editor.SourceIp) ? "127.0.0.1" : editor.SourceIp.Trim();
+            var sourceIp = CaddyBindAddressFormatter.NormalizeCsv(editor.SourceIp);
             var sourcePort = Math.Clamp(editor.SourcePort, 1, 65535);
             var destinationIp = string.IsNullOrWhiteSpace(editor.DestinationIp) ? "127.0.0.1" : editor.DestinationIp.Trim();
             var destinationPort = Math.Clamp(editor.DestinationPort, 1, 65535);
@@ -1012,9 +1207,9 @@ else
             var target = $"{scheme}://{FormatHostForUri(destinationIp)}:{destinationPort}";
             var portBuilder = new StringBuilder();
             portBuilder.AppendLine($"http://:{sourcePort} {{");
-            if (!IsAnyAddress(sourceIp))
+            if (!CaddyBindAddressFormatter.IsAnyAddressList(sourceIp))
             {
-                portBuilder.AppendLine($"    bind {sourceIp}");
+                portBuilder.AppendLine($"    bind {CaddyBindAddressFormatter.ToCaddyBindArguments(sourceIp)}");
             }
 
             portBuilder.AppendLine("    encode zstd gzip");
@@ -1070,7 +1265,7 @@ else
             warnings.Add("This uses a standard web port; check hostname routes before applying.");
         }
 
-        if (IsAnyAddress(editor.SourceIp))
+        if (CaddyBindAddressFormatter.IsAnyAddressList(editor.SourceIp))
         {
             warnings.Add("0.0.0.0 listens on every interface. Use a Tailnet or LAN IP when possible.");
         }
@@ -1107,16 +1302,6 @@ else
 
     private static string GetRouteTargetLabel(CaddyProxyRouteListItem route) =>
         route.Kind == CaddyProxyRouteKind.PortForward ? "Destination" : "Upstream";
-
-    private static bool IsAnyAddress(string value)
-    {
-        var normalized = (value ?? string.Empty).Trim();
-        return string.IsNullOrWhiteSpace(normalized) ||
-               normalized.Equals("*", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("::", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("[::]", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static string FormatHostForUri(string host)
     {
@@ -1196,4 +1381,10 @@ else
         string Label,
         string Path,
         string Description);
+
+    private sealed record CaddySourceBindOption(
+        string Value,
+        string Title,
+        string Subtitle,
+        string SearchText);
 }

@@ -326,7 +326,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(route => route.Name).HasMaxLength(120);
             entity.Property(route => route.Hostname).HasMaxLength(255);
             entity.Property(route => route.UpstreamUrl).HasMaxLength(512);
-            entity.Property(route => route.SourceIp).HasMaxLength(96);
+            entity.Property(route => route.SourceIp).HasMaxLength(512);
             entity.Property(route => route.DestinationIp).HasMaxLength(255);
             entity.Property(route => route.Description).HasMaxLength(320);
         });
