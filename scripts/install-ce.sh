@@ -217,8 +217,7 @@ if [[ "$START_SERVICE" == "true" ]]; then
   if [[ "$INSTALL_DESKTOP_HELPER" == "true" && "$LMS_DEST_ROOT" == "" ]] && lms_has_systemd; then
     if ! lms_wait_for_file_socket "$DESKTOP_HELPER_SOCKET_PATH" 30; then
       lms_log "Desktop Assistant broker socket was not created at $DESKTOP_HELPER_SOCKET_PATH"
-      systemctl --no-pager --full status "$SERVICE_UNIT" >&2 || true
-      exit 1
+      lms_log "Continuing because the LMS web service is running; Desktop Assistant can be repaired from Setup."
     fi
   fi
 fi
