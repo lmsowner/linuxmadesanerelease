@@ -353,9 +353,10 @@ public sealed class SqliteCaddyIntegrationDataService(
 
     private static string EnsureManagedImport(string currentText, string importPath)
     {
-        var normalizedCurrentText = string.IsNullOrWhiteSpace(currentText)
+        var currentWithoutPackagedDefault = CaddyMainConfigSanitizer.RemovePackagedDefaultSite(currentText ?? string.Empty);
+        var normalizedCurrentText = string.IsNullOrWhiteSpace(currentWithoutPackagedDefault)
             ? string.Empty
-            : currentText.TrimEnd() + Environment.NewLine;
+            : currentWithoutPackagedDefault.TrimEnd() + Environment.NewLine;
         var importLine = $"import {importPath}";
         if (normalizedCurrentText.Contains(importLine, StringComparison.Ordinal))
         {

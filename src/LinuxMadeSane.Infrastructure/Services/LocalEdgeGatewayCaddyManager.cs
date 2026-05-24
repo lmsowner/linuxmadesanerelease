@@ -235,7 +235,8 @@ public sealed class LocalEdgeGatewayCaddyManager(ILinuxCommandRunner commandRunn
 
     private static string EnsureManagedImport(string currentText, string importPath)
     {
-        var cleanedLines = (currentText ?? string.Empty)
+        var currentWithoutPackagedDefault = CaddyMainConfigSanitizer.RemovePackagedDefaultSite(currentText ?? string.Empty);
+        var cleanedLines = currentWithoutPackagedDefault
             .Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace('\r', '\n')
             .Split('\n')

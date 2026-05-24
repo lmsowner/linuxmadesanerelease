@@ -182,6 +182,53 @@ lms_enable_openssh_server() {
   lms_log "OpenSSH server unit was not found; install or start sshd before using local terminal sessions"
 }
 
+lms_remove_caddy_packaged_default_site() {
+  local file="/etc/caddy/Caddyfile"
+  local backup
+  local temp_file
+
+  [[ "${LMS_DEST_ROOT:-}" == "" ]] || return 0
+  [[ "$(id -u)" -eq 0 ]] || return 0
+  [[ -f "$file" ]] || return 0
+
+  temp_file="$(mktemp)"
+  awk '
+function delta(line, tmp, opens, closes) {
+  tmp=line; opens=gsub(/\{/, "{", tmp);
+  tmp=line; closes=gsub(/\}/, "}", tmp);
+  return opens - closes;
+}
+BEGIN { skip=0; depth=0; block=""; has_root=0; has_file_server=0; }
+skip == 0 && $0 ~ /^[[:space:]]*:80[[:space:]]*\{/ {
+  skip=1; depth=delta($0); block=$0 ORS; has_root=0; has_file_server=0; next;
+}
+skip == 1 {
+  block=block $0 ORS;
+  if ($0 ~ /^[[:space:]]*root[[:space:]]+\*[[:space:]]+\/usr\/share\/caddy[[:space:]]*$/) has_root=1;
+  if ($0 ~ /^[[:space:]]*file_server[[:space:]]*$/) has_file_server=1;
+  depth += delta($0);
+  if (depth <= 0) {
+    if (!(has_root && has_file_server)) printf "%s", block;
+    skip=0; depth=0; block="";
+  }
+  next;
+}
+{ print; }
+END { if (skip == 1) printf "%s", block; }
+' "$file" > "$temp_file"
+
+  if cmp -s "$file" "$temp_file"; then
+    rm -f "$temp_file"
+    return 0
+  fi
+
+  backup="/etc/caddy/Caddyfile.lms-backup-$(date +%Y%m%d%H%M%S)"
+  cp -a "$file" "$backup" || true
+  install -m 0644 "$temp_file" "$file"
+  rm -f "$temp_file"
+  lms_log "Removed the packaged Caddy :80 static site from $file so LMS does not claim port 80 by default"
+}
+
 lms_enable_caddy_service() {
   if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
     return
@@ -201,6 +248,8 @@ lms_enable_caddy_service() {
     lms_log "Caddy service unit was not found; Edge Gateway will report Caddy as unavailable"
     return
   fi
+
+  lms_remove_caddy_packaged_default_site
 
   lms_log "Enabling Caddy service"
   if ! systemctl enable caddy.service >/dev/null 2>&1; then
