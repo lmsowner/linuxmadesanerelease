@@ -375,12 +375,17 @@ public sealed class ApplicationUpdateService(
             ? "/usr/local/sbin/linux-made-sane-update"
             : options.UpdateHelperPath.Trim();
         var isRoot = OperatingSystem.IsLinux() && Environment.UserName.Equals("root", StringComparison.OrdinalIgnoreCase);
-        if (OperatingSystem.IsLinux() && File.Exists(helperPath))
+        if (OperatingSystem.IsLinux() && IsInstalledUpdateHelperCurrent(helperPath))
         {
             var helperCommand = $"{ShellQuote(helperPath)} --background";
             return new ApplicationUpdateCommand(
                 isRoot ? helperCommand : $"sudo -n {helperCommand}",
                 true);
+        }
+
+        if (OperatingSystem.IsLinux() && File.Exists(helperPath))
+        {
+            AppendLog($"Installed update helper at {helperPath} is stale; using the current public installer handoff.");
         }
 
         var installScriptUrl = NormalizeAbsoluteUrl(options.InstallScriptUrl, "https://www.linuxmadesane.com/install.sh");
@@ -447,6 +452,22 @@ public sealed class ApplicationUpdateService(
             "  rollback_self_update 'service did not become active after install'",
             "  exit 1",
             "fi");
+    }
+
+    private static bool IsInstalledUpdateHelperCurrent(string helperPath)
+    {
+        try
+        {
+            var helper = File.ReadAllText(helperPath);
+            return helper.Contains("--background|--detached|--no-wait", StringComparison.Ordinal) &&
+                   helper.Contains("SYSTEMD_RUN_ARGS+=(--wait)", StringComparison.Ordinal) &&
+                   helper.Contains("bash -s -- --install \"${INSTALL_ARGS[@]}\"", StringComparison.Ordinal) &&
+                   !helper.Contains("--pipe", StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void SetStatus(Func<ApplicationUpdateStatus, ApplicationUpdateStatus> update)
