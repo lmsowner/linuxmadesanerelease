@@ -690,27 +690,41 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 127
 fi
 
-if [[ -z "\${LMS_UPDATE_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
-  UNIT_NAME="linux-made-sane-self-update-\$(date -u +%Y%m%d%H%M%S)"
-  exec systemd-run \
-    --unit="\$UNIT_NAME" \
-    --collect \
-    --wait \
-    --pipe \
-    --property=Type=exec \
-    env LMS_UPDATE_DETACHED=1 LMS_INSTALL_URL="\$INSTALL_URL" LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" "\$0" "\$@"
-fi
-
+BACKGROUND=false
+INSTALL_ARGS=()
 for argument in "\$@"; do
   case "\$argument" in
+    --background|--detached|--no-wait)
+      BACKGROUND=true
+      ;;
     --no-start|--uninstall|--purge)
       EXPECT_SERVICE_ACTIVE=false
+      INSTALL_ARGS+=("\$argument")
       ;;
     --start)
       EXPECT_SERVICE_ACTIVE=true
+      INSTALL_ARGS+=("\$argument")
+      ;;
+    *)
+      INSTALL_ARGS+=("\$argument")
       ;;
   esac
 done
+
+if [[ -z "\${LMS_UPDATE_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  UNIT_NAME="linux-made-sane-self-update-\$(date -u +%Y%m%d%H%M%S)"
+  SYSTEMD_RUN_ARGS=(
+    --unit="\$UNIT_NAME"
+    --collect
+    --property=Type=exec
+  )
+  if [[ "\$BACKGROUND" != "true" ]]; then
+    SYSTEMD_RUN_ARGS+=(--wait)
+  fi
+
+  exec systemd-run "\${SYSTEMD_RUN_ARGS[@]}" \
+    env LMS_UPDATE_DETACHED=1 LMS_INSTALL_URL="\$INSTALL_URL" LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" "\$0" "\${INSTALL_ARGS[@]}"
+fi
 
 PREVIOUS_CURRENT_TARGET=""
 SERVICE_WAS_ACTIVE=false
@@ -751,7 +765,7 @@ verify_self_update_active() {
   return 1
 }
 
-if ! curl -fsSL "\$INSTALL_URL" | env LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" bash -s -- --install "\$@"; then
+if ! curl -fsSL "\$INSTALL_URL" | env LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" bash -s -- --install "\${INSTALL_ARGS[@]}"; then
   rollback_self_update "installer returned a non-zero exit code"
   exit 1
 fi

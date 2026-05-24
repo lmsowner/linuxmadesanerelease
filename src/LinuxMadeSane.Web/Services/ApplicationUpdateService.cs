@@ -87,15 +87,31 @@ public sealed class ApplicationUpdateService(
             });
             AppendLog($"Starting self-update from {check.CurrentVersion} to {check.LatestVersion}.");
 
-            var commandText = BuildUpdateCommand(options);
+            var updateCommand = BuildUpdateCommand(options);
             AppendLog(string.IsNullOrWhiteSpace(options.UpdateCommand)
-                ? "Running the installed update helper or public Community installer."
+                ? updateCommand.RunsDetached
+                    ? "Handing the update to the detached systemd self-update helper."
+                    : "Running the installed update helper or public Community installer."
                 : "Running the configured update command.");
-            var exitCode = await RunUpdateCommandAsync(commandText, options, cancellationToken);
+            var exitCode = await RunUpdateCommandAsync(updateCommand.ShellCommand, options, cancellationToken);
             var completedAtUtc = DateTimeOffset.UtcNow;
 
             if (exitCode == 0)
             {
+                if (updateCommand.RunsDetached)
+                {
+                    SetStatus(current => current with
+                    {
+                        State = ApplicationUpdateState.Installing,
+                        Summary = $"Linux Made Sane {current.LatestVersion} update started.",
+                        Detail = "The update is running outside the LMS web process. The service will restart when the installer reaches the service phase.",
+                        ProgressPercent = Math.Max(current.ProgressPercent, 20),
+                        LastInstallCompletedAtUtc = null
+                    });
+                    AppendLog("Detached self-update was queued successfully. LMS should restart during the install.");
+                    return GetStatus();
+                }
+
                 SetStatus(current => current with
                 {
                     State = ApplicationUpdateState.Completed,
@@ -348,11 +364,11 @@ public sealed class ApplicationUpdateService(
         return null;
     }
 
-    private string BuildUpdateCommand(ApplicationUpdateOptions options)
+    private ApplicationUpdateCommand BuildUpdateCommand(ApplicationUpdateOptions options)
     {
         if (!string.IsNullOrWhiteSpace(options.UpdateCommand))
         {
-            return options.UpdateCommand.Trim();
+            return new ApplicationUpdateCommand(options.UpdateCommand.Trim(), false);
         }
 
         var helperPath = string.IsNullOrWhiteSpace(options.UpdateHelperPath)
@@ -361,9 +377,10 @@ public sealed class ApplicationUpdateService(
         var isRoot = OperatingSystem.IsLinux() && Environment.UserName.Equals("root", StringComparison.OrdinalIgnoreCase);
         if (OperatingSystem.IsLinux() && File.Exists(helperPath))
         {
-            return isRoot
-                ? ShellQuote(helperPath)
-                : $"sudo -n {ShellQuote(helperPath)}";
+            var helperCommand = $"{ShellQuote(helperPath)} --background";
+            return new ApplicationUpdateCommand(
+                isRoot ? helperCommand : $"sudo -n {helperCommand}",
+                true);
         }
 
         var installScriptUrl = NormalizeAbsoluteUrl(options.InstallScriptUrl, "https://www.linuxmadesane.com/install.sh");
@@ -374,10 +391,12 @@ public sealed class ApplicationUpdateService(
             var sudoPrefix = isRoot ? string.Empty : "sudo -n ";
             var detachedInstallCommand = BuildPublicInstallerFallbackScript(installScriptUrl, runsAsRoot: true);
             var unitName = $"linux-made-sane-self-update-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
-            return $"{sudoPrefix}systemd-run --unit={ShellQuote(unitName)} --collect --wait --pipe --property=Type=exec bash -lc {ShellQuote(detachedInstallCommand)}";
+            return new ApplicationUpdateCommand(
+                $"{sudoPrefix}systemd-run --unit={ShellQuote(unitName)} --collect --property=Type=exec bash -lc {ShellQuote(detachedInstallCommand)}",
+                true);
         }
 
-        return BuildPublicInstallerFallbackScript(installScriptUrl, isRoot);
+        return new ApplicationUpdateCommand(BuildPublicInstallerFallbackScript(installScriptUrl, isRoot), false);
     }
 
     private static string BuildPublicInstallerFallbackScript(string installScriptUrl, bool runsAsRoot)
@@ -525,6 +544,8 @@ public sealed class ApplicationUpdateService(
 
     private static string ShellQuote(string value) =>
         $"'{value.Replace("'", "'\\''", StringComparison.Ordinal)}'";
+
+    private sealed record ApplicationUpdateCommand(string ShellCommand, bool RunsDetached);
 
     private static string FormatBytes(long bytes)
     {
