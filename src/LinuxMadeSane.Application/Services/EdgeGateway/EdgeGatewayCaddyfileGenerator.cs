@@ -58,7 +58,6 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
                 builder.AppendLine($"    handle @{authMatcherName} {{");
                 builder.AppendLine($"        reverse_proxy 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
                 builder.AppendLine("            header_up X-Forwarded-Proto https");
-                builder.AppendLine("            header_up X-Forwarded-Host {host}");
                 builder.AppendLine("        }");
                 builder.AppendLine("    }");
                 builder.AppendLine();
@@ -142,7 +141,6 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
         var builder = new StringBuilder();
         builder.AppendLine($"        reverse_proxy {targetUrl} {{");
         builder.AppendLine("            header_up X-Forwarded-Proto https");
-        builder.AppendLine("            header_up X-Forwarded-Host {host}");
         builder.AppendLine("            header_up X-Forwarded-Port 443");
         if (shouldTreatAsLocalLmsHop)
         {

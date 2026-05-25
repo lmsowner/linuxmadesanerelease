@@ -229,7 +229,6 @@ public sealed class RemoteLmsRelayCaddyService(
             builder.AppendLine($"    reverse_proxy http://127.0.0.1:{Math.Clamp(route.LocalPort, 1, 65535)} {{");
             builder.AppendLine("        header_up Host {host}");
             builder.AppendLine("        header_up X-Forwarded-Proto https");
-            builder.AppendLine("        header_up X-Forwarded-Host {host}");
             builder.AppendLine("        header_up X-Forwarded-Port 443");
             builder.AppendLine("        header_up X-Forwarded-For 127.0.0.1");
             builder.AppendLine("    }");
