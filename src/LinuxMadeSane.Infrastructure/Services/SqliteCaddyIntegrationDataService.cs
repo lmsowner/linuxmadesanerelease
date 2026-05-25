@@ -70,6 +70,7 @@ public sealed class SqliteCaddyIntegrationDataService(
     public async Task SaveRouteAsync(CaddyProxyRouteDefinition route, CancellationToken cancellationToken = default)
     {
         await EnsureInstalledAsync(cancellationToken);
+        await EnsureNoPortForwardSourceConflictAsync(route, cancellationToken);
 
         var entity = await dbContext.CaddyProxyRoutes.SingleOrDefaultAsync(item => item.Id == route.Id, cancellationToken);
         if (entity is null)
@@ -282,6 +283,37 @@ public sealed class SqliteCaddyIntegrationDataService(
         }
 
         throw new InvalidOperationException("Caddy is not installed on this LMS host yet.");
+    }
+
+    private async Task EnsureNoPortForwardSourceConflictAsync(
+        CaddyProxyRouteDefinition route,
+        CancellationToken cancellationToken)
+    {
+        if (route.Kind != CaddyProxyRouteKind.PortForward)
+        {
+            return;
+        }
+
+        var sourcePort = Math.Clamp(route.SourcePort, 1, 65535);
+        var routeSources = CaddyBindAddressFormatter.NormalizeMany(route.SourceIp);
+        var existingRoutes = await dbContext.CaddyProxyRoutes
+            .AsNoTracking()
+            .Where(item => item.RouteKind == (int)CaddyProxyRouteKind.PortForward &&
+                           item.SourcePort == sourcePort &&
+                           item.Id != route.Id)
+            .ToArrayAsync(cancellationToken);
+
+        foreach (var existingRoute in existingRoutes)
+        {
+            var existingSources = CaddyBindAddressFormatter.NormalizeMany(existingRoute.SourceIp);
+            if (!SourceBindingsOverlap(routeSources, existingSources))
+            {
+                continue;
+            }
+
+            throw new InvalidOperationException(
+                $"Source {CaddyBindAddressFormatter.FormatEndpointLabel(route.SourceIp, sourcePort)} conflicts with existing route `{existingRoute.Name}` ({CaddyBindAddressFormatter.FormatEndpointLabel(existingRoute.SourceIp, existingRoute.SourcePort)}). Pick another source IP or port.");
+        }
     }
 
     private async Task<string> GetInstalledVersionAsync(CancellationToken cancellationToken)
@@ -791,6 +823,17 @@ public sealed class SqliteCaddyIntegrationDataService(
         managedConfigText.Contains(route.Kind == CaddyProxyRouteKind.PortForward
             ? $"http://:{Math.Clamp(route.SourcePort, 1, 65535)}"
             : route.EnableTls ? route.Hostname : $"http://{route.Hostname}", StringComparison.Ordinal);
+
+    private static bool SourceBindingsOverlap(IReadOnlyList<string> left, IReadOnlyList<string> right)
+    {
+        if (left.Any(CaddyBindAddressFormatter.IsAnyAddressList) ||
+            right.Any(CaddyBindAddressFormatter.IsAnyAddressList))
+        {
+            return true;
+        }
+
+        return left.Intersect(right, StringComparer.OrdinalIgnoreCase).Any();
+    }
 
     private static string ResolveSourceProbeHost(string sourceIp)
     {
