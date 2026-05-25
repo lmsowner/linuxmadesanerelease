@@ -221,7 +221,18 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
             .ThenBy(user => user.UserName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        return users;
+        var dbUsers = await dbContext.LinuxShareUsers
+            .AsNoTracking()
+            .ToArrayAsync(cancellationToken);
+
+        return users
+            .Concat(dbUsers
+                .Select(Map)
+                .Where(dbUser => users.All(systemUser =>
+                    !systemUser.UserName.Equals(dbUser.UserName, StringComparison.OrdinalIgnoreCase))))
+            .OrderByDescending(user => IsLikelyHumanUser(user))
+            .ThenBy(user => user.UserName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     public async Task<LinuxShareUser?> GetUserAsync(Guid id, CancellationToken cancellationToken = default) =>
@@ -408,7 +419,18 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
             .ThenBy(group => group.GroupName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        return groups;
+        var dbGroups = await dbContext.LinuxShareGroups
+            .AsNoTracking()
+            .ToArrayAsync(cancellationToken);
+
+        return groups
+            .Concat(dbGroups
+                .Select(Map)
+                .Where(dbGroup => groups.All(systemGroup =>
+                    !systemGroup.GroupName.Equals(dbGroup.GroupName, StringComparison.OrdinalIgnoreCase))))
+            .OrderByDescending(group => group.Members.Count > 0)
+            .ThenBy(group => group.GroupName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     public async Task<LinuxShareGroup?> GetGroupAsync(Guid id, CancellationToken cancellationToken = default) =>
