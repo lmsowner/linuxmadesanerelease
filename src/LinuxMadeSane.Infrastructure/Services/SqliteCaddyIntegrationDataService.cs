@@ -41,6 +41,7 @@ public sealed class SqliteCaddyIntegrationDataService(
 
         var package = packagesTask.Result.FirstOrDefault();
         var service = servicesTask.Result.FirstOrDefault();
+        var routes = routesTask.Result.Select(Map).ToArray();
         var isInstalled = package?.IsInstalled == true;
         var mainConfigText = await ReadTextOrDefaultAsync(MainConfigPath, cancellationToken);
         var importConfigured = mainConfigText.Contains(ManagedImportLine, StringComparison.Ordinal);
@@ -48,6 +49,13 @@ public sealed class SqliteCaddyIntegrationDataService(
         var validation = isInstalled
             ? await ValidateLiveConfigurationAsync(cancellationToken)
             : new CaddyOperationResult(false, "Caddy is not installed on this LMS host yet.", []);
+        if (isInstalled && importConfigured && !ManagedConfigurationIsInSync(await ReadTextOrDefaultAsync(ManagedConfigPath, cancellationToken), routes))
+        {
+            validation = new CaddyOperationResult(
+                false,
+                "The LMS managed Caddy include is out of sync with saved routes. Use Reload config to repair it.",
+                validation.Logs);
+        }
 
         return new CaddyIntegrationSnapshot(
             isInstalled,
@@ -59,7 +67,7 @@ public sealed class SqliteCaddyIntegrationDataService(
             validation.Summary,
             MainConfigPath,
             ManagedConfigPath,
-            routesTask.Result.Select(Map).ToArray());
+            routes);
     }
 
     public async Task<CaddyProxyRouteDefinition?> GetRouteAsync(Guid id, CancellationToken cancellationToken = default) =>
@@ -422,6 +430,14 @@ public sealed class SqliteCaddyIntegrationDataService(
 
         return builder.ToString();
     }
+
+    private static bool ManagedConfigurationIsInSync(
+        string currentManagedConfigText,
+        IReadOnlyList<CaddyProxyRouteDefinition> routes) =>
+        NormalizeGeneratedConfig(currentManagedConfigText) == NormalizeGeneratedConfig(RenderManagedConfiguration(routes));
+
+    private static string NormalizeGeneratedConfig(string value) =>
+        (value ?? string.Empty).Replace("\r\n", "\n").TrimEnd();
 
     private static string RenderPortForwardBlock(CaddyProxyRouteDefinition route)
     {
