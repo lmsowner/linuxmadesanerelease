@@ -83,6 +83,7 @@ public sealed class SqliteCaddyIntegrationDataService(
 
         await dbContext.SaveChangesAsync(cancellationToken);
         await ApplyManagedConfigurationAsync(cancellationToken);
+        await ReloadCaddyServiceAsync(cancellationToken);
     }
 
     public async Task DeleteRouteAsync(Guid id, CancellationToken cancellationToken = default)
@@ -100,6 +101,7 @@ public sealed class SqliteCaddyIntegrationDataService(
         if (package?.IsInstalled == true)
         {
             await ApplyManagedConfigurationAsync(cancellationToken);
+            await ReloadCaddyServiceAsync(cancellationToken);
         }
     }
 
@@ -151,6 +153,7 @@ public sealed class SqliteCaddyIntegrationDataService(
                 route.DestinationIp,
                 route.DestinationPort,
                 cancellationToken));
+            logs.Add(await CheckDestinationProtocolAsync(route, cancellationToken));
 
             var sourceProbeHost = ResolveSourceProbeHost(route.SourceIp);
             logs.Add(await CheckTcpEndpointAsync(
@@ -470,6 +473,27 @@ public sealed class SqliteCaddyIntegrationDataService(
             cancellationToken);
     }
 
+    private async Task ReloadCaddyServiceAsync(CancellationToken cancellationToken)
+    {
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "systemctl",
+                ["reload", ServiceName],
+                true,
+                TimeSpan.FromMinutes(1),
+                "Reload Caddy after writing LMS routes"),
+            dryRun: false,
+            cancellationToken);
+
+        if (result.ExitCode == 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"Caddy config was written, but Caddy did not reload: {FirstCaddyProblemLine(result.StandardError, result.StandardOutput) ?? $"exit code {result.ExitCode}"}");
+    }
+
     private async Task WriteTextAsync(string path, string content, CancellationToken cancellationToken)
     {
         var directoryPath = Path.GetDirectoryName(path);
@@ -646,6 +670,67 @@ public sealed class SqliteCaddyIntegrationDataService(
         }
     }
 
+    private async Task<OperationLogEntry> CheckDestinationProtocolAsync(
+        CaddyProxyRouteDefinition route,
+        CancellationToken cancellationToken)
+    {
+        var configuredScheme = route.DestinationScheme == CaddyProxyTargetScheme.Https ? "https" : "http";
+        var alternateScheme = configuredScheme == "https" ? "http" : "https";
+        var configuredProbe = await ProbeHttpAsync(configuredScheme, route.DestinationIp, route.DestinationPort, cancellationToken);
+        if (configuredProbe.Success)
+        {
+            return BuildLog(
+                OperationLogLevel.Success,
+                $"Destination responds over {configuredScheme.ToUpperInvariant()} at {configuredProbe.Url}.",
+                standardOutput: configuredProbe.Summary);
+        }
+
+        var alternateProbe = await ProbeHttpAsync(alternateScheme, route.DestinationIp, route.DestinationPort, cancellationToken);
+        if (alternateProbe.Success)
+        {
+            return BuildLog(
+                OperationLogLevel.Error,
+                $"Destination is {alternateScheme.ToUpperInvariant()}, but this route is configured for {configuredScheme.ToUpperInvariant()}. Edit the route destination scheme to {alternateScheme.ToUpperInvariant()}.",
+                standardError: configuredProbe.Summary);
+        }
+
+        return BuildLog(
+            OperationLogLevel.Error,
+            $"Destination did not respond as HTTP or HTTPS at {route.DestinationIp}:{Math.Clamp(route.DestinationPort, 1, 65535)}.",
+            standardError: $"Configured {configuredScheme}: {configuredProbe.Summary}{Environment.NewLine}Alternate {alternateScheme}: {alternateProbe.Summary}");
+    }
+
+    private static async Task<HttpProbeResult> ProbeHttpAsync(
+        string scheme,
+        string host,
+        int port,
+        CancellationToken cancellationToken)
+    {
+        var normalizedHost = NormalizeConnectHost(host);
+        var normalizedPort = Math.Clamp(port, 1, 65535);
+        var url = $"{scheme}://{FormatHostForUri(normalizedHost)}:{normalizedPort}/";
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        using var handler = new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+        };
+        using var client = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+
+        try
+        {
+            using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            return new HttpProbeResult(true, url, $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}".TrimEnd());
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or IOException)
+        {
+            return new HttpProbeResult(false, url, exception.Message);
+        }
+    }
+
     private async Task<OperationLogEntry> CheckListenerSnapshotAsync(
         CaddyProxyRouteDefinition route,
         CancellationToken cancellationToken)
@@ -749,6 +834,8 @@ public sealed class SqliteCaddyIntegrationDataService(
         string? standardOutput = null,
         string? standardError = null) =>
         new(DateTimeOffset.Now, level, message, commandText, exitCode, standardOutput, standardError);
+
+    private sealed record HttpProbeResult(bool Success, string Url, string Summary);
 
     private static CaddyOperationResult BuildResult(IReadOnlyList<OperationLogEntry> logs, string successSummary)
     {
