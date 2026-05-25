@@ -152,11 +152,9 @@ public sealed class SqliteCaddyIntegrationDataService(
                 ? "Managed Caddy include contains this route."
                 : "Managed Caddy include does not contain this route. Save or reload the route so LMS writes it to Caddy."));
 
-        var validation = await ValidateLiveConfigurationAsync(cancellationToken);
-        logs.AddRange(validation.Logs);
-
         if (route.Kind == CaddyProxyRouteKind.PortForward)
         {
+            var routeProbeStart = logs.Count;
             logs.Add(await CheckTcpEndpointAsync(
                 "Destination target accepts TCP",
                 route.DestinationIp,
@@ -172,11 +170,31 @@ public sealed class SqliteCaddyIntegrationDataService(
                 cancellationToken));
 
             logs.Add(await CheckListenerSnapshotAsync(route, cancellationToken));
+
+            var portForwardWorks = logs
+                .Skip(routeProbeStart)
+                .All(log => log.Level != OperationLogLevel.Error);
+            var validation = await ValidateLiveConfigurationAsync(cancellationToken);
+            logs.AddRange(portForwardWorks
+                ? validation.Logs.Select(DowngradeValidationLogsForWorkingPortForward)
+                : validation.Logs);
+
+            if (portForwardWorks)
+            {
+                logs = logs
+                    .Select(DowngradeSoftConfigurationErrorForWorkingPortForward)
+                    .ToList();
+            }
+        }
+        else
+        {
+            var validation = await ValidateLiveConfigurationAsync(cancellationToken);
+            logs.AddRange(validation.Logs);
         }
 
         var failed = logs.FirstOrDefault(log => log.Level == OperationLogLevel.Error);
         return failed is null
-            ? new CaddyOperationResult(true, "Caddy route check passed.", logs)
+            ? new CaddyOperationResult(true, route.Kind == CaddyProxyRouteKind.PortForward ? "Port forward is working." : "Caddy route check passed.", logs)
             : BuildFailureResult(logs, $"Caddy route check found a problem: {failed.Message}");
     }
 
@@ -253,8 +271,11 @@ public sealed class SqliteCaddyIntegrationDataService(
             .OrderBy(route => route.Name)
             .ThenBy(route => route.Hostname)
             .ToArrayAsync(cancellationToken);
+        var mappedRoutes = routes.Select(Map).ToArray();
+        EnsureManagedRoutesAreRenderable(mappedRoutes);
+
         var liveMainText = await ReadTextOrDefaultAsync(MainConfigPath, cancellationToken);
-        var liveManagedText = RenderManagedConfiguration(routes.Select(Map).ToArray());
+        var liveManagedText = RenderManagedConfiguration(mappedRoutes);
 
         var tempDirectory = CreateTemporaryDirectory();
         try
@@ -313,6 +334,13 @@ public sealed class SqliteCaddyIntegrationDataService(
 
         foreach (var existingRoute in existingRoutes)
         {
+            var existingDefinition = Map(existingRoute);
+            if (!PortForwardTargetsMatch(route, existingDefinition))
+            {
+                throw new InvalidOperationException(
+                    $"Source port {sourcePort} is already managed by `{existingRoute.Name}` for {FormatPortForwardTarget(existingDefinition)}. Caddy can safely use one destination per source port; use a different source port or edit the existing route.");
+            }
+
             var existingSources = CaddyBindAddressFormatter.NormalizeMany(existingRoute.SourceIp);
             if (!SourceBindingsOverlap(routeSources, existingSources))
             {
@@ -404,7 +432,7 @@ public sealed class SqliteCaddyIntegrationDataService(
         builder.AppendLine("# Edit routes in LMS, not in this generated file.");
         builder.AppendLine();
 
-        foreach (var route in routes)
+        foreach (var route in routes.Where(route => route.Kind != CaddyProxyRouteKind.PortForward))
         {
             builder.AppendLine($"# Route: {route.Name}");
             if (!string.IsNullOrWhiteSpace(route.Description))
@@ -412,24 +440,96 @@ public sealed class SqliteCaddyIntegrationDataService(
                 builder.AppendLine($"# {SanitizeComment(route.Description)}");
             }
 
-            if (route.Kind == CaddyProxyRouteKind.PortForward)
+            var address = route.EnableTls ? route.Hostname : $"http://{route.Hostname}";
+            builder.AppendLine($"{address} {{");
+            builder.AppendLine("    encode zstd gzip");
+            builder.AppendLine($"    reverse_proxy {route.UpstreamUrl}");
+            builder.AppendLine("}");
+
+            builder.AppendLine();
+        }
+
+        foreach (var group in BuildPortForwardRenderGroups(routes))
+        {
+            foreach (var route in group.Routes)
             {
-                builder.Append(RenderPortForwardBlock(route));
-            }
-            else
-            {
-                var address = route.EnableTls ? route.Hostname : $"http://{route.Hostname}";
-                builder.AppendLine($"{address} {{");
-                builder.AppendLine("    encode zstd gzip");
-                builder.AppendLine($"    reverse_proxy {route.UpstreamUrl}");
-                builder.AppendLine("}");
+                builder.AppendLine($"# Route: {route.Name}");
+                if (!string.IsNullOrWhiteSpace(route.Description))
+                {
+                    builder.AppendLine($"# {SanitizeComment(route.Description)}");
+                }
             }
 
+            builder.Append(RenderPortForwardBlock(
+                group.SourceIp,
+                group.SourcePort,
+                group.DestinationIp,
+                group.DestinationPort,
+                group.DestinationScheme));
             builder.AppendLine();
         }
 
         return builder.ToString();
     }
+
+    private static void EnsureManagedRoutesAreRenderable(IReadOnlyList<CaddyProxyRouteDefinition> routes)
+    {
+        var conflict = routes
+            .Where(route => route.Kind == CaddyProxyRouteKind.PortForward)
+            .GroupBy(route => Math.Clamp(route.SourcePort, 1, 65535))
+            .Select(group => new
+            {
+                SourcePort = group.Key,
+                TargetGroups = group
+                    .GroupBy(BuildPortForwardRenderKey)
+                    .Select(targetGroup => targetGroup.OrderBy(route => route.Name, StringComparer.OrdinalIgnoreCase).ToArray())
+                    .ToArray()
+            })
+            .FirstOrDefault(group => group.TargetGroups.Length > 1);
+
+        if (conflict is null)
+        {
+            return;
+        }
+
+        var first = conflict.TargetGroups[0][0];
+        var second = conflict.TargetGroups[1][0];
+        throw new InvalidOperationException(
+            $"Source port {conflict.SourcePort} has multiple destinations (`{first.Name}` -> {FormatPortForwardTarget(first)}, `{second.Name}` -> {FormatPortForwardTarget(second)}). Use one route with multiple source IPs, or give one route a different source port.");
+    }
+
+    private static IReadOnlyList<PortForwardRenderGroup> BuildPortForwardRenderGroups(IReadOnlyList<CaddyProxyRouteDefinition> routes) =>
+        routes
+            .Where(route => route.Kind == CaddyProxyRouteKind.PortForward)
+            .GroupBy(BuildPortForwardRenderKey)
+            .OrderBy(group => group.Key.SourcePort)
+            .ThenBy(group => group.Key.DestinationScheme)
+            .ThenBy(group => group.Key.DestinationIp, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(group => group.Key.DestinationPort)
+            .Select(group =>
+            {
+                var orderedRoutes = group
+                    .OrderBy(route => route.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                return new PortForwardRenderGroup(
+                    group.Key.SourcePort,
+                    MergeSourceIps(orderedRoutes.Select(route => route.SourceIp)),
+                    group.Key.DestinationIp,
+                    group.Key.DestinationPort,
+                    group.Key.DestinationScheme,
+                    orderedRoutes);
+            })
+            .ToArray();
+
+    private static PortForwardRenderKey BuildPortForwardRenderKey(CaddyProxyRouteDefinition route) =>
+        new(
+            Math.Clamp(route.SourcePort, 1, 65535),
+            NormalizeTargetHost(route.DestinationIp),
+            Math.Clamp(route.DestinationPort, 1, 65535),
+            route.DestinationScheme);
+
+    private static string MergeSourceIps(IEnumerable<string> sourceIpValues) =>
+        CaddyBindAddressFormatter.NormalizeCsv(string.Join(", ", sourceIpValues));
 
     private static bool ManagedConfigurationIsInSync(
         string currentManagedConfigText,
@@ -439,12 +539,25 @@ public sealed class SqliteCaddyIntegrationDataService(
     private static string NormalizeGeneratedConfig(string value) =>
         (value ?? string.Empty).Replace("\r\n", "\n").TrimEnd();
 
-    private static string RenderPortForwardBlock(CaddyProxyRouteDefinition route)
+    private static string RenderPortForwardBlock(CaddyProxyRouteDefinition route) =>
+        RenderPortForwardBlock(
+            route.SourceIp,
+            route.SourcePort,
+            route.DestinationIp,
+            route.DestinationPort,
+            route.DestinationScheme);
+
+    private static string RenderPortForwardBlock(
+        string sourceIpValue,
+        int sourcePort,
+        string destinationIp,
+        int destinationPort,
+        CaddyProxyTargetScheme destinationScheme)
     {
         var builder = new StringBuilder();
-        var listenPort = Math.Clamp(route.SourcePort, 1, 65535);
-        var sourceIp = CaddyBindAddressFormatter.NormalizeCsv(route.SourceIp);
-        var targetUrl = BuildPortForwardTargetUrl(route);
+        var listenPort = Math.Clamp(sourcePort, 1, 65535);
+        var sourceIp = CaddyBindAddressFormatter.NormalizeCsv(sourceIpValue);
+        var targetUrl = BuildPortForwardTargetUrl(destinationIp, destinationPort, destinationScheme);
 
         builder.AppendLine($"http://:{listenPort} {{");
         if (!CaddyBindAddressFormatter.IsAnyAddressList(sourceIp))
@@ -453,7 +566,7 @@ public sealed class SqliteCaddyIntegrationDataService(
         }
 
         builder.AppendLine("    encode zstd gzip");
-        if (route.DestinationScheme == CaddyProxyTargetScheme.Https)
+        if (destinationScheme == CaddyProxyTargetScheme.Https)
         {
             builder.AppendLine($"    reverse_proxy {targetUrl} {{");
             builder.AppendLine("        transport http {");
@@ -851,6 +964,25 @@ public sealed class SqliteCaddyIntegrationDataService(
         return left.Intersect(right, StringComparer.OrdinalIgnoreCase).Any();
     }
 
+    private static bool PortForwardTargetsMatch(CaddyProxyRouteDefinition left, CaddyProxyRouteDefinition right) =>
+        left.DestinationScheme == right.DestinationScheme &&
+        Math.Clamp(left.DestinationPort, 1, 65535) == Math.Clamp(right.DestinationPort, 1, 65535) &&
+        string.Equals(NormalizeTargetHost(left.DestinationIp), NormalizeTargetHost(right.DestinationIp), StringComparison.OrdinalIgnoreCase);
+
+    private static string FormatPortForwardTarget(CaddyProxyRouteDefinition route) =>
+        BuildPortForwardTargetUrl(route.DestinationIp, route.DestinationPort, route.DestinationScheme);
+
+    private static string NormalizeTargetHost(string host)
+    {
+        var normalized = (host ?? string.Empty).Trim().Trim('[', ']');
+        if (IPAddress.TryParse(normalized, out var address))
+        {
+            return address.IsIPv4MappedToIPv6 ? address.MapToIPv4().ToString() : address.ToString();
+        }
+
+        return normalized;
+    }
+
     private static string ResolveSourceProbeHost(string sourceIp)
     {
         var addresses = CaddyBindAddressFormatter.NormalizeMany(sourceIp);
@@ -929,7 +1061,7 @@ public sealed class SqliteCaddyIntegrationDataService(
                     continue;
                 }
 
-                return formattedLine;
+                return FormatCaddyProblemForDisplay(formattedLine);
             }
 
             if (line.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) ||
@@ -937,13 +1069,41 @@ public sealed class SqliteCaddyIntegrationDataService(
                 line.Contains(" failed", StringComparison.OrdinalIgnoreCase) ||
                 line.Contains(" invalid", StringComparison.OrdinalIgnoreCase))
             {
-                return line;
+                return FormatCaddyProblemForDisplay(line);
             }
 
             fallback = string.IsNullOrWhiteSpace(fallback) ? line : fallback;
         }
 
-        return string.IsNullOrWhiteSpace(fallback) ? null : fallback;
+        return string.IsNullOrWhiteSpace(fallback) ? null : FormatCaddyProblemForDisplay(fallback);
+    }
+
+    private static string FormatCaddyProblemForDisplay(string problem)
+    {
+        const string ambiguousSiteMarker = "ambiguous site definition:";
+        if (!problem.Contains(ambiguousSiteMarker, StringComparison.OrdinalIgnoreCase))
+        {
+            return problem;
+        }
+
+        var siteDefinition = problem[(problem.IndexOf(ambiguousSiteMarker, StringComparison.OrdinalIgnoreCase) + ambiguousSiteMarker.Length)..].Trim();
+        var port = ExtractPortFromSiteDefinition(siteDefinition);
+        return string.IsNullOrWhiteSpace(port)
+            ? "Two Caddy routes are trying to use the same listener. Use one route with multiple source IPs, or give one route a different source port."
+            : $"Two Caddy routes are trying to use source port {port}. Use one route with multiple source IPs, or give one route a different source port.";
+    }
+
+    private static string ExtractPortFromSiteDefinition(string siteDefinition)
+    {
+        var trimmed = siteDefinition.Trim().TrimEnd('.', ';', ',', '"', '\'');
+        var colonIndex = trimmed.LastIndexOf(':');
+        if (colonIndex < 0 || colonIndex + 1 >= trimmed.Length)
+        {
+            return string.Empty;
+        }
+
+        var portCharacters = trimmed[(colonIndex + 1)..].TakeWhile(char.IsDigit).ToArray();
+        return portCharacters.Length == 0 ? string.Empty : new string(portCharacters);
     }
 
     private static bool TryFormatCaddyJsonLine(string line, out string formattedLine, out bool isInformational)
@@ -993,6 +1153,52 @@ public sealed class SqliteCaddyIntegrationDataService(
         var scheme = route.DestinationScheme == CaddyProxyTargetScheme.Https ? "https" : "http";
         return $"{scheme}://{FormatHostForUri(route.DestinationIp)}:{Math.Clamp(route.DestinationPort, 1, 65535)}";
     }
+
+    private static string BuildPortForwardTargetUrl(
+        string destinationIp,
+        int destinationPort,
+        CaddyProxyTargetScheme destinationScheme)
+    {
+        var scheme = destinationScheme == CaddyProxyTargetScheme.Https ? "https" : "http";
+        return $"{scheme}://{FormatHostForUri(destinationIp)}:{Math.Clamp(destinationPort, 1, 65535)}";
+    }
+
+    private static OperationLogEntry DowngradeValidationLogsForWorkingPortForward(OperationLogEntry log) =>
+        log.Level == OperationLogLevel.Error
+            ? log with
+            {
+                Level = OperationLogLevel.Warning,
+                Message = "Caddy validation reported a warning, but this port forward is responding."
+            }
+            : log;
+
+    private static OperationLogEntry DowngradeSoftConfigurationErrorForWorkingPortForward(OperationLogEntry log)
+    {
+        if (log.Level != OperationLogLevel.Error)
+        {
+            return log;
+        }
+
+        return log.Message.StartsWith("Main Caddyfile does not import", StringComparison.Ordinal) ||
+               log.Message.StartsWith("Managed Caddy include does not contain", StringComparison.Ordinal) ||
+               log.Message.Equals("Validate Caddy configuration", StringComparison.Ordinal)
+            ? log with { Level = OperationLogLevel.Warning }
+            : log;
+    }
+
+    private readonly record struct PortForwardRenderKey(
+        int SourcePort,
+        string DestinationIp,
+        int DestinationPort,
+        CaddyProxyTargetScheme DestinationScheme);
+
+    private sealed record PortForwardRenderGroup(
+        int SourcePort,
+        string SourceIp,
+        string DestinationIp,
+        int DestinationPort,
+        CaddyProxyTargetScheme DestinationScheme,
+        IReadOnlyList<CaddyProxyRouteDefinition> Routes);
 
     private static string FormatHostForUri(string host)
     {
