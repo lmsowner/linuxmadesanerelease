@@ -55,6 +55,8 @@ public sealed class TerminalWorkspaceState(ITerminalSessionService terminalSessi
     private readonly object syncRoot = new();
     private long version;
 
+    public bool DefaultCopyOnSelect { get; private set; }
+
     public IReadOnlyList<TerminalTabState> Tabs
     {
         get
@@ -124,6 +126,7 @@ public sealed class TerminalWorkspaceState(ITerminalSessionService terminalSessi
             if (existing is null)
             {
                 existing = TerminalTabState.Create(host);
+                existing.CopyOnSelect = DefaultCopyOnSelect;
                 tabs.Add(existing);
             }
             else
@@ -150,6 +153,7 @@ public sealed class TerminalWorkspaceState(ITerminalSessionService terminalSessi
         {
             var tab = TerminalTabState.Create(host);
             tab.SetWorkingDirectoryOverride(workingDirectory);
+            tab.CopyOnSelect = DefaultCopyOnSelect;
             tabs.Add(tab);
 
             if (activate)
@@ -228,6 +232,65 @@ public sealed class TerminalWorkspaceState(ITerminalSessionService terminalSessi
             }
 
             tab.AiPanelWidthPx = widthPx;
+            version++;
+            return true;
+        }
+    }
+
+    public bool SetCopyOnSelect(Guid tabId, bool enabled)
+    {
+        lock (syncRoot)
+        {
+            if (tabs.All(item => item.Id != tabId))
+            {
+                return false;
+            }
+
+            var changed = DefaultCopyOnSelect != enabled;
+            DefaultCopyOnSelect = enabled;
+            foreach (var tab in tabs)
+            {
+                if (tab.CopyOnSelect != enabled)
+                {
+                    tab.CopyOnSelect = enabled;
+                    changed = true;
+                }
+            }
+
+            if (!changed)
+            {
+                return false;
+            }
+
+            version++;
+            return true;
+        }
+    }
+
+    public bool SetDefaultCopyOnSelect(bool enabled, bool applyToExisting)
+    {
+        lock (syncRoot)
+        {
+            var changed = DefaultCopyOnSelect != enabled;
+            DefaultCopyOnSelect = enabled;
+
+            if (applyToExisting)
+            {
+                foreach (var tab in tabs)
+                {
+                    if (tab.CopyOnSelect != enabled)
+                    {
+                        tab.CopyOnSelect = enabled;
+                        changed = true;
+                    }
+                }
+            }
+
+            if (!changed)
+            {
+                return false;
+            }
+
             version++;
             return true;
         }
@@ -315,6 +378,8 @@ public sealed class TerminalTabState
     public bool AllowInternetResearch { get; set; }
 
     public int AiPanelWidthPx { get; set; } = 736;
+
+    public bool CopyOnSelect { get; set; }
 
     private string? workingDirectoryOverride;
 

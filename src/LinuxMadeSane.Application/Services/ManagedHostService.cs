@@ -76,6 +76,29 @@ public sealed class ManagedHostService(
         return hostId;
     }
 
+    public async Task DeleteHostAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var host = await hostStore.GetAsync(id, cancellationToken);
+        if (host is null)
+        {
+            throw new InvalidOperationException("Host not found.");
+        }
+
+        var capabilities = ManagedHostCapabilities.Describe(host);
+        if (capabilities.IsLocalLmsHost || IsCurrentLmsEndpoint(host))
+        {
+            throw new InvalidOperationException("The local Linux Made Sane host cannot be removed from the inventory.");
+        }
+
+        if (host.Kind is not ManagedHostKind.SshHost and not ManagedHostKind.LmsHost)
+        {
+            throw new InvalidOperationException("Only SSH hosts and remote LMS hosts can be removed.");
+        }
+
+        await hostStore.DeleteAsync(id, cancellationToken);
+        await DeleteStoredHostSecretsAsync(host, cancellationToken);
+    }
+
     public async Task<HostConnectionTestResult> TestConnectionAsync(
         ManagedHostEditor editor,
         CancellationToken cancellationToken = default)
@@ -821,6 +844,13 @@ public sealed class ManagedHostService(
         }
 
         await secretStore.DeleteSecretAsync(secretReference, cancellationToken);
+    }
+
+    private async Task DeleteStoredHostSecretsAsync(ManagedHost host, CancellationToken cancellationToken)
+    {
+        await DeleteTransientSecretAsync(host.PasswordSecretReference, cancellationToken);
+        await DeleteTransientSecretAsync(host.PrivateKeySecretReference, cancellationToken);
+        await DeleteTransientSecretAsync(host.PrivateKeyPassphraseSecretReference, cancellationToken);
     }
 
     private static string NormalizeEnvironment(string? environment)

@@ -9,5 +9,6 @@ public sealed class UserDisplayPreferenceEntity
     public string ThemePaletteId { get; set; } = string.Empty;
     public string ThemeMode { get; set; } = string.Empty;
     public int FontScalePercent { get; set; }
+    public bool TerminalCopyOnSelect { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }

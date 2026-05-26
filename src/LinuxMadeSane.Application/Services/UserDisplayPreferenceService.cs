@@ -24,11 +24,31 @@ public sealed class UserDisplayPreferenceService(IUserDisplayPreferenceStore sto
         int fontScalePercent,
         CancellationToken cancellationToken = default)
     {
+        var existing = await store.GetAsync(userId, cancellationToken);
         var preference = new UserDisplayPreference(
             userId,
             NormalizePaletteId(themePaletteId),
             NormalizeThemeMode(themeMode),
             Math.Clamp(fontScalePercent, MinimumFontScalePercent, MaximumFontScalePercent),
+            existing?.TerminalCopyOnSelect ?? false,
+            DateTimeOffset.UtcNow);
+
+        await store.SaveAsync(preference, cancellationToken);
+        return preference;
+    }
+
+    public async Task<UserDisplayPreference> SaveTerminalCopyOnSelectAsync(
+        Guid userId,
+        bool enabled,
+        CancellationToken cancellationToken = default)
+    {
+        var existing = await store.GetAsync(userId, cancellationToken);
+        var preference = new UserDisplayPreference(
+            userId,
+            existing?.ThemePaletteId ?? DefaultPaletteId,
+            existing?.ThemeMode ?? DefaultThemeMode,
+            existing?.FontScalePercent ?? 100,
+            enabled,
             DateTimeOffset.UtcNow);
 
         await store.SaveAsync(preference, cancellationToken);

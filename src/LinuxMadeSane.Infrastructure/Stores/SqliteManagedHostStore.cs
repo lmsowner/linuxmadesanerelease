@@ -71,6 +71,26 @@ public sealed class SqliteManagedHostStore(LinuxMadeSaneDbContext dbContext) : I
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var entity = await dbContext.ManagedHosts
+            .SingleOrDefaultAsync(host => host.Id == id, cancellationToken);
+        if (entity is null)
+        {
+            return;
+        }
+
+        await dbContext.AiAttachedServers
+            .Where(server => server.ManagedHostId == id)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.FileBrowserShortcuts
+            .Where(shortcut => shortcut.ManagedHostId == id)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        dbContext.ManagedHosts.Remove(entity);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
     private static ManagedHost Map(ManagedHostEntity entity) =>
         new(
             entity.Id,

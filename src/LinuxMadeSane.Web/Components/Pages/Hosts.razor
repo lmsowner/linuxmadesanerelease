@@ -173,6 +173,14 @@
                                                              SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
                                             <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
                                             <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Href="@($"/hosts/{row.Host.Id}/edit")" Variant="UiButtonVariant.Action" />
+                                            @if (CanRemoveHost(row.Host))
+                                            {
+                                                <UiCommandButton Label="Remove"
+                                                                 Glyph="UiIconGlyph.Delete"
+                                                                 Variant="UiButtonVariant.Danger"
+                                                                 Disabled="@isRemovingHost"
+                                                                 OnClick="@(() => OpenRemoveHostDialog(row.Host))" />
+                                            }
                                         </div>
                                     </td>
                                 </tr>
@@ -267,6 +275,14 @@
                                                                  Variant="UiButtonVariant.Action" />
                                             }
                                             <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Href="@($"/hosts/{row.Host.Id}/edit")" Variant="UiButtonVariant.Action" />
+                                            @if (CanRemoveHost(row.Host))
+                                            {
+                                                <UiCommandButton Label="Remove"
+                                                                 Glyph="UiIconGlyph.Delete"
+                                                                 Variant="UiButtonVariant.Danger"
+                                                                 Disabled="@isRemovingHost"
+                                                                 OnClick="@(() => OpenRemoveHostDialog(row.Host))" />
+                                            }
                                         </div>
                                     </td>
                                 </tr>
@@ -277,6 +293,43 @@
             </TabPage>
     </TabControl>
 </div>
+
+<UiModal IsOpen="@(hostPendingRemoval is not null)"
+         Title="Remove host"
+         Subtitle="@RemoveHostDialogSubtitle"
+         Class="hosts-remove-modal"
+         CloseOnBackdrop="@(!isRemovingHost)"
+         OnClose="CloseRemoveHostDialog">
+    <ChildContent>
+        @if (hostPendingRemoval is not null)
+        {
+            <div class="stack-relaxed">
+                <p class="callout warning">
+                    Remove <strong>@hostPendingRemoval.Name</strong> from LMS? This removes the inventory entry, saved SSH credentials, host runbooks, AI host attachments, and file shortcuts.
+                </p>
+                <p class="meta-text">This does not uninstall Linux Made Sane or change anything on the remote machine.</p>
+                @if (!string.IsNullOrWhiteSpace(removeHostStatus))
+                {
+                    <p class="@($"callout {removeHostTone}")">@removeHostStatus</p>
+                }
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <div class="hosts-remove-footer">
+            <UiCommandButton Label="Cancel"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isRemovingHost"
+                             OnClick="CloseRemoveHostDialog" />
+            <UiCommandButton Label="@(isRemovingHost ? "Removing..." : "Remove host")"
+                             Glyph="UiIconGlyph.Delete"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@(!CanConfirmRemoveHost)"
+                             OnClick="ConfirmRemoveHostAsync" />
+        </div>
+    </Footer>
+</UiModal>
 
 <UiModal IsOpen="@isPublicKeySetupOpen"
          Title="Set up public key SSH"
@@ -395,6 +448,10 @@
     private string publicKeySetupStatus = string.Empty;
     private string publicKeySetupTone = "info";
     private string publicKeySetupCommandOutput = string.Empty;
+    private ManagedHost? hostPendingRemoval;
+    private bool isRemovingHost;
+    private string removeHostStatus = string.Empty;
+    private string removeHostTone = "info";
     private Guid? lmsConnectHostId;
     private string lmsConnectStatus = string.Empty;
     private string lmsConnectTone = "info";
@@ -422,6 +479,18 @@
         : 0;
 
     private int ActiveOfflineHostCount => ActiveHostRows.Count(row => !row.IsStatusLoading && ResolveConnectionStatus(row) != ConnectionTestStatus.Succeeded);
+
+    private string RemoveHostDialogSubtitle =>
+        hostPendingRemoval is null
+            ? "Remove a host registration from LMS."
+            : ManagedHostCapabilities.IsLmsHost(hostPendingRemoval)
+                ? "Remove a remote LMS host registration without uninstalling the remote machine."
+                : "Remove an SSH host registration from LMS.";
+
+    private bool CanConfirmRemoveHost =>
+        hostPendingRemoval is not null &&
+        !isRemovingHost &&
+        CanRemoveHost(hostPendingRemoval);
 
     protected override async Task OnInitializedAsync()
     {
@@ -474,6 +543,75 @@
             ? SshHostsTabValue
             : LmsHostsTabValue;
         return Task.CompletedTask;
+    }
+
+    private Task OpenRemoveHostDialog(ManagedHost host)
+    {
+        if (!CanRemoveHost(host) || isRemovingHost)
+        {
+            return Task.CompletedTask;
+        }
+
+        hostPendingRemoval = host;
+        removeHostStatus = string.Empty;
+        removeHostTone = "info";
+        return Task.CompletedTask;
+    }
+
+    private Task CloseRemoveHostDialog()
+    {
+        if (!isRemovingHost)
+        {
+            hostPendingRemoval = null;
+            removeHostStatus = string.Empty;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmRemoveHostAsync()
+    {
+        var host = hostPendingRemoval;
+        if (host is null || !CanRemoveHost(host) || isRemovingHost)
+        {
+            return;
+        }
+
+        isRemovingHost = true;
+        removeHostStatus = "Removing host...";
+        removeHostTone = "info";
+
+        try
+        {
+            await HostService.DeleteHostAsync(host.Id);
+            hostRows = hostRows
+                .Where(row => row.Host.Id != host.Id)
+                .ToArray();
+            lmsUpdateOperations.Remove(host.Id);
+
+            if (publicKeySetupHost?.Id == host.Id)
+            {
+                isPublicKeySetupOpen = false;
+                publicKeySetupHost = null;
+                publicKeySetupEditor = null;
+                publicKeySetupKeyPair = null;
+            }
+
+            hostPendingRemoval = null;
+            removeHostStatus = string.Empty;
+            lmsConnectStatus = $"Removed {host.Name}.";
+            lmsConnectTone = "success";
+        }
+        catch (Exception exception)
+        {
+            removeHostStatus = exception.Message;
+            removeHostTone = "error";
+        }
+        finally
+        {
+            isRemovingHost = false;
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     private async Task RefreshStatusesAsync(CancellationToken cancellationToken)
@@ -806,6 +944,14 @@
     {
         var capabilities = ManagedHostCapabilities.Describe(row.Host);
         return capabilities is { IsLmsHost: true, IsLocalLmsHost: false };
+    }
+
+    private static bool CanRemoveHost(ManagedHost host)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(host);
+        return !capabilities.IsLocalLmsHost &&
+               !IsCurrentLmsEndpoint(host) &&
+               host.Kind is ManagedHostKind.SshHost or ManagedHostKind.LmsHost;
     }
 
     private static HostActionLink? TryGetLmsInstallAction(ManagedHost host)

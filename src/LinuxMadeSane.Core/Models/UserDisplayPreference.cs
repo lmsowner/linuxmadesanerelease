@@ -8,4 +8,5 @@ public sealed record UserDisplayPreference(
     string ThemePaletteId,
     string ThemeMode,
     int FontScalePercent,
+    bool TerminalCopyOnSelect,
     DateTimeOffset UpdatedAtUtc);

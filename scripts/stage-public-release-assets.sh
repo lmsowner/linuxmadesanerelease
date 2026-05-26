@@ -15,6 +15,7 @@ lms_require_command sha256sum
 REPO_ROOT="$(lms_repo_root)"
 PUBLIC_SITE_ROOT="$REPO_ROOT/src/LinuxMadeSane.PublicSite"
 PUBLIC_SITE_APPSETTINGS="$PUBLIC_SITE_ROOT/appsettings.json"
+LIVE_PUBLIC_SITE_RELEASE_ROOT="${LIVE_PUBLIC_SITE_RELEASE_ROOT:-/var/lib/linuxmadesane/public-site/releases}"
 APP_VERSION="$(lms_resolve_version)"
 RUNTIMES="${RUNTIMES:-linux-x64 linux-arm64 linux-arm}"
 PACKAGE_DIR="${PACKAGE_DIR:-$REPO_ROOT/artifacts/packages}"
@@ -43,8 +44,17 @@ resolve_public_site_directory() {
   (cd "$PUBLIC_SITE_ROOT" >/dev/null 2>&1 && mkdir -p "$configured" && cd "$configured" >/dev/null 2>&1 && pwd)
 }
 
-COMMUNITY_RELEASE_ROOT="${COMMUNITY_RELEASE_ROOT:-$(resolve_public_site_directory "$(read_public_site_setting CommunityReleaseDirectory "../../artifacts/public-site/community")")}"
-PRO_RELEASE_ROOT="${PRO_RELEASE_ROOT:-$(resolve_public_site_directory "$(read_public_site_setting ProReleaseDirectory "../../artifacts/public-site/pro")")}"
+if [[ -z "${COMMUNITY_RELEASE_ROOT:-}" && -d "$LIVE_PUBLIC_SITE_RELEASE_ROOT" ]]; then
+  COMMUNITY_RELEASE_ROOT="$LIVE_PUBLIC_SITE_RELEASE_ROOT/community"
+else
+  COMMUNITY_RELEASE_ROOT="${COMMUNITY_RELEASE_ROOT:-$(resolve_public_site_directory "$(read_public_site_setting CommunityReleaseDirectory "../../artifacts/public-site/community")")}"
+fi
+
+if [[ -z "${PRO_RELEASE_ROOT:-}" && -d "$LIVE_PUBLIC_SITE_RELEASE_ROOT" ]]; then
+  PRO_RELEASE_ROOT="$LIVE_PUBLIC_SITE_RELEASE_ROOT/pro"
+else
+  PRO_RELEASE_ROOT="${PRO_RELEASE_ROOT:-$(resolve_public_site_directory "$(read_public_site_setting ProReleaseDirectory "../../artifacts/public-site/pro")")}"
+fi
 COMMUNITY_ASSET_DIR="$COMMUNITY_RELEASE_ROOT/$APP_VERSION"
 PRO_ASSET_DIR="$PRO_RELEASE_ROOT/$APP_VERSION"
 

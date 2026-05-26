@@ -156,17 +156,63 @@ window.lmsTerminal = (() => {
             }, 12);
         });
 
+        const selectionSubscription = terminal.onSelectionChange?.(() => {
+            const state = terminals.get(id);
+            if (!state) {
+                return;
+            }
+
+            const text = terminal.getSelection() ?? "";
+            state.pendingSelectionText = text;
+            if (text !== state.lastAutoCopiedSelection) {
+                state.lastAutoCopiedSelection = "";
+            }
+        });
+
+        const documentPointerDownHandler = event => {
+            const state = terminals.get(id);
+            if (!state?.copyOnSelect || !state.terminal || element.contains(event.target)) {
+                return;
+            }
+
+            void autoCopySelection(state);
+        };
+
+        const terminalPointerUpHandler = () => {
+            const state = terminals.get(id);
+            if (!state?.copyOnSelect || !state.terminal) {
+                return;
+            }
+
+            const text = terminal.getSelection() ?? "";
+            if (text) {
+                state.pendingSelectionText = text;
+                void autoCopySelection(state);
+            }
+        };
+
+        document.addEventListener("pointerdown", documentPointerDownHandler, true);
+        element.addEventListener("pointerup", terminalPointerUpHandler);
+        element.addEventListener("mouseup", terminalPointerUpHandler);
+
         terminals.set(id, {
             terminal,
             fitAddon,
             resizeObserver,
             dataSubscription,
+            selectionSubscription,
+            documentPointerDownHandler,
+            terminalPointerUpHandler,
+            terminalHostElement: element,
             dotNetRef,
             lastOutput: "",
             lastRevision: -1,
             pendingInput: "",
             inputFlushHandle: 0,
-            fitFrame: 0
+            fitFrame: 0,
+            copyOnSelect: false,
+            pendingSelectionText: "",
+            lastAutoCopiedSelection: ""
         });
 
         dotNetRef.invokeMethodAsync("OnTerminalResize", terminal.cols, terminal.rows);
@@ -221,6 +267,27 @@ window.lmsTerminal = (() => {
         if (text) {
             await writeClipboardText(text);
         }
+    }
+
+    function setCopyOnSelect(id, enabled) {
+        const state = getState(id);
+        if (state) {
+            state.copyOnSelect = !!enabled;
+        }
+    }
+
+    async function autoCopySelection(state) {
+        const text = state?.terminal?.getSelection?.() || state?.pendingSelectionText || "";
+        if (!text || text === state.lastAutoCopiedSelection) {
+            return false;
+        }
+
+        const copied = await writeClipboardText(text);
+        if (copied) {
+            state.lastAutoCopiedSelection = text;
+        }
+
+        return copied;
     }
 
     function getSelection(id) {
@@ -407,7 +474,15 @@ window.lmsTerminal = (() => {
         }
 
         state.dataSubscription?.dispose?.();
+        state.selectionSubscription?.dispose?.();
         state.resizeObserver?.disconnect?.();
+        if (state.documentPointerDownHandler) {
+            document.removeEventListener("pointerdown", state.documentPointerDownHandler, true);
+        }
+        if (state.terminalPointerUpHandler) {
+            state.terminalHostElement?.removeEventListener("pointerup", state.terminalPointerUpHandler);
+            state.terminalHostElement?.removeEventListener("mouseup", state.terminalPointerUpHandler);
+        }
         if (state.inputFlushHandle) {
             window.clearTimeout(state.inputFlushHandle);
         }
@@ -476,6 +551,7 @@ window.lmsTerminal = (() => {
         appendChunk,
         focus,
         copySelection,
+        setCopyOnSelect,
         getSelection,
         readClipboard,
         clear,

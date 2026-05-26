@@ -14,4 +14,9 @@ public interface IUserDisplayPreferenceService
         string themeMode,
         int fontScalePercent,
         CancellationToken cancellationToken = default);
+
+    Task<UserDisplayPreference> SaveTerminalCopyOnSelectAsync(
+        Guid userId,
+        bool enabled,
+        CancellationToken cancellationToken = default);
 }

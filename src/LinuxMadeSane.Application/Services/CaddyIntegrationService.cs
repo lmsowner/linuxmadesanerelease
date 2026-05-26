@@ -10,6 +10,7 @@ using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Caddy;
+using LinuxMadeSane.Core.Models.RdpOptimizer;
 
 namespace LinuxMadeSane.Application.Services;
 
@@ -17,9 +18,21 @@ public sealed class CaddyIntegrationService(
     ICaddyIntegrationDataService dataService,
     EdgeGatewayOptions? edgeGatewayOptions = null) : ICaddyIntegrationService
 {
+    private const string ManagedIncludeOutOfSyncMarker = "out of sync with saved routes";
+
     public async Task<CaddyIntegrationDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default)
     {
         var snapshot = await dataService.GetSnapshotAsync(cancellationToken);
+        IReadOnlyList<OperationLogEntry> lastOperationLogs = [];
+        if (ShouldRepairManagedInclude(snapshot))
+        {
+            var repairResult = await dataService.ReloadAsync(cancellationToken);
+            lastOperationLogs = repairResult.Logs;
+            snapshot = repairResult.Success
+                ? await dataService.GetSnapshotAsync(cancellationToken)
+                : snapshot with { ValidationSummary = $"Caddy config drift repair failed: {repairResult.Summary}" };
+        }
+
         return new CaddyIntegrationDashboardViewModel(
             snapshot.IsInstalled,
             snapshot.InstalledVersion,
@@ -35,8 +48,15 @@ public sealed class CaddyIntegrationService(
                 .ThenBy(route => route.Hostname, StringComparer.OrdinalIgnoreCase)
                 .Select(MapListItem)
                 .ToArray(),
-            []);
+            lastOperationLogs);
     }
+
+    private static bool ShouldRepairManagedInclude(CaddyIntegrationSnapshot snapshot) =>
+        snapshot.IsInstalled &&
+        snapshot.IsServiceActive &&
+        snapshot.IsManagedImportConfigured &&
+        !snapshot.IsConfigurationValid &&
+        snapshot.ValidationSummary.Contains(ManagedIncludeOutOfSyncMarker, StringComparison.OrdinalIgnoreCase);
 
     public async Task<CaddyProxyRouteEditor> GetEditorAsync(Guid? routeId, CancellationToken cancellationToken = default)
     {

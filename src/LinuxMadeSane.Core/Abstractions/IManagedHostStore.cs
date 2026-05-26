@@ -12,4 +12,6 @@ public interface IManagedHostStore
     Task<ManagedHost?> GetAsync(Guid id, CancellationToken cancellationToken = default);
 
     Task SaveAsync(ManagedHost host, CancellationToken cancellationToken = default);
+
+    Task DeleteAsync(Guid id, CancellationToken cancellationToken = default);
 }

@@ -1010,11 +1010,12 @@ lms_extract_version_revision() {
 
 lms_resolve_next_version_revision() {
   local version_date="$1"
-  local repo_root package_dir public_site_root date_regex max_revision path base revision
+  local repo_root package_dir public_site_root live_public_site_root date_regex max_revision path base revision
 
   repo_root="${REPO_ROOT:-$(lms_repo_root)}"
   package_dir="${PACKAGE_DIR:-$repo_root/artifacts/packages}"
   public_site_root="$repo_root/artifacts/public-site"
+  live_public_site_root="${LIVE_PUBLIC_SITE_RELEASE_ROOT:-/var/lib/linuxmadesane/public-site/releases}"
   date_regex="${version_date//./\\.}"
   max_revision=-1
 
@@ -1023,7 +1024,9 @@ lms_resolve_next_version_revision() {
     "$package_dir"/release-manifest-"$version_date".*.json \
     "$package_dir"/linux-made-sane-*-"$version_date".*-*.tar.gz \
     "$public_site_root"/community/"$version_date".* \
-    "$public_site_root"/pro/"$version_date".*
+    "$public_site_root"/pro/"$version_date".* \
+    "$live_public_site_root"/community/"$version_date".* \
+    "$live_public_site_root"/pro/"$version_date".*
   do
     base="$(basename "$path")"
     if [[ "$base" =~ $date_regex\.([0-9]+) ]]; then

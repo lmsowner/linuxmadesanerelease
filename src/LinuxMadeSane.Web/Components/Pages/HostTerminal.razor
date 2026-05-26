@@ -4,12 +4,15 @@
 @page "/hosts/{HostId:guid}/terminal"
 @rendermode InteractiveServer
 @implements IAsyncDisposable
+@using System.Security.Claims
+@using Microsoft.AspNetCore.Components.Authorization
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models
 @inject IManagedHostService HostService
 @inject ITerminalSessionService TerminalSessionService
+@inject IUserDisplayPreferenceService UserDisplayPreferenceService
 @inject ITransientConnectionSecretStore ConnectionSecretStore
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
@@ -241,7 +244,12 @@
                                                     </div>
 
                                                     <div class="terminal-console-note">
-                                                        <span class="meta-text">Right-click for copy, paste, runbooks, interrupt, local clear, and pop out.</span>
+                                                        <label class="terminal-copy-on-select">
+                                                            <input type="checkbox"
+                                                                   checked="@tab.CopyOnSelect"
+                                                                   @onchange="@((ChangeEventArgs args) => SetCopyOnSelectAsync(tab, args))" />
+                                                            <span>Copy on select</span>
+                                                        </label>
                                                     </div>
                                                 </div>
 
@@ -275,6 +283,8 @@
     [Parameter]
     public Guid HostId { get; set; }
 
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
     private readonly string terminalElementId = $"terminal-{Guid.NewGuid():N}";
     private readonly string terminalClientId = Guid.NewGuid().ToString("N");
     private readonly Dictionary<Guid, long> renderedOutputRevisions = [];
@@ -299,6 +309,7 @@
     private bool pendingAiAnalyzeSession;
     private Guid? pendingAiSelectionTabId;
     private string? pendingAiSelectionText;
+    private Guid? userId;
 
     private TerminalWorkspaceState? TerminalWorkspace => terminalWorkspace;
 
@@ -327,15 +338,24 @@
 
     private string? ActiveTabValue => ActiveTab is null ? null : GetTabValue(ActiveTab);
 
-    protected override Task OnInitializedAsync()
+    protected override async Task OnInitializedAsync()
     {
         terminalWorkspace = TerminalWorkspaceRegistry.GetOrCreate(TerminalWorkspaceAccessor.GetWorkspaceId());
+        userId = await ResolveUserIdAsync();
+        if (userId.HasValue)
+        {
+            var preference = await UserDisplayPreferenceService.GetAsync(userId.Value);
+            if (preference is not null)
+            {
+                terminalWorkspace.SetDefaultCopyOnSelect(preference.TerminalCopyOnSelect, applyToExisting: true);
+            }
+        }
+
         observedWorkspaceVersion = terminalWorkspace.Version;
         dotNetReference = DotNetObjectReference.Create(this);
         TerminalSessionService.OutputAppended += HandleTerminalOutputAppended;
         pollingCts = new CancellationTokenSource();
         _ = PollSnapshotsAsync(pollingCts.Token);
-        return Task.CompletedTask;
     }
 
     protected override async Task OnParametersSetAsync()
@@ -384,6 +404,11 @@
             terminalInitialized = await JSRuntime.InvokeAsync<bool>("lmsTerminal.createTerminal", terminalClientId, terminalElementId, dotNetReference);
             renderedTabId = ActiveTab.Id;
             renderedOutputRevisions[ActiveTab.Id] = -1;
+        }
+
+        if (terminalInitialized)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.setCopyOnSelect", terminalClientId, ActiveTab.CopyOnSelect);
         }
 
         await WriteRenderedSnapshotAsync();
@@ -876,6 +901,53 @@
         contextMenuOpen = false;
         hasContextMenuSelection = false;
         await JSRuntime.InvokeVoidAsync("lmsTerminal.copySelection", terminalClientId);
+    }
+
+    private async Task SetCopyOnSelectAsync(TerminalTabState tab, ChangeEventArgs args)
+    {
+        var enabled = ReadCheckboxValue(args);
+
+        if (TerminalWorkspace is not null)
+        {
+            if (TerminalWorkspace.SetCopyOnSelect(tab.Id, enabled))
+            {
+                observedWorkspaceVersion = TerminalWorkspace.Version;
+            }
+        }
+        else
+        {
+            tab.CopyOnSelect = enabled;
+        }
+
+        if (terminalInitialized && renderedTabId == tab.Id)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.setCopyOnSelect", terminalClientId, enabled);
+        }
+
+        if (userId.HasValue)
+        {
+            await UserDisplayPreferenceService.SaveTerminalCopyOnSelectAsync(userId.Value, enabled);
+        }
+    }
+
+    private static bool ReadCheckboxValue(ChangeEventArgs args) =>
+        args.Value switch
+        {
+            bool value => value,
+            string text when bool.TryParse(text, out var parsed) => parsed,
+            _ => false
+        };
+
+    private async Task<Guid?> ResolveUserIdAsync()
+    {
+        var authenticationState = AuthenticationStateTask is null
+            ? null
+            : await AuthenticationStateTask;
+        var value = authenticationState?.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+
+        return Guid.TryParse(value, out var parsed)
+            ? parsed
+            : null;
     }
 
     private async Task AskAiAsync(TerminalTabState tab)

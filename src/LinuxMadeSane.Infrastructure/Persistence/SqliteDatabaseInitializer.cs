@@ -1739,11 +1739,13 @@ public sealed class SqliteDatabaseInitializer(
                 ThemePaletteId TEXT NOT NULL,
                 ThemeMode TEXT NOT NULL,
                 FontScalePercent INTEGER NOT NULL,
+                TerminalCopyOnSelect INTEGER NOT NULL DEFAULT 0,
                 UpdatedAtUtc TEXT NOT NULL
             );
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(userDisplayPreferencesSql, cancellationToken);
+        await EnsureColumnExistsAsync("user_display_preferences", "TerminalCopyOnSelect", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
     }
 
     private async Task EnsureFileBrowserShortcutTablesAsync(CancellationToken cancellationToken)

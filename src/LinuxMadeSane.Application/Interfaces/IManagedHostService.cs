@@ -15,6 +15,8 @@ public interface IManagedHostService
 
     Task<Guid> SaveHostAsync(ManagedHostEditor editor, CancellationToken cancellationToken = default);
 
+    Task DeleteHostAsync(Guid id, CancellationToken cancellationToken = default);
+
     Task<HostConnectionTestResult> TestConnectionAsync(
         ManagedHostEditor editor,
         CancellationToken cancellationToken = default);
