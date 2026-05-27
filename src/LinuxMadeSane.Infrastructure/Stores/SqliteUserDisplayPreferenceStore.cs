@@ -35,6 +35,7 @@ public sealed class SqliteUserDisplayPreferenceStore(LinuxMadeSaneDbContext dbCo
             entity.ThemeMode = preference.ThemeMode;
             entity.FontScalePercent = preference.FontScalePercent;
             entity.TerminalCopyOnSelect = preference.TerminalCopyOnSelect;
+            entity.DockerAiActionsApproved = preference.DockerAiActionsApproved;
             entity.UpdatedAtUtc = preference.UpdatedAtUtc;
         }
 
@@ -48,6 +49,7 @@ public sealed class SqliteUserDisplayPreferenceStore(LinuxMadeSaneDbContext dbCo
             entity.ThemeMode,
             entity.FontScalePercent,
             entity.TerminalCopyOnSelect,
+            entity.DockerAiActionsApproved,
             entity.UpdatedAtUtc);
 
     private static UserDisplayPreferenceEntity Map(UserDisplayPreference preference) =>
@@ -58,6 +60,7 @@ public sealed class SqliteUserDisplayPreferenceStore(LinuxMadeSaneDbContext dbCo
             ThemeMode = preference.ThemeMode,
             FontScalePercent = preference.FontScalePercent,
             TerminalCopyOnSelect = preference.TerminalCopyOnSelect,
+            DockerAiActionsApproved = preference.DockerAiActionsApproved,
             UpdatedAtUtc = preference.UpdatedAtUtc
         };
 }

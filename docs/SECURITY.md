@@ -50,6 +50,7 @@ Basic Caddy routes under Integrations > Caddy are routing rules, not an authenti
 - prefer private or tailnet source addresses for port-forward routes
 - review generated Caddy blocks before reloading or restarting Caddy
 - use Edge Gateway or another identity layer when a route needs MFA/passkey protection
+- configure and test LMS messaging before relying on email MFA codes or login links; unknown email addresses must receive the same generic check-your-inbox response to avoid account discovery
 - avoid putting admin tools behind a basic Caddy route without separate access control
 
 ## Credential Handling

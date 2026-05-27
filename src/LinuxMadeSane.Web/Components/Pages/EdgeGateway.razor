@@ -736,7 +736,7 @@
 
     <UiModal IsOpen="@isHttpServicePickerOpen"
              Title="HTTP/S service lookup"
-             Subtitle="Cached internal services from localhost, LAN, and optional Tailscale peers."
+             Subtitle="Cached internal services from localhost, Docker, LAN, and optional Tailscale peers."
              Class="edge-http-service-modal"
              OnClose="CloseHttpServicePicker">
         <ChildContent>
@@ -744,9 +744,10 @@
                 <div class="table-header edge-http-service-picker-header">
                     <div>
                         <strong>Available origins</strong>
-                        <p class="meta-text">Cached results are shown first. Run a scan to refresh localhost, private LAN and optional Tailscale services.</p>
+                        <p class="meta-text">Cached results are shown first. Run a scan to refresh localhost, exposed Docker containers, private LAN and optional Tailscale services.</p>
                     </div>
                     <div class="edge-http-service-actions">
+                        <UiCheckboxField @bind-Value="includeDockerHttpScan" Label="Docker" Compact="true" />
                         <UiCheckboxField @bind-Value="includeLanHttpScan" Label="LAN" Compact="true" />
                         <UiCheckboxField @bind-Value="includeTailnetHttpScan" Label="Tailscale" Compact="true" />
                         <UiCommandButton Label="@(isDiscoveringHttpServices ? "Scanning..." : "Scan")"
@@ -771,7 +772,7 @@
                 {
                     <section class="empty-state edge-http-service-empty">
                         <h3>No cached HTTP/S services</h3>
-                        <p>@(httpServiceDiscoveryMessage ?? "Click Scan to search localhost and the private LAN. Enable Tailscale if you want tailnet peers included.")</p>
+                        <p>@(httpServiceDiscoveryMessage ?? "Click Scan to search localhost, exposed Docker containers, and the private LAN. Enable Tailscale if you want tailnet peers included.")</p>
                     </section>
                 }
                 else
@@ -1004,6 +1005,7 @@
     private bool isProvisioningCloudflareDomain;
     private bool isDeletingRelay;
     private bool isCheckingRouteTarget;
+    private bool includeDockerHttpScan = true;
     private bool includeLanHttpScan = true;
     private bool includeTailnetHttpScan;
     private bool routeEditorIsError;
@@ -1444,7 +1446,8 @@
         var request = new LocalHttpServiceDiscoveryRequest(
             IncludeLocalhost: true,
             IncludeLan: includeLanHttpScan,
-            IncludeTailnet: includeTailnetHttpScan);
+            IncludeTailnet: includeTailnetHttpScan,
+            IncludeDocker: includeDockerHttpScan);
         _ = RunHttpServicesScanAsync(request);
         return Task.CompletedTask;
     }

@@ -30,6 +30,7 @@ public sealed class AiProviderModelDiscoveryService(
             AiProviderType.Groq => DiscoverGroqModelsAsync(settings, apiKeyOverride, cancellationToken),
             AiProviderType.XAi => DiscoverXAiModelsAsync(settings, apiKeyOverride, cancellationToken),
             AiProviderType.DeepSeek => DiscoverDeepSeekModelsAsync(settings, apiKeyOverride, cancellationToken),
+            AiProviderType.Custom => DiscoverCustomOpenAiCompatibleModelsAsync(settings, apiKeyOverride, cancellationToken),
             AiProviderType.Ollama => DiscoverOllamaModelsAsync(cancellationToken),
             _ => Task.FromResult<IReadOnlyList<AiProviderModelOption>>([])
         };
@@ -244,6 +245,51 @@ public sealed class AiProviderModelDiscoveryService(
             .ToArray();
     }
 
+    private async Task<IReadOnlyList<AiProviderModelOption>> DiscoverCustomOpenAiCompatibleModelsAsync(
+        AiProviderSettings settings,
+        string? apiKeyOverride,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(settings.BaseUrl))
+        {
+            return [];
+        }
+
+        using var httpClient = httpClientFactory.CreateClient();
+        using var message = new HttpRequestMessage(HttpMethod.Get, ResolveCustomOpenAiCompatibleModelsEndpoint(settings));
+        message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        var apiKey = !string.IsNullOrWhiteSpace(apiKeyOverride)
+            ? apiKeyOverride.Trim()
+            : string.IsNullOrWhiteSpace(settings.ApiKeySecretReference)
+                ? string.Empty
+                : await secretStore.ResolveSecretAsync(settings.ApiKeySecretReference, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(apiKey))
+        {
+            message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
+        }
+
+        using var response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        EnsureResponseSucceeded(response, body, "OpenAI-compatible provider");
+
+        var data = JsonNode.Parse(body)?["data"] as JsonArray ?? [];
+        return data
+            .OfType<JsonObject>()
+            .Select(item => item["id"]?.GetValue<string>() ?? string.Empty)
+            .Where(IsOpenAiCompatibleTextModel)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
+            .Select(id => new AiProviderModelOption(
+                AiProviderType.Custom,
+                id,
+                BuildDisplayName(id),
+                "Discovered from the OpenAI-compatible models endpoint.",
+                true,
+                false))
+            .ToArray();
+    }
+
     private async Task<IReadOnlyList<AiProviderModelOption>> DiscoverOllamaModelsAsync(CancellationToken cancellationToken)
     {
         var installedModels = await ollamaRuntimeService.ListInstalledModelsAsync(cancellationToken);
@@ -314,6 +360,9 @@ public sealed class AiProviderModelDiscoveryService(
         string.IsNullOrWhiteSpace(settings.BaseUrl)
             ? new Uri("https://api.deepseek.com/models", UriKind.Absolute)
             : DeepSeekAiProvider.ResolveOpenAiCompatibleEndpoint(settings.BaseUrl, "models");
+
+    private static Uri ResolveCustomOpenAiCompatibleModelsEndpoint(AiProviderSettings settings) =>
+        DeepSeekAiProvider.ResolveOpenAiCompatibleEndpoint(settings.BaseUrl, "models");
 
     private static void EnsureResponseSucceeded(HttpResponseMessage response, string responseBody, string providerName)
     {
@@ -470,6 +519,35 @@ public sealed class AiProviderModelDiscoveryService(
     private static bool IsLikelyRecommendedDeepSeekModel(string modelId) =>
         modelId.Equals("deepseek-v4-flash", StringComparison.OrdinalIgnoreCase) ||
         modelId.Equals("deepseek-v4-pro", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsOpenAiCompatibleTextModel(string modelId)
+    {
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return false;
+        }
+
+        var normalized = modelId.Trim().ToLowerInvariant();
+        return !IsAuxiliaryModelArtifact(normalized) &&
+               !normalized.Contains("audio", StringComparison.Ordinal) &&
+               !normalized.Contains("embedding", StringComparison.Ordinal) &&
+               !normalized.Contains("image", StringComparison.Ordinal) &&
+               !normalized.Contains("moderation", StringComparison.Ordinal) &&
+               !normalized.Contains("rerank", StringComparison.Ordinal) &&
+               !normalized.Contains("tts", StringComparison.Ordinal) &&
+               !normalized.Contains("whisper", StringComparison.Ordinal);
+    }
+
+    private static bool IsAuxiliaryModelArtifact(string normalizedModelId)
+    {
+        var fileName = normalizedModelId.Replace('\\', '/').Split('/').LastOrDefault() ?? normalizedModelId;
+        return fileName.StartsWith("mmproj", StringComparison.Ordinal) ||
+               fileName.Contains("-mmproj", StringComparison.Ordinal) ||
+               fileName.Contains("_mmproj", StringComparison.Ordinal) ||
+               fileName.EndsWith(".mmproj", StringComparison.Ordinal) ||
+               (fileName.Contains("projector", StringComparison.Ordinal) &&
+                fileName.EndsWith(".gguf", StringComparison.Ordinal));
+    }
 
     private static string BuildDisplayName(string modelId) =>
         string.Join(

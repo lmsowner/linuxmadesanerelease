@@ -12,5 +12,6 @@ public sealed record LocalAiEngineWorkspaceViewModel(
     IReadOnlyList<LocalAiBenchmarkResult> Benchmarks,
     IReadOnlyList<LocalAiUsageEntry> UsageEntries,
     IReadOnlyList<LocalAiAuditEntry> AuditEntries,
+    DockerAiEngineWorkspace DockerEngines,
     IReadOnlyList<RemoteLmsAiEngineDescriptor> RemoteEngines,
     bool IsPortalConnected);

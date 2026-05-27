@@ -22,6 +22,7 @@ public sealed class AiProviderCapabilityService(
         {
             AiProviderType.OpenAi or AiProviderType.Anthropic or AiProviderType.Gemini or AiProviderType.Groq or AiProviderType.XAi or AiProviderType.DeepSeek => BuildManagedCloudReport(settings.DisplayName, effectiveModelId),
             AiProviderType.Ollama => modelManagementService.BuildCapabilityReport(settings.DisplayName, effectiveModelId, settings.ToolUseEnabled),
+            AiProviderType.Custom => BuildCustomOpenAiCompatibleReport(settings, effectiveModelId),
             AiProviderType.RemoteLmsAiEngine => BuildRemoteReport(settings, effectiveModelId),
             _ => new LocalAiCapabilityReport(
                 settings.DisplayName,
@@ -82,5 +83,20 @@ public sealed class AiProviderCapabilityService(
             false,
             "Managed cloud provider with full LMS chat, tool-calling, and Deep Fix support.",
             string.Empty);
+
+    private static LocalAiCapabilityReport BuildCustomOpenAiCompatibleReport(AiProviderSettings settings, string modelId) =>
+        new(
+            settings.DisplayName,
+            modelId,
+            AiProviderCapabilityFlag.BasicChat |
+            AiProviderCapabilityFlag.CommandExplanation |
+            AiProviderCapabilityFlag.LogSummary |
+            AiProviderCapabilityFlag.FixPlanGeneration |
+            AiProviderCapabilityFlag.Streaming |
+            AiProviderCapabilityFlag.DeepFixAllowedWithExtraApproval,
+            settings.ToolUseEnabled,
+            true,
+            "OpenAI-compatible local or Docker-hosted provider suitable for chat, summaries, and guarded fix-plan generation.",
+            "Linux Made Sane cannot verify this self-hosted model's tool-calling reliability. Mutating Deep Fix actions should require stronger approval.");
 
 }

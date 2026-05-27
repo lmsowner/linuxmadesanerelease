@@ -690,7 +690,7 @@ else
 
     <UiModal IsOpen="@isLocalServicePickerOpen"
              Title="HTTP/S service lookup"
-             Subtitle="Cached internal services from localhost, LAN, and optional Tailscale peers."
+             Subtitle="Cached internal services from localhost, Docker, LAN, and optional Tailscale peers."
              Class="cloudflare-local-service-modal"
              OnClose="CloseLocalServicePickerAsync">
         <ChildContent>
@@ -698,9 +698,10 @@ else
                 <div class="table-header cloudflare-local-service-picker-header">
                     <div>
                         <strong>Available origins</strong>
-                        <p class="meta-text">Cached results are shown first. Run a scan to refresh localhost, private LAN and optional Tailscale services.</p>
+                        <p class="meta-text">Cached results are shown first. Run a scan to refresh localhost, exposed Docker containers, private LAN and optional Tailscale services.</p>
                     </div>
                     <div class="cloudflare-local-service-actions">
+                        <UiCheckboxField @bind-Value="includeDockerLocalServiceScan" Label="Docker" Compact="true" />
                         <UiCheckboxField @bind-Value="includeLanLocalServiceScan" Label="LAN" Compact="true" />
                         <UiCheckboxField @bind-Value="includeTailnetLocalServiceScan" Label="Tailscale" Compact="true" />
                         <UiCommandButton Label="@(isDiscoveringLocalServices ? "Scanning..." : "Scan")"
@@ -725,7 +726,7 @@ else
                 {
                     <section class="empty-state cloudflare-local-service-empty">
                         <h3>No HTTP/S services found</h3>
-                        <p>@(localServiceDiscoveryMessage ?? "No cached services yet. Click Scan to search localhost and the private LAN.")</p>
+                        <p>@(localServiceDiscoveryMessage ?? "No cached services yet. Click Scan to search localhost, exposed Docker containers, and the private LAN.")</p>
                     </section>
                 }
                 else
@@ -796,6 +797,7 @@ else
     private bool statusIsError;
     private bool connectorInstallPreferenceTouched;
     private bool noTlsVerifyPreferenceTouched;
+    private bool includeDockerLocalServiceScan = true;
     private bool includeLanLocalServiceScan = true;
     private bool includeTailnetLocalServiceScan;
     private List<string> validationMessages = [];
@@ -1518,7 +1520,8 @@ else
         var request = new LocalHttpServiceDiscoveryRequest(
             IncludeLocalhost: true,
             IncludeLan: includeLanLocalServiceScan,
-            IncludeTailnet: includeTailnetLocalServiceScan);
+            IncludeTailnet: includeTailnetLocalServiceScan,
+            IncludeDocker: includeDockerLocalServiceScan);
         _ = RunLocalServicesScanAsync(request);
         return Task.CompletedTask;
     }

@@ -130,7 +130,7 @@ public sealed class AiProviderSettingsService(
             displayName,
             editor.IsEnabled,
             editor.IsDefault,
-            existing?.BaseUrl ?? string.Empty,
+            ResolveBaseUrl(editor, existing),
             editor.DefaultModelId.Trim(),
             editor.StreamingEnabled,
             editor.ToolUseEnabled,
@@ -213,7 +213,7 @@ public sealed class AiProviderSettingsService(
             editor.DisplayName.Trim(),
             editor.IsEnabled,
             shouldBeDefault,
-            existing?.BaseUrl ?? string.Empty,
+            ResolveBaseUrl(editor, existing),
             editor.DefaultModelId.Trim(),
             editor.StreamingEnabled,
             editor.ToolUseEnabled,
@@ -346,7 +346,7 @@ public sealed class AiProviderSettingsService(
             displayName,
             editor.IsEnabled,
             editor.IsDefault,
-            existing?.BaseUrl ?? string.Empty,
+            ResolveBaseUrl(editor, existing),
             selectedModelId,
             editor.StreamingEnabled,
             editor.ToolUseEnabled,
@@ -405,6 +405,7 @@ public sealed class AiProviderSettingsService(
             IsEnabled = provider.IsEnabled,
             IsDefault = provider.IsDefault,
             DefaultModelId = provider.DefaultModelId,
+            BaseUrl = provider.BaseUrl,
             StreamingEnabled = provider.StreamingEnabled,
             ToolUseEnabled = provider.ToolUseEnabled,
             RequiresApiKey = true,
@@ -416,6 +417,7 @@ public sealed class AiProviderSettingsService(
         IReadOnlyList<AiProviderModelOption> modelCatalog)
     {
         if (string.IsNullOrWhiteSpace(editor.DefaultModelId) ||
+            IsAuxiliaryModelArtifact(editor.DefaultModelId) ||
             modelCatalog.Any(model =>
                 model.ProviderType == editor.ProviderType &&
                 model.ModelId.Equals(editor.DefaultModelId, StringComparison.OrdinalIgnoreCase)))
@@ -445,6 +447,11 @@ public sealed class AiProviderSettingsService(
         IReadOnlyList<AiProviderSettings> allProviders,
         CancellationToken cancellationToken)
     {
+        if (IsAuxiliaryModelArtifact(selectedModelId))
+        {
+            return false;
+        }
+
         if (supportedModels.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase)))
         {
             return true;
@@ -465,7 +472,7 @@ public sealed class AiProviderSettingsService(
                 string.IsNullOrWhiteSpace(editor.DisplayName) ? providerKey : editor.DisplayName.Trim(),
                 editor.IsEnabled,
                 editor.IsDefault,
-                existing?.BaseUrl ?? string.Empty,
+                ResolveBaseUrl(editor, existing),
                 selectedModelId,
                 editor.StreamingEnabled,
                 editor.ToolUseEnabled,
@@ -519,6 +526,7 @@ public sealed class AiProviderSettingsService(
             AiProviderType.Groq => "groq",
             AiProviderType.XAi => "xai-grok",
             AiProviderType.DeepSeek => "deepseek",
+            AiProviderType.Custom => "openai-compatible",
             _ => "provider"
         };
 
@@ -564,6 +572,11 @@ public sealed class AiProviderSettingsService(
         return new string(builder.ToArray()).Trim('-');
     }
 
+    private static string ResolveBaseUrl(AiProviderSettingsEditor editor, AiProviderSettings? existing) =>
+        string.IsNullOrWhiteSpace(editor.BaseUrl)
+            ? existing?.BaseUrl ?? string.Empty
+            : editor.BaseUrl.Trim().TrimEnd('/');
+
     private static void ValidateEditor(AiProviderSettingsEditor editor)
     {
         var results = new List<ValidationResult>();
@@ -576,5 +589,22 @@ public sealed class AiProviderSettingsService(
         }
 
         throw new InvalidOperationException(string.Join(" ", results.Select(result => result.ErrorMessage)));
+    }
+
+    private static bool IsAuxiliaryModelArtifact(string modelId)
+    {
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return false;
+        }
+
+        var normalized = modelId.Trim().Replace('\\', '/').ToLowerInvariant();
+        var fileName = normalized.Split('/').LastOrDefault() ?? normalized;
+        return fileName.StartsWith("mmproj", StringComparison.Ordinal) ||
+               fileName.Contains("-mmproj", StringComparison.Ordinal) ||
+               fileName.Contains("_mmproj", StringComparison.Ordinal) ||
+               fileName.EndsWith(".mmproj", StringComparison.Ordinal) ||
+               (fileName.Contains("projector", StringComparison.Ordinal) &&
+                fileName.EndsWith(".gguf", StringComparison.Ordinal));
     }
 }

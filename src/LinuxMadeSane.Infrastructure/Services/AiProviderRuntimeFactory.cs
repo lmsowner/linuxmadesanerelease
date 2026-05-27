@@ -25,6 +25,7 @@ internal static class AiProviderRuntimeFactory
             AiProviderType.Groq => new GroqAiProvider(settings.ProviderKey, definition, settings, models, secretStore, httpClientFactory),
             AiProviderType.XAi => new XAiGrokAiProvider(settings.ProviderKey, definition, settings, models, secretStore, httpClientFactory),
             AiProviderType.DeepSeek => new DeepSeekAiProvider(settings.ProviderKey, definition, settings, models, secretStore, httpClientFactory),
+            AiProviderType.Custom => new CustomOpenAiCompatibleAiProvider(settings.ProviderKey, definition, settings, models, secretStore, httpClientFactory),
             AiProviderType.Ollama => new OllamaAiProvider(settings.ProviderKey, definition, settings, models, ollamaRuntimeService),
             AiProviderType.RemoteLmsAiEngine => new RemoteLmsAiEngineAiProvider(settings.ProviderKey, definition, settings, models, remoteGateway),
             _ => throw new NotSupportedException($"{settings.ProviderType} is not implemented yet in this Linux Made Sane build.")

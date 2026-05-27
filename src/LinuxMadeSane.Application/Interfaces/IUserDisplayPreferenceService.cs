@@ -19,4 +19,9 @@ public interface IUserDisplayPreferenceService
         Guid userId,
         bool enabled,
         CancellationToken cancellationToken = default);
+
+    Task<UserDisplayPreference> SaveDockerAiActionsApprovedAsync(
+        Guid userId,
+        bool approved,
+        CancellationToken cancellationToken = default);
 }

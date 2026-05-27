@@ -22,6 +22,7 @@ public sealed class LocalAiEngineManagerService(
     IAiProviderCapabilityService capabilityService,
     IAiProviderSettingsStore providerSettingsStore,
     IRemoteLmsAiEngineGateway remoteGateway,
+    IDockerAiEngineDiscoveryService dockerAiEngineDiscoveryService,
     IPortalConnectionStore portalConnectionStore,
     ILmsConnectClientFeature connectClientFeature) : ILocalAiEngineManagerService, ILocalAiEngineService
 {
@@ -35,8 +36,9 @@ public sealed class LocalAiEngineManagerService(
         var usageTask = store.ListUsageAsync(cancellationToken);
         var auditTask = store.ListAuditEntriesAsync(cancellationToken);
         var portalSettingsTask = portalConnectionStore.GetAsync(cancellationToken);
+        var dockerEnginesTask = dockerAiEngineDiscoveryService.GetWorkspaceAsync(cancellationToken);
 
-        await Task.WhenAll(statusTask, benchmarksTask, usageTask, auditTask, portalSettingsTask);
+        await Task.WhenAll(statusTask, benchmarksTask, usageTask, auditTask, portalSettingsTask, dockerEnginesTask);
 
         var portalConnected = connectClientFeature.SupportsRemoteAiSharing &&
                               IsPortalConnected(portalSettingsTask.Result);
@@ -53,6 +55,7 @@ public sealed class LocalAiEngineManagerService(
             benchmarksTask.Result,
             usageTask.Result,
             auditTask.Result,
+            dockerEnginesTask.Result,
             remoteEngines,
             portalConnected);
     }
@@ -628,6 +631,214 @@ public sealed class LocalAiEngineManagerService(
         return provider;
     }
 
+    public async Task<AiProviderSettings> CreateOrUpdateDockerProviderAsync(
+        DockerAiProviderRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.BaseUrl))
+        {
+            throw new InvalidOperationException("The Docker AI engine endpoint is missing.");
+        }
+
+        if (!Uri.TryCreate(request.BaseUrl.Trim(), UriKind.Absolute, out var endpoint) ||
+            endpoint.Scheme is not ("http" or "https"))
+        {
+            throw new InvalidOperationException("The Docker AI engine endpoint must be an HTTP or HTTPS URL.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.ModelId))
+        {
+            throw new InvalidOperationException("The Docker AI engine must expose at least one model before LMS can add it as a provider.");
+        }
+
+        var catalogItem = dockerAiEngineDiscoveryService.ListCatalog()
+            .FirstOrDefault(item => item.EngineId.Equals(request.EngineId, StringComparison.OrdinalIgnoreCase));
+        var existingProviders = await providerSettingsStore.ListAsync(cancellationToken);
+        var providerKeyBase = $"docker-ai-{NormalizeProviderSegment(request.DisplayName)}";
+        if (providerKeyBase.Equals("docker-ai-", StringComparison.Ordinal))
+        {
+            providerKeyBase = $"docker-ai-{NormalizeProviderSegment(request.EngineId)}";
+        }
+
+        var providerKey = existingProviders.Any(provider => provider.ProviderKey.Equals(providerKeyBase, StringComparison.OrdinalIgnoreCase))
+            ? providerKeyBase
+            : providerKeyBase;
+        var existing = existingProviders.FirstOrDefault(provider => provider.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase));
+        var now = DateTimeOffset.UtcNow;
+        var displayName = string.IsNullOrWhiteSpace(request.DisplayName)
+            ? catalogItem?.DisplayName ?? "Docker AI Engine"
+            : request.DisplayName.Trim();
+        var shouldBeDefault = request.SetDefault || existing?.IsDefault == true || existingProviders.All(provider => !provider.IsDefault);
+
+        var provider = new AiProviderSettings(
+            providerKey,
+            AiProviderType.Custom,
+            displayName,
+            true,
+            shouldBeDefault,
+            request.BaseUrl.Trim().TrimEnd('/'),
+            request.ModelId.Trim(),
+            true,
+            false,
+            "Docker-hosted OpenAI-compatible AI engine discovered by Linux Made Sane.",
+            JsonSerializer.Serialize(new DockerAiEngineProviderMetadata(
+                request.EngineId,
+                catalogItem?.DockerImage ?? string.Empty,
+                displayName,
+                catalogItem?.TrustLabel ?? "Local Docker container",
+                DockerAiEngineApiProfile.OpenAiCompatible.ToString())),
+            string.Empty,
+            existing?.CreatedAtUtc ?? now,
+            now);
+
+        await providerSettingsStore.SaveAsync(provider, cancellationToken);
+        if (shouldBeDefault)
+        {
+            foreach (var other in existingProviders.Where(item =>
+                         !item.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase) &&
+                         item.IsDefault))
+            {
+                await providerSettingsStore.SaveAsync(other with
+                {
+                    IsDefault = false,
+                    UpdatedAtUtc = now
+                }, cancellationToken);
+            }
+        }
+
+        await RecordAuditAsync(
+            "local-ai.docker-provider.saved",
+            "docker",
+            "Docker AI provider saved.",
+            $"{displayName} at {request.BaseUrl} using {request.ModelId}.",
+            true,
+            cancellationToken);
+
+        return provider;
+    }
+
+    public async Task<AiProviderSettings> CreateOrUpdateCustomOpenAiProviderAsync(
+        CustomOpenAiProviderRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.BaseUrl))
+        {
+            throw new InvalidOperationException("The OpenAI-compatible endpoint is missing.");
+        }
+
+        if (!Uri.TryCreate(request.BaseUrl.Trim(), UriKind.Absolute, out var endpoint) ||
+            endpoint.Scheme is not ("http" or "https"))
+        {
+            throw new InvalidOperationException("The OpenAI-compatible endpoint must be an HTTP or HTTPS URL.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.ModelId))
+        {
+            throw new InvalidOperationException("Enter the model ID exposed by this API.");
+        }
+
+        var existingProviders = await providerSettingsStore.ListAsync(cancellationToken);
+        var displayName = string.IsNullOrWhiteSpace(request.DisplayName)
+            ? "OpenAI-compatible API"
+            : request.DisplayName.Trim();
+        var providerKeyBase = $"custom-ai-{NormalizeProviderSegment(displayName)}";
+        var providerKey = providerKeyBase.Equals("custom-ai-", StringComparison.Ordinal)
+            ? "custom-ai-openai-compatible"
+            : providerKeyBase;
+        var existing = existingProviders.FirstOrDefault(provider => provider.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase));
+        var now = DateTimeOffset.UtcNow;
+        var shouldBeDefault = request.SetDefault || existing?.IsDefault == true || existingProviders.All(provider => !provider.IsDefault);
+
+        var provider = new AiProviderSettings(
+            providerKey,
+            AiProviderType.Custom,
+            displayName,
+            true,
+            shouldBeDefault,
+            request.BaseUrl.Trim().TrimEnd('/'),
+            request.ModelId.Trim(),
+            true,
+            false,
+            "User-supplied OpenAI-compatible AI endpoint.",
+            string.Empty,
+            existing?.ApiKeySecretReference ?? string.Empty,
+            existing?.CreatedAtUtc ?? now,
+            now);
+
+        await providerSettingsStore.SaveAsync(provider, cancellationToken);
+        if (shouldBeDefault)
+        {
+            foreach (var other in existingProviders.Where(item =>
+                         !item.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase) &&
+                         item.IsDefault))
+            {
+                await providerSettingsStore.SaveAsync(other with
+                {
+                    IsDefault = false,
+                    UpdatedAtUtc = now
+                }, cancellationToken);
+            }
+        }
+
+        await RecordAuditAsync(
+            "local-ai.custom-provider.saved",
+            "custom",
+            "OpenAI-compatible provider saved.",
+            $"{displayName} at {request.BaseUrl} using {request.ModelId}.",
+            true,
+            cancellationToken);
+
+        return provider;
+    }
+
+    public async Task<LocalAiApplyResult> InstallDockerEngineAsync(
+        string engineId,
+        bool approved,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await dockerAiEngineDiscoveryService.InstallEngineAsync(engineId, approved, cancellationToken);
+        await RecordAuditAsync(
+            "local-ai.docker-engine.install",
+            "docker",
+            result.Summary,
+            result.Detail,
+            result.Succeeded,
+            cancellationToken);
+        return result;
+    }
+
+    public async Task<LocalAiApplyResult> StartDockerEngineAsync(
+        string containerIdOrName,
+        bool approved,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await dockerAiEngineDiscoveryService.StartContainerAsync(containerIdOrName, approved, cancellationToken);
+        await RecordAuditAsync(
+            "local-ai.docker-engine.start",
+            "docker",
+            result.Summary,
+            result.Detail,
+            result.Succeeded,
+            cancellationToken);
+        return result;
+    }
+
+    public async Task<LocalAiApplyResult> StopDockerEngineAsync(
+        string containerIdOrName,
+        bool approved,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await dockerAiEngineDiscoveryService.StopContainerAsync(containerIdOrName, approved, cancellationToken);
+        await RecordAuditAsync(
+            "local-ai.docker-engine.stop",
+            "docker",
+            result.Summary,
+            result.Detail,
+            result.Succeeded,
+            cancellationToken);
+        return result;
+    }
+
     private static LocalAiSharingEditor MapSharingEditor(LocalAiEngineSettings settings) =>
         new()
         {
@@ -721,6 +932,22 @@ public sealed class LocalAiEngineManagerService(
         value.Split(['\r', '\n', ',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+
+    private static string NormalizeProviderSegment(string value)
+    {
+        var normalized = new string(value
+            .Trim()
+            .ToLowerInvariant()
+            .Select(character => char.IsLetterOrDigit(character) ? character : '-')
+            .ToArray());
+
+        while (normalized.Contains("--", StringComparison.Ordinal))
+        {
+            normalized = normalized.Replace("--", "-", StringComparison.Ordinal);
+        }
+
+        return normalized.Trim('-');
+    }
 
     private static void ValidateEditor(LocalAiSharingEditor editor)
     {

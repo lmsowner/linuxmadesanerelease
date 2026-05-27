@@ -3,12 +3,19 @@
 
 @using LinuxMadeSane.Core.Models.Cloudflare
 
-<section class="http-service-lookup-row" role="listitem">
+<section class="http-service-lookup-row" role="listitem" title="@RowTitle">
     <div class="http-service-lookup-main">
-        <strong title="@Service.Url">@EndpointLabel</strong>
-        @if (!string.IsNullOrWhiteSpace(ServiceName))
+        <span class="http-service-lookup-endpoint" title="@Service.Url">
+            <span class="http-service-lookup-host">@Service.Host</span>
+            <span class="http-service-lookup-port">:@Service.Port</span>
+        </span>
+        @if (!string.IsNullOrWhiteSpace(IpAddressLabel))
         {
-            <span title="@ServiceName">(@ServiceName)</span>
+            <span class="http-service-lookup-ip" title="@IpAddressLabel">@IpAddressLabel</span>
+        }
+        @if (!string.IsNullOrWhiteSpace(ResponseLabel))
+        {
+            <span class="http-service-lookup-response" title="@ResponseLabel">@ResponseLabel</span>
         }
     </div>
     <div class="http-service-lookup-chips" aria-label="Service details">
@@ -25,32 +32,48 @@
     [Parameter, EditorRequired] public LocalHttpServiceEndpoint Service { get; set; } = default!;
     [Parameter] public EventCallback<LocalHttpServiceEndpoint> OnUse { get; set; }
 
-    private string EndpointLabel => $"{Service.Host}:{Service.Port}";
-
     private string SchemeClass =>
         Service.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? "https" : "http";
 
-    private string ServiceName
+    private string IpAddressLabel =>
+        string.IsNullOrWhiteSpace(Service.IpAddress) ||
+        Service.Host.Equals(Service.IpAddress, StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : Service.IpAddress.Trim();
+
+    private string ResponseLabel =>
+        Service.Scope.Equals("Docker", StringComparison.OrdinalIgnoreCase)
+            ? JoinNonBlank(Service.DisplayName, Service.Title, Service.ServerHeader)
+            : FirstNonBlank(Service.Title, Service.DisplayName, Service.ServerHeader) ?? string.Empty;
+
+    private string RowTitle
     {
         get
         {
-            var name = !string.IsNullOrWhiteSpace(Service.Title)
-                ? Service.Title
-                : !string.IsNullOrWhiteSpace(Service.DisplayName)
-                    ? Service.DisplayName
-                    : Service.ServerHeader;
+            var parts = new List<string> { Service.Url };
 
-            if (string.IsNullOrWhiteSpace(Service.IpAddress) ||
-                Service.Host.Equals(Service.IpAddress, StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrWhiteSpace(IpAddressLabel))
             {
-                return name ?? string.Empty;
+                parts.Add($"IP: {IpAddressLabel}");
             }
 
-            return string.IsNullOrWhiteSpace(name)
-                ? Service.IpAddress
-                : $"{name} · {Service.IpAddress}";
+            if (!string.IsNullOrWhiteSpace(ResponseLabel))
+            {
+                parts.Add($"Response: {ResponseLabel}");
+            }
+
+            return string.Join(" | ", parts);
         }
     }
+
+    private static string? FirstNonBlank(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
+
+    private static string JoinNonBlank(params string?[] values) =>
+        string.Join(" · ", values
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase));
 
     private Task HandleUseAsync() => OnUse.InvokeAsync(Service);
 }

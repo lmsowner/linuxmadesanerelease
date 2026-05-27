@@ -1740,12 +1740,14 @@ public sealed class SqliteDatabaseInitializer(
                 ThemeMode TEXT NOT NULL,
                 FontScalePercent INTEGER NOT NULL,
                 TerminalCopyOnSelect INTEGER NOT NULL DEFAULT 0,
+                DockerAiActionsApproved INTEGER NOT NULL DEFAULT 0,
                 UpdatedAtUtc TEXT NOT NULL
             );
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(userDisplayPreferencesSql, cancellationToken);
         await EnsureColumnExistsAsync("user_display_preferences", "TerminalCopyOnSelect", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnExistsAsync("user_display_preferences", "DockerAiActionsApproved", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
     }
 
     private async Task EnsureFileBrowserShortcutTablesAsync(CancellationToken cancellationToken)
