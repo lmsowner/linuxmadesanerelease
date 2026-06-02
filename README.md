@@ -73,6 +73,7 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 509
 - installs the Desktop Assistant helper for signed-in Linux GUI sessions unless disabled
 - installs the local update helper used by LMS-managed updates
 - stops an existing service before replacing files during an update
+- prints a short-lived lost-access recovery URL/code so a sudo SSH user can recover web access
 
 ## Supported Linux Builds
 

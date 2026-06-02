@@ -3,6 +3,7 @@
 
 @page "/login"
 @layout AuthLayout
+@inject LocalAccessRecoveryService AccessRecovery
 
 <script type="module" src="@Assets["Components/Pages/Login.razor.js"]"></script>
 
@@ -164,6 +165,40 @@
 
             <p class="auth-login-footnote">For Edge Gateway routes, LMS checks this local session before proxying.</p>
         </form>
+
+        @if (showRecovery)
+        {
+            <form method="post" action="/auth/recovery" class="stack-form auth-recovery-form">
+                <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+                <input type="hidden" name="recovery" value="@Recovery" />
+
+                <div class="auth-recovery-heading">
+                    <p>Lost access recovery</p>
+                    <span>Use the code printed by the installer on this LMS host.</span>
+                </div>
+
+                <label class="auth-login-field-group">
+                    <span>LMS email</span>
+                    <div class="auth-login-field-shell auth-login-email-shell">
+                        <input name="email" type="email" value="@Email" autocomplete="email" placeholder="you@example.com" required />
+                    </div>
+                </label>
+
+                <label class="auth-login-field-group">
+                    <span>Recovery code</span>
+                    <div class="auth-login-field-shell">
+                        <input name="recoveryCode"
+                               type="text"
+                               autocomplete="one-time-code"
+                               inputmode="text"
+                               placeholder="XXXX-XXXX-XXXX-XXXX"
+                               required />
+                    </div>
+                </label>
+
+                <button class="auth-recovery-submit" type="submit">Recover access</button>
+            </form>
+        }
     </section>
 </div>
 
@@ -177,7 +212,17 @@
     [SupplyParameterFromQuery]
     public string? Email { get; set; }
 
+    [SupplyParameterFromQuery]
+    public string? Recovery { get; set; }
+
+    private bool showRecovery;
+
     private string NormalizedReturnUrl => NormalizeReturnUrl(ReturnUrl);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        showRecovery = await AccessRecovery.HasActiveChallengeAsync(Recovery);
+    }
 
     private static string NormalizeReturnUrl(string? returnUrl)
     {
