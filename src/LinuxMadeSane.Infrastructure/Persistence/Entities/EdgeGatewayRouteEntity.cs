@@ -19,6 +19,11 @@ public sealed class EdgeGatewayRouteEntity
     public string AllowedGroups { get; set; } = string.Empty;
     public bool AllowLanOnly { get; set; }
     public string AllowKnownIps { get; set; } = string.Empty;
+    public string TemporaryIpApprovalRecipients { get; set; } = string.Empty;
+    public string TemporaryIpApprovalAllowedCountryCodes { get; set; } = string.Empty;
+    public bool TemporaryIpApprovalUseNotFoundResponse { get; set; }
+    public int? TemporaryIpApprovalIdleTimeoutMinutes { get; set; }
+    public int? TemporaryIpApprovalMaxLifetimeMinutes { get; set; }
     public string Notes { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }

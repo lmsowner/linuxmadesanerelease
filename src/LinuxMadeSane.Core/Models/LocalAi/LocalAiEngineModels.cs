@@ -204,3 +204,71 @@ public sealed record RemoteLmsAiEngineProviderMetadata(
     string EngineDisplayName,
     string InstanceDisplayName,
     IReadOnlyList<string> AllowedModelIds);
+
+public sealed record DockerAiRuntimeStatus(
+    bool IsDockerInstalled,
+    bool IsDockerReachable,
+    bool IsPortainerDetected,
+    string Version,
+    string Detail,
+    IReadOnlyList<string> Warnings,
+    DateTimeOffset CheckedAtUtc);
+
+public sealed record DockerAiEngineCatalogItem(
+    string EngineId,
+    string DisplayName,
+    string Description,
+    string DockerImage,
+    string DockerTag,
+    string DockerHubUrl,
+    string DocumentationUrl,
+    string TrustLabel,
+    DockerAiEngineApiProfile ApiProfile,
+    int ContainerPort,
+    int HostPort,
+    string SuggestedContainerName,
+    string DefaultModelId,
+    bool RequiresGpu,
+    bool RequiresModelArgument,
+    string RunCommand,
+    string Detail,
+    bool IsHostPortAvailable = true,
+    string HostPortDetail = "");
+
+public sealed record DockerAiDiscoveredEngine(
+    string EngineId,
+    string ContainerId,
+    string ContainerName,
+    string Image,
+    string Status,
+    string BaseUrl,
+    string DefaultModelId,
+    IReadOnlyList<string> ModelIds,
+    bool IsRunning,
+    bool IsReachable,
+    string Detail);
+
+public sealed record DockerAiEngineWorkspace(
+    DockerAiRuntimeStatus Docker,
+    IReadOnlyList<DockerAiEngineCatalogItem> Catalog,
+    IReadOnlyList<DockerAiDiscoveredEngine> DiscoveredEngines);
+
+public sealed record DockerAiProviderRequest(
+    string EngineId,
+    string DisplayName,
+    string BaseUrl,
+    string ModelId,
+    bool SetDefault);
+
+public sealed record CustomOpenAiProviderRequest(
+    string DisplayName,
+    string BaseUrl,
+    string ModelId,
+    bool SetDefault);
+
+public sealed record DockerAiEngineProviderMetadata(
+    string EngineId,
+    string DockerImage,
+    string ContainerName,
+    string TrustLabel,
+    string ApiProfile);

@@ -13,4 +13,6 @@ public sealed record EdgeGatewayAuthCheckContext(
     string ForwardedFor,
     string Host,
     IPAddress? RemoteIpAddress,
-    ClaimsPrincipal User);
+    ClaimsPrincipal User,
+    string CountryCode = "",
+    string UserAgent = "");

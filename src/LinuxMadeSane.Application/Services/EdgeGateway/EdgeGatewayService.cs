@@ -31,6 +31,7 @@ public sealed class EdgeGatewayService(
     ICommandExecutionService commandExecutionService,
     CloudflareIntegrationOptions cloudflareOptions,
     IEdgeGatewaySettingsStore settingsStore,
+    IEdgeGatewayTemporaryIpApprovalService temporaryIpApprovalService,
     EdgeGatewayOptions options) : IEdgeGatewayService
 {
     private const int StatusOk = 200;
@@ -281,6 +282,11 @@ public sealed class EdgeGatewayService(
                 AllowedGroups = route.AllowedGroups,
                 AllowLanOnly = route.AllowLanOnly,
                 AllowKnownIps = route.AllowKnownIps,
+                TemporaryIpApprovalRecipients = route.TemporaryIpApprovalRecipients,
+                TemporaryIpApprovalAllowedCountryCodes = route.TemporaryIpApprovalAllowedCountryCodes,
+                TemporaryIpApprovalUseNotFoundResponse = route.TemporaryIpApprovalUseNotFoundResponse,
+                TemporaryIpApprovalIdleTimeoutMinutes = route.TemporaryIpApprovalIdleTimeoutMinutes,
+                TemporaryIpApprovalMaxLifetimeMinutes = route.TemporaryIpApprovalMaxLifetimeMinutes,
                 Notes = route.Notes
             };
     }
@@ -309,6 +315,11 @@ public sealed class EdgeGatewayService(
             NormalizeCsvOrLines(editor.AllowedGroups),
             editor.AllowLanOnly,
             NormalizeCsvOrLines(editor.AllowKnownIps),
+            NormalizeCsvOrLines(editor.TemporaryIpApprovalRecipients),
+            NormalizeCountryCodeTextBlock(editor.TemporaryIpApprovalAllowedCountryCodes),
+            editor.TemporaryIpApprovalUseNotFoundResponse,
+            NormalizeOptionalMinutes(editor.TemporaryIpApprovalIdleTimeoutMinutes, 1, 1440),
+            NormalizeOptionalMinutes(editor.TemporaryIpApprovalMaxLifetimeMinutes, 1, 10080),
             (editor.Notes ?? string.Empty).Trim(),
             existing?.CreatedAt ?? now,
             now,
@@ -1379,6 +1390,43 @@ public sealed class EdgeGatewayService(
                 cancellationToken);
         }
 
+        if (route.AuthMode == EdgeGatewayAuthMode.TemporaryIpApproval)
+        {
+            var temporaryApprovalResult = await temporaryIpApprovalService.EvaluateAsync(
+                route,
+                new EdgeGatewayTemporaryIpApprovalCheckContext(
+                    requestedHost,
+                    requestedPath,
+                    BuildRequestedUrl(requestedHost, requestedPath),
+                    sourceIp,
+                    context.CountryCode,
+                    context.UserAgent),
+                cancellationToken);
+
+            if (temporaryApprovalResult.IsAllowed)
+            {
+                return await AllowTemporaryIpAsync(
+                    route,
+                    requestedHost,
+                    requestedPath,
+                    sourceIp,
+                    temporaryApprovalResult.Reason,
+                    cancellationToken);
+            }
+
+            return await AuditAndReturnAsync(
+                route,
+                requestedHost,
+                requestedPath,
+                sourceIp,
+                string.Empty,
+                EdgeGatewayDecision.Denied,
+                route.TemporaryIpApprovalUseNotFoundResponse ? StatusNotFound : StatusForbidden,
+                temporaryApprovalResult.Reason,
+                route.AuthMode,
+                cancellationToken);
+        }
+
         if (context.User.Identity?.IsAuthenticated != true)
         {
             return await RedirectToLoginAsync(route, requestedHost, requestedPath, sourceIp, "MFA/passkey required.", cancellationToken);
@@ -1420,6 +1468,24 @@ public sealed class EdgeGatewayService(
         }
 
         return await AllowAsync(route, requestedHost, requestedPath, sourceIp, userEmail, context.User, "Policy allowed.", cancellationToken);
+    }
+
+    public async Task<EdgeGatewayTemporaryIpApprovalCompletionViewModel> ApproveTemporaryIpAsync(
+        string token,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await temporaryIpApprovalService.ApproveAsync(token, cancellationToken);
+        return new EdgeGatewayTemporaryIpApprovalCompletionViewModel(
+            result.Success,
+            result.Title,
+            result.Message,
+            result.SourceIp,
+            result.CountryCode,
+            result.RouteName,
+            result.PublicHostname,
+            result.ApprovedUrl,
+            result.IdleExpiresAtUtc,
+            result.ExpiresAtUtc);
     }
 
     public async Task<string> BuildSafeReturnPathAsync(string targetUrl, CancellationToken cancellationToken = default)
@@ -1469,6 +1535,22 @@ public sealed class EdgeGatewayService(
             UserName: FindFirstValue(user, ClaimTypes.Name) ?? userEmail,
             UserEmail: userEmail,
             Groups: groups);
+    }
+
+    private async Task<EdgeGatewayAuthCheckResult> AllowTemporaryIpAsync(
+        EdgeGatewayRoute route,
+        string requestedHost,
+        string requestedPath,
+        string sourceIp,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        await AddAuditAsync(route, requestedHost, requestedPath, sourceIp, string.Empty, EdgeGatewayDecision.Allowed, reason, route.AuthMode, cancellationToken);
+        return new EdgeGatewayAuthCheckResult(
+            StatusOk,
+            EdgeGatewayDecision.Allowed,
+            reason,
+            UserName: $"temporary-ip:{sourceIp}");
     }
 
     private async Task<EdgeGatewayAuthCheckResult> RedirectToLoginAsync(
@@ -1687,6 +1769,7 @@ public sealed class EdgeGatewayService(
     {
         EdgeGatewayAuthMode.PassThrough => EdgeGatewayAuthMode.PassThrough,
         EdgeGatewayAuthMode.Blocked => EdgeGatewayAuthMode.Blocked,
+        EdgeGatewayAuthMode.TemporaryIpApproval => EdgeGatewayAuthMode.TemporaryIpApproval,
         _ => EdgeGatewayAuthMode.RequireMfa
     };
 
@@ -2736,6 +2819,11 @@ public sealed class EdgeGatewayService(
             route.TargetPathPrefix,
             EdgeGatewayRouteValidator.BuildTargetUrl(route),
             NormalizePublicAuthMode(route.AuthMode),
+            route.TemporaryIpApprovalRecipients,
+            route.TemporaryIpApprovalAllowedCountryCodes,
+            route.TemporaryIpApprovalUseNotFoundResponse,
+            route.TemporaryIpApprovalIdleTimeoutMinutes,
+            route.TemporaryIpApprovalMaxLifetimeMinutes,
             route.LastTestStatus,
             route.LastTestMessage,
             route.UpdatedAt);
@@ -2769,6 +2857,19 @@ public sealed class EdgeGatewayService(
 
     private static string NormalizeCsvOrLines(string? value) =>
         string.Join(", ", EdgeGatewayRouteValidator.SplitList(value));
+
+    private static string NormalizeCountryCodeTextBlock(string? value) =>
+        string.Join(
+            ", ",
+            (value ?? string.Empty)
+                .Split([',', '\n', '\r', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(static item => item.Trim().ToUpperInvariant())
+                .Where(static item => item.Length == 2 && item.All(char.IsLetter))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(static item => item, StringComparer.OrdinalIgnoreCase));
+
+    private static int? NormalizeOptionalMinutes(int? value, int minimum, int maximum) =>
+        value.HasValue ? Math.Clamp(value.Value, minimum, maximum) : null;
 
     private static string? FindFirstValue(ClaimsPrincipal user, string claimType) =>
         user.FindFirst(claimType)?.Value;

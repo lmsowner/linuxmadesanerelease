@@ -164,17 +164,18 @@ window.lmsFileBrowser = (() => {
         const maxMenuHeight = Math.max(160, viewportHeight - margin * 2);
 
         menu.style.maxHeight = `${maxMenuHeight}px`;
-        menu.style.left = `${margin}px`;
-        menu.style.top = `${margin}px`;
+        const origin = getPositioningOrigin(menu);
+        menu.style.left = "0px";
+        menu.style.top = "0px";
 
         const menuWidth = Math.ceil(menu.offsetWidth || 212);
         const menuHeight = Math.min(Math.ceil(menu.scrollHeight || menu.offsetHeight || 0), maxMenuHeight);
-        const left = clamp(wantedX, margin, Math.max(margin, viewportWidth - menuWidth - margin));
-        const top = clamp(wantedY, margin, Math.max(margin, viewportHeight - menuHeight - margin));
+        const viewportLeft = clamp(wantedX, margin, Math.max(margin, viewportWidth - menuWidth - margin));
+        const viewportTop = clamp(wantedY, margin, Math.max(margin, viewportHeight - menuHeight - margin));
 
-        menu.style.left = `${left}px`;
-        menu.style.top = `${top}px`;
-        menu.style.maxHeight = `${Math.max(120, viewportHeight - top - margin)}px`;
+        menu.style.left = `${viewportLeft - origin.x}px`;
+        menu.style.top = `${viewportTop - origin.y}px`;
+        menu.style.maxHeight = `${Math.max(120, viewportHeight - viewportTop - margin)}px`;
 
         const submenus = menu.querySelectorAll(".host-file-context-submenu");
         for (const submenu of submenus) {
@@ -220,6 +221,7 @@ window.lmsFileBrowser = (() => {
         const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
         const triggerRect = trigger.getBoundingClientRect();
         const panelSize = measureHiddenElement(panel);
+        const origin = getPositioningOrigin(panel);
         const panelWidth = Math.ceil(panelSize.width || 168);
         const panelHeight = Math.min(Math.ceil(panelSize.height || 0), Math.max(120, viewportHeight - margin * 2));
 
@@ -230,10 +232,40 @@ window.lmsFileBrowser = (() => {
             : clamp(leftLeft, margin, Math.max(margin, viewportWidth - panelWidth - margin));
         const top = clamp(triggerRect.top, margin, Math.max(margin, viewportHeight - panelHeight - margin));
 
-        panel.style.left = `${left}px`;
-        panel.style.top = `${top}px`;
+        panel.style.left = `${left - origin.x}px`;
+        panel.style.top = `${top - origin.y}px`;
         panel.style.maxHeight = `${Math.max(120, viewportHeight - top - margin)}px`;
         return true;
+    }
+
+    function getPositioningOrigin(element) {
+        const previousLeft = element.style.left;
+        const previousTop = element.style.top;
+        const previousDisplay = element.style.display;
+        const previousVisibility = element.style.visibility;
+        const previousPointerEvents = element.style.pointerEvents;
+        const computedDisplay = window.getComputedStyle(element).display;
+
+        if (computedDisplay === "none") {
+            element.style.display = "grid";
+            element.style.visibility = "hidden";
+            element.style.pointerEvents = "none";
+        }
+
+        element.style.left = "0px";
+        element.style.top = "0px";
+        const rect = element.getBoundingClientRect();
+        const origin = {
+            x: Number.isFinite(rect.left) ? rect.left : 0,
+            y: Number.isFinite(rect.top) ? rect.top : 0
+        };
+
+        element.style.left = previousLeft;
+        element.style.top = previousTop;
+        element.style.display = previousDisplay;
+        element.style.visibility = previousVisibility;
+        element.style.pointerEvents = previousPointerEvents;
+        return origin;
     }
 
     function measureHiddenElement(element) {

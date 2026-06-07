@@ -53,7 +53,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
             {
                 builder.AppendLine($"    @{authMatcherName} {{");
                 builder.AppendLine($"        host {route.Hostname}");
-                builder.AppendLine("        path /InitialSetup /initial-setup /login /login/* /auth/initial-setup/* /auth/login /auth/logout /auth/setup-passkey /edge-auth/* /api/passkeys/login/* /api/passkeys/enroll/* /api/passkeys/register/* /access-denied /scripts/theme*.js /scripts/passkeys*.js /styles/* /lib/xterm/* /lib/pdfjs/pdf_viewer*.css /app*.css /LinuxMadeSane.Web*.styles.css /Components/Pages/Login* /Components/Pages/InitialSetup* /Components/Pages/PasskeySetupPrompt* /images/lms-auth-panel.png /images/lms-splash.png /favicon.png /favicon.ico");
+                builder.AppendLine("        path /InitialSetup /initial-setup /login /login/* /auth/initial-setup/* /auth/login /auth/logout /auth/setup-passkey /auth/email-mfa/* /edge-auth/* /api/email-mfa/login/* /api/passkeys/login/* /api/passkeys/enroll/* /api/passkeys/register/* /access-denied /scripts/theme*.js /scripts/passkeys*.js /styles/* /lib/xterm/* /lib/pdfjs/pdf_viewer*.css /app*.css /LinuxMadeSane.Web*.styles.css /Components/Pages/Login* /Components/Pages/InitialSetup* /Components/Pages/PasskeySetupPrompt* /images/lms-auth-panel.png /images/lms-splash.png /favicon.png /favicon.ico");
                 builder.AppendLine("    }");
                 builder.AppendLine($"    handle @{authMatcherName} {{");
                 builder.AppendLine($"        reverse_proxy 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
@@ -99,7 +99,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
         }
 
         builder.AppendLine("    handle {");
-        builder.AppendLine("        respond \"No Linux Made Sane Edge Gateway route matched this hostname.\" 404");
+        builder.AppendLine("        respond 404");
         builder.AppendLine("    }");
         builder.AppendLine("}");
         builder.AppendLine();
@@ -141,6 +141,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
         var builder = new StringBuilder();
         builder.AppendLine($"        reverse_proxy {targetUrl} {{");
         builder.AppendLine("            header_up X-Forwarded-Proto https");
+        builder.AppendLine("            header_up X-Forwarded-Host {host}");
         builder.AppendLine("            header_up X-Forwarded-Port 443");
         if (shouldTreatAsLocalLmsHop)
         {

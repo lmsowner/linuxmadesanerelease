@@ -20,6 +20,8 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<CaddyProxyRouteEntity> CaddyProxyRoutes => Set<CaddyProxyRouteEntity>();
     public DbSet<EdgeGatewayRouteEntity> EdgeGatewayRoutes => Set<EdgeGatewayRouteEntity>();
     public DbSet<EdgeGatewayAuditEntryEntity> EdgeGatewayAuditEntries => Set<EdgeGatewayAuditEntryEntity>();
+    public DbSet<EdgeGatewayTemporaryIpApprovalRequestEntity> EdgeGatewayTemporaryIpApprovalRequests => Set<EdgeGatewayTemporaryIpApprovalRequestEntity>();
+    public DbSet<EdgeGatewayTemporaryIpApprovalGrantEntity> EdgeGatewayTemporaryIpApprovalGrants => Set<EdgeGatewayTemporaryIpApprovalGrantEntity>();
     public DbSet<EdgeGatewaySettingsEntity> EdgeGatewaySettings => Set<EdgeGatewaySettingsEntity>();
     public DbSet<MessagingEmailSettingsEntity> MessagingEmailSettings => Set<MessagingEmailSettingsEntity>();
     public DbSet<SftpHostSettingsEntity> SftpHostSettings => Set<SftpHostSettingsEntity>();
@@ -343,6 +345,8 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(route => route.AllowedUsers).HasColumnType("TEXT");
             entity.Property(route => route.AllowedGroups).HasColumnType("TEXT");
             entity.Property(route => route.AllowKnownIps).HasColumnType("TEXT");
+            entity.Property(route => route.TemporaryIpApprovalRecipients).HasColumnType("TEXT");
+            entity.Property(route => route.TemporaryIpApprovalAllowedCountryCodes).HasColumnType("TEXT");
             entity.Property(route => route.Notes).HasColumnType("TEXT");
             entity.Property(route => route.LastTestMessage).HasColumnType("TEXT");
             entity.HasIndex(route => route.Hostname);
@@ -364,6 +368,39 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.HasIndex(entry => entry.Hostname);
             entity.HasIndex(entry => entry.UserEmail);
             entity.HasIndex(entry => entry.Decision);
+        });
+
+        modelBuilder.Entity<EdgeGatewayTemporaryIpApprovalRequestEntity>(entity =>
+        {
+            entity.ToTable("edge_gateway_temporary_ip_approval_requests");
+            entity.HasKey(request => request.Id);
+            entity.Property(request => request.RouteName).HasMaxLength(160);
+            entity.Property(request => request.PublicHostname).HasMaxLength(255);
+            entity.Property(request => request.TargetPathPrefix).HasMaxLength(255);
+            entity.Property(request => request.SourceIp).HasMaxLength(96);
+            entity.Property(request => request.CountryCode).HasMaxLength(8);
+            entity.Property(request => request.UserAgent).HasColumnType("TEXT");
+            entity.Property(request => request.RequestedUrl).HasMaxLength(2048);
+            entity.Property(request => request.ApprovalTokenHash).HasMaxLength(128);
+            entity.Property(request => request.LastEmailStatus).HasColumnType("TEXT");
+            entity.HasIndex(request => new { request.RouteId, request.SourceIp });
+            entity.HasIndex(request => request.ApprovalTokenHash);
+            entity.HasIndex(request => request.UpdatedUtc);
+        });
+
+        modelBuilder.Entity<EdgeGatewayTemporaryIpApprovalGrantEntity>(entity =>
+        {
+            entity.ToTable("edge_gateway_temporary_ip_approval_grants");
+            entity.HasKey(grant => grant.Id);
+            entity.Property(grant => grant.RouteName).HasMaxLength(160);
+            entity.Property(grant => grant.PublicHostname).HasMaxLength(255);
+            entity.Property(grant => grant.TargetPathPrefix).HasMaxLength(255);
+            entity.Property(grant => grant.SourceIp).HasMaxLength(96);
+            entity.Property(grant => grant.CountryCode).HasMaxLength(8);
+            entity.Property(grant => grant.UserAgent).HasColumnType("TEXT");
+            entity.HasIndex(grant => new { grant.RouteId, grant.SourceIp });
+            entity.HasIndex(grant => grant.IdleExpiresAtUtc);
+            entity.HasIndex(grant => grant.ExpiresAtUtc);
         });
 
         modelBuilder.Entity<EdgeGatewaySettingsEntity>(entity =>

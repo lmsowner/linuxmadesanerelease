@@ -3,12 +3,15 @@
 
 @page "/ai/engine"
 @rendermode InteractiveServer
+@using System.Security.Claims
+@using Microsoft.AspNetCore.Components.Authorization
 @using LinuxMadeSane.Application.Contracts.LocalAi
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.LocalAi
 @inject ILocalAiEngineManagerService LocalAiService
+@inject IUserDisplayPreferenceService UserDisplayPreferenceService
 @inject ILmsConnectClientFeature ConnectClientFeature
 
 @if (!Embedded)
@@ -365,6 +368,321 @@
                                         @if (lastApplyResult.OutputLines.Count > 0)
                                         {
                                             <pre class="local-ai-output-log">@string.Join(Environment.NewLine, lastApplyResult.OutputLines)</pre>
+                                        }
+                                    </div>
+                                }
+                            </section>
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@DockerTabValue" Title="Docker Engines">
+                    <ChildContent>
+                        <div class="local-ai-tab-content">
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Docker AI</p>
+                                        <h2>Trusted Docker-hosted engines</h2>
+                                        <p class="meta-text">LMS only lists trusted Docker Hub engine images here. Running containers are discovered locally, including containers started through Portainer or another Docker manager.</p>
+                                    </div>
+                                    <UiPill Tone="@GetDockerHealthTone()">
+                                        @(workspace.DockerEngines.Docker.IsDockerReachable ? "Docker ready" : "Docker unavailable")
+                                    </UiPill>
+                                </div>
+
+                                <div class="local-ai-docker-status-grid">
+                                    <article class="local-ai-fact-card">
+                                        <span class="eyebrow">Docker</span>
+                                        <strong>@(workspace.DockerEngines.Docker.IsDockerInstalled ? "Installed" : "Not installed")</strong>
+                                        <span class="meta-text">@workspace.DockerEngines.Docker.Detail</span>
+                                        @if (!string.IsNullOrWhiteSpace(workspace.DockerEngines.Docker.Version))
+                                        {
+                                            <span class="helper-text">@workspace.DockerEngines.Docker.Version</span>
+                                        }
+                                    </article>
+
+                                    <article class="local-ai-fact-card">
+                                        <span class="eyebrow">Container manager</span>
+                                        <strong>@(workspace.DockerEngines.Docker.IsPortainerDetected ? "Detected" : "Recommended")</strong>
+                                        <span class="meta-text">Portainer or another Docker manager makes model containers easier to inspect, update, and remove outside LMS.</span>
+                                    </article>
+
+                                    @if (workspace.DockerEngines.Docker.IsDockerInstalled && !workspace.DockerEngines.Docker.IsDockerReachable)
+                                    {
+                                        <article class="local-ai-fact-card">
+                                            <span class="eyebrow">Fix</span>
+                                            <strong>Grant LMS Docker access</strong>
+                                            <span class="meta-text">LMS now retries Docker inspection through its local privileged runner. If Docker still shows unavailable, rerun the latest LMS installer/update so the service account gets local system access, then restart LMS.</span>
+                                        </article>
+                                    }
+                                </div>
+
+                                @if (workspace.DockerEngines.Docker.Warnings.Count > 0)
+                                {
+                                    <div class="local-ai-warning-list">
+                                        @foreach (var warning in workspace.DockerEngines.Docker.Warnings)
+                                        {
+                                            <div class="local-ai-warning-item">@warning</div>
+                                        }
+                                    </div>
+                                }
+
+                                <div class="local-ai-approval-row">
+                                    <label class="local-ai-approval-toggle" title="Required before LMS installs, starts, or stops Docker AI containers.">
+                                        <UiCompactCheckbox Label="Approve Docker actions"
+                                                           Value="@dockerActionsApproved"
+                                                           ValueChanged="SetDockerActionsApprovedAsync" />
+                                        <span>I approve Docker engine install, start, and stop actions.</span>
+                                    </label>
+                                </div>
+                            </section>
+
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Hosted API</p>
+                                        <h2>Use OpenAI directly</h2>
+                                        <p class="meta-text">Best when the user wants the strongest models quickly and is happy to bring their own OpenAI API key. This does not require Docker or a local model server.</p>
+                                    </div>
+                                    <UiCommandButton Label="Add OpenAI provider"
+                                                     Glyph="UiIconGlyph.Key"
+                                                     Href="/ai/providers/new" />
+                                </div>
+                            </section>
+
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Custom endpoint</p>
+                                        <h2>Use an existing OpenAI-compatible API</h2>
+                                        <p class="meta-text">Use this for LM Studio, llama.cpp, Portainer-managed containers, another Docker host, or any API that exposes OpenAI-compatible chat completions.</p>
+                                    </div>
+                                </div>
+
+                                <div class="local-ai-form-grid local-ai-custom-endpoint-grid">
+                                    <UiTextField @bind-Value="customOpenAiDisplayName"
+                                                 Label="Display name"
+                                                 Helper="Provider label shown in LMS."
+                                                 Placeholder="My local AI API"
+                                                 Compact="true" />
+                                    <UiTextField @bind-Value="customOpenAiBaseUrl"
+                                                 Label="Base URL"
+                                                 Helper="Use the API root, usually ending in /v1."
+                                                 Placeholder="http://127.0.0.1:1234/v1"
+                                                 Compact="true" />
+                                    <UiTextField @bind-Value="customOpenAiModelId"
+                                                 Label="Model ID"
+                                                 Helper="Exact model name exposed by the API."
+                                                 Placeholder="qwen2.5-coder:7b"
+                                                 Compact="true" />
+                                </div>
+
+                                <div class="local-ai-inline-actions local-ai-custom-endpoint-actions">
+                                    <UiCompactCheckbox Label="Default provider"
+                                                       Value="@customOpenAiSetDefault"
+                                                       ValueChanged="SetCustomOpenAiDefaultAsync" />
+                                    <UiCommandButton Label="Add custom provider"
+                                                     Glyph="UiIconGlyph.Plus"
+                                                     Disabled="@(!CanAddCustomOpenAiProvider)"
+                                                     OnClick="AddCustomOpenAiProviderAsync" />
+                                </div>
+                            </section>
+
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Docker Hub</p>
+                                        <h2>Verified engine catalog</h2>
+                                    </div>
+                                    <span>@workspace.DockerEngines.Catalog.Count engine(s)</span>
+                                </div>
+
+                                <div class="compact-list local-ai-docker-engine-list">
+                                    @foreach (var engine in workspace.DockerEngines.Catalog)
+                                    {
+                                        var installedEngine = FindDockerEngine(engine.EngineId);
+                                        <div class="compact-row compact-row-block local-ai-docker-engine-row">
+                                            <div class="compact-row-main">
+                                                <div class="provider-record-heading">
+                                                    <strong>@engine.DisplayName</strong>
+                                                    <UiPill Tone="UiPillTone.Success">@engine.TrustLabel</UiPill>
+                                                    <UiPill Tone="@(engine.IsHostPortAvailable ? UiPillTone.Success : UiPillTone.Warning)">
+                                                        @(engine.IsHostPortAvailable ? "Port checked" : "Port busy")
+                                                    </UiPill>
+                                                    @if (installedEngine is not null)
+                                                    {
+                                                        <UiPill Tone="@(installedEngine.IsRunning ? UiPillTone.Success : UiPillTone.Warning)">
+                                                            @(installedEngine.IsRunning ? "Running" : "Stopped")
+                                                        </UiPill>
+                                                    }
+                                                    @if (engine.RequiresGpu)
+                                                    {
+                                                        <UiPill Tone="UiPillTone.Warning">GPU expected</UiPill>
+                                                    }
+                                                </div>
+                                                <p class="compact-row-summary">@engine.Description</p>
+                                                <p class="meta-text">@GetDockerEngineGuidance(engine)</p>
+                                                <div class="local-ai-inline-meta">
+                                                    <span>@($"{engine.DockerImage}:{engine.DockerTag}")</span>
+                                                    <span>@GetDockerPortLabel(engine)</span>
+                                                    <span>@(string.IsNullOrWhiteSpace(engine.DefaultModelId) ? "model selected in container" : engine.DefaultModelId)</span>
+                                                </div>
+                                                <p class="helper-text">@engine.HostPortDetail</p>
+                                                <p class="meta-text">@engine.Detail</p>
+                                                <code class="local-ai-command-preview">@engine.RunCommand</code>
+                                            </div>
+
+                                            <div class="compact-row-side">
+                                                <div class="toolbar-cluster">
+                                                    @if (installedEngine is null)
+                                                    {
+                                                        @if (dockerActionsApproved)
+                                                        {
+                                                            <UiCommandButton Label="Install"
+                                                                             Glyph="UiIconGlyph.Download"
+                                                                             Disabled="@(!workspace.DockerEngines.Docker.IsDockerReachable || !engine.IsHostPortAvailable || isBusy)"
+                                                                             OnClick="@(() => InstallDockerEngineAsync(engine.EngineId))" />
+                                                        }
+                                                    }
+                                                    else if (installedEngine.IsRunning)
+                                                    {
+                                                        @if (dockerActionsApproved)
+                                                        {
+                                                            <UiCommandButton Label="Stop"
+                                                                             Glyph="UiIconGlyph.Stop"
+                                                                             Variant="UiButtonVariant.Ghost"
+                                                                             Disabled="@isBusy"
+                                                                             OnClick="@(() => StopDockerEngineAsync(installedEngine.ContainerId))" />
+                                                        }
+                                                    }
+                                                    else
+                                                    {
+                                                        @if (dockerActionsApproved)
+                                                        {
+                                                            <UiCommandButton Label="Start"
+                                                                             Glyph="UiIconGlyph.Run"
+                                                                             Disabled="@isBusy"
+                                                                             OnClick="@(() => StartDockerEngineAsync(installedEngine.ContainerId))" />
+                                                        }
+                                                    }
+                                                    @if (installedEngine is not null)
+                                                    {
+                                                        <UiCommandButton Label="Open UI/API"
+                                                                         Glyph="UiIconGlyph.PopOut"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         Disabled="@(!installedEngine.IsRunning)"
+                                                                         Href="@(installedEngine.IsRunning ? GetDockerEngineUiUrl(installedEngine) : null)"
+                                                                         Target="_blank"
+                                                                         Rel="noreferrer" />
+                                                    }
+                                                    @if (installedEngine is not null && CanAddDockerProvider(installedEngine))
+                                                    {
+                                                        <UiCommandButton Label="Add provider"
+                                                                         Glyph="UiIconGlyph.Plus"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         OnClick="@(() => AddDockerProviderAsync(installedEngine))" />
+                                                    }
+                                                    <UiCommandButton Label="Docker Hub"
+                                                                     Glyph="UiIconGlyph.PopOut"
+                                                                     Variant="UiButtonVariant.Ghost"
+                                                                     Href="@engine.DockerHubUrl"
+                                                                     Target="_blank"
+                                                                     Rel="noreferrer" />
+                                                    <UiCommandButton Label="Docs"
+                                                                     Glyph="UiIconGlyph.Info"
+                                                                     Variant="UiButtonVariant.Ghost"
+                                                                     Href="@engine.DocumentationUrl"
+                                                                     Target="_blank"
+                                                                     Rel="noreferrer" />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    }
+                                </div>
+                            </section>
+
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">Running containers</p>
+                                        <h2>OpenAI-compatible engines LMS can use</h2>
+                                    </div>
+                                    <span>@workspace.DockerEngines.DiscoveredEngines.Count engine(s)</span>
+                                </div>
+
+                                @if (workspace.DockerEngines.DiscoveredEngines.Count == 0)
+                                {
+                                    <div class="empty-state compact-empty-state">
+                                        <p>No reachable Docker AI engines were discovered.</p>
+                                        <p class="meta-text">Start one of the trusted engines, or start a compatible container in Portainer. LMS will use the published local OpenAI-compatible endpoint once it can list models.</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="compact-list local-ai-docker-engine-list">
+                                        @foreach (var engine in workspace.DockerEngines.DiscoveredEngines)
+                                        {
+                                            <div class="compact-row compact-row-block local-ai-docker-engine-row">
+                                                <div class="compact-row-main">
+                                                    <div class="provider-record-heading">
+                                                        <strong>@engine.ContainerName</strong>
+                                                        <UiPill Tone="@(engine.IsRunning ? UiPillTone.Success : UiPillTone.Warning)">
+                                                            @(engine.IsRunning ? "Running" : "Stopped")
+                                                        </UiPill>
+                                                        <UiPill Tone="@(engine.IsReachable ? UiPillTone.Success : UiPillTone.Warning)">
+                                                            @(engine.IsReachable ? "Model API ready" : "No model API")
+                                                        </UiPill>
+                                                    </div>
+                                                    <div class="local-ai-inline-meta">
+                                                        <span>@engine.Image</span>
+                                                        <span>@engine.BaseUrl</span>
+                                                        <span>@(string.IsNullOrWhiteSpace(engine.DefaultModelId) ? "No model detected" : engine.DefaultModelId)</span>
+                                                    </div>
+                                                    <p class="meta-text">@engine.Detail</p>
+                                                    @if (engine.ModelIds.Count > 1)
+                                                    {
+                                                        <p class="helper-text">@FormatDockerModelList(engine.ModelIds)</p>
+                                                    }
+                                                </div>
+
+                                                <div class="compact-row-side">
+                                                    <div class="toolbar-cluster">
+                                                        @if (engine.IsRunning)
+                                                        {
+                                                            @if (dockerActionsApproved)
+                                                            {
+                                                                <UiCommandButton Label="Stop"
+                                                                                 Glyph="UiIconGlyph.Stop"
+                                                                                 Variant="UiButtonVariant.Ghost"
+                                                                                 Disabled="@isBusy"
+                                                                                 OnClick="@(() => StopDockerEngineAsync(engine.ContainerId))" />
+                                                            }
+                                                        }
+                                                        else
+                                                        {
+                                                            @if (dockerActionsApproved)
+                                                            {
+                                                                <UiCommandButton Label="Start"
+                                                                                 Glyph="UiIconGlyph.Run"
+                                                                                 Disabled="@isBusy"
+                                                                                 OnClick="@(() => StartDockerEngineAsync(engine.ContainerId))" />
+                                                            }
+                                                        }
+                                                        <UiCommandButton Label="Open UI/API"
+                                                                         Glyph="UiIconGlyph.PopOut"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         Disabled="@(!engine.IsRunning)"
+                                                                         Href="@(engine.IsRunning ? GetDockerEngineUiUrl(engine) : null)"
+                                                                         Target="_blank"
+                                                                         Rel="noreferrer" />
+                                                        <UiCommandButton Label="Add provider"
+                                                                         Glyph="UiIconGlyph.Plus"
+                                                                         Disabled="@(!CanAddDockerProvider(engine))"
+                                                                         OnClick="@(() => AddDockerProviderAsync(engine))" />
+                                                    </div>
+                                                </div>
+                                            </div>
                                         }
                                     </div>
                                 }
@@ -841,8 +1159,12 @@
     [Parameter]
     public bool Embedded { get; set; }
 
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
     private const string OverviewTabValue = "overview";
     private const string SetupTabValue = "setup";
+    private const string DockerTabValue = "docker";
     private const string ModelsTabValue = "models";
     private const string HardwareTabValue = "hardware";
     private const string SharingTabValue = "sharing";
@@ -863,6 +1185,12 @@
     private bool setupApproved;
     private bool runtimeActionsApproved;
     private bool modelActionsApproved;
+    private bool dockerActionsApproved;
+    private Guid? userId;
+    private string customOpenAiDisplayName = "OpenAI-compatible API";
+    private string customOpenAiBaseUrl = string.Empty;
+    private string customOpenAiModelId = string.Empty;
+    private bool customOpenAiSetDefault;
     private bool SupportsConnectSharing => ConnectClientFeature.SupportsRemoteAiSharing;
 
     private IReadOnlyList<LocalAiUsageEntry> LocalUsageEntries =>
@@ -878,6 +1206,11 @@
         !string.IsNullOrWhiteSpace(GetCurrentModelId()) &&
         workspace.InstalledModels.Any(model => model.ModelId.Equals(GetCurrentModelId(), StringComparison.OrdinalIgnoreCase));
 
+    private bool CanAddCustomOpenAiProvider =>
+        !isBusy &&
+        !string.IsNullOrWhiteSpace(customOpenAiBaseUrl) &&
+        !string.IsNullOrWhiteSpace(customOpenAiModelId);
+
     private LocalAiSetupProgressUpdate? CurrentSetupProgress =>
         setupProgressUpdates.Count == 0 ? null : setupProgressUpdates[^1];
 
@@ -886,6 +1219,13 @@
 
     protected override async Task OnInitializedAsync()
     {
+        userId = await ResolveUserIdAsync();
+        if (userId.HasValue)
+        {
+            var preference = await UserDisplayPreferenceService.GetAsync(userId.Value);
+            dockerActionsApproved = preference?.DockerAiActionsApproved ?? false;
+        }
+
         await LoadAsync();
     }
 
@@ -944,6 +1284,33 @@
     {
         modelActionsApproved = value;
         return Task.CompletedTask;
+    }
+
+    private async Task SetDockerActionsApprovedAsync(bool value)
+    {
+        dockerActionsApproved = value;
+        if (userId.HasValue)
+        {
+            await UserDisplayPreferenceService.SaveDockerAiActionsApprovedAsync(userId.Value, value);
+        }
+    }
+
+    private Task SetCustomOpenAiDefaultAsync(bool value)
+    {
+        customOpenAiSetDefault = value;
+        return Task.CompletedTask;
+    }
+
+    private async Task<Guid?> ResolveUserIdAsync()
+    {
+        var authenticationState = AuthenticationStateTask is null
+            ? null
+            : await AuthenticationStateTask;
+        var value = authenticationState?.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+
+        return Guid.TryParse(value, out var parsed)
+            ? parsed
+            : null;
     }
 
     private async Task PreviewSetupAsync()
@@ -1187,6 +1554,112 @@
         }
     }
 
+    private async Task AddDockerProviderAsync(DockerAiDiscoveredEngine engine)
+    {
+        isBusy = true;
+        try
+        {
+            var provider = await LocalAiService.CreateOrUpdateDockerProviderAsync(
+                new DockerAiProviderRequest(
+                    engine.EngineId,
+                    $"Docker {engine.ContainerName}",
+                    engine.BaseUrl,
+                    engine.DefaultModelId,
+                    false));
+            SetStatus($"{provider.DisplayName} is now available in AI Providers.", "success");
+            await LoadAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task AddCustomOpenAiProviderAsync()
+    {
+        isBusy = true;
+        try
+        {
+            var provider = await LocalAiService.CreateOrUpdateCustomOpenAiProviderAsync(
+                new CustomOpenAiProviderRequest(
+                    customOpenAiDisplayName,
+                    customOpenAiBaseUrl,
+                    customOpenAiModelId,
+                    customOpenAiSetDefault));
+            SetStatus($"{provider.DisplayName} is now available in AI Providers.", "success");
+            await LoadAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task InstallDockerEngineAsync(string engineId)
+    {
+        isBusy = true;
+        try
+        {
+            lastApplyResult = await LocalAiService.InstallDockerEngineAsync(engineId, dockerActionsApproved);
+            SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
+            await LoadAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task StartDockerEngineAsync(string containerIdOrName)
+    {
+        isBusy = true;
+        try
+        {
+            lastApplyResult = await LocalAiService.StartDockerEngineAsync(containerIdOrName, dockerActionsApproved);
+            SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
+            await LoadAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task StopDockerEngineAsync(string containerIdOrName)
+    {
+        isBusy = true;
+        try
+        {
+            lastApplyResult = await LocalAiService.StopDockerEngineAsync(containerIdOrName, dockerActionsApproved);
+            SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
+            await LoadAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
     private async Task RunRuntimeActionAsync(Func<Task<LocalAiApplyResult>> action)
     {
         isBusy = true;
@@ -1332,6 +1805,56 @@
         LocalAiGpuAccelerationState.Available => UiPillTone.Warning,
         _ => UiPillTone.Neutral
     };
+
+    private UiPillTone GetDockerHealthTone() =>
+        workspace?.DockerEngines.Docker.IsDockerReachable == true
+            ? UiPillTone.Success
+            : workspace?.DockerEngines.Docker.IsDockerInstalled == true
+                ? UiPillTone.Warning
+                : UiPillTone.Failure;
+
+    private bool CanAddDockerProvider(DockerAiDiscoveredEngine engine) =>
+        engine.IsReachable &&
+        engine.IsRunning &&
+        !string.IsNullOrWhiteSpace(engine.BaseUrl) &&
+        !string.IsNullOrWhiteSpace(engine.DefaultModelId) &&
+        !isBusy;
+
+    private DockerAiDiscoveredEngine? FindDockerEngine(string engineId) =>
+        workspace?.DockerEngines.DiscoveredEngines.FirstOrDefault(engine =>
+            engine.EngineId.Equals(engineId, StringComparison.OrdinalIgnoreCase));
+
+    private static string GetDockerEngineUiUrl(DockerAiDiscoveredEngine engine)
+    {
+        if (string.IsNullOrWhiteSpace(engine.BaseUrl))
+        {
+            return string.Empty;
+        }
+
+        var baseUrl = engine.BaseUrl.Trim().TrimEnd('/');
+        return baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
+            ? baseUrl[..^3]
+            : baseUrl;
+    }
+
+    private static string GetDockerEngineGuidance(DockerAiEngineCatalogItem engine) =>
+        engine.EngineId switch
+        {
+            "ollama" => "Choose this for the simplest local model server. Install it, pull a model from the container or a Docker manager, then add the provider once LMS can see the model.",
+            "localai" => "Choose this when you want an OpenAI-compatible local API with flexible CPU-friendly model serving and external model management.",
+            "vllm" => "Choose this for high-throughput GPU inference. It expects a working Docker GPU runtime and is overkill for small CPU-only boxes.",
+            _ => "Choose this when the container exposes an OpenAI-compatible model API that LMS can probe."
+        };
+
+    private static string GetDockerPortLabel(DockerAiEngineCatalogItem engine) =>
+        $"127.0.0.1:{engine.HostPort} -> {engine.ContainerPort}/tcp";
+
+    private static string FormatDockerModelList(IReadOnlyList<string> modelIds)
+    {
+        var visible = modelIds.Take(5).ToArray();
+        var suffix = modelIds.Count > visible.Length ? $" +{modelIds.Count - visible.Length} more" : string.Empty;
+        return $"Models: {string.Join(", ", visible)}{suffix}";
+    }
 
     private static UiPillTone MapSuitabilityTone(LocalAiModelSuitability suitability) => suitability switch
     {

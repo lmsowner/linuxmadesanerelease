@@ -14,6 +14,11 @@ public sealed record EdgeGatewayRouteListItem(
     string TargetPathPrefix,
     string TargetUrl,
     EdgeGatewayAuthMode AuthMode,
+    string TemporaryIpApprovalRecipients,
+    string TemporaryIpApprovalAllowedCountryCodes,
+    bool TemporaryIpApprovalUseNotFoundResponse,
+    int? TemporaryIpApprovalIdleTimeoutMinutes,
+    int? TemporaryIpApprovalMaxLifetimeMinutes,
     EdgeGatewayDiagnosticStatus LastTestStatus,
     string LastTestMessage,
     DateTimeOffset UpdatedAt);

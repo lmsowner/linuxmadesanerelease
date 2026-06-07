@@ -4,9 +4,12 @@
 @page "/ai/providers/new"
 @page "/ai/providers/{ProviderKey}"
 @rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts.LocalAi
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Models.Ai
+@using LinuxMadeSane.Core.Models.LocalAi
 @inject IAiProviderSettingsService ProviderSettingsService
+@inject ILocalAiEngineManagerService LocalAiService
 @inject NavigationManager NavigationManager
 
 <PageTitle>@(IsEditMode ? "Edit AI Provider" : "New AI Provider") | Linux Made Sane</PageTitle>
@@ -86,11 +89,45 @@
                                      Label="Display name" />
                     </div>
 
+                    @if (providerContext.Editor.ProviderType == AiProviderType.Custom ||
+                         !string.IsNullOrWhiteSpace(providerContext.Editor.BaseUrl))
+                    {
+                        <section class="ai-provider-docker-api-panel">
+                            @if (!string.IsNullOrWhiteSpace(dockerDiscoveryMessage))
+                            {
+                                <div class="callout warning">@dockerDiscoveryMessage</div>
+                            }
+
+                            <div class="field-row ai-provider-docker-source-row">
+                                <UiComboboxField TValue="string"
+                                                 Value="@SelectedDockerEngineBaseUrl"
+                                                 ValueChanged="SetDockerHostedEngineAsync"
+                                                 ValueExpression="@(() => SelectedDockerEngineBaseUrl)"
+                                                 Label="Docker-hosted AI"
+                                                 Helper="@DockerHostedAiHelper">
+                                    <option value="">Manual / external OpenAI-compatible endpoint</option>
+                                    @foreach (var engine in ReadyDockerCompatibleEngines)
+                                    {
+                                        <option value="@NormalizeBaseUrl(engine.BaseUrl)">@FormatDockerEngineOption(engine)</option>
+                                    }
+                                </UiComboboxField>
+
+                                <UiTextField @bind-Value="providerContext.Editor.BaseUrl"
+                                             Label="Base URL"
+                                             Helper="OpenAI-compatible API root, for example http://127.0.0.1:8000/v1." />
+                            </div>
+                        </section>
+                    }
+
                     <div class="field-row ai-provider-model-row">
                         <UiComboboxField TValue="string"
                                        @bind-Value="providerContext.Editor.DefaultModelId"
                                        Label="Default model"
-                                       Helper="@(CurrentModelOptions.Count > 0 ? "Used for new chats that pick this provider." : null)">
+                                       Helper="@DefaultModelFieldHelper">
+                            @if (CurrentModelOptions.Count == 0)
+                            {
+                                <option value="">Select an engine or refresh models</option>
+                            }
                             @foreach (var model in CurrentModelOptions)
                             {
                                 <option value="@model.ModelId">@model.DisplayName</option>
@@ -229,6 +266,7 @@
     public string? ProviderKey { get; set; }
 
     private AiProviderSettingsEditorContextViewModel? providerContext;
+    private LocalAiEngineWorkspaceViewModel? localAiWorkspace;
     private bool isLoaded;
     private bool isSaving;
     private bool isTestingProvider;
@@ -239,18 +277,71 @@
     private string providerTestTone = "success";
     private string? modelRefreshMessage;
     private string modelRefreshTone = "success";
+    private string dockerDiscoveryMessage = string.Empty;
     private AiProviderType? lastProviderType;
     private bool IsEditMode => !string.IsNullOrWhiteSpace(ProviderKey);
     private AiProviderDefinition SelectedProviderTypeDefinition =>
         providerContext?.SupportedProviders.FirstOrDefault(provider => provider.ProviderType == providerContext.Editor.ProviderType)
         ?? new AiProviderDefinition("unknown", AiProviderType.Unknown, "Unknown", "Unknown provider type.", false, false);
-    private IReadOnlyList<AiProviderModelOption> CurrentModelOptions =>
-        providerContext?.AvailableModelOptions
-            .Where(model => model.ProviderType == providerContext.Editor.ProviderType)
-            .OrderByDescending(model => model.IsRecommendedDefault)
-            .ThenBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
+    private IReadOnlyList<DockerAiDiscoveredEngine> ReadyDockerCompatibleEngines =>
+        localAiWorkspace?.DockerEngines.DiscoveredEngines
+            .Where(engine => engine.IsRunning &&
+                             engine.IsReachable &&
+                             !string.IsNullOrWhiteSpace(engine.BaseUrl) &&
+                             engine.ModelIds.Any(IsSelectableChatModelId))
+            .OrderBy(engine => engine.ContainerName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(engine => engine.BaseUrl, StringComparer.OrdinalIgnoreCase)
             .ToArray()
         ?? [];
+
+    private string SelectedDockerEngineBaseUrl
+    {
+        get
+        {
+            var baseUrl = providerContext?.Editor.BaseUrl ?? string.Empty;
+            return ReadyDockerCompatibleEngines
+                       .FirstOrDefault(engine => SameBaseUrl(engine.BaseUrl, baseUrl))
+                       ?.BaseUrl
+                       .Trim()
+                       .TrimEnd('/') ??
+                   string.Empty;
+        }
+    }
+
+    private string DockerHostedAiHelper =>
+        ReadyDockerCompatibleEngines.Count == 0
+            ? "No running Docker model endpoint was found. Use a manual endpoint below, or start one in Local AI."
+            : "Choose a Docker engine LMS has already found, then pick the model below.";
+
+    private string? DefaultModelFieldHelper =>
+        CurrentModelOptions.Count > 0
+            ? "Used for new chats that pick this provider."
+            : providerContext?.Editor.ProviderType == AiProviderType.Custom
+                ? "Select a Docker-hosted AI endpoint, or enter a Base URL and refresh models."
+                : null;
+
+    private IReadOnlyList<AiProviderModelOption> CurrentModelOptions
+    {
+        get
+        {
+            if (providerContext is null)
+            {
+                return [];
+            }
+
+            var options = providerContext.AvailableModelOptions
+                .Where(model => model.ProviderType == providerContext.Editor.ProviderType)
+                .Concat(GetDockerModelOptionsForCurrentProvider())
+                .Where(IsSelectableModelOption)
+                .GroupBy(model => model.ModelId, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .OrderByDescending(model => model.IsRecommendedDefault)
+                .ThenBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            return options;
+        }
+    }
 
     protected override async Task OnParametersSetAsync()
     {
@@ -270,6 +361,18 @@
             providerContext = await ProviderSettingsService.GetEditorAsync(ProviderKey);
             lastProviderType = providerContext.Editor.ProviderType;
             providerContext.Editor.RequiresApiKey = SelectedProviderTypeDefinition.RequiresApiKey;
+            try
+            {
+                localAiWorkspace = await LocalAiService.GetWorkspaceAsync();
+                dockerDiscoveryMessage = string.Empty;
+            }
+            catch (Exception exception)
+            {
+                localAiWorkspace = null;
+                dockerDiscoveryMessage = $"Docker API-compatible engine discovery is unavailable: {exception.Message}";
+            }
+
+            EnsureSelectedDefaultModelIsSelectable();
         }
         catch (Exception exception)
         {
@@ -304,12 +407,15 @@
             providerContext.Editor.DisplayName = selectedDefinition.DisplayName;
         }
 
-        var selectedModel = CurrentModelOptions.FirstOrDefault(model =>
-            model.ModelId.Equals(providerContext.Editor.DefaultModelId, StringComparison.OrdinalIgnoreCase));
-
-        if (selectedModel is null)
+        if (providerContext.Editor.ProviderType == AiProviderType.Custom &&
+            string.IsNullOrWhiteSpace(providerContext.Editor.BaseUrl) &&
+            ReadyDockerCompatibleEngines.Count == 1)
         {
-            providerContext.Editor.DefaultModelId = CurrentModelOptions.FirstOrDefault()?.ModelId ?? string.Empty;
+            ApplyDockerCompatibleEngine(ReadyDockerCompatibleEngines[0], updateDisplayName: true);
+        }
+        else
+        {
+            EnsureSelectedDefaultModelIsSelectable();
         }
 
         lastProviderType = providerContext.Editor.ProviderType;
@@ -402,13 +508,7 @@
             var refreshedCatalog = await ProviderSettingsService.RefreshModelCatalogAsync(providerContext.Editor);
             providerContext = providerContext with { AvailableModelOptions = refreshedCatalog };
 
-            var selectedModel = CurrentModelOptions.FirstOrDefault(model =>
-                model.ModelId.Equals(providerContext.Editor.DefaultModelId, StringComparison.OrdinalIgnoreCase));
-
-            if (selectedModel is null)
-            {
-                providerContext.Editor.DefaultModelId = CurrentModelOptions.FirstOrDefault()?.ModelId ?? string.Empty;
-            }
+            EnsureSelectedDefaultModelIsSelectable();
 
             modelRefreshTone = "success";
             modelRefreshMessage = $"Model list refreshed. {CurrentModelOptions.Count} option(s) available for {SelectedProviderTypeDefinition.DisplayName}.";
@@ -422,6 +522,153 @@
         {
             isRefreshingModels = false;
         }
+    }
+
+    private Task SetDockerHostedEngineAsync(string baseUrl)
+    {
+        if (providerContext is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        ClearProviderTestMessage();
+        ClearModelRefreshMessage();
+
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            if (ReadyDockerCompatibleEngines.Any(engine => SameBaseUrl(engine.BaseUrl, providerContext.Editor.BaseUrl)))
+            {
+                providerContext.Editor.BaseUrl = string.Empty;
+                providerContext.Editor.DefaultModelId = string.Empty;
+            }
+
+            return Task.CompletedTask;
+        }
+
+        var selectedEngine = ReadyDockerCompatibleEngines.FirstOrDefault(engine => SameBaseUrl(engine.BaseUrl, baseUrl));
+        if (selectedEngine is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        ApplyDockerCompatibleEngine(selectedEngine, updateDisplayName: true);
+        modelRefreshTone = "success";
+        modelRefreshMessage = $"Selected {selectedEngine.ContainerName}. Pick the model below and save the provider.";
+        return Task.CompletedTask;
+    }
+
+    private void ApplyDockerCompatibleEngine(DockerAiDiscoveredEngine engine, bool updateDisplayName)
+    {
+        if (providerContext is null)
+        {
+            return;
+        }
+
+        providerContext.Editor.ProviderType = AiProviderType.Custom;
+        if (updateDisplayName &&
+            (string.IsNullOrWhiteSpace(providerContext.Editor.DisplayName) ||
+             providerContext.Editor.DisplayName.Equals(SelectedProviderTypeDefinition.DisplayName, StringComparison.OrdinalIgnoreCase) ||
+             providerContext.Editor.DisplayName.Equals("OpenAI / Docker-compatible API", StringComparison.OrdinalIgnoreCase)))
+        {
+            providerContext.Editor.DisplayName = $"Docker {engine.ContainerName}";
+        }
+
+        providerContext.Editor.BaseUrl = NormalizeBaseUrl(engine.BaseUrl);
+        providerContext.Editor.DefaultModelId = SelectDefaultDockerModelId(engine);
+        providerContext.Editor.StreamingEnabled = true;
+        providerContext.Editor.ToolUseEnabled = false;
+        providerContext.Editor.RequiresApiKey = false;
+    }
+
+    private IReadOnlyList<AiProviderModelOption> GetDockerModelOptionsForCurrentProvider()
+    {
+        if (providerContext?.Editor.ProviderType != AiProviderType.Custom)
+        {
+            return [];
+        }
+
+        var selectedBaseUrl = NormalizeBaseUrl(providerContext.Editor.BaseUrl);
+        var selectedEngine = ReadyDockerCompatibleEngines.FirstOrDefault(engine =>
+            SameBaseUrl(engine.BaseUrl, selectedBaseUrl));
+
+        if (selectedEngine is null)
+        {
+            return [];
+        }
+
+        return selectedEngine.ModelIds
+            .Where(IsSelectableChatModelId)
+            .Select((modelId, index) => new AiProviderModelOption(
+                AiProviderType.Custom,
+                modelId,
+                modelId,
+                $"Docker API-compatible model from {selectedEngine.ContainerName}.",
+                false,
+                index == 0))
+            .ToArray();
+    }
+
+    private static string FormatDockerProviderModelList(IReadOnlyList<string> modelIds)
+    {
+        var selectable = modelIds.Where(IsSelectableChatModelId).ToArray();
+        var visible = selectable.Take(3).ToArray();
+        var suffix = selectable.Length > visible.Length ? $" +{selectable.Length - visible.Length} more" : string.Empty;
+        return $"{string.Join(", ", visible)}{suffix}";
+    }
+
+    private static string FormatDockerEngineOption(DockerAiDiscoveredEngine engine) =>
+        $"{engine.ContainerName} - {FormatDockerProviderModelList(engine.ModelIds)}";
+
+    private static string NormalizeBaseUrl(string? baseUrl) =>
+        string.IsNullOrWhiteSpace(baseUrl) ? string.Empty : baseUrl.Trim().TrimEnd('/');
+
+    private static bool SameBaseUrl(string? left, string? right) =>
+        NormalizeBaseUrl(left).Equals(NormalizeBaseUrl(right), StringComparison.OrdinalIgnoreCase);
+
+    private void EnsureSelectedDefaultModelIsSelectable()
+    {
+        if (providerContext is null)
+        {
+            return;
+        }
+
+        var selectedModel = CurrentModelOptions.FirstOrDefault(model =>
+            model.ModelId.Equals(providerContext.Editor.DefaultModelId, StringComparison.OrdinalIgnoreCase));
+
+        if (selectedModel is null || !IsSelectableChatModelId(selectedModel.ModelId))
+        {
+            providerContext.Editor.DefaultModelId = CurrentModelOptions.FirstOrDefault(IsSelectableModelOption)?.ModelId ?? string.Empty;
+        }
+    }
+
+    private static string SelectDefaultDockerModelId(DockerAiDiscoveredEngine engine)
+    {
+        if (IsSelectableChatModelId(engine.DefaultModelId))
+        {
+            return engine.DefaultModelId;
+        }
+
+        return engine.ModelIds.FirstOrDefault(IsSelectableChatModelId) ?? string.Empty;
+    }
+
+    private static bool IsSelectableModelOption(AiProviderModelOption model) =>
+        IsSelectableChatModelId(model.ModelId);
+
+    private static bool IsSelectableChatModelId(string modelId)
+    {
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return false;
+        }
+
+        var normalized = modelId.Trim().Replace('\\', '/').ToLowerInvariant();
+        var fileName = normalized.Split('/').LastOrDefault() ?? normalized;
+        return !fileName.StartsWith("mmproj", StringComparison.Ordinal) &&
+               !fileName.Contains("-mmproj", StringComparison.Ordinal) &&
+               !fileName.Contains("_mmproj", StringComparison.Ordinal) &&
+               !fileName.EndsWith(".mmproj", StringComparison.Ordinal) &&
+               !(fileName.Contains("projector", StringComparison.Ordinal) &&
+                 fileName.EndsWith(".gguf", StringComparison.Ordinal));
     }
 
     private void ClearProviderTestMessage()

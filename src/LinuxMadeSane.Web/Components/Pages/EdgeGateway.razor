@@ -16,6 +16,7 @@
 @inject IEdgeGatewayService EdgeGatewayService
 @inject EdgeGatewayOptions EdgeGatewayOptions
 @inject ILocalHttpServiceDiscoveryService HttpServiceDiscovery
+@inject ISecurityUserStore SecurityUserStore
 
 <PageTitle>Edge Gateway | Linux Made Sane</PageTitle>
 
@@ -54,19 +55,19 @@
                     Class="page-tab-control edge-tabs"
                     PanelClass="page-tab-panel edge-tab-panel">
             <ChildContent>
-                <TabPage Value="@PublishedAppsTabValue" Title="@($"Published Apps ({dashboard.Routes.Count})")">
+                <TabPage Value="@PublishedAppsTabValue" Title="@($"Services ({dashboard.Routes.Count})")">
                     <section class="surface-card edge-card">
                         <div class="table-header">
                             <div>
                                 <p class="eyebrow">Services</p>
                                 <h2>Apps and hosts exposed through Edge Gateway</h2>
-                                <p class="meta-text">Saving a service adds it to LMS. Press Publish on the service card to create Cloudflare DNS, tunnel ingress, and Caddy routing.</p>
+                                <p class="meta-text">Saving an enabled service applies Cloudflare DNS, tunnel ingress, and Caddy routing automatically.</p>
                             </div>
                         </div>
 
                         @if (dashboard.Routes.Count == 0)
                         {
-                            <p class="meta-text">No services yet. Use Setup to prepare a relay, add a service, then press Publish on the service card to make it live.</p>
+                            <p class="meta-text">No services yet. Use Setup to prepare a relay, then add and save a service to make it live.</p>
                         }
                         else
                         {
@@ -115,11 +116,6 @@
                                                                 <UiPill Tone="@GetStatusTone(route.LastTestStatus)">@BuildRouteTestStatusLabel(route.LastTestStatus)</UiPill>
                                                             </div>
                                                             <div class="edge-route-actions">
-                                                                <UiCommandButton Label="@(IsPublishingRoute(route.Id) ? "Publishing..." : "Publish")"
-                                                                                 Glyph="UiIconGlyph.Connection"
-                                                                                 Variant="UiButtonVariant.Primary"
-                                                                                 Disabled="@(IsRouteActionBusy || !route.Enabled || !dashboard.Runtime.CanAttemptPublish)"
-                                                                                 OnClick="@(() => ProvisionCloudflareRouteAsync(route.Id))" />
                                                                 <UiCommandButton Label="@BuildRouteToggleLabel(route)"
                                                                                  Glyph="@(route.Enabled ? UiIconGlyph.Stop : UiIconGlyph.Run)"
                                                                                  Variant="@(route.Enabled ? UiButtonVariant.Danger : UiButtonVariant.Primary)"
@@ -140,6 +136,14 @@
                                                                 <a href="@route.TargetUrl" target="_blank" rel="noopener noreferrer">@route.TargetUrl</a>
                                                             </span>
                                                         </div>
+                                                        @if (route.AuthMode == EdgeGatewayAuthMode.TemporaryIpApproval)
+                                                        {
+                                                            <div class="edge-temporary-approval-summary">
+                                                                <strong>Email approve IP is enabled</strong>
+                                                                <span>@TemporaryIpApprovalWarningText</span>
+                                                                <span>@BuildTemporaryIpApprovalSummary(route)</span>
+                                                            </div>
+                                                        }
                                                         @if (routeActionMessageRouteId == route.Id && !string.IsNullOrWhiteSpace(routeActionMessage))
                                                         {
                                                             <div class="edge-route-status @(routeActionIsError ? "error" : "success")">
@@ -150,9 +154,9 @@
                                                         {
                                                             <details class="edge-route-publish-details">
                                                                 <summary>
-                                                                    <span>Publishing details</span>
+                                                                    <span>Deployment details</span>
                                                                     <UiPill Tone="@(publishResult.Success ? UiPillTone.Success : UiPillTone.Warning)">
-                                                                        @(publishResult.Success ? "Published" : "Needs confirmation")
+                                                                        @(publishResult.Success ? "Applied" : "Needs confirmation")
                                                                     </UiPill>
                                                                 </summary>
                                                                 <div class="edge-route-publish-body">
@@ -178,7 +182,7 @@
                                                                                              Label="Replace the existing DNS record for this route"
                                                                                              Helper="Use this when the public hostname is currently pointing somewhere else."
                                                                                              Compact="true" />
-                                                                            <UiCommandButton Label="Replace and publish"
+                                                                            <UiCommandButton Label="Replace DNS and retry"
                                                                                              Glyph="UiIconGlyph.Save"
                                                                                              Variant="UiButtonVariant.Danger"
                                                                                              OnClick="@(() => ProvisionCloudflareRouteAsync(publishResult.RouteId))" />
@@ -317,7 +321,7 @@
                             <div>
                                 <p class="eyebrow">Cloudflare token</p>
                                 <h2>Connect Cloudflare to Edge Gateway</h2>
-                                <p class="meta-text">Validate a scoped token here before publishing. Edge Gateway will then list the Cloudflare zones that token can manage.</p>
+                                <p class="meta-text">Validate a scoped token here before applying services. Edge Gateway will then list the Cloudflare zones that token can manage.</p>
                             </div>
                             @if (dashboard.Cloudflare.HasSavedToken)
                             {
@@ -456,7 +460,7 @@
                                             }
                                             else
                                             {
-                                                <span>No published app routes on this zone yet.</span>
+                                                <span>No app routes on this zone yet.</span>
                                             }
                                         </div>
                                         <div class="edge-local-relay-actions">
@@ -489,7 +493,7 @@
 
                         <div class="edge-relay-settings-body">
                             <p class="callout warning edge-relay-warning">
-                                The relay namespace must be unique across your LMS landscape. Do not change it after apps are published unless you intentionally want to break those external app URLs and then republish the affected relay/routes.
+                                The relay namespace must be unique across your LMS landscape. Do not change it after apps are live unless you intentionally want to break those external app URLs and then re-apply the affected relay/routes.
                             </p>
 
                             <EditForm Model="@edgeSettingsEditor" OnValidSubmit="SaveEdgeGatewaySettingsAsync" class="edge-relay-settings-form">
@@ -575,7 +579,7 @@
                             <div>
                                 <p class="eyebrow">Diagnostics</p>
                                 <h2>Route checks and access log</h2>
-                                <p class="meta-text">Run Test on a published app to show route checks here. The log shows recent auth decisions.</p>
+                                <p class="meta-text">Run Test on a saved app to show route checks here. The log shows recent auth decisions.</p>
                             </div>
                         </div>
 
@@ -627,7 +631,7 @@
 
     <UiModal IsOpen="@showRouteModal"
              Title="@routeModalTitle"
-             Subtitle="Save creates a local LMS service record."
+             Subtitle="Save applies the service to Cloudflare and Caddy when enabled."
              Class="edge-route-modal"
              OnClose="CloseRouteModal">
         <ChildContent>
@@ -649,6 +653,51 @@
                             }
                         </UiSelectField>
                     </div>
+
+                    @if (routeEditor.AuthMode == EdgeGatewayAuthMode.TemporaryIpApproval)
+                    {
+                        <div class="callout ready edge-temporary-approval-warning" role="status">
+                            <strong>Email approval gates this route by source IP</strong>
+                            <span>@TemporaryIpApprovalWarningText</span>
+                        </div>
+                        <div class="edge-form-grid edge-temporary-approval-grid">
+                            <UiMultiSelect Label="Approval recipients"
+                                           HelperText="Optional. Blank sends to route allowed users, then enabled LMS users."
+                                           Placeholder="Choose LMS users"
+                                           EmptyText="No enabled LMS users match."
+                                           Items="@approvalRecipientOptions"
+                                           @bind-Value="routeEditor.TemporaryIpApprovalRecipients"
+                                           Class="edge-temporary-approval-picker" />
+                            <UiMultiSelect Label="Allowed countries"
+                                           HelperText="Optional Cloudflare country allow-list. Blank allows any country."
+                                           Placeholder="Search countries"
+                                           EmptyText="No countries match."
+                                           Items="@CountryOptions"
+                                           @bind-Value="routeEditor.TemporaryIpApprovalAllowedCountryCodes"
+                                           Class="edge-temporary-approval-picker" />
+                            <UiCheckboxField @bind-Value="routeEditor.TemporaryIpApprovalUseNotFoundResponse"
+                                             Label="Return 404"
+                                             Helper="Still sends the approval email, but unapproved clients see Not Found."
+                                             Compact="true"
+                                             Class="edge-temporary-approval-checkbox" />
+                            <UiNumberField TValue="int?"
+                                           @bind-Value="routeEditor.TemporaryIpApprovalIdleTimeoutMinutes"
+                                           Label="Idle cut-off"
+                                           Helper="Minutes without traffic. Blank uses the default."
+                                           Placeholder="@EdgeGatewayOptions.TemporaryIpApprovalIdleTimeoutMinutes.ToString()"
+                                           Compact="true"
+                                           min="1"
+                                           max="1440" />
+                            <UiNumberField TValue="int?"
+                                           @bind-Value="routeEditor.TemporaryIpApprovalMaxLifetimeMinutes"
+                                           Label="Maximum expiry"
+                                           Helper="Absolute approval lifetime in minutes. Blank uses the default."
+                                           Placeholder="@EdgeGatewayOptions.TemporaryIpApprovalMaxLifetimeMinutes.ToString()"
+                                           Compact="true"
+                                           min="1"
+                                           max="10080" />
+                        </div>
+                    }
 
                     <div class="edge-form-grid edge-form-grid-target">
                         <UiTextField @bind-Value="routeEditor.TargetPathPrefix"
@@ -684,22 +733,22 @@
 
                     <details class="edge-advanced-settings edge-publish-details">
                         <summary>
-                            <span>Publishing</span>
-                            <small>Public URL and DNS preview</small>
+                            <span>Public route</span>
+                            <small>URL, DNS and routing preview</small>
                         </summary>
                         <div class="edge-publish-details-body">
                             <div class="edge-publish-preview">
                                 <div>
-                                    <strong>@BuildPublishHeadline()</strong>
-                                    <span>@BuildPublishDetail()</span>
+                                    <strong>@BuildRoutePreviewHeadline()</strong>
+                                    <span>@BuildRoutePreviewDetail()</span>
                                 </div>
                                 <UiPill Tone="@GetAuthModeTone(routeEditor.AuthMode)">
                                     @BuildRouteAccessLabel(routeEditor.AuthMode)
                                 </UiPill>
                             </div>
 
-                            <p class="callout warning edge-publish-required">
-                                Save creates the service record only. Press Publish on the service card when you want the public hostname to go live.
+                            <p class="callout ready edge-publish-required">
+                                Save applies enabled services to Cloudflare DNS, tunnel ingress and Caddy. Disabled services are saved and removed from generated Caddy routing.
                             </p>
                         </div>
                     </details>
@@ -729,14 +778,14 @@
             </EditForm>
         </ChildContent>
         <Footer>
-            <UiCommandButton Label="Save service" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Primary" Type="submit" form="@routeEditorFormId" />
-            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="CloseRouteModal" />
+            <UiCommandButton Label="@(isSavingRoute ? "Saving and applying..." : "Save service")" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Primary" Type="submit" form="@routeEditorFormId" Disabled="@isSavingRoute" />
+            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@isSavingRoute" OnClick="CloseRouteModal" />
         </Footer>
     </UiModal>
 
     <UiModal IsOpen="@isHttpServicePickerOpen"
              Title="HTTP/S service lookup"
-             Subtitle="Cached internal services from localhost, LAN, and optional Tailscale peers."
+             Subtitle="Cached internal services from localhost, Docker, LAN, and optional Tailscale peers."
              Class="edge-http-service-modal"
              OnClose="CloseHttpServicePicker">
         <ChildContent>
@@ -744,9 +793,10 @@
                 <div class="table-header edge-http-service-picker-header">
                     <div>
                         <strong>Available origins</strong>
-                        <p class="meta-text">Cached results are shown first. Run a scan to refresh localhost, private LAN and optional Tailscale services.</p>
+                        <p class="meta-text">Cached results are shown first. Run a scan to refresh localhost, exposed Docker containers, private LAN and optional Tailscale services.</p>
                     </div>
                     <div class="edge-http-service-actions">
+                        <UiCheckboxField @bind-Value="includeDockerHttpScan" Label="Docker" Compact="true" />
                         <UiCheckboxField @bind-Value="includeLanHttpScan" Label="LAN" Compact="true" />
                         <UiCheckboxField @bind-Value="includeTailnetHttpScan" Label="Tailscale" Compact="true" />
                         <UiCommandButton Label="@(isDiscoveringHttpServices ? "Scanning..." : "Scan")"
@@ -771,7 +821,7 @@
                 {
                     <section class="empty-state edge-http-service-empty">
                         <h3>No cached HTTP/S services</h3>
-                        <p>@(httpServiceDiscoveryMessage ?? "Click Scan to search localhost and the private LAN. Enable Tailscale if you want tailnet peers included.")</p>
+                        <p>@(httpServiceDiscoveryMessage ?? "Click Scan to search localhost, exposed Docker containers, and the private LAN. Enable Tailscale if you want tailnet peers included.")</p>
                     </section>
                 }
                 else
@@ -800,7 +850,7 @@
 
     <UiModal IsOpen="@showCloudflareSetupGuide"
              Title="Cloudflare token setup"
-             Subtitle="Create a scoped token for Edge Gateway publishing."
+             Subtitle="Create a scoped token for Edge Gateway automation."
              Class="edge-setup-guide-modal"
              OnClose="CloseCloudflareSetupGuide">
         <ChildContent>
@@ -916,7 +966,7 @@
     </UiModal>
 
     <UiModal IsOpen="@(routePendingDelete is not null)"
-             Title="Delete published service"
+             Title="Delete service"
              Subtitle="Remove this Edge Gateway route and regenerate the local Caddy config."
              Class="edge-delete-route-modal"
              CloseOnBackdrop="@(!isDeletingRoute)"
@@ -931,7 +981,7 @@
                         <span>@routePendingDelete.TargetUrl</span>
                     </section>
                     <p class="meta-text">
-                        This removes the published service route from LMS and reloads Caddy. It does not uninstall the backend application.
+                        This removes the service route from LMS and reloads Caddy. It does not uninstall the backend application.
                     </p>
                     @if (!string.IsNullOrWhiteSpace(routeDeleteMessage))
                     {
@@ -960,11 +1010,13 @@
     private const string SetupTabValue = "setup";
     private const string DiagnosticsTabValue = "diagnostics";
     private const string CloudflareUserTokenUrl = "https://dash.cloudflare.com/profile/api-tokens";
+    private const string TemporaryIpApprovalWarningText = "The first request is denied and an approval email is sent. Approval only allows this app from the exact source IP, then expires on the configured idle cut-off or maximum lifetime. Repeated emails for the same app/IP are throttled.";
     private readonly string routeEditorFormId = $"edge-route-editor-form-{Guid.NewGuid():N}";
     private static readonly IReadOnlyList<EdgeGatewayAuthMode> AuthModeOptions =
     [
-        EdgeGatewayAuthMode.PassThrough,
         EdgeGatewayAuthMode.RequireMfa,
+        EdgeGatewayAuthMode.TemporaryIpApproval,
+        EdgeGatewayAuthMode.PassThrough,
         EdgeGatewayAuthMode.Blocked
     ];
 
@@ -978,6 +1030,7 @@
     private EdgeGatewayCloudflareRelayRemovalResult? cloudflareRelayRemovalResult;
     private EdgeGatewaySettingsEditor edgeSettingsEditor = new();
     private IReadOnlyList<LocalHttpServiceEndpoint> httpServiceSuggestions = [];
+    private IReadOnlyList<UiIdentityTokenPickerItem> approvalRecipientOptions = [];
     private CancellationTokenSource? dashboardLoadCancellation;
     private string activeTab = PublishedAppsTabValue;
     private string userMessage = string.Empty;
@@ -1004,6 +1057,8 @@
     private bool isProvisioningCloudflareDomain;
     private bool isDeletingRelay;
     private bool isCheckingRouteTarget;
+    private bool isSavingRoute;
+    private bool includeDockerHttpScan = true;
     private bool includeLanHttpScan = true;
     private bool includeTailnetHttpScan;
     private bool routeEditorIsError;
@@ -1065,6 +1120,9 @@
         ?? [];
     private IReadOnlyList<EdgeGatewayCloudflareDomainOption> CloudflareDomains =>
         dashboard?.Cloudflare.Domains ?? [];
+
+    private static IReadOnlyList<UiIdentityTokenPickerItem> CountryOptions =>
+        TemporaryIpApprovalSelectionOptions.CountryOptions;
 
     private IReadOnlyList<EdgeGatewayCloudflareDomainOption> ConfiguredCloudflareRelays =>
         CloudflareDomains
@@ -1177,14 +1235,16 @@
     {
         var dashboardTask = EdgeGatewayService.GetDashboardAsync(cancellationToken);
         var settingsTask = EdgeGatewayService.GetSettingsEditorAsync(cancellationToken);
-        await Task.WhenAll(dashboardTask, settingsTask);
-        return new EdgeGatewayDashboardSnapshot(await dashboardTask, await settingsTask);
+        var usersTask = SecurityUserStore.ListAsync(cancellationToken);
+        await Task.WhenAll(dashboardTask, settingsTask, usersTask);
+        return new EdgeGatewayDashboardSnapshot(await dashboardTask, await settingsTask, await usersTask);
     }
 
     private void ApplyDashboardSnapshot(EdgeGatewayDashboardSnapshot snapshot)
     {
         dashboard = snapshot.Dashboard;
         edgeSettingsEditor = snapshot.SettingsEditor;
+        approvalRecipientOptions = TemporaryIpApprovalSelectionOptions.BuildUserOptions(snapshot.SecurityUsers);
         relayNamespaceUnlocked = false;
         if (CloudflareDomains.Count > 0 &&
             !CloudflareDomains.Any(domain => domain.DomainName.Equals(selectedDomainName, StringComparison.OrdinalIgnoreCase)))
@@ -1308,13 +1368,13 @@
         routeEditor.TargetHost = "127.0.0.1";
         routeEditor.TargetPort = Math.Clamp(EdgeGatewayOptions.LmsForwardAuthPort, 1, 65535);
         routeEditor.AuthMode = EdgeGatewayAuthMode.PassThrough;
-        routeEditor.Notes = "Publishes the LMS web UI. LMS handles login directly.";
+        routeEditor.Notes = "Exposes the LMS web UI. LMS handles login directly.";
         if (string.IsNullOrWhiteSpace(routeEditor.DomainName) && CloudflareDomains.Count > 0)
         {
             routeEditor.DomainName = SelectedCloudflareDomain?.DomainName ?? CloudflareDomains[0].DomainName;
         }
 
-        routeModalTitle = "Publish LMS";
+        routeModalTitle = "Expose LMS";
         routeEditorMessage = string.Empty;
         routeEditorIsError = false;
         ResetRouteTargetCheckMessage();
@@ -1346,6 +1406,11 @@
 
     private void CloseRouteModal()
     {
+        if (isSavingRoute)
+        {
+            return;
+        }
+
         showRouteModal = false;
     }
 
@@ -1444,7 +1509,8 @@
         var request = new LocalHttpServiceDiscoveryRequest(
             IncludeLocalhost: true,
             IncludeLan: includeLanHttpScan,
-            IncludeTailnet: includeTailnetHttpScan);
+            IncludeTailnet: includeTailnetHttpScan,
+            IncludeDocker: includeDockerHttpScan);
         _ = RunHttpServicesScanAsync(request);
         return Task.CompletedTask;
     }
@@ -1527,13 +1593,21 @@
 
     private async Task SaveRouteAsync()
     {
+        if (isSavingRoute)
+        {
+            return;
+        }
+
+        isSavingRoute = true;
+        routeEditorMessage = "Saving service and applying Edge Gateway changes...";
+        routeEditorIsError = false;
+        await InvokeAsync(StateHasChanged);
+
         try
         {
             var savedRouteId = await EdgeGatewayService.SaveRouteAsync(routeEditor);
             var savedDomainName = NormalizeRouteDomainName(routeEditor.DomainName);
-            userMessage = "Service saved locally. It is not public yet. Press Publish on the service card to create Cloudflare DNS, tunnel ingress, and Caddy routing.";
             routeActionMessageRouteId = savedRouteId;
-            routeActionMessage = userMessage;
             routeActionIsError = false;
             routeEditorMessage = string.Empty;
             routeEditorIsError = false;
@@ -1544,12 +1618,34 @@
             }
 
             showRouteModal = false;
-            await LoadAsync();
+
+            if (routeEditor.Enabled)
+            {
+                await ApplyRoutePublishingAsync(
+                    savedRouteId,
+                    replaceExistingDnsRecord: false,
+                    "Saving service. Updating Cloudflare DNS, tunnel ingress, and Caddy...");
+            }
+            else
+            {
+                var applyResult = await EdgeGatewayService.ApplyCaddyConfigurationAsync();
+                routeActionIsError = !applyResult.Success;
+                routeActionMessage = applyResult.Success
+                    ? "Disabled service saved and Caddy routing reloaded."
+                    : $"Disabled service saved, but Caddy did not reload: {applyResult.Summary}";
+                userMessage = routeActionMessage;
+                await LoadAsync();
+            }
         }
         catch (Exception exception)
         {
             routeEditorMessage = exception.Message;
             routeEditorIsError = true;
+            userMessage = exception.Message;
+        }
+        finally
+        {
+            isSavingRoute = false;
         }
     }
 
@@ -1618,7 +1714,7 @@
         routeActionIsError = false;
         var nextEnabled = !currentlyEnabled;
         routeActionMessage = nextEnabled
-            ? "Enabling service and reloading Caddy..."
+            ? "Enabling service. Updating Cloudflare DNS, tunnel ingress, and Caddy..."
             : "Disabling service and reloading Caddy...";
         userMessage = routeActionMessage;
         await InvokeAsync(StateHasChanged);
@@ -1628,15 +1724,23 @@
             var editor = await EdgeGatewayService.GetEditorAsync(routeId);
             editor.Enabled = nextEnabled;
             await EdgeGatewayService.SaveRouteAsync(editor);
-            var applyResult = await EdgeGatewayService.ApplyCaddyConfigurationAsync();
-            routeActionIsError = !applyResult.Success;
-            routeActionMessage = applyResult.Success
-                ? nextEnabled
-                    ? "Service enabled and Caddy reloaded."
-                    : "Service disabled and Caddy reloaded."
-                : $"Service saved, but Caddy did not reload: {applyResult.Summary}";
-            userMessage = routeActionMessage;
-            await LoadAsync();
+            if (nextEnabled)
+            {
+                await ApplyRoutePublishingAsync(
+                    routeId,
+                    replaceExistingDnsRecord: false,
+                    "Enabling service. Updating Cloudflare DNS, tunnel ingress, and Caddy...");
+            }
+            else
+            {
+                var applyResult = await EdgeGatewayService.ApplyCaddyConfigurationAsync();
+                routeActionIsError = !applyResult.Success;
+                routeActionMessage = applyResult.Success
+                    ? "Service disabled and Caddy reloaded."
+                    : $"Service disabled, but Caddy did not reload: {applyResult.Summary}";
+                userMessage = routeActionMessage;
+                await LoadAsync();
+            }
         }
         catch (Exception exception)
         {
@@ -1784,7 +1888,7 @@
             ? selectedDomain.GatewayDomainName
             : $"{edgeSettingsEditor.GatewaySubdomain}.domain";
 
-        return $"Warning: this deletes the current LMS relay namespace ({namespaceText}), all DNS records under that namespace, and any DNS records that point into it. It then removes/deletes the associated Cloudflare tunnel, clears local published app routes, reloads Caddy, clears the saved token, resets the relay namespace to the machine default, and generates a new Edge Gateway tunnel identity. Unrelated Cloudflare records outside that namespace are not reset.";
+        return $"Warning: this deletes the current LMS relay namespace ({namespaceText}), all DNS records under that namespace, and any DNS records that point into it. It then removes/deletes the associated Cloudflare tunnel, clears local service routes, reloads Caddy, clears the saved token, resets the relay namespace to the machine default, and generates a new Edge Gateway tunnel identity. Unrelated Cloudflare records outside that namespace are not reset.";
     }
 
     private Task CloseResetSetupModal()
@@ -1911,10 +2015,21 @@
             return;
         }
 
+        await ApplyRoutePublishingAsync(
+            routeId,
+            confirmRouteDnsReplacement,
+            "Replacing DNS and applying service. Updating Cloudflare DNS, tunnel ingress, and Caddy...");
+    }
+
+    private async Task<EdgeGatewayCloudflareRouteSetupResult?> ApplyRoutePublishingAsync(
+        Guid routeId,
+        bool replaceExistingDnsRecord,
+        string progressMessage)
+    {
         publishingRouteId = routeId;
         routeActionMessageRouteId = routeId;
         routeActionIsError = false;
-        routeActionMessage = "Publishing service. Updating Cloudflare DNS, tunnel ingress, and Caddy...";
+        routeActionMessage = progressMessage;
         userMessage = routeActionMessage;
         cloudflareRouteSetupResult = null;
         await InvokeAsync(StateHasChanged);
@@ -1923,12 +2038,18 @@
         {
             cloudflareRouteSetupResult = await EdgeGatewayService.ProvisionCloudflareRouteAsync(
                 routeId,
-                confirmRouteDnsReplacement);
+                replaceExistingDnsRecord);
             userMessage = cloudflareRouteSetupResult.Summary;
             routeActionIsError = !cloudflareRouteSetupResult.Success;
             routeActionMessage = cloudflareRouteSetupResult.RequiresDnsReplacement
-                ? $"{cloudflareRouteSetupResult.Summary} Open Publishing details on this service to confirm replacement."
+                ? $"{cloudflareRouteSetupResult.Summary} Open Deployment details on this service to confirm replacement."
                 : cloudflareRouteSetupResult.Summary;
+            if (!cloudflareRouteSetupResult.Success)
+            {
+                routeActionMessage = $"{routeActionMessage} {await TryApplyCaddyAfterProvisioningGapAsync()}";
+                userMessage = routeActionMessage;
+            }
+
             if (!cloudflareRouteSetupResult.RequiresDnsReplacement)
             {
                 confirmRouteDnsReplacement = false;
@@ -1936,12 +2057,16 @@
 
             activeTab = PublishedAppsTabValue;
             await LoadAsync();
+            return cloudflareRouteSetupResult;
         }
         catch (Exception exception)
         {
-            userMessage = exception.Message;
             routeActionIsError = true;
-            routeActionMessage = exception.Message;
+            routeActionMessage = $"{exception.Message} {await TryApplyCaddyAfterProvisioningGapAsync()}";
+            userMessage = routeActionMessage;
+            activeTab = PublishedAppsTabValue;
+            await LoadAsync();
+            return null;
         }
         finally
         {
@@ -1949,7 +2074,20 @@
         }
     }
 
-    private bool IsPublishingRoute(Guid routeId) => publishingRouteId == routeId;
+    private async Task<string> TryApplyCaddyAfterProvisioningGapAsync()
+    {
+        try
+        {
+            var applyResult = await EdgeGatewayService.ApplyCaddyConfigurationAsync();
+            return applyResult.Success
+                ? "Saved Caddy routing was reloaded."
+                : $"Caddy did not reload: {applyResult.Summary}";
+        }
+        catch (Exception exception)
+        {
+            return $"Caddy reload also failed: {exception.Message}";
+        }
+    }
 
     private string BuildRouteToggleLabel(EdgeGatewayRouteListItem route)
     {
@@ -1989,8 +2127,72 @@
             return $"Relay exists but needs checking: {domain.GatewayDomainName}.";
         }
 
-        return "Setup Relay before publishing apps on this domain.";
+            return "Setup Relay before adding live apps on this domain.";
     }
+
+    private string BuildTemporaryIpApprovalSummary(EdgeGatewayRouteListItem route)
+    {
+        var recipients = BuildSelectionSummary(
+            route.TemporaryIpApprovalRecipients,
+            "Approval recipients",
+            "Default recipient fallback",
+            static value => value);
+        var countries = BuildSelectionSummary(
+            route.TemporaryIpApprovalAllowedCountryCodes,
+            "Allowed countries",
+            "Any country",
+            BuildCountrySelectionLabel);
+        var deniedResponse = route.TemporaryIpApprovalUseNotFoundResponse
+            ? "Denied response: 404."
+            : "Denied response: approval status.";
+        var idleTimeout = FormatTemporaryIpApprovalMinutes(
+            route.TemporaryIpApprovalIdleTimeoutMinutes,
+            EdgeGatewayOptions.TemporaryIpApprovalIdleTimeoutMinutes);
+        var maxLifetime = FormatTemporaryIpApprovalMinutes(
+            route.TemporaryIpApprovalMaxLifetimeMinutes,
+            EdgeGatewayOptions.TemporaryIpApprovalMaxLifetimeMinutes);
+        return $"{recipients}. {countries}. {deniedResponse} Idle cut-off: {idleTimeout}. Maximum expiry: {maxLifetime}.";
+    }
+
+    private static string BuildSelectionSummary(
+        string value,
+        string label,
+        string emptyText,
+        Func<string, string> formatter)
+    {
+        var selectedValues = ParseSelectionValues(value)
+            .Select(formatter)
+            .Where(static item => !string.IsNullOrWhiteSpace(item))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static item => item, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (selectedValues.Length == 0)
+        {
+            return $"{label}: {emptyText}";
+        }
+
+        return selectedValues.Length <= 3
+            ? $"{label}: {string.Join(", ", selectedValues)}"
+            : $"{label}: {string.Join(", ", selectedValues.Take(3))} +{selectedValues.Length - 3} more";
+    }
+
+    private static string BuildCountrySelectionLabel(string countryCode)
+    {
+        var normalized = countryCode.Trim().ToUpperInvariant();
+        return CountryOptions.FirstOrDefault(country => country.Key.Equals(normalized, StringComparison.OrdinalIgnoreCase))?.Title ?? normalized;
+    }
+
+    private static string FormatTemporaryIpApprovalMinutes(int? configuredMinutes, int defaultMinutes) =>
+        configuredMinutes.HasValue
+            ? $"{configuredMinutes.Value} min"
+            : $"{defaultMinutes} min default";
+
+    private static IReadOnlyList<string> ParseSelectionValues(string? value) =>
+        (value ?? string.Empty)
+            .Split(new[] { ',', ';', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(static item => !string.IsNullOrWhiteSpace(item))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
     private static UiPillTone GetStatusTone(EdgeGatewayDiagnosticStatus status) => status switch
     {
@@ -2193,6 +2395,7 @@
         EdgeGatewayAuthMode.RequireLogin => "MFA/Passkey",
         EdgeGatewayAuthMode.RequireMfa => "MFA/Passkey",
         EdgeGatewayAuthMode.RequirePasskey => "MFA/Passkey",
+        EdgeGatewayAuthMode.TemporaryIpApproval => "Email approve IP",
         EdgeGatewayAuthMode.Blocked => "Blocked",
         _ => mode.ToString()
     };
@@ -2203,6 +2406,7 @@
         EdgeGatewayAuthMode.RequireLogin => "MFA/Passkey",
         EdgeGatewayAuthMode.RequireMfa => "MFA/Passkey",
         EdgeGatewayAuthMode.RequirePasskey => "MFA/Passkey",
+        EdgeGatewayAuthMode.TemporaryIpApproval => "Email approve IP",
         EdgeGatewayAuthMode.Blocked => "Blocked",
         _ => mode.ToString()
     };
@@ -2213,6 +2417,7 @@
         EdgeGatewayAuthMode.RequireLogin => "The user must pass LMS MFA using an authenticator code or a registered passkey.",
         EdgeGatewayAuthMode.RequireMfa => "The user must pass LMS MFA using an authenticator code or a registered passkey.",
         EdgeGatewayAuthMode.RequirePasskey => "The user must pass LMS MFA using an authenticator code or a registered passkey.",
+        EdgeGatewayAuthMode.TemporaryIpApproval => "The first request is denied and approval email opens this app only for the exact source IP.",
         EdgeGatewayAuthMode.Blocked => "Caddy still has the hostname, but LMS rejects all access.",
         _ => string.Empty
     };
@@ -2223,6 +2428,7 @@
         EdgeGatewayAuthMode.RequireLogin => "Use for internal tools, admin surfaces, dashboards, and anything that should require LMS MFA. This is the default.",
         EdgeGatewayAuthMode.RequireMfa => "Use for internal tools, admin surfaces, dashboards, and anything that should require LMS MFA. This is the default.",
         EdgeGatewayAuthMode.RequirePasskey => "Use for internal tools, admin surfaces, dashboards, and anything that should require LMS MFA. This is the default.",
+        EdgeGatewayAuthMode.TemporaryIpApproval => "Use for clients such as Plex or native apps that cannot complete a browser MFA flow but should still deny by default.",
         EdgeGatewayAuthMode.Blocked => "Use as an emergency stop or placeholder while keeping the route record.",
         _ => string.Empty
     };
@@ -2234,7 +2440,7 @@
         _ => UiPillTone.Success
     };
 
-    private string BuildPublishHeadline()
+    private string BuildRoutePreviewHeadline()
     {
         var externalUrl = ResolvePreviewExternalUrl();
         return string.IsNullOrWhiteSpace(externalUrl)
@@ -2242,13 +2448,15 @@
             : $"{externalUrl} -> {BuildPreviewTarget()}";
     }
 
-    private string BuildPublishDetail()
+    private string BuildRoutePreviewDetail()
     {
         var auth = routeEditor.AuthMode == EdgeGatewayAuthMode.PassThrough
             ? "Caddy will proxy this straight to the backend with no LMS auth check."
+            : routeEditor.AuthMode == EdgeGatewayAuthMode.TemporaryIpApproval
+                ? "Caddy will call LMS forward_auth first. Policy: Email approve IP deny-first source IP approval."
             : $"Caddy will call LMS forward_auth first. Policy: {FormatAuthMode(routeEditor.AuthMode)}.";
         var cloudflare = CloudflareDomains.Count > 0
-            ? $"LMS will publish DNS as {ResolvePreviewHostname()} -> {ResolvePreviewRelayHostname()}."
+            ? $"LMS will manage DNS as {ResolvePreviewHostname()} -> {ResolvePreviewRelayHostname()}."
             : "Domain is manual because no saved Cloudflare token is available.";
         var path = NormalizeRoutePathPrefix(routeEditor.TargetPathPrefix);
         var routing = string.IsNullOrWhiteSpace(path)
@@ -2478,7 +2686,7 @@
         var relayCount = CloudflareDomains.Count(domain => domain.RelayConfigured);
         if (appCount > 0 || relayCount > 0)
         {
-            return "Changing this now will break exposed app URLs until the relay and affected routes are republished.";
+            return "Changing this now will break exposed app URLs until the relay and affected routes are re-applied.";
         }
 
         return "Choose a unique namespace before setting up your first relay.";
@@ -2514,5 +2722,6 @@
 
     private sealed record EdgeGatewayDashboardSnapshot(
         EdgeGatewayDashboardViewModel Dashboard,
-        EdgeGatewaySettingsEditor SettingsEditor);
+        EdgeGatewaySettingsEditor SettingsEditor,
+        IReadOnlyList<SecurityUser> SecurityUsers);
 }

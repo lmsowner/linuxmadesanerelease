@@ -176,6 +176,11 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
             entity.AllowedGroups,
             entity.AllowLanOnly,
             entity.AllowKnownIps,
+            entity.TemporaryIpApprovalRecipients,
+            entity.TemporaryIpApprovalAllowedCountryCodes,
+            entity.TemporaryIpApprovalUseNotFoundResponse,
+            entity.TemporaryIpApprovalIdleTimeoutMinutes,
+            entity.TemporaryIpApprovalMaxLifetimeMinutes,
             entity.Notes,
             entity.CreatedAt,
             entity.UpdatedAt,
@@ -201,6 +206,11 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
             AllowedGroups = route.AllowedGroups,
             AllowLanOnly = route.AllowLanOnly,
             AllowKnownIps = route.AllowKnownIps,
+            TemporaryIpApprovalRecipients = route.TemporaryIpApprovalRecipients,
+            TemporaryIpApprovalAllowedCountryCodes = route.TemporaryIpApprovalAllowedCountryCodes,
+            TemporaryIpApprovalUseNotFoundResponse = route.TemporaryIpApprovalUseNotFoundResponse,
+            TemporaryIpApprovalIdleTimeoutMinutes = route.TemporaryIpApprovalIdleTimeoutMinutes,
+            TemporaryIpApprovalMaxLifetimeMinutes = route.TemporaryIpApprovalMaxLifetimeMinutes,
             Notes = route.Notes,
             CreatedAt = route.CreatedAt,
             UpdatedAt = route.UpdatedAt,
@@ -223,6 +233,11 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
         entity.AllowedGroups = route.AllowedGroups;
         entity.AllowLanOnly = route.AllowLanOnly;
         entity.AllowKnownIps = route.AllowKnownIps;
+        entity.TemporaryIpApprovalRecipients = route.TemporaryIpApprovalRecipients;
+        entity.TemporaryIpApprovalAllowedCountryCodes = route.TemporaryIpApprovalAllowedCountryCodes;
+        entity.TemporaryIpApprovalUseNotFoundResponse = route.TemporaryIpApprovalUseNotFoundResponse;
+        entity.TemporaryIpApprovalIdleTimeoutMinutes = route.TemporaryIpApprovalIdleTimeoutMinutes;
+        entity.TemporaryIpApprovalMaxLifetimeMinutes = route.TemporaryIpApprovalMaxLifetimeMinutes;
         entity.Notes = route.Notes;
         entity.CreatedAt = route.CreatedAt;
         entity.UpdatedAt = route.UpdatedAt;

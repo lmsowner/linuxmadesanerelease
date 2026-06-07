@@ -26,6 +26,9 @@ public sealed class AiProviderSettingsEditor : IValidatableObject
     [StringLength(128)]
     public string DefaultModelId { get; set; } = string.Empty;
 
+    [StringLength(512)]
+    public string BaseUrl { get; set; } = string.Empty;
+
     public bool StreamingEnabled { get; set; } = true;
 
     public bool ToolUseEnabled { get; set; } = true;
@@ -60,6 +63,23 @@ public sealed class AiProviderSettingsEditor : IValidatableObject
             yield return new ValidationResult(
                 "Default model is required.",
                 [nameof(DefaultModelId)]);
+        }
+
+        if (ProviderType == AiProviderType.Custom)
+        {
+            if (string.IsNullOrWhiteSpace(BaseUrl))
+            {
+                yield return new ValidationResult(
+                    "Base URL is required for OpenAI-compatible providers.",
+                    [nameof(BaseUrl)]);
+            }
+            else if (!Uri.TryCreate(BaseUrl.Trim(), UriKind.Absolute, out var uri) ||
+                     uri.Scheme is not ("http" or "https"))
+            {
+                yield return new ValidationResult(
+                    "Base URL must be an HTTP or HTTPS URL.",
+                    [nameof(BaseUrl)]);
+            }
         }
 
         if (IsDefault && !IsEnabled)

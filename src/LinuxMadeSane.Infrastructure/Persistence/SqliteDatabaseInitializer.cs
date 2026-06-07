@@ -687,6 +687,11 @@ public sealed class SqliteDatabaseInitializer(
                 AllowedGroups TEXT NOT NULL,
                 AllowLanOnly INTEGER NOT NULL,
                 AllowKnownIps TEXT NOT NULL,
+                TemporaryIpApprovalRecipients TEXT NOT NULL DEFAULT '',
+                TemporaryIpApprovalAllowedCountryCodes TEXT NOT NULL DEFAULT '',
+                TemporaryIpApprovalUseNotFoundResponse INTEGER NOT NULL DEFAULT 0,
+                TemporaryIpApprovalIdleTimeoutMinutes INTEGER NULL,
+                TemporaryIpApprovalMaxLifetimeMinutes INTEGER NULL,
                 Notes TEXT NOT NULL,
                 CreatedAt TEXT NOT NULL,
                 UpdatedAt TEXT NOT NULL,
@@ -696,6 +701,11 @@ public sealed class SqliteDatabaseInitializer(
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(routesSql, cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_routes", "TemporaryIpApprovalRecipients", "TEXT NOT NULL DEFAULT ''", cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_routes", "TemporaryIpApprovalAllowedCountryCodes", "TEXT NOT NULL DEFAULT ''", cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_routes", "TemporaryIpApprovalUseNotFoundResponse", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_routes", "TemporaryIpApprovalIdleTimeoutMinutes", "INTEGER NULL", cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_routes", "TemporaryIpApprovalMaxLifetimeMinutes", "INTEGER NULL", cancellationToken);
 
         const string auditSql = """
             CREATE TABLE IF NOT EXISTS edge_gateway_audit_entries (
@@ -713,6 +723,49 @@ public sealed class SqliteDatabaseInitializer(
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(auditSql, cancellationToken);
+
+        const string temporaryApprovalRequestsSql = """
+            CREATE TABLE IF NOT EXISTS edge_gateway_temporary_ip_approval_requests (
+                Id TEXT NOT NULL PRIMARY KEY,
+                RouteId TEXT NOT NULL,
+                RouteName TEXT NOT NULL,
+                PublicHostname TEXT NOT NULL,
+                TargetPathPrefix TEXT NOT NULL,
+                SourceIp TEXT NOT NULL,
+                CountryCode TEXT NOT NULL,
+                UserAgent TEXT NOT NULL,
+                RequestedUrl TEXT NOT NULL,
+                CreatedUtc TEXT NOT NULL,
+                UpdatedUtc TEXT NOT NULL,
+                LastEmailSentUtc TEXT NULL,
+                EmailSendCount INTEGER NOT NULL,
+                ApprovalTokenHash TEXT NOT NULL,
+                ApprovalTokenExpiresAtUtc TEXT NULL,
+                ApprovedUtc TEXT NULL,
+                LastEmailStatus TEXT NOT NULL
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(temporaryApprovalRequestsSql, cancellationToken);
+
+        const string temporaryApprovalGrantsSql = """
+            CREATE TABLE IF NOT EXISTS edge_gateway_temporary_ip_approval_grants (
+                Id TEXT NOT NULL PRIMARY KEY,
+                RouteId TEXT NOT NULL,
+                RouteName TEXT NOT NULL,
+                PublicHostname TEXT NOT NULL,
+                TargetPathPrefix TEXT NOT NULL,
+                SourceIp TEXT NOT NULL,
+                CountryCode TEXT NOT NULL,
+                UserAgent TEXT NOT NULL,
+                ApprovedUtc TEXT NOT NULL,
+                LastSeenUtc TEXT NOT NULL,
+                IdleExpiresAtUtc TEXT NOT NULL,
+                ExpiresAtUtc TEXT NOT NULL
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(temporaryApprovalGrantsSql, cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(
             "DROP INDEX IF EXISTS IX_edge_gateway_routes_Hostname;",
             cancellationToken);
@@ -739,6 +792,24 @@ public sealed class SqliteDatabaseInitializer(
             cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(
             "CREATE INDEX IF NOT EXISTS IX_edge_gateway_audit_entries_Decision ON edge_gateway_audit_entries (Decision);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_temporary_ip_approval_requests_RouteId_SourceIp ON edge_gateway_temporary_ip_approval_requests (RouteId, SourceIp);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_temporary_ip_approval_requests_ApprovalTokenHash ON edge_gateway_temporary_ip_approval_requests (ApprovalTokenHash);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_temporary_ip_approval_requests_UpdatedUtc ON edge_gateway_temporary_ip_approval_requests (UpdatedUtc);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_temporary_ip_approval_grants_RouteId_SourceIp ON edge_gateway_temporary_ip_approval_grants (RouteId, SourceIp);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_temporary_ip_approval_grants_IdleExpiresAtUtc ON edge_gateway_temporary_ip_approval_grants (IdleExpiresAtUtc);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_edge_gateway_temporary_ip_approval_grants_ExpiresAtUtc ON edge_gateway_temporary_ip_approval_grants (ExpiresAtUtc);",
             cancellationToken);
     }
 
@@ -1740,12 +1811,14 @@ public sealed class SqliteDatabaseInitializer(
                 ThemeMode TEXT NOT NULL,
                 FontScalePercent INTEGER NOT NULL,
                 TerminalCopyOnSelect INTEGER NOT NULL DEFAULT 0,
+                DockerAiActionsApproved INTEGER NOT NULL DEFAULT 0,
                 UpdatedAtUtc TEXT NOT NULL
             );
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(userDisplayPreferencesSql, cancellationToken);
         await EnsureColumnExistsAsync("user_display_preferences", "TerminalCopyOnSelect", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnExistsAsync("user_display_preferences", "DockerAiActionsApproved", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
     }
 
     private async Task EnsureFileBrowserShortcutTablesAsync(CancellationToken cancellationToken)

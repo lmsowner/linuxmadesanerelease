@@ -9,5 +9,6 @@ public enum EdgeGatewayAuthMode
     RequireLogin = 1,
     RequireMfa = 2,
     RequirePasskey = 3,
-    Blocked = 4
+    Blocked = 4,
+    TemporaryIpApproval = 5
 }

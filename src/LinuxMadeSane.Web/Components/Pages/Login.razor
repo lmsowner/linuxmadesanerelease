@@ -3,6 +3,7 @@
 
 @page "/login"
 @layout AuthLayout
+@inject LocalAccessRecoveryService AccessRecovery
 
 <script type="module" src="@Assets["Components/Pages/Login.razor.js"]"></script>
 
@@ -44,9 +45,65 @@
                     <span class="auth-login-method-icon">MFA</span>
                     <span>Device passkey</span>
                 </button>
+                <button class="auth-login-method auth-login-method-button" type="button" data-email-mfa-send>
+                    <span class="auth-login-method-icon">MAIL</span>
+                    <span>Email code/link</span>
+                </button>
             </div>
 
             <p class="callout auth-login-status" data-passkey-status hidden></p>
+
+            <label class="auth-login-field-group auth-login-email-code-group" data-email-code-group hidden>
+                <span>Email code</span>
+                <input type="hidden" data-email-code-hidden />
+
+                <div class="auth-login-otp-grid" data-email-code-grid role="group" aria-label="Email sign-in code">
+                    <input class="auth-login-otp-box"
+                           type="text"
+                           inputmode="numeric"
+                           autocomplete="one-time-code"
+                           maxlength="1"
+                           aria-label="Email code digit 1"
+                           data-email-code-digit />
+                    <input class="auth-login-otp-box"
+                           type="text"
+                           inputmode="numeric"
+                           autocomplete="off"
+                           maxlength="1"
+                           aria-label="Email code digit 2"
+                           data-email-code-digit />
+                    <input class="auth-login-otp-box"
+                           type="text"
+                           inputmode="numeric"
+                           autocomplete="off"
+                           maxlength="1"
+                           aria-label="Email code digit 3"
+                           data-email-code-digit />
+                    <input class="auth-login-otp-box"
+                           type="text"
+                           inputmode="numeric"
+                           autocomplete="off"
+                           maxlength="1"
+                           aria-label="Email code digit 4"
+                           data-email-code-digit />
+                    <input class="auth-login-otp-box"
+                           type="text"
+                           inputmode="numeric"
+                           autocomplete="off"
+                           maxlength="1"
+                           aria-label="Email code digit 5"
+                           data-email-code-digit />
+                    <input class="auth-login-otp-box"
+                           type="text"
+                           inputmode="numeric"
+                           autocomplete="off"
+                           maxlength="1"
+                           aria-label="Email code digit 6"
+                           data-email-code-digit />
+                </div>
+
+                <span class="helper-text auth-login-otp-helper">Use the 6-digit email code, or open the secure link from your inbox.</span>
+            </label>
 
             <label class="auth-login-field-group auth-login-otp-group">
                 <span>MFA code</span>
@@ -108,6 +165,40 @@
 
             <p class="auth-login-footnote">For Edge Gateway routes, LMS checks this local session before proxying.</p>
         </form>
+
+        @if (showRecovery)
+        {
+            <form method="post" action="/auth/recovery" class="stack-form auth-recovery-form">
+                <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+                <input type="hidden" name="recovery" value="@Recovery" />
+
+                <div class="auth-recovery-heading">
+                    <p>Lost access recovery</p>
+                    <span>Use the code printed by the installer on this LMS host.</span>
+                </div>
+
+                <label class="auth-login-field-group">
+                    <span>LMS email</span>
+                    <div class="auth-login-field-shell auth-login-email-shell">
+                        <input name="email" type="email" value="@Email" autocomplete="email" placeholder="you@example.com" required />
+                    </div>
+                </label>
+
+                <label class="auth-login-field-group">
+                    <span>Recovery code</span>
+                    <div class="auth-login-field-shell">
+                        <input name="recoveryCode"
+                               type="text"
+                               autocomplete="one-time-code"
+                               inputmode="text"
+                               placeholder="XXXX-XXXX-XXXX-XXXX"
+                               required />
+                    </div>
+                </label>
+
+                <button class="auth-recovery-submit" type="submit">Recover access</button>
+            </form>
+        }
     </section>
 </div>
 
@@ -121,7 +212,17 @@
     [SupplyParameterFromQuery]
     public string? Email { get; set; }
 
+    [SupplyParameterFromQuery]
+    public string? Recovery { get; set; }
+
+    private bool showRecovery;
+
     private string NormalizedReturnUrl => NormalizeReturnUrl(ReturnUrl);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        showRecovery = await AccessRecovery.HasActiveChallengeAsync(Recovery);
+    }
 
     private static string NormalizeReturnUrl(string? returnUrl)
     {

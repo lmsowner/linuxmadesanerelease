@@ -34,5 +34,15 @@ public sealed class EdgeGatewayRouteEditor
     public string AllowedGroups { get; set; } = string.Empty;
     public bool AllowLanOnly { get; set; }
     public string AllowKnownIps { get; set; } = string.Empty;
+    public string TemporaryIpApprovalRecipients { get; set; } = string.Empty;
+    public string TemporaryIpApprovalAllowedCountryCodes { get; set; } = string.Empty;
+    public bool TemporaryIpApprovalUseNotFoundResponse { get; set; }
+
+    [Range(1, 1440)]
+    public int? TemporaryIpApprovalIdleTimeoutMinutes { get; set; }
+
+    [Range(1, 10080)]
+    public int? TemporaryIpApprovalMaxLifetimeMinutes { get; set; }
+
     public string Notes { get; set; } = string.Empty;
 }

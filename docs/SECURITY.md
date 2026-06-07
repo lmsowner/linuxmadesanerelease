@@ -26,6 +26,17 @@ For remote managed hosts, use deliberate key-based access. Avoid shared human pa
 
 sudo-marked LMS runbooks use non-interactive sudo. If the runner account is not allowed to elevate without a password, the operation should fail clearly instead of hanging on a password prompt.
 
+## Lost-Access Recovery
+
+Local recovery is for the case where you still control the Linux host but cannot complete LMS web sign-in. SSH to the LMS machine with a sudo-capable Linux account and rerun the installer; it writes a short-lived challenge under the LMS data directory and prints the matching recovery URL and code once.
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
+ssh -L 5080:127.0.0.1:5080 <sudo-user>@<server>
+```
+
+The normal login page does not show the recovery form. It appears only when opened with the installer-generated `recovery` URL, stores only a salted hash of the code on disk, consumes the challenge after success, and removes it after expiry or too many failed attempts.
+
 ## Desktop Assistant Helper
 
 The Desktop Assistant helper runs inside the signed-in Linux graphical session. It lets LMS reason about GUI-session details that the background service cannot reliably see, such as X11 or Wayland state, keyboard layout, monitor layout, and desktop settings.
@@ -50,6 +61,7 @@ Basic Caddy routes under Integrations > Caddy are routing rules, not an authenti
 - prefer private or tailnet source addresses for port-forward routes
 - review generated Caddy blocks before reloading or restarting Caddy
 - use Edge Gateway or another identity layer when a route needs MFA/passkey protection
+- configure and test LMS messaging before relying on email MFA codes or login links; unknown email addresses must receive the same generic check-your-inbox response to avoid account discovery
 - avoid putting admin tools behind a basic Caddy route without separate access control
 
 ## Credential Handling

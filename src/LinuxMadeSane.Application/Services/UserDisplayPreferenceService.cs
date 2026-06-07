@@ -31,6 +31,7 @@ public sealed class UserDisplayPreferenceService(IUserDisplayPreferenceStore sto
             NormalizeThemeMode(themeMode),
             Math.Clamp(fontScalePercent, MinimumFontScalePercent, MaximumFontScalePercent),
             existing?.TerminalCopyOnSelect ?? false,
+            existing?.DockerAiActionsApproved ?? false,
             DateTimeOffset.UtcNow);
 
         await store.SaveAsync(preference, cancellationToken);
@@ -49,6 +50,26 @@ public sealed class UserDisplayPreferenceService(IUserDisplayPreferenceStore sto
             existing?.ThemeMode ?? DefaultThemeMode,
             existing?.FontScalePercent ?? 100,
             enabled,
+            existing?.DockerAiActionsApproved ?? false,
+            DateTimeOffset.UtcNow);
+
+        await store.SaveAsync(preference, cancellationToken);
+        return preference;
+    }
+
+    public async Task<UserDisplayPreference> SaveDockerAiActionsApprovedAsync(
+        Guid userId,
+        bool approved,
+        CancellationToken cancellationToken = default)
+    {
+        var existing = await store.GetAsync(userId, cancellationToken);
+        var preference = new UserDisplayPreference(
+            userId,
+            existing?.ThemePaletteId ?? DefaultPaletteId,
+            existing?.ThemeMode ?? DefaultThemeMode,
+            existing?.FontScalePercent ?? 100,
+            existing?.TerminalCopyOnSelect ?? false,
+            approved,
             DateTimeOffset.UtcNow);
 
         await store.SaveAsync(preference, cancellationToken);

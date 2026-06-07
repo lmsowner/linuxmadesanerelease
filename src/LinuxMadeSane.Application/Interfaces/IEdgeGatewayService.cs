@@ -27,6 +27,7 @@ public interface IEdgeGatewayService
     Task<EdgeGatewayRemoteLmsRelaySetupResult> ProvisionRemoteLmsRelayAsync(string domainName, string hostname, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<EdgeGatewayAuditEntry>> ListAuditEntriesAsync(EdgeGatewayAuditFilter filter, CancellationToken cancellationToken = default);
     Task<EdgeGatewayAuthCheckResult> EvaluateAuthAsync(EdgeGatewayAuthCheckContext context, CancellationToken cancellationToken = default);
+    Task<EdgeGatewayTemporaryIpApprovalCompletionViewModel> ApproveTemporaryIpAsync(string token, CancellationToken cancellationToken = default);
     Task<string> BuildSafeReturnPathAsync(string targetUrl, CancellationToken cancellationToken = default);
     Task<bool> IsSafeReturnTargetAsync(string targetUrl, CancellationToken cancellationToken = default);
 }

@@ -30,6 +30,7 @@ The public installer:
 - stops any existing `linux-made-sane.service` before replacing application files during an update
 - installs `linux-made-sane-update` for LMS-managed self-updates
 - starts the service and checks `/healthz`
+- writes a short-lived local lost-access recovery challenge and prints the matching URL/code at the end
 
 See [Security model](SECURITY.md) before changing runner, SSH, or sudo defaults.
 
@@ -53,6 +54,7 @@ Supported environment variables:
 - `LMS_ENABLE_LOCAL_SUDO`: set `false` to skip passwordless sudo setup for local automation
 - `LMS_INSTALL_DESKTOP_HELPER`: set `false` to skip Desktop Assistant helper setup
 - `LMS_DESKTOP_HELPER_LOCAL_LMS_URL`: override the local tray URL, default `http://127.0.0.1:<port>/desktop-assistant`
+- `LMS_RECOVERY_TTL_MINUTES`: local lost-access recovery lifetime, default `30`, clamped to `5`-`240`
 - `LMS_BASE_URL`: override the public website base URL for staging tests
 - `LMS_UPDATE_HELPER_PATH`: default `/usr/local/sbin/linux-made-sane-update`
 
@@ -64,10 +66,27 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-syste
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-local-ssh
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-local-sudo
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-desktop-helper
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --recovery-ttl 60
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-start
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --uninstall
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --purge
 ```
+
+## Lost Access Recovery
+
+If you cannot complete LMS web sign-in but still have SSH access to the machine with a sudo-capable Linux account, rerun the installer:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
+```
+
+The installer repairs or updates the service, then prints a short-lived recovery URL and recovery code. If your browser is on another workstation, forward the LMS port over SSH:
+
+```bash
+ssh -L 5080:127.0.0.1:5080 <sudo-user>@<server>
+```
+
+Open the printed `http://127.0.0.1:5080/login?recovery=...` URL through that tunnel, enter the LMS account email and recovery code, then fix the MFA, passkey, email sign-in, or trusted-network setting that locked you out. If the URL expires or too many attempts fail, rerun the installer to mint a new code.
 
 ## Service Commands
 

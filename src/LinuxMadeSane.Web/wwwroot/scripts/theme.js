@@ -1133,3 +1133,63 @@ window.lmsModal = (() => {
         beginDrag
     };
 })();
+
+window.lmsMultiSelect = (() => {
+    const registrations = new WeakMap();
+
+    function eventTargetsElement(event, element) {
+        if (typeof event.composedPath === "function") {
+            return event.composedPath().includes(element);
+        }
+
+        return element.contains(event.target);
+    }
+
+    function unregisterOutsideClick(element) {
+        if (!element) {
+            return false;
+        }
+
+        const handler = registrations.get(element);
+        if (!handler) {
+            return false;
+        }
+
+        document.removeEventListener("pointerdown", handler, true);
+        registrations.delete(element);
+        return true;
+    }
+
+    function registerOutsideClick(element, dotNetReference) {
+        if (!element || !dotNetReference) {
+            return false;
+        }
+
+        unregisterOutsideClick(element);
+
+        const handler = event => {
+            if (!element.isConnected) {
+                unregisterOutsideClick(element);
+                return;
+            }
+
+            if (eventTargetsElement(event, element)) {
+                return;
+            }
+
+            try {
+                Promise.resolve(dotNetReference.invokeMethodAsync("CloseFromOutsideAsync")).catch(() => {});
+            } catch {
+            }
+        };
+
+        document.addEventListener("pointerdown", handler, true);
+        registrations.set(element, handler);
+        return true;
+    }
+
+    return {
+        registerOutsideClick,
+        unregisterOutsideClick
+    };
+})();

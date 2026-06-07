@@ -20,6 +20,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private const int MaxConcurrentProbes = 96;
     private const int MaxLanCandidates = 512;
     private const int MaxTailnetPeersToProbe = 96;
+    private const int MaxDockerPublishedPortsToProbe = 128;
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromMilliseconds(1400);
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromMilliseconds(420);
     private static readonly TimeSpan ReverseLookupTimeout = TimeSpan.FromMilliseconds(280);
@@ -91,6 +92,11 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         if (request.IncludeLocalhost)
         {
             hosts.AddRange(BuildLocalhostProbeHosts());
+        }
+
+        if (request.IncludeDocker)
+        {
+            hosts.AddRange(await BuildDockerProbeHostsAsync(cancellationToken));
         }
 
         if (request.IncludeLan)
@@ -410,6 +416,272 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             .ToArray();
     }
 
+    private async Task<IReadOnlyList<HttpProbeHost>> BuildDockerProbeHostsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await RunDockerContainerListAsync(requiresSudo: false, cancellationToken);
+            if (result.ExitCode != 0 && IsDockerSocketPermissionDenied(result))
+            {
+                result = await RunDockerContainerListAsync(requiresSudo: true, cancellationToken);
+            }
+
+            if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.StandardOutput))
+            {
+                return [];
+            }
+
+            return ParseDockerPublishedPortHosts(result.StandardOutput);
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private async Task<LinuxCommandResult> RunDockerContainerListAsync(
+        bool requiresSudo,
+        CancellationToken cancellationToken) =>
+        await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "docker",
+                ["ps", "--format", "{{json .}}"],
+                requiresSudo,
+                TimeSpan.FromSeconds(5),
+                "Inspect Docker containers with published HTTP/S ports")
+            {
+                IsOptionalExternalTool = true
+            },
+            dryRun: false,
+            cancellationToken);
+
+    private static bool IsDockerSocketPermissionDenied(LinuxCommandResult result)
+    {
+        var output = $"{result.StandardError}\n{result.StandardOutput}";
+        return output.Contains("/var/run/docker.sock", StringComparison.OrdinalIgnoreCase) &&
+               output.Contains("permission denied", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IReadOnlyList<HttpProbeHost> ParseDockerPublishedPortHosts(string output)
+    {
+        var publishedPorts = new List<DockerPublishedPort>();
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                var containerName = GetJsonString(root, "Names") ?? GetJsonString(root, "Name");
+                var image = GetJsonString(root, "Image");
+                var portsText = GetJsonString(root, "Ports");
+                if (string.IsNullOrWhiteSpace(containerName) || string.IsNullOrWhiteSpace(portsText))
+                {
+                    continue;
+                }
+
+                foreach (var publishedPort in ParseDockerPublishedPorts(containerName, image, portsText))
+                {
+                    publishedPorts.Add(publishedPort);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        return publishedPorts
+            .DistinctBy(port => $"{port.HostAddress}|{port.HostPort}|{port.ContainerName}|{port.ContainerPort}", StringComparer.OrdinalIgnoreCase)
+            .Take(MaxDockerPublishedPortsToProbe)
+            .GroupBy(port => BuildDockerProbeGroupKey(port), StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var item = group.First();
+                var bind = NormalizeDockerBindAddress(item.HostAddress);
+                var targetHost = ResolveDockerTargetHost(bind);
+                var probeAddress = ResolveDockerProbeAddress(bind);
+                var ipAddress = ResolveDockerDisplayAddress(bind);
+                var displayName = BuildDockerDisplayName(item);
+
+                return new HttpProbeHost(
+                    targetHost,
+                    probeAddress,
+                    targetHost,
+                    "Docker",
+                    ipAddress,
+                    displayName,
+                    group.Select(port => port.HostPort).Distinct().Order().ToArray(),
+                    IsLocalhostProbe: true,
+                    ResolveHostName: false);
+            })
+            .ToArray();
+    }
+
+    private static IEnumerable<DockerPublishedPort> ParseDockerPublishedPorts(string containerName, string? image, string portsText)
+    {
+        foreach (var segment in portsText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!segment.Contains("->", StringComparison.Ordinal) ||
+                !segment.EndsWith("/tcp", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var parts = segment.Split("->", 2, StringSplitOptions.TrimEntries);
+            if (parts.Length != 2)
+            {
+                continue;
+            }
+
+            var hostSide = parts[0].Trim();
+            var containerSide = parts[1].Trim();
+            var slashIndex = containerSide.IndexOf('/');
+            if (slashIndex > 0)
+            {
+                containerSide = containerSide[..slashIndex];
+            }
+
+            var (hostAddress, hostPorts) = ParseDockerHostSide(hostSide);
+            var containerPort = ParseFirstPort(containerSide);
+            if (hostPorts.Count == 0 || containerPort <= 0)
+            {
+                continue;
+            }
+
+            foreach (var hostPort in hostPorts)
+            {
+                yield return new DockerPublishedPort(
+                    containerName,
+                    image,
+                    hostAddress,
+                    hostPort,
+                    containerPort);
+            }
+        }
+    }
+
+    private static (string HostAddress, IReadOnlyList<int> HostPorts) ParseDockerHostSide(string hostSide)
+    {
+        var normalized = hostSide.Trim();
+        var separatorIndex = normalized.LastIndexOf(':');
+        if (separatorIndex < 0)
+        {
+            return (string.Empty, ParseDockerPortRange(normalized));
+        }
+
+        var hostAddress = normalized[..separatorIndex].Trim().Trim('[', ']');
+        var hostPortText = normalized[(separatorIndex + 1)..].Trim();
+        return (hostAddress, ParseDockerPortRange(hostPortText));
+    }
+
+    private static IReadOnlyList<int> ParseDockerPortRange(string value)
+    {
+        var normalized = value.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return [];
+        }
+
+        var parts = normalized.Split('-', 2, StringSplitOptions.TrimEntries);
+        if (!int.TryParse(parts[0], out var start) || start <= 0 || start > 65535)
+        {
+            return [];
+        }
+
+        if (parts.Length == 1)
+        {
+            return [start];
+        }
+
+        if (!int.TryParse(parts[1], out var end) || end < start || end > 65535)
+        {
+            return [start];
+        }
+
+        return Enumerable.Range(start, Math.Min(end - start + 1, 64)).ToArray();
+    }
+
+    private static int ParseFirstPort(string value)
+    {
+        var normalized = value.Trim();
+        var separatorIndex = normalized.IndexOf('-');
+        if (separatorIndex >= 0)
+        {
+            normalized = normalized[..separatorIndex];
+        }
+
+        return int.TryParse(normalized, out var port) ? port : 0;
+    }
+
+    private static string? GetJsonString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return property.GetString();
+    }
+
+    private static string BuildDockerProbeGroupKey(DockerPublishedPort port)
+    {
+        var bind = NormalizeDockerBindAddress(port.HostAddress);
+        return $"{ResolveDockerTargetHost(bind)}|{BuildDockerDisplayName(port)}";
+    }
+
+    private static string BuildDockerDisplayName(DockerPublishedPort port)
+    {
+        var image = string.IsNullOrWhiteSpace(port.Image) ? "container" : port.Image.Trim();
+        return $"Docker: {port.ContainerName.Trim()} ({image}) -> {port.ContainerPort}";
+    }
+
+    private static string NormalizeDockerBindAddress(string value)
+    {
+        var normalized = value.Trim().Trim('[', ']');
+        return normalized.Length == 0 ? "0.0.0.0" : normalized;
+    }
+
+    private static string ResolveDockerTargetHost(string bindAddress)
+    {
+        if (bindAddress is "0.0.0.0" or "::" or "*")
+        {
+            return "localhost";
+        }
+
+        if (IPAddress.TryParse(bindAddress, out var address) && IPAddress.IsLoopback(address))
+        {
+            return "localhost";
+        }
+
+        return bindAddress;
+    }
+
+    private static IPAddress? ResolveDockerProbeAddress(string bindAddress)
+    {
+        if (bindAddress is "0.0.0.0" or "::" or "*")
+        {
+            return IPAddress.Loopback;
+        }
+
+        if (IPAddress.TryParse(bindAddress, out var address))
+        {
+            return IPAddress.IsLoopback(address) ? IPAddress.Loopback : address;
+        }
+
+        return null;
+    }
+
+    private static string ResolveDockerDisplayAddress(string bindAddress)
+    {
+        if (bindAddress is "0.0.0.0" or "::" or "*")
+        {
+            return IPAddress.Loopback.ToString();
+        }
+
+        return IPAddress.TryParse(bindAddress, out var address) && IPAddress.IsLoopback(address)
+            ? IPAddress.Loopback.ToString()
+            : bindAddress;
+    }
+
     private static IReadOnlyList<int> GetLocalListeningPorts()
     {
         try
@@ -719,6 +991,11 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             scopes.Add("Tailnet");
         }
 
+        if (request.IncludeDocker)
+        {
+            scopes.Add("Docker");
+        }
+
         return scopes;
     }
 
@@ -756,10 +1033,11 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             .DistinctBy(BuildEndpointKey, StringComparer.OrdinalIgnoreCase)
             .OrderBy(endpoint => endpoint.Scope switch
             {
-                "Localhost" => 0,
-                "LAN" => 1,
-                "Tailnet" => 2,
-                _ => 3
+                "Docker" => 0,
+                "Localhost" => 1,
+                "LAN" => 2,
+                "Tailnet" => 3,
+                _ => 4
             })
             .ThenBy(endpoint => endpoint.DisplayName ?? endpoint.Host, StringComparer.OrdinalIgnoreCase)
             .ThenBy(endpoint => endpoint.Port)
@@ -798,6 +1076,13 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         string SubnetLabel,
         IPAddress LocalAddress,
         int PrefixLength);
+
+    private sealed record DockerPublishedPort(
+        string ContainerName,
+        string? Image,
+        string HostAddress,
+        int HostPort,
+        int ContainerPort);
 
     private sealed record HttpServiceDiscoveryCache(
         DateTimeOffset UpdatedAtUtc,

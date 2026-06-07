@@ -55,6 +55,8 @@ public sealed partial class DesktopAssistantChatService(
             ? provider?.Settings.DefaultModelId ?? string.Empty
             : activeThread.ModelId;
 
+        var proposedFix = TryRecoverPendingFixFromMessages(messages);
+
         return new DesktopAssistantChatWorkspaceViewModel(
             sessions,
             activeSessionId,
@@ -64,7 +66,8 @@ public sealed partial class DesktopAssistantChatService(
             providerKey,
             provider?.Settings.DisplayName ?? "No AI provider configured",
             modelId,
-            BuildStatusSummary(desktopSnapshot));
+            BuildStatusSummary(desktopSnapshot),
+            proposedFix);
     }
 
     public async Task<Guid> CreateSessionAsync(
@@ -187,7 +190,7 @@ public sealed partial class DesktopAssistantChatService(
                 thread.Id,
                 nextSequenceNumber + 1,
                 AiChatMessageRole.Assistant,
-                "I can fix this. Do you want LMS to apply it?",
+                BuildProposedFixApprovalMessage(directProposedFix),
                 DateTimeOffset.UtcNow);
             await conversationStore.SaveMessageAsync(directAssistantMessage, cancellationToken);
 
@@ -257,7 +260,11 @@ public sealed partial class DesktopAssistantChatService(
         var proposedFix = TryBuildSupportedActionFallback(userText, assistantText, existingMessages);
         if (proposedFix is not null)
         {
-            assistantText = "I can fix this. Do you want LMS to apply it?";
+            assistantText = BuildProposedFixApprovalMessage(proposedFix);
+        }
+        else if (LooksLikePendingFixAssistantMessage(assistantText))
+        {
+            assistantText = BuildUnsupportedApprovalFallback();
         }
 
         if (string.IsNullOrWhiteSpace(assistantText))
@@ -683,14 +690,33 @@ public sealed partial class DesktopAssistantChatService(
 
     private static string NormalizeKeyboardLayout(string layout)
     {
-        var normalized = NormalizeSelection(layout).ToLowerInvariant();
-        if (!KeyboardLayoutPattern().IsMatch(normalized))
+        if (!TryNormalizeKeyboardLayout(layout, out var normalized))
         {
             throw new InvalidOperationException("Keyboard layout code is invalid.");
         }
 
         return normalized;
     }
+
+    private static bool TryNormalizeKeyboardLayout(string layout, out string normalized)
+    {
+        var token = NormalizeSelection(layout)
+            .Trim('*', '`', '\'', '"', '(', ')', '[', ']', '{', '}', '.', ',', ';', ':')
+            .ToLowerInvariant();
+
+        normalized = token switch
+        {
+            "uk" or "british" or "united kingdom" or "united-kingdom" => "gb",
+            "usa" or "american" or "united states" or "united-states" => "us",
+            _ => token
+        };
+
+        return KeyboardLayoutPattern().IsMatch(normalized) &&
+               !IsReservedKeyboardLayoutToken(normalized);
+    }
+
+    private static bool IsReservedKeyboardLayoutToken(string value) =>
+        value is "as" or "be" or "fix" or "is" or "key" or "now" or "set" or "the" or "to" or "use" or "x11" or "xkb";
 
     private static IReadOnlyList<string> NormalizePackageNames(IReadOnlyList<string> packageNames)
     {
@@ -780,7 +806,7 @@ public sealed partial class DesktopAssistantChatService(
         var evidenceText = BuildSupportedFixEvidenceText(userText, assistantText, existingMessages);
         var intentText = LooksLikeFixContinuation(userText) ? evidenceText : userText;
 
-        if (TryResolveKeyboardLayoutIntent(intentText, out var layout))
+        if (TryResolveKeyboardLayoutIntent(evidenceText, out var layout))
         {
             return new DesktopAssistantProposedFixViewModel(
                 DesktopSessionActionKinds.SetKeyboardLayout,
@@ -822,6 +848,41 @@ public sealed partial class DesktopAssistantChatService(
         return null;
     }
 
+    private static DesktopAssistantProposedFixViewModel? TryRecoverPendingFixFromMessages(
+        IReadOnlyList<AiChatMessage> messages)
+    {
+        var conversation = messages
+            .Where(message => message.Role is AiChatMessageRole.User or AiChatMessageRole.Assistant)
+            .OrderBy(message => message.SequenceNumber)
+            .ToArray();
+        var lastAssistantMessage = conversation.LastOrDefault();
+        if (lastAssistantMessage is null ||
+            lastAssistantMessage.Role != AiChatMessageRole.Assistant ||
+            !LooksLikePendingFixAssistantMessage(lastAssistantMessage.Content))
+        {
+            return null;
+        }
+
+        var previousMessages = conversation
+            .Take(conversation.Length - 1)
+            .ToArray();
+        var lastUserMessage = previousMessages.LastOrDefault(message => message.Role == AiChatMessageRole.User);
+        return lastUserMessage is null
+            ? null
+            : TryBuildSupportedActionFallback(lastUserMessage.Content, lastAssistantMessage.Content, previousMessages);
+    }
+
+    private static string BuildProposedFixApprovalMessage(DesktopAssistantProposedFixViewModel proposedFix) =>
+        $"""
+        I can fix this. Do you want LMS to apply it?
+
+        {proposedFix.Title}
+        {proposedFix.Description}
+        """;
+
+    private static string BuildUnsupportedApprovalFallback() =>
+        "I found a likely desktop fix, but LMS could not map it to a safe one-click action. Rephrase with the exact supported action, for example: set keyboard layout to gb.";
+
     private static string BuildSupportedFixEvidenceText(
         string userText,
         string assistantText,
@@ -849,6 +910,14 @@ public sealed partial class DesktopAssistantChatService(
                normalized.Contains("go ahead", StringComparison.Ordinal) ||
                normalized.Contains("do it", StringComparison.Ordinal) ||
                normalized.Contains("apply it", StringComparison.Ordinal);
+    }
+
+    private static bool LooksLikePendingFixAssistantMessage(string assistantText)
+    {
+        var normalized = MultiWhitespacePattern().Replace(assistantText.Trim().ToLowerInvariant(), " ");
+        return normalized.Contains("do you want lms to apply it", StringComparison.Ordinal) ||
+               normalized.Contains("do you want lms to fix", StringComparison.Ordinal) ||
+               normalized.Contains("i can fix this", StringComparison.Ordinal);
     }
 
     private static bool LooksLikeDirectFixRequest(string userText)
@@ -879,14 +948,21 @@ public sealed partial class DesktopAssistantChatService(
             return false;
         }
 
-        var match = KeyboardLayoutIntentPattern().Match(userText);
-        if (!match.Success)
+        foreach (Match targetMatch in KeyboardTargetLayoutIntentPattern().Matches(userText))
         {
-            return false;
+            if (TryNormalizeKeyboardLayout(targetMatch.Groups["layout"].Value, out layout))
+            {
+                return true;
+            }
         }
 
-        layout = NormalizeKeyboardLayout(match.Groups["layout"].Value);
-        return true;
+        var match = KeyboardLayoutIntentPattern().Match(userText);
+        if (match.Success && TryNormalizeKeyboardLayout(match.Groups["layout"].Value, out layout))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     private static bool TryResolveIgnoredAptSourceFileFix(string text, out string sourcePath)
@@ -1864,7 +1940,10 @@ LMS_APT_SOURCE_REPAIR
     [GeneratedRegex("\\b(keyboard|keymap|xkb|xkbmap)\\b", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex KeyboardIntentPattern();
 
-    [GeneratedRegex("\\b(?:keyboard(?:\\s+layout)?|keymap|xkb(?:map|layout)?)\\b(?:\\s+(?:to|as|is|set|use|make|be)|\\s*[:=])?\\s+['`\"]?(?<layout>[a-z]{2,3}(?:[_+-][a-z0-9]+)?)['`\"]?", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
+    [GeneratedRegex("\\b(?:keyboard(?:\\s+layout)?|keymap|xkb(?:map|layout)?)\\b[^.\\n]{0,160}?\\b(?:to|as|use|using|apply)\\b\\s+(?:the\\s+)?(?:desktop\\s+)?(?:cleanly\\s+)?[\\*`'\"(\\[]*(?<layout>uk|gb|us|usa|british|american|[a-z]{2,3}(?:[_+-][a-z0-9]+)?)(?=$|\\s|[\\]})`'\".,;:!?])", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
+    private static partial Regex KeyboardTargetLayoutIntentPattern();
+
+    [GeneratedRegex("\\b(?:keyboard(?:\\s+layout)?|keymap|xkb(?:map|layout)?)\\b(?:\\s+(?:to|as|is|set|use|make|be)|\\s*[:=])?\\s+['`\"]?(?<layout>[a-z]{2,3}(?:[_+-][a-z0-9]+)?)(?=$|\\s|[\\]})`'\".,;:!?])", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex KeyboardLayoutIntentPattern();
 
     [GeneratedRegex("(?<path>/etc/apt/sources\\.list\\.d/[A-Za-z0-9._+-]+)", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]

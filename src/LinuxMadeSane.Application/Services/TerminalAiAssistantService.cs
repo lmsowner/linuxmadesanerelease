@@ -16,6 +16,7 @@ public sealed partial class TerminalAiAssistantService(
     IAiPromptSanitizer promptSanitizer) : ITerminalAiAssistantService
 {
     private const int MaxTerminalOutputChars = 3200;
+    private const int MaxCustomProviderTerminalOutputChars = 1200;
     private const int MaxRequestChars = 1800;
     private const int MaxHistoryEntries = 12;
     private const int MaxHistoryRecapChars = 1800;
@@ -33,7 +34,8 @@ public sealed partial class TerminalAiAssistantService(
             ?? throw new InvalidOperationException("No enabled runnable AI provider is configured.");
 
         var now = DateTimeOffset.UtcNow;
-        var userPrompt = BuildPrompt(request, BuildConversationRecap(conversation));
+        var conversationRecap = BuildConversationRecap(conversation);
+        var userPrompt = BuildPrompt(request, conversationRecap, provider.Settings.ProviderType);
         var sanitization = promptSanitizer.Sanitize(userPrompt, provider.Settings.ProviderType);
         var userEntry = new TerminalAiConversationEntry(AiChatMessageRole.User, BuildDisplayUserMessage(request), now);
         var thread = new AiChatThread(
@@ -52,6 +54,27 @@ public sealed partial class TerminalAiAssistantService(
         [
             new AiProviderMessageInputItem(AiChatMessageRole.User, sanitization.Content)
         ];
+
+        if (ShouldUseImmediateCommandFallback(provider.Settings.ProviderType) && (
+                TryBuildTerminalErrorFallback(request, out var immediateFallback) ||
+                TryBuildFallbackCommand(request, conversationRecap, out immediateFallback)))
+        {
+            var immediateAssistantEntry = new TerminalAiConversationEntry(
+                AiChatMessageRole.Assistant,
+                immediateFallback.Message,
+                now,
+                immediateFallback.Command);
+
+            return new TerminalAiTurnResult(
+                provider.ProviderKey,
+                provider.Settings.DisplayName,
+                thread.ModelId,
+                conversation.ProviderConversationReference,
+                conversation.ProviderResponseId,
+                sanitization.Summary,
+                userEntry,
+                immediateAssistantEntry);
+        }
 
         var attachedServers = request.HostId == Guid.Empty
             ? Array.Empty<AiAttachedServer>()
@@ -88,11 +111,20 @@ public sealed partial class TerminalAiAssistantService(
             throw new InvalidOperationException("The AI provider returned no assistant text.");
         }
 
+        var suggestedCommand = ExtractSuggestedCommand(assistantText);
+        if (string.IsNullOrWhiteSpace(suggestedCommand) && (
+                TryBuildTerminalErrorFallback(request, out var fallback) ||
+                TryBuildFallbackCommand(request, conversationRecap, out fallback)))
+        {
+            suggestedCommand = fallback.Command;
+            assistantText = fallback.Message;
+        }
+
         var assistantEntry = new TerminalAiConversationEntry(
             AiChatMessageRole.Assistant,
             assistantText,
             now,
-            ExtractSuggestedCommand(assistantText));
+            suggestedCommand);
 
         return new TerminalAiTurnResult(
             provider.ProviderKey,
@@ -128,7 +160,10 @@ public sealed partial class TerminalAiAssistantService(
             : await providerRegistry.GetProviderAsync(selectedProvider.ProviderKey, cancellationToken);
     }
 
-    private static string BuildPrompt(TerminalAiPromptRequest request, string conversationRecap)
+    private static string BuildPrompt(
+        TerminalAiPromptRequest request,
+        string conversationRecap,
+        AiProviderType providerType)
     {
         var hostLabel = string.IsNullOrWhiteSpace(request.HostName)
             ? "this host"
@@ -137,7 +172,7 @@ public sealed partial class TerminalAiAssistantService(
             ? "Unknown"
             : request.WorkingDirectory.Trim();
         var requestText = TrimRequestText(request.Request);
-        var outputTail = TrimTerminalOutput(request.TerminalOutput);
+        var outputTail = TrimTerminalOutput(request.TerminalOutput, providerType);
 
         var builder = new StringBuilder();
         builder.AppendLine("You are helping with an ongoing terminal support conversation.");
@@ -145,6 +180,12 @@ public sealed partial class TerminalAiAssistantService(
         builder.AppendLine("Do not ask the user to paste large terminal output manually back into chat. If fresh evidence is needed, propose the single next command and assume the interface can run it and analyze the updated terminal session.");
         builder.AppendLine("Do not say 'if you want I can', 'you could try', or similar hedging. State the next fix, check, or command directly.");
         builder.AppendLine("When a command is appropriate, include exactly one fenced bash block so the interface can offer Run then review or Run commands.");
+        builder.AppendLine("If the operator asks for live host state, counts, lists, running processes, services, Docker containers, packages, ports, devices, or current status, do not invent the answer. Return the single command that collects the evidence.");
+        builder.AppendLine("If recent terminal output shows permission denied for the previous command, do not repeat the same unprivileged command. Retry the same focused check with sudo when that is the minimum safe next step.");
+        if (providerType == AiProviderType.Custom)
+        {
+            builder.AppendLine("This provider may be a small Docker-hosted OpenAI-compatible model. Keep the answer deterministic: one short sentence plus one fenced bash block whenever terminal evidence is needed.");
+        }
         if (request.AllowInternetResearch)
         {
             builder.AppendLine("Internet research is allowed for this turn. If local terminal evidence is not enough, use web search selectively to find concrete answers and fold the findings into the diagnosis or fix.");
@@ -256,7 +297,7 @@ public sealed partial class TerminalAiAssistantService(
         return $"{normalized[..MaxHistoryEntryChars]}...";
     }
 
-    private static string TrimTerminalOutput(string terminalOutput)
+    private static string TrimTerminalOutput(string terminalOutput, AiProviderType providerType)
     {
         if (string.IsNullOrWhiteSpace(terminalOutput))
         {
@@ -264,12 +305,15 @@ public sealed partial class TerminalAiAssistantService(
         }
 
         var normalized = terminalOutput.Trim();
-        if (normalized.Length <= MaxTerminalOutputChars)
+        var maxChars = providerType == AiProviderType.Custom
+            ? MaxCustomProviderTerminalOutputChars
+            : MaxTerminalOutputChars;
+        if (normalized.Length <= maxChars)
         {
             return normalized;
         }
 
-        return $"[recent output tail]{Environment.NewLine}{normalized[^MaxTerminalOutputChars..]}";
+        return $"[recent output tail]{Environment.NewLine}{normalized[^maxChars..]}";
     }
 
     private static string TrimRequestText(string requestText)
@@ -291,17 +335,351 @@ public sealed partial class TerminalAiAssistantService(
     private static string ExtractSuggestedCommand(string assistantText)
     {
         var match = SuggestedCommandPattern().Match(assistantText);
-        if (!match.Success)
+        if (match.Success)
+        {
+            return match.Groups[1].Value.Trim();
+        }
+
+        foreach (var line in assistantText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var command = NormalizePotentialCommand(line);
+            if (IsLikelyShellCommand(command))
+            {
+                return command;
+            }
+        }
+
+        var inlineMatch = InlineBacktickCommandPattern().Match(assistantText);
+        return inlineMatch.Success && IsLikelyShellCommand(inlineMatch.Groups[1].Value.Trim())
+            ? inlineMatch.Groups[1].Value.Trim()
+            : string.Empty;
+    }
+
+    private static bool TryBuildFallbackCommand(
+        TerminalAiPromptRequest request,
+        string conversationRecap,
+        out TerminalCommandFallback fallback)
+    {
+        var context = $"{request.Request}{Environment.NewLine}{conversationRecap}".ToLowerInvariant();
+        fallback = default;
+
+        if (!LooksLikeLiveStateRequest(context) &&
+            request.Mode is not TerminalAiPromptMode.SuggestCommand and not TerminalAiPromptMode.Investigate)
+        {
+            return false;
+        }
+
+        var command = ResolveLiveStateCommand(context);
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            return false;
+        }
+
+        fallback = new TerminalCommandFallback(
+            command,
+            BuildFallbackMessage(command, context));
+        return true;
+    }
+
+    private static bool ShouldUseImmediateCommandFallback(AiProviderType providerType) =>
+        providerType is AiProviderType.Custom or AiProviderType.Ollama;
+
+    private static bool TryBuildTerminalErrorFallback(
+        TerminalAiPromptRequest request,
+        out TerminalCommandFallback fallback)
+    {
+        fallback = default;
+        if (string.IsNullOrWhiteSpace(request.TerminalOutput))
+        {
+            return false;
+        }
+
+        var terminalOutput = StripAnsi(request.TerminalOutput);
+        var lowerOutput = terminalOutput.ToLowerInvariant();
+        if (!ContainsAny(lowerOutput, "permission denied", "operation not permitted"))
+        {
+            return false;
+        }
+
+        var deniedCommand = ExtractLastPromptCommandBeforeError(terminalOutput);
+        if (string.IsNullOrWhiteSpace(deniedCommand))
+        {
+            return false;
+        }
+
+        var retryCommand = BuildSudoRetryCommand(deniedCommand, lowerOutput);
+        if (string.IsNullOrWhiteSpace(retryCommand))
+        {
+            return false;
+        }
+
+        fallback = new TerminalCommandFallback(
+            retryCommand,
+            BuildPermissionDeniedFallbackMessage(retryCommand, lowerOutput));
+        return true;
+    }
+
+    private static string ResolveLiveStateCommand(string context)
+    {
+        if (ContainsAny(context, "docker", "container", "containers", "compose"))
+        {
+            return context.Contains("stopped", StringComparison.Ordinal) ||
+                   context.Contains("all container", StringComparison.Ordinal)
+                ? "docker ps -a --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'"
+                : "docker ps --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'";
+        }
+
+        if (ContainsAny(context, "process", "processes", "ram", "memory", "cpu usage"))
+        {
+            return "ps -eo pid,user,comm,%mem,%cpu,rss --sort=-rss | head -n 25";
+        }
+
+        if (ContainsAny(context, "bluetooth"))
+        {
+            return "bluetoothctl devices";
+        }
+
+        if (ContainsAny(context, "listening", "open port", "ports", "socket", "sockets"))
+        {
+            return "ss -tulpn";
+        }
+
+        if (ContainsAny(context, "service", "services", "systemd", "daemon"))
+        {
+            return "systemctl --type=service --state=running --no-pager";
+        }
+
+        if (ContainsAny(context, "disk", "storage", "space", "filesystem", "file system"))
+        {
+            return "df -hT";
+        }
+
+        if (ContainsAny(context, "tailscale"))
+        {
+            return "tailscale status";
+        }
+
+        if (ContainsAny(context, "network", "interface", "interfaces", "ip address", "addresses", "route", "gateway"))
+        {
+            return "ip -brief address && ip route";
+        }
+
+        if (ContainsAny(context, "journal", "logs", "log entries"))
+        {
+            return "journalctl -p warning -n 80 --no-pager";
+        }
+
+        if (ContainsAny(context, "gpu", "nvidia", "graphics"))
+        {
+            return "nvidia-smi || lspci | grep -Ei 'vga|3d|display'";
+        }
+
+        if (ContainsAny(context, "package", "packages", "apt", "dpkg"))
+        {
+            return "apt list --installed 2>/dev/null | head -n 50";
+        }
+
+        return string.Empty;
+    }
+
+    private static string BuildFallbackMessage(string command, string context)
+    {
+        if (command.StartsWith("docker ", StringComparison.Ordinal))
+        {
+            return "Run this to get the live Docker container list; I will review the output after it runs.";
+        }
+
+        if (context.Contains("process", StringComparison.Ordinal) ||
+            context.Contains("ram", StringComparison.Ordinal) ||
+            context.Contains("memory", StringComparison.Ordinal))
+        {
+            return "Run this to get the live process view; I will review the output after it runs.";
+        }
+
+        return "Run this to collect the live terminal evidence; I will review the output after it runs.";
+    }
+
+    private static string ExtractLastPromptCommandBeforeError(string terminalOutput)
+    {
+        var lines = terminalOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var errorIndex = Array.FindLastIndex(
+            lines,
+            line => line.Contains("permission denied", StringComparison.OrdinalIgnoreCase) ||
+                    line.Contains("operation not permitted", StringComparison.OrdinalIgnoreCase));
+        if (errorIndex <= 0)
         {
             return string.Empty;
         }
 
-        return match.Groups[1].Value.Trim();
+        for (var index = errorIndex - 1; index >= 0; index--)
+        {
+            var command = ExtractCommandFromPromptLine(lines[index]);
+            if (!string.IsNullOrWhiteSpace(command))
+            {
+                return command;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static string ExtractCommandFromPromptLine(string line)
+    {
+        var trimmed = line.Trim();
+        var dollarIndex = trimmed.LastIndexOf("$ ", StringComparison.Ordinal);
+        var hashIndex = trimmed.LastIndexOf("# ", StringComparison.Ordinal);
+        var promptIndex = Math.Max(dollarIndex, hashIndex);
+        if (promptIndex < 0 || promptIndex + 2 >= trimmed.Length)
+        {
+            return string.Empty;
+        }
+
+        return trimmed[(promptIndex + 2)..].Trim();
+    }
+
+    private static string BuildSudoRetryCommand(string command, string lowerTerminalOutput)
+    {
+        var normalized = command.Trim();
+        if (normalized.StartsWith("sudo ", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        if (StartsWithShellCommand(normalized, "docker") &&
+            lowerTerminalOutput.Contains("/var/run/docker.sock", StringComparison.Ordinal))
+        {
+            return $"sudo {normalized}";
+        }
+
+        return IsReadOnlySudoRetryCommand(normalized)
+            ? $"sudo {normalized}"
+            : string.Empty;
+    }
+
+    private static bool IsReadOnlySudoRetryCommand(string command)
+    {
+        if (StartsWithShellCommand(command, "journalctl") ||
+            StartsWithShellCommand(command, "ss") ||
+            StartsWithShellCommand(command, "lsof") ||
+            StartsWithShellCommand(command, "nft") && command.Contains(" list ", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!StartsWithShellCommand(command, "systemctl"))
+        {
+            return false;
+        }
+
+        var lowerCommand = command.ToLowerInvariant();
+        return ContainsAny(
+            lowerCommand,
+            " status",
+            " show",
+            " cat ",
+            " list-",
+            " is-active",
+            " --type=",
+            " --state=");
+    }
+
+    private static string BuildPermissionDeniedFallbackMessage(string command, string lowerTerminalOutput)
+    {
+        if (command.StartsWith("sudo docker ", StringComparison.Ordinal) &&
+            lowerTerminalOutput.Contains("/var/run/docker.sock", StringComparison.Ordinal))
+        {
+            return "Docker is reachable, but this terminal user cannot read /var/run/docker.sock. Run the same read-only Docker check with sudo so I can review the output.";
+        }
+
+        return "The previous command was blocked by permissions. Retry the same focused check with sudo so I can review the output.";
+    }
+
+    private static bool StartsWithShellCommand(string command, string executable)
+    {
+        var trimmed = command.TrimStart();
+        return trimmed.Equals(executable, StringComparison.OrdinalIgnoreCase) ||
+               trimmed.StartsWith($"{executable} ", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeLiveStateRequest(string context) =>
+        ContainsAny(
+            context,
+            "how many",
+            "show me",
+            "show the",
+            "show them",
+            "list",
+            "view",
+            "running",
+            "what is running",
+            "what are running",
+            "status",
+            "check",
+            "find",
+            "current");
+
+    private static bool ContainsAny(string value, params string[] needles) =>
+        needles.Any(needle => value.Contains(needle, StringComparison.Ordinal));
+
+    private static string NormalizePotentialCommand(string line)
+    {
+        var command = line.Trim();
+        if (command.StartsWith("$ ", StringComparison.Ordinal) ||
+            command.StartsWith("# ", StringComparison.Ordinal))
+        {
+            command = command[2..].Trim();
+        }
+
+        if (command.StartsWith("sudo ", StringComparison.OrdinalIgnoreCase))
+        {
+            return command;
+        }
+
+        var colonIndex = command.IndexOf(':', StringComparison.Ordinal);
+        if (colonIndex >= 0 && colonIndex < 24)
+        {
+            command = command[(colonIndex + 1)..].Trim();
+        }
+
+        return command;
+    }
+
+    private static bool IsLikelyShellCommand(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command) ||
+            command.EndsWith(".", StringComparison.Ordinal) ||
+            command.Contains(" should ", StringComparison.OrdinalIgnoreCase) ||
+            command.Contains(" can ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var firstToken = command.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault() ?? string.Empty;
+        if (firstToken.Equals("sudo", StringComparison.OrdinalIgnoreCase))
+        {
+            firstToken = command.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Skip(1)
+                .FirstOrDefault() ?? string.Empty;
+        }
+
+        return firstToken is "apt" or "apt-cache" or "apt-get" or "bluetoothctl" or "cat" or "df" or "docker" or "du" or "find" or "free" or "grep" or "ip" or "journalctl" or "lms" or "ls" or "lspci" or "nvidia-smi" or "podman" or "ps" or "ss" or "systemctl" or "tail" or "top";
     }
 
     [GeneratedRegex("```(?:bash|sh)?\\s*\\n([\\s\\S]*?)```", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SuggestedCommandPattern();
 
+    [GeneratedRegex("`([^`\\r\\n]+)`", RegexOptions.CultureInvariant)]
+    private static partial Regex InlineBacktickCommandPattern();
+
+    [GeneratedRegex("\\x1B\\[[0-?]*[ -/]*[@-~]", RegexOptions.CultureInvariant)]
+    private static partial Regex AnsiEscapePattern();
+
     [GeneratedRegex("\\s+", RegexOptions.CultureInvariant)]
     private static partial Regex MultiWhitespacePattern();
+
+    private static string StripAnsi(string value) =>
+        AnsiEscapePattern().Replace(value, string.Empty);
+
+    private readonly record struct TerminalCommandFallback(string Command, string Message);
 }

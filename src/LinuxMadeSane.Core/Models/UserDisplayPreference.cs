@@ -9,4 +9,5 @@ public sealed record UserDisplayPreference(
     string ThemeMode,
     int FontScalePercent,
     bool TerminalCopyOnSelect,
+    bool DockerAiActionsApproved,
     DateTimeOffset UpdatedAtUtc);

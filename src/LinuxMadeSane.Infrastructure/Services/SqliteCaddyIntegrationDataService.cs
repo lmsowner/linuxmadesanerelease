@@ -583,24 +583,43 @@ public sealed class SqliteCaddyIntegrationDataService(
         return builder.ToString();
     }
 
-    private static string EnsureManagedImport(string currentText, string importPath)
+    internal static string EnsureManagedImport(string currentText, string importPath)
     {
         var currentWithoutPackagedDefault = CaddyMainConfigSanitizer.RemovePackagedDefaultSite(currentText ?? string.Empty);
-        var normalizedCurrentText = string.IsNullOrWhiteSpace(currentWithoutPackagedDefault)
-            ? string.Empty
-            : currentWithoutPackagedDefault.TrimEnd() + Environment.NewLine;
-        var importLine = $"import {importPath}";
-        if (normalizedCurrentText.Contains(importLine, StringComparison.Ordinal))
+        var cleanedLines = currentWithoutPackagedDefault
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Split('\n')
+            .Where(static line => !IsReverseProxyImportOrHeading(line))
+            .Select(static line => line.TrimEnd())
+            .ToList();
+
+        while (cleanedLines.Count > 0 && string.IsNullOrWhiteSpace(cleanedLines[^1]))
         {
-            return normalizedCurrentText;
+            cleanedLines.RemoveAt(cleanedLines.Count - 1);
         }
 
-        if (normalizedCurrentText.Length == 0)
+        var importLine = $"import {importPath}";
+        if (cleanedLines.Count == 0)
         {
             return $"# Managed by Linux Made Sane{Environment.NewLine}{importLine}{Environment.NewLine}";
         }
 
-        return $"{normalizedCurrentText}{Environment.NewLine}# Linux Made Sane managed reverse proxies{Environment.NewLine}{importLine}{Environment.NewLine}";
+        cleanedLines.Add(string.Empty);
+        cleanedLines.Add("# Linux Made Sane managed reverse proxies");
+        cleanedLines.Add(importLine);
+        cleanedLines.Add(string.Empty);
+        return string.Join(Environment.NewLine, cleanedLines);
+    }
+
+    private static bool IsReverseProxyImportOrHeading(string line)
+    {
+        var trimmed = line.Trim();
+        var normalized = trimmed.Replace('\\', '/');
+        return trimmed.Equals("# Linux Made Sane managed reverse proxies", StringComparison.Ordinal) ||
+               trimmed.Equals(ManagedImportLine, StringComparison.Ordinal) ||
+               (normalized.StartsWith("import ", StringComparison.Ordinal) &&
+                normalized.EndsWith("/reverse-proxies.caddy", StringComparison.Ordinal));
     }
 
     private async Task<string> ReadTextOrDefaultAsync(string path, CancellationToken cancellationToken)

@@ -1,0 +1,257 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using System.Collections.Generic
+@using System.Linq
+@inject IJSRuntime JSRuntime
+@implements IAsyncDisposable
+
+<div class="@ShellClass" @ref="rootElement" @onfocusin="CancelPendingClose" @onfocusout="ScheduleClose">
+    @if (!string.IsNullOrWhiteSpace(Label))
+    {
+        <span class="ui-field-label">@Label</span>
+    }
+    <div class="ui-multi-select @(isOpen ? "open" : string.Empty)">
+        <div class="ui-multi-select-control">
+            @foreach (var selected in SelectedOptions)
+            {
+                <span class="ui-multi-select-chip">
+                    <span>@selected.Title</span>
+                    <button type="button" aria-label="Remove @selected.Title" @onclick="@(() => RemoveValueAsync(selected.Key))">x</button>
+                </span>
+            }
+            <input value="@searchText"
+                   placeholder="@BuildPlaceholder()"
+                   @onfocus="Open"
+                   @oninput="OnSearchChanged" />
+            <button class="ui-multi-select-trigger"
+                    type="button"
+                    aria-label="Toggle @Label"
+                    aria-expanded="@isOpen"
+                    @onclick="ToggleOpen">v</button>
+        </div>
+        @if (isOpen)
+        {
+            <div class="ui-multi-select-options" role="listbox" aria-label="@Label">
+                @if (FilteredOptions.Count == 0)
+                {
+                    <span class="ui-multi-select-empty">@EmptyText</span>
+                }
+                else
+                {
+                    @foreach (var option in FilteredOptions)
+                    {
+                        var selected = IsSelected(option.Key);
+                        <button class="ui-multi-select-option @(selected ? "selected" : string.Empty)"
+                                type="button"
+                                role="option"
+                                aria-selected="@selected"
+                                @onclick="@(() => ToggleValueAsync(option.Key))">
+                            <span>@option.Title</span>
+                            @if (selected)
+                            {
+                                <strong>Selected</strong>
+                            }
+                        </button>
+                    }
+                }
+            </div>
+        }
+    </div>
+    @if (!string.IsNullOrWhiteSpace(HelperText))
+    {
+        <span class="ui-field-helper">@HelperText</span>
+    }
+</div>
+
+@code {
+    private bool isOpen;
+    private string searchText = string.Empty;
+    private ElementReference rootElement;
+    private DotNetObjectReference<UiMultiSelect>? outsideClickReference;
+    private int closeRequestVersion;
+    private bool disposed;
+
+    [Parameter] public string Label { get; set; } = string.Empty;
+    [Parameter] public string HelperText { get; set; } = string.Empty;
+    [Parameter] public string Placeholder { get; set; } = "Search...";
+    [Parameter] public string EmptyText { get; set; } = "No matches.";
+    [Parameter] public IReadOnlyList<UiIdentityTokenPickerItem> Items { get; set; } = [];
+    [Parameter] public string Value { get; set; } = string.Empty;
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    [Parameter] public string? Class { get; set; }
+
+    private string ShellClass => string.IsNullOrWhiteSpace(Class)
+        ? "ui-field-shell ui-field-shell-compact ui-multi-select-field"
+        : $"ui-field-shell ui-field-shell-compact ui-multi-select-field {Class}";
+
+    private IReadOnlyList<string> SelectedValues =>
+        SplitValues(Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private IReadOnlyList<UiIdentityTokenPickerItem> SelectedOptions =>
+        SelectedValues
+            .Select(value => FindOption(value) ?? new UiIdentityTokenPickerItem(value, value, value))
+            .ToArray();
+
+    private IReadOnlyList<UiIdentityTokenPickerItem> FilteredOptions
+    {
+        get
+        {
+            var query = searchText.Trim();
+            IEnumerable<UiIdentityTokenPickerItem> options = Items
+                .OrderBy(item => item.Title, StringComparer.OrdinalIgnoreCase);
+
+            if (!string.IsNullOrWhiteSpace(query))
+            {
+                options = options.Where(item =>
+                    item.Title.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    item.Key.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    (!string.IsNullOrWhiteSpace(item.Subtitle) && item.Subtitle.Contains(query, StringComparison.OrdinalIgnoreCase)) ||
+                    (!string.IsNullOrWhiteSpace(item.SearchText) && item.SearchText.Contains(query, StringComparison.OrdinalIgnoreCase)));
+            }
+
+            return options.Take(80).ToArray();
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        outsideClickReference = DotNetObjectReference.Create(this);
+        await JSRuntime.InvokeVoidAsync("lmsMultiSelect.registerOutsideClick", rootElement, outsideClickReference);
+    }
+
+    private void Open()
+    {
+        CancelPendingClose();
+        isOpen = true;
+    }
+
+    private void ToggleOpen()
+    {
+        CancelPendingClose();
+        isOpen = !isOpen;
+        if (!isOpen)
+        {
+            searchText = string.Empty;
+        }
+    }
+
+    private void OnSearchChanged(ChangeEventArgs args)
+    {
+        CancelPendingClose();
+        searchText = args.Value?.ToString() ?? string.Empty;
+        isOpen = true;
+    }
+
+    private async Task ToggleValueAsync(string value)
+    {
+        var selected = SelectedValues.ToList();
+        var existingIndex = selected.FindIndex(item => item.Equals(value, StringComparison.OrdinalIgnoreCase));
+        if (existingIndex >= 0)
+        {
+            selected.RemoveAt(existingIndex);
+        }
+        else
+        {
+            selected.Add(value);
+        }
+
+        searchText = string.Empty;
+        await ValueChanged.InvokeAsync(JoinValues(selected));
+    }
+
+    private async Task RemoveValueAsync(string value)
+    {
+        var selected = SelectedValues
+            .Where(item => !item.Equals(value, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        await ValueChanged.InvokeAsync(JoinValues(selected));
+    }
+
+    private bool IsSelected(string value) =>
+        SelectedValues.Any(item => item.Equals(value, StringComparison.OrdinalIgnoreCase));
+
+    private UiIdentityTokenPickerItem? FindOption(string value) =>
+        Items.FirstOrDefault(item => item.Key.Equals(value, StringComparison.OrdinalIgnoreCase));
+
+    private string BuildPlaceholder() =>
+        SelectedValues.Count == 0 ? Placeholder : string.Empty;
+
+    private static IReadOnlyList<string> SplitValues(string? value) =>
+        (value ?? string.Empty)
+            .Split(new[] { ',', '\r', '\n', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string JoinValues(IEnumerable<string> values) =>
+        string.Join(", ", values.Where(static value => !string.IsNullOrWhiteSpace(value)));
+
+    private void CancelPendingClose()
+    {
+        closeRequestVersion++;
+    }
+
+    private void ScheduleClose()
+    {
+        var requestVersion = ++closeRequestVersion;
+        _ = CloseAfterFocusLeavesAsync(requestVersion);
+    }
+
+    private async Task CloseAfterFocusLeavesAsync(int requestVersion)
+    {
+        await Task.Delay(120);
+
+        if (disposed || requestVersion != closeRequestVersion)
+        {
+            return;
+        }
+
+        await CloseAsync();
+    }
+
+    [JSInvokable]
+    public async Task CloseFromOutsideAsync()
+    {
+        CancelPendingClose();
+        await CloseAsync();
+    }
+
+    private async Task CloseAsync()
+    {
+        if (!isOpen && string.IsNullOrEmpty(searchText))
+        {
+            return;
+        }
+
+        await InvokeAsync(() =>
+        {
+            isOpen = false;
+            searchText = string.Empty;
+            StateHasChanged();
+        });
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+        CancelPendingClose();
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsMultiSelect.unregisterOutsideClick", rootElement);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        outsideClickReference?.Dispose();
+    }
+}

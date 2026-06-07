@@ -10,5 +10,6 @@ public sealed class UserDisplayPreferenceEntity
     public string ThemeMode { get; set; } = string.Empty;
     public int FontScalePercent { get; set; }
     public bool TerminalCopyOnSelect { get; set; }
+    public bool DockerAiActionsApproved { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }
