@@ -40,6 +40,10 @@ dotnet publish \
   /p:LinuxMadeSaneVersionRevision="$VERSION_REVISION" \
   /p:LinuxMadeSaneSkipPluginPackaging=true
 
+if find "$PACKAGE_ROOT/app" -path '*/.playwright' -type d -prune -print -quit | grep -q .; then
+  lms_die "Playwright assets were published into the CE package. Remove demo tooling from the host package before release."
+fi
+
 lms_log "Publishing desktop session helper to $DESKTOP_HELPER_OUTPUT_DIR"
 dotnet publish \
   "$REPO_ROOT/src/LinuxMadeSane.DesktopHelper/LinuxMadeSane.DesktopHelper.csproj" \
