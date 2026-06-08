@@ -1219,6 +1219,7 @@ else
     private bool showShareFolderDialog;
     private bool isSavingShareFolder;
     private bool isDeletingShareFolder;
+    private bool ancillaryNavigationLookupsEnabled;
     private bool previewPanelOpen;
     private bool previewPanelFocused;
     private bool connectionIdentityEditorOpen;
@@ -1291,6 +1292,12 @@ else
     private bool HasInlineBrowseCredentials =>
         !string.IsNullOrWhiteSpace(ConnectionPassword) ||
         !string.IsNullOrWhiteSpace(ConnectionPrivateKey);
+    private bool ShouldValidateStoredBrowseCredentials =>
+        browser is not null &&
+        !IsLocalBrowser &&
+        preferStoredCredentials &&
+        HasConfiguredStoredCredentials &&
+        !HasInlineBrowseCredentials;
     private bool HasAvailableBrowseCredentials =>
         IsLocalBrowser ||
         HasScopedRoot ||
@@ -1595,6 +1602,7 @@ else
         expandedDirectoryPaths.Clear();
         selectedPaths.Clear();
         accessDeniedPath = string.Empty;
+        ancillaryNavigationLookupsEnabled = false;
 
         DetachedFileBrowserState? detachedState = null;
         DetachedFileSearchState? detachedSearchState = null;
@@ -1674,7 +1682,6 @@ else
             PreferStoredCredentialsOverride ??
             (!string.IsNullOrWhiteSpace(browser.Host.PasswordSecretReference) ||
              !string.IsNullOrWhiteSpace(browser.Host.PrivateKeySecretReference));
-        await RefreshStoredBrowseCredentialStateAsync();
         EnsureInlineDetachedBrowserState();
 
         browserStatus = IsLocalBrowser
@@ -1683,26 +1690,11 @@ else
                 ? "Browser ready"
                 : detachedSearchState is not null
                     ? "Search window ready"
-                : preferStoredCredentials && HasSavedCredentials
-                    ? "Saved credentials ready"
+                    : preferStoredCredentials && HasSavedCredentials
+                        ? "Saved credentials ready"
                     : preferStoredCredentials && HasConfiguredStoredCredentials
-                        ? "Saved credentials unavailable"
+                        ? "Saved credentials configured"
                     : "Credentials required";
-
-        if (HasAvailableBrowseCredentials)
-        {
-            await LoadItemsAsync(currentPath, preserveSessionOnFailure: false, updatePathInputOnSuccess: true);
-
-            if (!string.IsNullOrWhiteSpace(detachedState?.SelectedPath))
-            {
-                var restoredSelection = FindItemByPath(items, detachedState.SelectedPath);
-                if (restoredSelection is not null)
-                {
-                    selectedItem = restoredSelection;
-                    await LoadPreviewAsync(restoredSelection, preservePanelState: true);
-                }
-            }
-        }
 
         if (detachedSearchState is not null)
         {
@@ -1715,7 +1707,31 @@ else
             previewPanelFocused = false;
         }
 
-        QueuePathSuggestionsRefresh(pathInput);
+        if (HasAvailableBrowseCredentials || ShouldValidateStoredBrowseCredentials)
+        {
+            try
+            {
+                await LoadItemsAsync(currentPath, preserveSessionOnFailure: false, updatePathInputOnSuccess: true);
+
+                if (!string.IsNullOrWhiteSpace(detachedState?.SelectedPath))
+                {
+                    var restoredSelection = FindItemByPath(items, detachedState.SelectedPath);
+                    if (restoredSelection is not null)
+                    {
+                        selectedItem = restoredSelection;
+                        await LoadPreviewAsync(restoredSelection, preservePanelState: true);
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                HandleBrowseFailure(currentPath, exception, preserveSessionOnFailure: false, previousCanBrowse: false);
+            }
+        }
+        else
+        {
+            QueuePathSuggestionsRefresh(pathInput);
+        }
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -1830,11 +1846,13 @@ else
     private async Task RefreshCurrentPathAsync()
     {
         DismissContextMenu();
+        EnableAncillaryNavigationLookups();
         await LoadItemsAsync(currentPath, preserveSessionOnFailure: canBrowse, updatePathInputOnSuccess: false);
     }
 
     private Task SetPathInputAsync(string? value)
     {
+        EnableAncillaryNavigationLookups();
         pathInput = value ?? string.Empty;
         QueuePathSuggestionsRefresh(pathInput);
         return Task.CompletedTask;
@@ -1843,6 +1861,7 @@ else
     private async Task CommitPathInputAsync(string? value)
     {
         DismissContextMenu();
+        EnableAncillaryNavigationLookups();
         pathInput = value?.Trim() ?? string.Empty;
         QueuePathSuggestionsRefresh(pathInput);
         await LoadItemsAsync(ResolveAddressInputPath(pathInput), preserveSessionOnFailure: canBrowse, updatePathInputOnSuccess: true);
@@ -1851,16 +1870,30 @@ else
     private async Task SelectPathSuggestionAsync(string path)
     {
         DismissContextMenu();
+        EnableAncillaryNavigationLookups();
         pathInput = path;
         QueuePathSuggestionsRefresh(pathInput);
         await LoadItemsAsync(path, preserveSessionOnFailure: canBrowse, updatePathInputOnSuccess: true);
     }
 
-    private async Task LoadItemsAsync(string targetPath, bool preserveSessionOnFailure, bool updatePathInputOnSuccess, bool showBusyState = true)
+    private async Task LoadItemsAsync(
+        string targetPath,
+        bool preserveSessionOnFailure,
+        bool updatePathInputOnSuccess,
+        bool showBusyState = true,
+        bool refreshAncillaryNavigation = true)
     {
         if (browser is null)
         {
             return;
+        }
+
+        if (ShouldValidateStoredBrowseCredentials)
+        {
+            browserStatus = "Checking saved credentials";
+            await InvokeAsync(StateHasChanged);
+            await RefreshStoredBrowseCredentialStateAsync();
+            browserStatus = HasSavedCredentials ? "Saved credentials ready" : "Credentials required";
         }
 
         if (!IsLocalBrowser && !HasAvailableBrowseCredentials)
@@ -1918,9 +1951,17 @@ else
 
             browserStatus = IsLocalBrowser ? "Live local listing" : "Live remote listing";
             canBrowse = true;
-            QueueDirectoryTreeRefresh(currentPath);
+            if (refreshAncillaryNavigation)
+            {
+                QueueDirectoryTreeRefresh(currentPath);
+            }
+            else
+            {
+                RebuildDirectoryTree();
+            }
+
             PersistDetachedBrowserState();
-            QueuePathSuggestionsRefresh(pathInput);
+            RefreshPathSuggestions(pathInput, refreshAncillaryNavigation);
         }
         catch (Exception exception)
         {
@@ -1945,7 +1986,7 @@ else
                 canBrowse = true;
                 browserStatus = previousStatus;
                 RebuildDirectoryTree();
-                QueuePathSuggestionsRefresh(pathInput);
+                RefreshPathSuggestions(pathInput, refreshAncillaryNavigation);
             }
             else
             {
@@ -1956,7 +1997,7 @@ else
                     : (IsLocalBrowser ? "Browse failed" : "Connection failed");
                 canBrowse = false;
                 directoryNodes = Array.Empty<FileBrowserDirectoryNode>();
-                QueuePathSuggestionsRefresh(pathInput);
+                RefreshPathSuggestions(pathInput, refreshAncillaryNavigation);
             }
         }
         finally
@@ -1969,9 +2010,57 @@ else
         }
     }
 
+    private void HandleBrowseFailure(string path, Exception exception, bool preserveSessionOnFailure, bool previousCanBrowse)
+    {
+        var normalizedPath = ResolveBrowserPath(path);
+        var isAccessDenied = IsAccessDeniedFailure(exception);
+        var isPathNotFound = IsPathNotFoundFailure(exception);
+        if (isAccessDenied)
+        {
+            blockedDirectoryPaths.Add(normalizedPath);
+            accessDeniedPath = normalizedPath;
+        }
+        else if (string.Equals(accessDeniedPath, normalizedPath, StringComparison.Ordinal))
+        {
+            accessDeniedPath = string.Empty;
+        }
+
+        errorMessage = BuildBrowseFailureMessage(normalizedPath, exception, isAccessDenied, isPathNotFound);
+        if (preserveSessionOnFailure && previousCanBrowse)
+        {
+            canBrowse = true;
+            RebuildDirectoryTree();
+            QueuePathSuggestionsRefresh(pathInput);
+            return;
+        }
+
+        browserStatus = isAccessDenied
+            ? (IsLocalBrowser ? "Folder not accessible" : "Remote path not accessible")
+            : isPathNotFound
+                ? "Folder not found"
+                : (IsLocalBrowser ? "Browse failed" : "Connection failed");
+        canBrowse = false;
+        directoryNodes = Array.Empty<FileBrowserDirectoryNode>();
+        QueuePathSuggestionsRefresh(pathInput);
+    }
+
+    private void RefreshPathSuggestions(string? query, bool allowLookup)
+    {
+        if (allowLookup)
+        {
+            QueuePathSuggestionsRefresh(query);
+            return;
+        }
+
+        var normalizedQuery = (query ?? string.Empty).Trim();
+        pathSuggestions = BuildCachedPathSuggestions(normalizedQuery);
+        isPathSuggestionsLoading = false;
+    }
+
     private async Task NavigateToPathAsync(string path)
     {
         DismissContextMenu();
+        EnableAncillaryNavigationLookups();
         await LoadItemsAsync(path, preserveSessionOnFailure: canBrowse, updatePathInputOnSuccess: true);
     }
 
@@ -1981,12 +2070,14 @@ else
     private async Task NavigateToShortcutAsync(FileBrowserShortcut shortcut)
     {
         DismissContextMenu();
+        EnableAncillaryNavigationLookups();
         await LoadItemsAsync(shortcut.TargetPath, preserveSessionOnFailure: canBrowse, updatePathInputOnSuccess: true);
     }
 
     private async Task GoUpAsync()
     {
         DismissContextMenu();
+        EnableAncillaryNavigationLookups();
 
         if (string.IsNullOrWhiteSpace(currentPath) || currentPath == "/")
         {
@@ -2013,6 +2104,7 @@ else
     private async Task ToggleDirectoryAsync(string path)
     {
         DismissContextMenu();
+        EnableAncillaryNavigationLookups();
         var normalizedPath = ResolveBrowserPath(path);
         if (expandedDirectoryPaths.Contains(normalizedPath))
         {
@@ -4424,9 +4516,17 @@ else
         }
     }
 
+    private void EnableAncillaryNavigationLookups() =>
+        ancillaryNavigationLookupsEnabled = true;
+
     private void QueueDirectoryTreeRefresh(string path)
     {
         RebuildDirectoryTree();
+        if (!ancillaryNavigationLookupsEnabled)
+        {
+            return;
+        }
+
         var requestVersion = ++directoryTreeRefreshVersion;
         _ = RefreshDirectoryTreeAsync(requestVersion, path);
     }
@@ -4853,6 +4953,12 @@ else
         var normalizedQuery = (query ?? string.Empty).Trim();
         var requestVersion = ++pathSuggestionsRequestVersion;
         pathSuggestions = BuildCachedPathSuggestions(normalizedQuery);
+        if (!ancillaryNavigationLookupsEnabled)
+        {
+            isPathSuggestionsLoading = false;
+            return;
+        }
+
         var inspectionPaths = BuildPathSuggestionInspectionPaths(normalizedQuery);
         var requiresLookup = inspectionPaths.Any(path => !directoryItemCache.ContainsKey(path));
         isPathSuggestionsLoading = requiresLookup;

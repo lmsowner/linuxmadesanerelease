@@ -3,7 +3,6 @@
 
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
-using System.Diagnostics;
 using System.Globalization;
 
 namespace LinuxMadeSane.Infrastructure.Services;
@@ -47,74 +46,12 @@ internal static class LocalFileBrowsingSupport
 
     private static LocalFileMetadata ReadMetadata(FileSystemInfo item, SftpItemType itemType)
     {
-        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-        {
-            var statMetadata = TryReadStatMetadata(item);
-            if (statMetadata is not null)
-            {
-                return statMetadata;
-            }
-        }
-
         var mode = TryGetUnixFileMode(item);
         return new LocalFileMetadata(
             string.Empty,
             string.Empty,
             FormatPermissions(mode, itemType),
             FormatPermissionsOctal(mode));
-    }
-
-    private static LocalFileMetadata? TryReadStatMetadata(FileSystemInfo item)
-    {
-        try
-        {
-            using var process = new Process
-            {
-                StartInfo = new ProcessStartInfo("stat")
-                {
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false
-                }
-            };
-
-            process.StartInfo.ArgumentList.Add("--printf=%U\\0%G\\0%A\\0%a");
-            process.StartInfo.ArgumentList.Add("--");
-            process.StartInfo.ArgumentList.Add(item.FullName);
-
-            if (!process.Start())
-            {
-                return null;
-            }
-
-            var output = process.StandardOutput.ReadToEnd();
-            if (!process.WaitForExit(1_000))
-            {
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch
-                {
-                }
-
-                return null;
-            }
-
-            if (process.ExitCode != 0)
-            {
-                return null;
-            }
-
-            var parts = output.Split('\0');
-            return parts.Length >= 4
-                ? new LocalFileMetadata(parts[0], parts[1], parts[2], parts[3])
-                : null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     private static UnixFileMode TryGetUnixFileMode(FileSystemInfo item)

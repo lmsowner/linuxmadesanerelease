@@ -245,6 +245,7 @@
     private IReadOnlyList<string> sharePathSuggestions = [];
     private string lastSuggestedPath = string.Empty;
     private bool pathEditedManually;
+    private bool wasOpen;
     private int sharePathSuggestionRequestVersion;
 
     [Parameter] public bool IsOpen { get; set; }
@@ -261,12 +262,26 @@
 
     protected override async Task OnParametersSetAsync()
     {
-        if (!ReferenceEquals(trackedEditor, Editor))
+        var editorChanged = !ReferenceEquals(trackedEditor, Editor);
+        if (editorChanged)
         {
             trackedEditor = Editor;
             ApplyEditorDefaults();
+            sharePathSuggestions = [];
+        }
+
+        if (!IsOpen)
+        {
+            wasOpen = false;
+            return;
+        }
+
+        if (editorChanged || !wasOpen)
+        {
             await RefreshSharePathSuggestionsAsync();
         }
+
+        wasOpen = true;
     }
 
     private IReadOnlyList<string> GetSelectedUsers() =>
