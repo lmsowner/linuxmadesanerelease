@@ -413,8 +413,45 @@
 
     private Task SetGuestAccessAsync(bool value)
     {
+        if (Editor.GuestAccess == value)
+        {
+            return Task.CompletedTask;
+        }
+
         Editor.GuestAccess = value;
+        if (value)
+        {
+            if (IsBlankOrMask(Editor.CreateMask, "0664"))
+            {
+                Editor.CreateMask = "0777";
+            }
+
+            if (IsBlankOrMask(Editor.DirectoryMask, "2775"))
+            {
+                Editor.DirectoryMask = "0777";
+            }
+        }
+        else
+        {
+            if (IsBlankOrMask(Editor.CreateMask, "0777"))
+            {
+                Editor.CreateMask = "0664";
+            }
+
+            if (IsBlankOrMask(Editor.DirectoryMask, "0777"))
+            {
+                Editor.DirectoryMask = "2775";
+            }
+        }
+
         return Task.CompletedTask;
+    }
+
+    private static bool IsBlankOrMask(string? value, string expected)
+    {
+        var trimmed = value?.Trim() ?? string.Empty;
+        return trimmed.Length == 0 ||
+               trimmed.TrimStart('0').Equals(expected.TrimStart('0'), StringComparison.OrdinalIgnoreCase);
     }
 
     private Task SetReadOnlyAsync(bool value)

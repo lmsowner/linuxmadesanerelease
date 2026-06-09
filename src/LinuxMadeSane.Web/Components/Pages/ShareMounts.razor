@@ -6,10 +6,14 @@
 @rendermode InteractiveServer
 @using LinuxMadeSane.Application.Contracts.Shares
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.RdpOptimizer
 @using LinuxMadeSane.Core.Models.Shares
+@using Microsoft.AspNetCore.Components.Authorization
+@using System.Security.Claims
 @inject ShareMountsWorkspaceService ShareWorkspace
+@inject ISecurityUserStore SecurityUserStore
 @inject IJSRuntime JSRuntime
 
 <PageTitle>Network Shares | Linux Made Sane</PageTitle>
@@ -300,6 +304,13 @@
                                                         <span class="share-grid-unavailable">Unavailable</span>
                                                     }
 
+                                                    @if (CanEditCurrentMount(mount))
+                                                    {
+                                                        <CompactUIButton Label="Edit mount"
+                                                                         Title="Edit and remount this current CIFS mount"
+                                                                         Glyph="UiIconGlyph.Edit"
+                                                                         OnClick="@(() => OpenEditCurrentMountModal(mount))" />
+                                                    }
                                                     <CompactUIButton Label="Unmount"
                                                                      Title="Unmount this network mount"
                                                                      Glyph="UiIconGlyph.Delete"
@@ -334,6 +345,12 @@
                                                             </div>
                                                         </dl>
                                                         <div class="share-grid-detail-actions">
+                                                            @if (CanEditCurrentMount(mount))
+                                                            {
+                                                                <CompactUIButton Label="Edit mount"
+                                                                                 Glyph="UiIconGlyph.Edit"
+                                                                                 OnClick="@(() => OpenEditCurrentMountModal(mount))" />
+                                                            }
                                                             <CompactUIButton Label="Unmount"
                                                                              Glyph="UiIconGlyph.Delete"
                                                                              Class="share-compact-danger"
@@ -686,6 +703,7 @@
                  Title="Connect to server share"
                  Subtitle="Discover SMB machines, authenticate, list shares, then mount the selected share on LMS."
                  Class="share-add-modal"
+                 CloseOnBackdrop="false"
                  OnClose="CloseAddShareModal">
             <div class="add-share-steps share-modal-steps">
                 <section class="surface-subcard add-share-step">
@@ -879,6 +897,7 @@
                     else
                     {
                         <ShareMappingForm Editor="@mountEditor"
+                                          LocalUserName="@CurrentLinuxUserName"
                                           StatusMessage="@mountStatusMessage"
                                           StatusTone="@mountStatusTone"
                                           CanCreateMounts="@CanCreateRemoteMounts()"
@@ -895,6 +914,7 @@
                  Title="Mount SSH host"
                  Subtitle="Mount a registered public-key SSH host with SSHFS."
                  Class="share-add-modal"
+                 CloseOnBackdrop="false"
                  OnClose="CloseAddSshfsMountModal">
             <div class="add-share-steps share-modal-steps">
                 <section class="surface-subcard add-share-step">
@@ -1015,11 +1035,13 @@
         </UiModal>
 
         <UiModal IsOpen="@showEditMountPanel"
-                 Title="Edit network mount"
-                 Subtitle="Update the server, share, mount path, or saved credentials, then remount it on LMS."
+                 Title="@EditMountModalTitle"
+                 Subtitle="@EditMountModalSubtitle"
                  Class="share-add-modal"
+                 CloseOnBackdrop="false"
                  OnClose="CloseEditMountModal">
             <ShareMappingForm Editor="@editMountEditor"
+                              LocalUserName="@CurrentLinuxUserName"
                               StatusMessage="@mountStatusMessage"
                               StatusTone="@mountStatusTone"
                               CanCreateMounts="@CanCreateRemoteMounts()"
@@ -1027,17 +1049,18 @@
                               BusyLabel="Saving changes..."
                               TemporarySubmitLabel="Save changes and remount"
                               PermanentSubmitLabel="Save changes and remount"
-                              SourceLabel="Managed LMS mount"
-                              SourceHelper="This permanent LMS mount is already saved on the LMS server. Update the connection or mount path, then save and remount it."
+                              SourceLabel="@EditMountSourceLabel"
+                              SourceHelper="@EditMountSourceHelper"
                               ShowPersistenceToggle="false"
-                              ShowSavedPasswordToggle="true"
-                              OnCreateMount="UpdateManagedMountFromMappingAsync" />
+                              ShowSavedPasswordToggle="@(pendingManagedMountEdit is not null)"
+                              OnCreateMount="SaveEditMountFromMappingAsync" />
         </UiModal>
 
         <UiModal IsOpen="@showDeleteMountPanel"
                  Title="@DeleteMountModalTitle"
                  Subtitle="@DeleteMountModalSubtitle"
                  Class="share-delete-modal"
+                 CloseOnBackdrop="false"
                  OnClose="CloseDeleteMountModal">
             <div class="share-delete-modal-body">
                 <section class="share-mapping-route">
@@ -1071,6 +1094,7 @@
                  Title="Delete SSHFS mount"
                  Subtitle="This removes the saved SSHFS mount and disconnects it from the LMS server."
                  Class="share-delete-modal"
+                 CloseOnBackdrop="false"
                  OnClose="CloseDeleteSshfsMountModal">
             <div class="share-delete-modal-body">
                 <section class="share-mapping-route">
@@ -1117,6 +1141,7 @@
     private SshfsMountEditor sshfsEditor = new();
     private NetworkShareMachine? selectedMachine;
     private ManagedRemoteShareMount? pendingManagedMountEdit;
+    private CurrentSystemMount? pendingCurrentMountEdit;
     private ManagedRemoteShareMount? pendingManagedMountDeletion;
     private ManagedSshfsMount? pendingSshfsMountDeletion;
     private CurrentSystemMount? pendingCurrentMountDeletion;
@@ -1161,6 +1186,7 @@
     private bool showEditMountPanel;
     private bool showDeleteMountPanel;
     private bool showDeleteSshfsMountPanel;
+    private string currentLinuxUserName = string.Empty;
     private NetworkShareDiscoveryScope activeDiscoveryScope = NetworkShareDiscoveryScope.Lan;
     private readonly HashSet<string> expandedCurrentMountBrowsers = new(StringComparer.Ordinal);
     private readonly HashSet<Guid> reconnectingNetworkMountIds = [];
@@ -1185,6 +1211,22 @@
     private string DeleteMountConfirmLabel => pendingManagedMountDeletion is not null
         ? "Delete mount"
         : "Unmount";
+    private string CurrentLinuxUserName =>
+        string.IsNullOrWhiteSpace(currentLinuxUserName) ? ResolveFallbackLocalUserName() : currentLinuxUserName;
+    private string EditMountModalTitle => pendingManagedMountEdit is not null
+        ? "Edit network mount"
+        : "Edit current mount";
+    private string EditMountModalSubtitle => pendingManagedMountEdit is not null
+        ? "Update the server, share, mount path, or saved credentials, then remount it on LMS."
+        : "Update this live CIFS mount, then LMS will unmount and remount it with the new options.";
+    private string EditMountSourceLabel => pendingManagedMountEdit is not null
+        ? "Managed LMS mount"
+        : "Current CIFS mount";
+    private string EditMountSourceHelper => pendingManagedMountEdit is not null
+        ? "This permanent LMS mount is already saved on the LMS server. Update the connection or mount path, then save and remount it."
+        : "This mount is currently live but not saved by LMS. Enter credentials if the share requires them before remounting.";
+
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
 
     private static NetworkShareMountExplorerViewModel CreatePendingNetworkExplorer() =>
         new(
@@ -1237,6 +1279,8 @@
 
     private async Task LoadInitialShareStateAsync()
     {
+        await LoadCurrentLinuxUserNameAsync();
+
         try
         {
             var networkExplorer = await ShareWorkspace.GetNetworkShareMountExplorerAsync(activeDiscoveryScope, runDiscovery: false);
@@ -1301,6 +1345,36 @@
         }
 
         _ = ReconnectDisconnectedMountsAsync();
+    }
+
+    private async Task LoadCurrentLinuxUserNameAsync()
+    {
+        try
+        {
+            var authenticationState = AuthenticationStateTask is null
+                ? null
+                : await AuthenticationStateTask;
+            var userIdValue = authenticationState?.User.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (Guid.TryParse(userIdValue, out var userId))
+            {
+                var user = await SecurityUserStore.GetAsync(userId);
+                if (!string.IsNullOrWhiteSpace(user?.LinuxUsername))
+                {
+                    await InvokeAsync(() =>
+                    {
+                        currentLinuxUserName = user.LinuxUsername.Trim();
+                        StateHasChanged();
+                    });
+                    return;
+                }
+            }
+        }
+        catch
+        {
+            // Mount ownership falls back to process/user environment if session lookup is unavailable.
+        }
+
+        await InvokeAsync(() => currentLinuxUserName = ResolveFallbackLocalUserName());
     }
 
     private async Task ReconnectDisconnectedMountsAsync()
@@ -1585,6 +1659,8 @@
             UserName = connectionEditor.UserName,
             Password = connectionEditor.Password,
             Domain = connectionEditor.Domain,
+            FileMode = "0777",
+            DirectoryMode = "0777",
             PersistOnServer = false
         };
         mountStatusMessage = string.Empty;
@@ -1804,6 +1880,7 @@
     private void OpenEditManagedMountModal(ManagedRemoteShareMount mount)
     {
         pendingManagedMountEdit = mount;
+        pendingCurrentMountEdit = null;
         editMountEditor = new RemoteShareMountEditor
         {
             ManagedMountId = mount.Id,
@@ -1813,10 +1890,30 @@
             LocalMountPath = mount.LocalMountPath,
             UserName = mount.UserName ?? string.Empty,
             Domain = mount.Domain ?? string.Empty,
+            LocalOwner = mount.LocalOwner ?? string.Empty,
+            FileMode = string.IsNullOrWhiteSpace(mount.FileMode) ? "0777" : mount.FileMode,
+            DirectoryMode = string.IsNullOrWhiteSpace(mount.DirectoryMode) ? "0777" : mount.DirectoryMode,
             PersistOnServer = true,
             HasSavedPassword = mount.HasSavedPassword,
             KeepSavedPassword = mount.HasSavedPassword
         };
+        mountStatusMessage = string.Empty;
+        mountStatusTone = "info";
+        showEditMountPanel = true;
+    }
+
+    private void OpenEditCurrentMountModal(CurrentSystemMount mount)
+    {
+        if (!TryBuildCurrentMountEditor(mount, out var editor))
+        {
+            mountStatusMessage = "Only CIFS mounts with a //server/share source can be edited here.";
+            mountStatusTone = "warning";
+            return;
+        }
+
+        pendingManagedMountEdit = null;
+        pendingCurrentMountEdit = mount;
+        editMountEditor = editor;
         mountStatusMessage = string.Empty;
         mountStatusTone = "info";
         showEditMountPanel = true;
@@ -1827,11 +1924,17 @@
         if (!isUpdatingMount)
         {
             pendingManagedMountEdit = null;
+            pendingCurrentMountEdit = null;
             showEditMountPanel = false;
         }
     }
 
-    private async Task UpdateManagedMountFromMappingAsync(bool _)
+    private Task SaveEditMountFromMappingAsync(bool _) =>
+        pendingManagedMountEdit is not null
+            ? UpdateManagedMountFromMappingAsync()
+            : RemountCurrentMountFromMappingAsync();
+
+    private async Task UpdateManagedMountFromMappingAsync()
     {
         if (pendingManagedMountEdit is null)
         {
@@ -1849,12 +1952,50 @@
             mountStatusTone = "success";
             showEditMountPanel = false;
             pendingManagedMountEdit = null;
+            pendingCurrentMountEdit = null;
             await RefreshMountStateAsync();
         }
         catch (Exception exception)
         {
             mountStatusMessage = exception.Message;
             mountStatusTone = "error";
+        }
+        finally
+        {
+            isUpdatingMount = false;
+        }
+    }
+
+    private async Task RemountCurrentMountFromMappingAsync()
+    {
+        if (pendingCurrentMountEdit is null)
+        {
+            return;
+        }
+
+        isUpdatingMount = true;
+        mountStatusMessage = string.Empty;
+        mountStatusTone = "info";
+
+        try
+        {
+            editMountEditor.PersistOnServer = false;
+            await ShareWorkspace.DisconnectCurrentRemoteMountAsync(pendingCurrentMountEdit.LocalMountPath);
+            var result = await ShareWorkspace.CreateRemoteShareMountAsync(editMountEditor);
+            mountStatusMessage = result.StatusMessage;
+            mountStatusTone = "success";
+            showEditMountPanel = false;
+            expandedCurrentMountBrowsers.Remove(pendingCurrentMountEdit.LocalMountPath);
+            expandedCurrentMountBrowsers.Add(result.LocalMountPath);
+            pendingCurrentMountEdit = null;
+            pendingManagedMountEdit = null;
+            await RefreshMountStateAsync();
+        }
+        catch (Exception exception)
+        {
+            mountStatusMessage = exception.Message;
+            mountStatusTone = "error";
+            await RefreshMountStateAsync();
         }
         finally
         {
@@ -2283,6 +2424,42 @@
         explorer?.CurrentMounts.FirstOrDefault(mount =>
             mount.LocalMountPath.Equals(localMountPath, StringComparison.OrdinalIgnoreCase));
 
+    private bool CanEditCurrentMount(CurrentSystemMount mount) =>
+        mount.FileSystemType.Equals("cifs", StringComparison.OrdinalIgnoreCase) &&
+        TryParseCifsSource(mount.SourcePath, out _, out _);
+
+    private bool TryBuildCurrentMountEditor(CurrentSystemMount mount, out RemoteShareMountEditor editor)
+    {
+        editor = new RemoteShareMountEditor();
+        if (!CanEditCurrentMount(mount) ||
+            !TryParseCifsSource(mount.SourcePath, out var remoteHost, out var shareName))
+        {
+            return false;
+        }
+
+        var options = ParseMountOptions(mount.MountOptions);
+        var localOwner = options.GetValueOrDefault("uid");
+        if (string.IsNullOrWhiteSpace(localOwner) ||
+            localOwner.Equals("0", StringComparison.Ordinal))
+        {
+            localOwner = CurrentLinuxUserName;
+        }
+
+        editor = new RemoteShareMountEditor
+        {
+            Target = remoteHost,
+            ShareName = shareName,
+            LocalMountPath = mount.LocalMountPath,
+            UserName = options.GetValueOrDefault("username") ?? string.Empty,
+            Domain = options.GetValueOrDefault("domain") ?? options.GetValueOrDefault("workgroup") ?? string.Empty,
+            LocalOwner = localOwner,
+            FileMode = NormalizeModeForEditor(options.GetValueOrDefault("file_mode"), "0777"),
+            DirectoryMode = NormalizeModeForEditor(options.GetValueOrDefault("dir_mode"), "0777"),
+            PersistOnServer = false
+        };
+        return true;
+    }
+
     private bool CanExposeManagedMountBrowser(ManagedRemoteShareMount mount)
     {
         if (!mount.IsMounted)
@@ -2420,6 +2597,74 @@
         (mount.IsNetworkMount || mount.IsManagedByLms) &&
         Path.IsPathRooted(mount.LocalMountPath) &&
         Directory.Exists(mount.LocalMountPath);
+
+    private static bool TryParseCifsSource(string sourcePath, out string remoteHost, out string shareName)
+    {
+        remoteHost = string.Empty;
+        shareName = string.Empty;
+
+        if (!sourcePath.StartsWith("//", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var withoutPrefix = sourcePath[2..];
+        var separatorIndex = withoutPrefix.IndexOf('/', StringComparison.Ordinal);
+        if (separatorIndex <= 0 || separatorIndex >= withoutPrefix.Length - 1)
+        {
+            return false;
+        }
+
+        remoteHost = withoutPrefix[..separatorIndex].Trim();
+        shareName = withoutPrefix[(separatorIndex + 1)..].Trim();
+        return remoteHost.Length > 0 && shareName.Length > 0;
+    }
+
+    private static Dictionary<string, string> ParseMountOptions(string mountOptions)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var option in mountOptions.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var separatorIndex = option.IndexOf('=', StringComparison.Ordinal);
+            if (separatorIndex <= 0 || separatorIndex >= option.Length - 1)
+            {
+                continue;
+            }
+
+            values[option[..separatorIndex]] = option[(separatorIndex + 1)..];
+        }
+
+        return values;
+    }
+
+    private static string NormalizeModeForEditor(string? value, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        var trimmed = value.Trim();
+        return trimmed.Length == 3 ? $"0{trimmed}" : trimmed;
+    }
+
+    private static string ResolveFallbackLocalUserName()
+    {
+        var userName = Environment.GetEnvironmentVariable("SUDO_USER");
+        if (string.IsNullOrWhiteSpace(userName) || userName.Equals("root", StringComparison.OrdinalIgnoreCase))
+        {
+            userName = Environment.GetEnvironmentVariable("USER");
+        }
+
+        if (string.IsNullOrWhiteSpace(userName) || userName.Equals("root", StringComparison.OrdinalIgnoreCase))
+        {
+            userName = Environment.UserName;
+        }
+
+        return string.IsNullOrWhiteSpace(userName) || userName.Equals("root", StringComparison.OrdinalIgnoreCase)
+            ? "user"
+            : userName;
+    }
 
     private static string FormatLog(OperationLogEntry log)
     {

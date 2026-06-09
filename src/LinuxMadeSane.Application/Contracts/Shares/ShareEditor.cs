@@ -30,8 +30,8 @@ public sealed class ShareEditor
     public string ForceGroup { get; set; } = string.Empty;
 
     [Required]
-    public string CreateMask { get; set; } = "0664";
+    public string CreateMask { get; set; } = "0777";
 
     [Required]
-    public string DirectoryMask { get; set; } = "2775";
+    public string DirectoryMask { get; set; } = "0777";
 }

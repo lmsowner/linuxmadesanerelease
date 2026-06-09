@@ -15,6 +15,7 @@ public sealed class DesktopTrayHostedService(
     DesktopAssistantLaunchTicketCache launchTicketCache,
     DesktopAssistantNativeMessageBus nativeMessageBus,
     IOptions<DesktopSessionHelperOptions> options,
+    IHostApplicationLifetime hostApplicationLifetime,
     ILogger<DesktopTrayHostedService> logger) : IHostedService
 {
     private Task? desktopTask;
@@ -52,6 +53,7 @@ public sealed class DesktopTrayHostedService(
             nativeMessageBus,
             options.Value,
             localLmsUri,
+            hostApplicationLifetime,
             logger);
         logger.LogInformation(
             "LMS desktop helper starting native desktop UI. DISPLAY={Display}, WAYLAND_DISPLAY={WaylandDisplay}, desktop={CurrentDesktop}, trayIcon={TrayIconPath}, openWindowOnStart={OpenWindowOnStart}.",
@@ -146,6 +148,7 @@ internal sealed class DesktopAssistantAvaloniaContext(
     DesktopAssistantNativeMessageBus nativeMessageBus,
     DesktopSessionHelperOptions options,
     Uri localLmsUri,
+    IHostApplicationLifetime hostApplicationLifetime,
     ILogger logger)
 {
     private IClassicDesktopStyleApplicationLifetime? lifetime;
@@ -222,6 +225,12 @@ internal sealed class DesktopAssistantAvaloniaContext(
             assistantWindow?.Hide();
             lifetime?.TryShutdown();
         });
+    }
+
+    public void QuitApplication()
+    {
+        Shutdown();
+        hostApplicationLifetime.StopApplication();
     }
 
     private Uri BuildLaunchUri(string returnUrl)

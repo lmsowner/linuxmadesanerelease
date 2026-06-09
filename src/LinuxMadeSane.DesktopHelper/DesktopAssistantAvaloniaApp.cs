@@ -62,15 +62,9 @@ internal sealed class DesktopAssistantAvaloniaApp(DesktopAssistantAvaloniaContex
 
         menu.Add(new NativeMenuItemSeparator());
 
-        var hideItem = new NativeMenuItem("Hide tray icon");
-        hideItem.Click += (_, _) =>
-        {
-            if (trayIcon is not null)
-            {
-                trayIcon.IsVisible = false;
-            }
-        };
-        menu.Add(hideItem);
+        var quitItem = new NativeMenuItem("Quit Desktop Helper");
+        quitItem.Click += (_, _) => context.QuitApplication();
+        menu.Add(quitItem);
 
         var icon = new TrayIcon
         {

@@ -58,6 +58,9 @@ internal sealed class SambaRemoteMountService(
                     entity.LocalMountPath,
                     entity.UserName,
                     entity.Domain,
+                    entity.LocalOwner,
+                    entity.FileMode,
+                    entity.DirectoryMode,
                     !string.IsNullOrWhiteSpace(entity.CredentialFilePath) && File.Exists(entity.CredentialFilePath),
                     isMounted,
                     entity.CreatedAtUtc,
@@ -166,7 +169,7 @@ internal sealed class SambaRemoteMountService(
                 requiresSudo: true,
                 cancellationToken);
 
-            var mountOptions = BuildMountOptions(hasCredentials, mountCredentialFilePath);
+            var mountOptions = BuildMountOptions(hasCredentials, mountCredentialFilePath, request);
 
             await RunRequiredCommandAsync(
                 "mount",
@@ -181,7 +184,7 @@ internal sealed class SambaRemoteMountService(
                     managedMountId!.Value,
                     remoteUncPath,
                     localMountPath,
-                    BuildPersistentMountOptions(hasCredentials, credentialFilePath),
+                    BuildPersistentMountOptions(hasCredentials, credentialFilePath, request),
                     cancellationToken);
 
                 dbContext.RemoteShareMounts.Add(new RemoteShareMountEntity
@@ -193,6 +196,9 @@ internal sealed class SambaRemoteMountService(
                     LocalMountPath = localMountPath,
                     UserName = NullIfWhiteSpace(request.UserName),
                     Domain = NullIfWhiteSpace(request.Domain),
+                    LocalOwner = NormalizeLocalOwner(request.LocalOwner),
+                    FileMode = NormalizeCifsMode(request.FileMode),
+                    DirectoryMode = NormalizeCifsMode(request.DirectoryMode),
                     CredentialFilePath = credentialFilePath,
                     CreatedAtUtc = DateTimeOffset.UtcNow,
                     LastMountedAtUtc = DateTimeOffset.UtcNow
@@ -332,7 +338,7 @@ internal sealed class SambaRemoteMountService(
 
             await RunRequiredCommandAsync(
                 "mount",
-                ["-t", "cifs", newRemoteUncPath, localMountPath, "-o", string.Join(",", BuildMountOptions(hasCredentials, credentialFilePath))],
+                ["-t", "cifs", newRemoteUncPath, localMountPath, "-o", string.Join(",", BuildMountOptions(hasCredentials, credentialFilePath, request))],
                 $"Mount {newRemoteUncPath} on {localMountPath}",
                 requiresSudo: true,
                 cancellationToken);
@@ -341,7 +347,7 @@ internal sealed class SambaRemoteMountService(
                 id,
                 newRemoteUncPath,
                 localMountPath,
-                BuildPersistentMountOptions(hasCredentials, credentialFilePath),
+                BuildPersistentMountOptions(hasCredentials, credentialFilePath, request),
                 cancellationToken);
 
             entity.RemoteHost = remoteHost;
@@ -350,6 +356,9 @@ internal sealed class SambaRemoteMountService(
             entity.LocalMountPath = localMountPath;
             entity.UserName = NullIfWhiteSpace(request.UserName);
             entity.Domain = NullIfWhiteSpace(request.Domain);
+            entity.LocalOwner = NormalizeLocalOwner(request.LocalOwner);
+            entity.FileMode = NormalizeCifsMode(request.FileMode);
+            entity.DirectoryMode = NormalizeCifsMode(request.DirectoryMode);
             entity.CredentialFilePath = credentialFilePath;
             entity.LastMountedAtUtc = DateTimeOffset.UtcNow;
 
@@ -377,7 +386,23 @@ internal sealed class SambaRemoteMountService(
                         oldRemoteUncPath,
                         entity.LocalMountPath,
                         "-o",
-                        string.Join(",", BuildMountOptions(rollbackHasCredentials, rollbackHasCredentials ? entity.CredentialFilePath : null))
+                        string.Join(
+                            ",",
+                            BuildMountOptions(
+                                rollbackHasCredentials,
+                                rollbackHasCredentials ? entity.CredentialFilePath : null,
+                                new RemoteShareMountRequest(
+                                    entity.RemoteHost,
+                                    entity.RemoteAddress,
+                                    entity.ShareName,
+                                    entity.LocalMountPath,
+                                    entity.UserName,
+                                    null,
+                                    entity.Domain,
+                                    PersistOnServer: true,
+                                    entity.LocalOwner,
+                                    entity.FileMode,
+                                    entity.DirectoryMode)))
                     ],
                     $"Restore {oldRemoteUncPath} on {entity.LocalMountPath}",
                     requiresSudo: true,
@@ -826,7 +851,10 @@ internal sealed class SambaRemoteMountService(
             .FirstOrDefault(marker => marker.LocalMountPath.Equals(normalizedPath, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static IReadOnlyList<string> BuildMountOptions(bool hasCredentials, string? credentialFilePath)
+    private static IReadOnlyList<string> BuildMountOptions(
+        bool hasCredentials,
+        string? credentialFilePath,
+        RemoteShareMountRequest request)
     {
         var options = new List<string>
         {
@@ -845,15 +873,76 @@ internal sealed class SambaRemoteMountService(
             options.Add("guest");
         }
 
+        var localOwner = NormalizeLocalOwner(request.LocalOwner);
+        if (!string.IsNullOrWhiteSpace(localOwner))
+        {
+            options.Add($"uid={localOwner}");
+            options.Add($"gid={localOwner}");
+            options.Add("forceuid");
+            options.Add("forcegid");
+        }
+
+        var fileMode = NormalizeCifsMode(request.FileMode);
+        if (!string.IsNullOrWhiteSpace(fileMode))
+        {
+            options.Add($"file_mode={fileMode}");
+        }
+
+        var directoryMode = NormalizeCifsMode(request.DirectoryMode);
+        if (!string.IsNullOrWhiteSpace(directoryMode))
+        {
+            options.Add($"dir_mode={directoryMode}");
+        }
+
         return options;
     }
 
-    private static IReadOnlyList<string> BuildPersistentMountOptions(bool hasCredentials, string? credentialFilePath)
+    private static IReadOnlyList<string> BuildPersistentMountOptions(
+        bool hasCredentials,
+        string? credentialFilePath,
+        RemoteShareMountRequest request)
     {
-        var options = BuildMountOptions(hasCredentials, credentialFilePath).ToList();
+        var options = BuildMountOptions(hasCredentials, credentialFilePath, request).ToList();
         options.Add("nofail");
         options.Add("x-systemd.automount");
         return options;
+    }
+
+    private static string? NormalizeLocalOwner(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var owner = value.Trim();
+        var isNumericId = owner.All(char.IsAsciiDigit);
+        var isLinuxName = owner.Length <= 32 &&
+                          (char.IsAsciiLetter(owner[0]) || owner[0] == '_') &&
+                          owner.All(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '-');
+        if (!isNumericId && !isLinuxName)
+        {
+            throw new InvalidOperationException("The CIFS local owner must be a Linux username or numeric uid without spaces or commas.");
+        }
+
+        return owner;
+    }
+
+    private static string? NormalizeCifsMode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var trimmed = value.Trim();
+        var mode = trimmed.Length == 3 ? $"0{trimmed}" : trimmed;
+        if (mode.Length != 4 || mode.Any(character => character is < '0' or > '7'))
+        {
+            throw new InvalidOperationException("CIFS file and directory modes must be octal values such as 0777 or 0755.");
+        }
+
+        return mode;
     }
 
     private static string BuildRemoteUncPath(string remoteHost, string shareName) =>

@@ -567,6 +567,9 @@ public sealed class SqliteDatabaseInitializer(
                 LocalMountPath TEXT NOT NULL,
                 UserName TEXT NULL,
                 Domain TEXT NULL,
+                LocalOwner TEXT NULL,
+                FileMode TEXT NULL,
+                DirectoryMode TEXT NULL,
                 CredentialFilePath TEXT NULL,
                 CreatedAtUtc TEXT NOT NULL,
                 LastMountedAtUtc TEXT NULL
@@ -574,6 +577,7 @@ public sealed class SqliteDatabaseInitializer(
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(remoteShareMountsSql, cancellationToken);
+        await EnsureRemoteShareMountColumnsAsync(cancellationToken);
 
         const string sshfsMountsSql = """
             CREATE TABLE IF NOT EXISTS sshfs_mounts (
@@ -2029,5 +2033,12 @@ public sealed class SqliteDatabaseInitializer(
         await EnsureColumnExistsAsync("scheduled_tasks", "AgeFilterUnit", "INTEGER NOT NULL DEFAULT 2", cancellationToken);
         await EnsureColumnExistsAsync("scheduled_tasks", "CleanupDeleteFiles", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
         await EnsureColumnExistsAsync("scheduled_tasks", "CleanupDeleteDirectories", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+    }
+
+    private async Task EnsureRemoteShareMountColumnsAsync(CancellationToken cancellationToken)
+    {
+        await EnsureColumnExistsAsync("remote_share_mounts", "LocalOwner", "TEXT NULL", cancellationToken);
+        await EnsureColumnExistsAsync("remote_share_mounts", "FileMode", "TEXT NULL", cancellationToken);
+        await EnsureColumnExistsAsync("remote_share_mounts", "DirectoryMode", "TEXT NULL", cancellationToken);
     }
 }

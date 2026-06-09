@@ -19,6 +19,10 @@ public sealed class ShareManagementService(
     ISshfsMountService? sshfsMountService = null) : IShareManagementService
 {
     private static readonly string[] SambaServerPackageNames = ["samba"];
+    private const string AuthenticatedCreateMask = "0664";
+    private const string AuthenticatedDirectoryMask = "2775";
+    private const string GuestCreateMask = "0777";
+    private const string GuestDirectoryMask = "0777";
     private static readonly ShareToolingDefinition[] SshfsToolingDefinitions =
     [
         new(
@@ -126,6 +130,8 @@ public sealed class ShareManagementService(
     {
         var shareId = editor.Id ?? Guid.NewGuid();
         var normalizedName = editor.Name.Trim();
+        var createMask = ResolveCreateMask(editor);
+        var directoryMask = ResolveDirectoryMask(editor);
         var definition = new SambaShareDefinition(
             shareId,
             normalizedName,
@@ -140,10 +146,10 @@ public sealed class ShareManagementService(
             ParseCsv(editor.ReadListCsv),
             NullIfWhiteSpace(editor.ForceUser),
             NullIfWhiteSpace(editor.ForceGroup),
-            NormalizeMask(editor.CreateMask, "0664"),
-            NormalizeMask(editor.DirectoryMask, "2775"),
-            ExplainMask(editor.CreateMask, false),
-            ExplainMask(editor.DirectoryMask, true));
+            createMask,
+            directoryMask,
+            ExplainMask(createMask, false),
+            ExplainMask(directoryMask, true));
 
         await shareDataService.SaveShareAsync(definition, cancellationToken);
         return shareId;
@@ -466,7 +472,10 @@ public sealed class ShareManagementService(
                 NullIfWhiteSpace(editor.UserName),
                 NullIfWhiteSpace(editor.Password),
                 NullIfWhiteSpace(editor.Domain),
-                editor.PersistOnServer),
+                editor.PersistOnServer,
+                NullIfWhiteSpace(editor.LocalOwner),
+                NormalizeCifsMode(editor.FileMode),
+                NormalizeCifsMode(editor.DirectoryMode)),
             cancellationToken);
     }
 
@@ -492,7 +501,10 @@ public sealed class ShareManagementService(
                 NullIfWhiteSpace(editor.UserName),
                 NullIfWhiteSpace(editor.Password),
                 NullIfWhiteSpace(editor.Domain),
-                PersistOnServer: true),
+                PersistOnServer: true,
+                NullIfWhiteSpace(editor.LocalOwner),
+                NormalizeCifsMode(editor.FileMode),
+                NormalizeCifsMode(editor.DirectoryMode)),
             editor.KeepSavedPassword,
             cancellationToken);
     }
@@ -1182,6 +1194,17 @@ public sealed class ShareManagementService(
     private static string? NullIfWhiteSpace(string value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    private static string? NormalizeCifsMode(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var trimmed = value.Trim();
+        return trimmed.Length == 3 ? $"0{trimmed}" : trimmed;
+    }
+
     private static string NormalizeMask(string value, string fallback)
     {
         var trimmed = value.Trim();
@@ -1190,7 +1213,7 @@ public sealed class ShareManagementService(
 
     private static string ExplainMask(string value, bool directory)
     {
-        var trimmed = NormalizeMask(value, directory ? "2775" : "0664");
+        var trimmed = NormalizeMask(value, directory ? AuthenticatedDirectoryMask : AuthenticatedCreateMask);
         var octal = trimmed.TrimStart('0');
         if (!int.TryParse(octal, out var parsed))
         {
@@ -1218,6 +1241,21 @@ public sealed class ShareManagementService(
         1 => "enter only",
         _ => "no access"
     };
+
+    private static string ResolveCreateMask(ShareEditor editor)
+    {
+        var mask = NormalizeMask(editor.CreateMask, editor.GuestAccess ? GuestCreateMask : AuthenticatedCreateMask);
+        return editor.GuestAccess && MaskEquals(mask, AuthenticatedCreateMask) ? GuestCreateMask : mask;
+    }
+
+    private static string ResolveDirectoryMask(ShareEditor editor)
+    {
+        var mask = NormalizeMask(editor.DirectoryMask, editor.GuestAccess ? GuestDirectoryMask : AuthenticatedDirectoryMask);
+        return editor.GuestAccess && MaskEquals(mask, AuthenticatedDirectoryMask) ? GuestDirectoryMask : mask;
+    }
+
+    private static bool MaskEquals(string left, string right) =>
+        left.Trim().TrimStart('0').Equals(right.Trim().TrimStart('0'), StringComparison.OrdinalIgnoreCase);
 
     private static string BuildSuggestedSharePath(string shareName)
     {

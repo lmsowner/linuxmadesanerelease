@@ -12,6 +12,9 @@ public sealed class RemoteShareMountEntity
     public string LocalMountPath { get; set; } = string.Empty;
     public string? UserName { get; set; }
     public string? Domain { get; set; }
+    public string? LocalOwner { get; set; }
+    public string? FileMode { get; set; }
+    public string? DirectoryMode { get; set; }
     public string? CredentialFilePath { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset? LastMountedAtUtc { get; set; }

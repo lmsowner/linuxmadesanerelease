@@ -334,10 +334,13 @@ public sealed partial class TerminalAiAssistantService(
 
     private static string ExtractSuggestedCommand(string assistantText)
     {
-        var match = SuggestedCommandPattern().Match(assistantText);
-        if (match.Success)
+        foreach (Match match in SuggestedCommandPattern().Matches(assistantText))
         {
-            return match.Groups[1].Value.Trim();
+            var command = ExtractLikelyCommand(match.Groups[1].Value);
+            if (!string.IsNullOrWhiteSpace(command))
+            {
+                return command;
+            }
         }
 
         foreach (var line in assistantText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -353,6 +356,21 @@ public sealed partial class TerminalAiAssistantService(
         return inlineMatch.Success && IsLikelyShellCommand(inlineMatch.Groups[1].Value.Trim())
             ? inlineMatch.Groups[1].Value.Trim()
             : string.Empty;
+    }
+
+    private static string ExtractLikelyCommand(string value)
+    {
+        foreach (var line in value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var command = NormalizePotentialCommand(line);
+            if (IsLikelyShellCommand(command))
+            {
+                return command;
+            }
+        }
+
+        var normalized = NormalizePotentialCommand(value);
+        return IsLikelyShellCommand(normalized) ? normalized : string.Empty;
     }
 
     private static bool TryBuildFallbackCommand(
@@ -647,6 +665,8 @@ public sealed partial class TerminalAiAssistantService(
     private static bool IsLikelyShellCommand(string command)
     {
         if (string.IsNullOrWhiteSpace(command) ||
+            command.Contains('\n') ||
+            command.Contains('\r') ||
             command.EndsWith(".", StringComparison.Ordinal) ||
             command.Contains(" should ", StringComparison.OrdinalIgnoreCase) ||
             command.Contains(" can ", StringComparison.OrdinalIgnoreCase))
@@ -654,16 +674,81 @@ public sealed partial class TerminalAiAssistantService(
             return false;
         }
 
-        var firstToken = command.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault() ?? string.Empty;
-        if (firstToken.Equals("sudo", StringComparison.OrdinalIgnoreCase))
+        var tokens = command.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var tokenIndex = 0;
+        while (tokenIndex < tokens.Length && IsCommandPrefixToken(tokens[tokenIndex]))
         {
-            firstToken = command.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Skip(1)
-                .FirstOrDefault() ?? string.Empty;
+            tokenIndex++;
         }
 
-        return firstToken is "apt" or "apt-cache" or "apt-get" or "bluetoothctl" or "cat" or "df" or "docker" or "du" or "find" or "free" or "grep" or "ip" or "journalctl" or "lms" or "ls" or "lspci" or "nvidia-smi" or "podman" or "ps" or "ss" or "systemctl" or "tail" or "top";
+        while (tokenIndex < tokens.Length && IsEnvironmentAssignment(tokens[tokenIndex]))
+        {
+            tokenIndex++;
+        }
+
+        if (tokenIndex >= tokens.Length)
+        {
+            return false;
+        }
+
+        var executable = tokens[tokenIndex].Trim();
+        return IsExecutableToken(executable) &&
+               !IsProseLeadToken(executable) &&
+               HasShellCommandShape(tokens, tokenIndex);
+    }
+
+    private static bool IsCommandPrefixToken(string token) =>
+        token.Equals("sudo", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("doas", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("env", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("command", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("time", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("run_with_optional_sudo", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsEnvironmentAssignment(string token)
+    {
+        var separatorIndex = token.IndexOf('=', StringComparison.Ordinal);
+        return separatorIndex > 0 &&
+               separatorIndex < token.Length - 1 &&
+               token[..separatorIndex].All(character => char.IsLetterOrDigit(character) || character == '_');
+    }
+
+    private static bool IsExecutableToken(string token) =>
+        token.Length > 0 &&
+        token.All(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.' or '/' or '+');
+
+    private static bool IsProseLeadToken(string token)
+    {
+        var normalized = token.TrimStart('.', '/', '~').Trim().ToLowerInvariant();
+        return normalized is
+            "a" or "an" or "and" or "because" or "but" or "for" or "i" or "if" or "it" or "not" or "no" or "now" or
+            "please" or "run" or "so" or "that" or "the" or "then" or "there" or "this" or "to" or "try" or "use" or
+            "we" or "what" or "when" or "where" or "why" or "you";
+    }
+
+    private static bool HasShellCommandShape(IReadOnlyList<string> tokens, int executableIndex)
+    {
+        if (tokens[executableIndex].Contains('/', StringComparison.Ordinal) ||
+            tokens[executableIndex].StartsWith("./", StringComparison.Ordinal) ||
+            tokens[executableIndex].StartsWith("../", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (tokens.Count <= executableIndex + 1)
+        {
+            return IsCommonSingleTokenCommand(tokens[executableIndex]);
+        }
+
+        return true;
+    }
+
+    private static bool IsCommonSingleTokenCommand(string executable)
+    {
+        var commandName = Path.GetFileName(executable);
+        return commandName is
+            "date" or "df" or "free" or "hostname" or "id" or "ls" or "pwd" or "reboot" or "top" or "uptime" or
+            "whoami";
     }
 
     [GeneratedRegex("```(?:bash|sh)?\\s*\\n([\\s\\S]*?)```", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

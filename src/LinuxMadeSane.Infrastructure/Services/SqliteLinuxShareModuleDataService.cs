@@ -34,7 +34,9 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
             commandRunner,
             localUserAccessSystemService,
             new SambaConfigurationShareReader(commandRunner),
-            new SambaConfigurationShareWriter(commandRunner),
+            new SambaConfigurationShareWriter(
+                commandRunner,
+                tempRootDirectory: Path.Combine(shareMountStorageSettings.RuntimeDirectory, "samba-config")),
             new SambaNetworkDiscoveryService(commandRunner),
             new SambaRemoteMountService(dbContext, commandRunner, shareMountStorageSettings))
     {

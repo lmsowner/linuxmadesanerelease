@@ -1,6 +1,7 @@
 // Copyright (c) Richard D. Kiernan.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using System.Globalization;
 using System.Text;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models.RdpOptimizer;
@@ -19,17 +20,22 @@ internal sealed class SambaConfigurationShareWriter
     private readonly ILinuxCommandRunner commandRunner;
     private readonly IReadOnlyList<string> mainConfigPaths;
     private readonly string managedConfigPath;
+    private readonly string? tempRootDirectory;
 
     public SambaConfigurationShareWriter(
         ILinuxCommandRunner commandRunner,
         IReadOnlyList<string>? mainConfigPaths = null,
-        string? managedConfigPath = null)
+        string? managedConfigPath = null,
+        string? tempRootDirectory = null)
     {
         this.commandRunner = commandRunner;
         this.mainConfigPaths = mainConfigPaths ?? DefaultMainConfigPaths;
         this.managedConfigPath = string.IsNullOrWhiteSpace(managedConfigPath)
             ? "/etc/samba/lms-shares.conf"
             : managedConfigPath.Trim();
+        this.tempRootDirectory = string.IsNullOrWhiteSpace(tempRootDirectory)
+            ? null
+            : tempRootDirectory.Trim();
     }
 
     public async Task<IReadOnlyList<SambaShareDefinition>> ListManagedSharesAsync(CancellationToken cancellationToken = default)
@@ -64,7 +70,7 @@ internal sealed class SambaConfigurationShareWriter
             managedShares.Add(share);
         }
 
-        await ApplyManagedConfigurationAsync(managedShares, share.SharePath, cancellationToken);
+        await ApplyManagedConfigurationAsync(managedShares, share, cancellationToken);
     }
 
     public async Task DeleteManagedShareAsync(
@@ -88,7 +94,7 @@ internal sealed class SambaConfigurationShareWriter
 
     private async Task ApplyManagedConfigurationAsync(
         IReadOnlyList<SambaShareDefinition> managedShares,
-        string? sharePathToEnsure,
+        SambaShareDefinition? shareToEnsure,
         CancellationToken cancellationToken)
     {
         var mainConfigPath = ResolvePrimaryMainConfigPath();
@@ -109,9 +115,13 @@ internal sealed class SambaConfigurationShareWriter
 
             await ValidateConfigurationAsync(tempMainConfigPath, cancellationToken);
 
-            if (!string.IsNullOrWhiteSpace(sharePathToEnsure))
+            if (shareToEnsure is not null && !string.IsNullOrWhiteSpace(shareToEnsure.SharePath))
             {
-                await EnsureSharePathExistsAsync(sharePathToEnsure, cancellationToken);
+                await EnsureSharePathExistsAsync(shareToEnsure.SharePath, cancellationToken);
+                if (shareToEnsure.GuestAccess)
+                {
+                    await EnsureGuestSharePathPermissionsAsync(shareToEnsure.SharePath, cancellationToken);
+                }
             }
 
             await WriteTextAsync(managedConfigPath, liveManagedText, cancellationToken);
@@ -199,6 +209,16 @@ internal sealed class SambaConfigurationShareWriter
             "mkdir",
             ["-p", sharePath],
             $"Create share path {sharePath}",
+            requiresSudo: true,
+            cancellationToken);
+    }
+
+    private async Task EnsureGuestSharePathPermissionsAsync(string sharePath, CancellationToken cancellationToken)
+    {
+        await RunRequiredCommandAsync(
+            "chmod",
+            ["0777", sharePath],
+            $"Allow anonymous access to {sharePath}",
             requiresSudo: true,
             cancellationToken);
     }
@@ -527,10 +547,34 @@ internal sealed class SambaConfigurationShareWriter
 
     private static string FormatBoolean(bool value) => value ? "yes" : "no";
 
-    private static string CreateTemporaryDirectory()
+    private string CreateTemporaryDirectory()
     {
-        var path = Path.Combine(Path.GetTempPath(), "linuxmadesane-samba", Guid.NewGuid().ToString("N"));
+        var rootPath = tempRootDirectory ?? BuildDefaultTemporaryRoot();
+        var path = Path.Combine(rootPath, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static string BuildDefaultTemporaryRoot()
+    {
+        var userName = SanitizePathSegment(Environment.UserName);
+        var suffix = string.IsNullOrWhiteSpace(userName)
+            ? Environment.ProcessId.ToString(CultureInfo.InvariantCulture)
+            : $"{userName}-{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)}";
+
+        return Path.Combine(Path.GetTempPath(), $"linuxmadesane-samba-{suffix}");
+    }
+
+    private static string SanitizePathSegment(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            builder.Append(char.IsLetterOrDigit(character) || character is '-' or '_'
+                ? character
+                : '-');
+        }
+
+        return builder.ToString().Trim('-');
     }
 }

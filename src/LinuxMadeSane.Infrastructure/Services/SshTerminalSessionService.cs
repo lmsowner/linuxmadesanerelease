@@ -42,8 +42,10 @@ public sealed class SshTerminalSessionService(
 
         try
         {
-            client.Connect();
-            var stream = client.CreateShellStream("xterm-256color", (uint)request.Columns, (uint)request.Rows, 0, 0, 4096);
+            await Task.Run(client.Connect, cancellationToken);
+            var stream = await Task.Run(
+                () => client.CreateShellStream("xterm-256color", (uint)request.Columns, (uint)request.Rows, 0, 0, 4096),
+                cancellationToken);
             var workingDirectory = string.IsNullOrWhiteSpace(request.WorkingDirectory)
                 ? host.DefaultWorkingDirectory
                 : request.WorkingDirectory.Trim();

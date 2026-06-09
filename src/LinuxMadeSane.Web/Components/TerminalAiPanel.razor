@@ -273,10 +273,13 @@
     private ElementReference promptInputElement;
     private AiChatThreadEditorContextViewModel? aiProviderContext;
     private DotNetObjectReference<TerminalAiPanel>? promptInteropReference;
+    private CancellationTokenSource? providerContextLoadCts;
+    private Task? providerContextLoadTask;
     private const int MaxInvestigationSteps = 4;
     private string selectedProviderKey = string.Empty;
     private string selectedModelId = string.Empty;
     private Guid? observedTabId;
+    private bool isDisposed;
     private ManagedHostEditor? publicKeySetupEditor;
     private GeneratedSshKeyPair? publicKeySetupKeyPair;
     private bool isPublicKeySetupOpen;
@@ -527,7 +530,7 @@ Selected terminal content:
         await SendCustomPromptAsync();
     }
 
-    protected override async Task OnParametersSetAsync()
+    protected override Task OnParametersSetAsync()
     {
         if (observedTabId != Tab.Id)
         {
@@ -535,8 +538,8 @@ Selected terminal content:
             ResetPublicKeySetupState();
         }
 
-        await EnsureProviderContextAsync();
-        SyncTerminalProviderSelection();
+        StartProviderContextLoad();
+        return Task.CompletedTask;
     }
 
     private async Task WaitForTerminalUpdateAsync(int initialOutputLength, DateTimeOffset? initialActivity)
@@ -588,17 +591,50 @@ Selected terminal content:
 
     private async Task EnsureProviderContextAsync()
     {
-        if (aiProviderContext is not null || isProviderContextLoading)
+        if (aiProviderContext is not null)
         {
             return;
         }
 
+        if (providerContextLoadTask is null || providerContextLoadTask.IsCompleted)
+        {
+            providerContextLoadTask = LoadProviderContextAsync(notifyOnCompletion: false);
+        }
+
+        await providerContextLoadTask;
+    }
+
+    private void StartProviderContextLoad()
+    {
+        if (aiProviderContext is not null)
+        {
+            SyncTerminalProviderSelection();
+            return;
+        }
+
+        if (providerContextLoadTask is { IsCompleted: false })
+        {
+            return;
+        }
+
+        providerContextLoadTask = LoadProviderContextAsync(notifyOnCompletion: true);
+    }
+
+    private async Task LoadProviderContextAsync(bool notifyOnCompletion)
+    {
+        providerContextLoadCts?.Cancel();
+        providerContextLoadCts?.Dispose();
+        providerContextLoadCts = new CancellationTokenSource();
+        var cancellationToken = providerContextLoadCts.Token;
         isProviderContextLoading = true;
 
         try
         {
-            aiProviderContext = await ThreadService.GetEditorAsync();
+            aiProviderContext = await ThreadService.GetEditorAsync(cancellationToken: cancellationToken);
             SyncTerminalProviderSelection();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch (Exception exception)
         {
@@ -607,6 +643,10 @@ Selected terminal content:
         finally
         {
             isProviderContextLoading = false;
+            if (notifyOnCompletion && !isDisposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
         }
     }
 
@@ -1040,6 +1080,10 @@ Selected terminal content:
 
     public ValueTask DisposeAsync()
     {
+        isDisposed = true;
+        providerContextLoadCts?.Cancel();
+        providerContextLoadCts?.Dispose();
+        providerContextLoadCts = null;
         promptInteropReference?.Dispose();
         promptInteropReference = null;
         return ValueTask.CompletedTask;

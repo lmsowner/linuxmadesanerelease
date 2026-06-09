@@ -30,5 +30,11 @@ public sealed class RemoteShareMountEditor
 
     public string Domain { get; set; } = string.Empty;
 
+    public string LocalOwner { get; set; } = string.Empty;
+
+    public string FileMode { get; set; } = "0777";
+
+    public string DirectoryMode { get; set; } = "0777";
+
     public bool PersistOnServer { get; set; }
 }

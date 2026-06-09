@@ -502,6 +502,9 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(mount => mount.LocalMountPath).HasMaxLength(512);
             entity.Property(mount => mount.UserName).HasMaxLength(128);
             entity.Property(mount => mount.Domain).HasMaxLength(128);
+            entity.Property(mount => mount.LocalOwner).HasMaxLength(128);
+            entity.Property(mount => mount.FileMode).HasMaxLength(8);
+            entity.Property(mount => mount.DirectoryMode).HasMaxLength(8);
             entity.Property(mount => mount.CredentialFilePath).HasMaxLength(512);
         });
 

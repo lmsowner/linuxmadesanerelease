@@ -169,6 +169,43 @@
         </div>
     </section>
 
+    <section class="share-mapping-location">
+        <div class="share-mapping-section-header">
+            <div>
+                <strong>Linux presentation</strong>
+                <span>Controls how CIFS presents ownership and permissions on this LMS server.</span>
+            </div>
+        </div>
+
+        <div class="share-mapping-grid">
+            <UiTextField Label="Linux owner"
+                         Helper="Local Linux user or numeric uid. This becomes uid/gid for the CIFS mount."
+                         Value="@Editor.LocalOwner"
+                         ValueChanged="SetLocalOwnerAsync"
+                         ValueExpression="@(() => Editor.LocalOwner)"
+                         Compact="true"
+                         Placeholder="richard" />
+
+            <UiTextField Label="File mode"
+                         Helper="Client-side file mode. Use 0777 for open local access."
+                         Value="@Editor.FileMode"
+                         ValueChanged="SetFileModeAsync"
+                         ValueExpression="@(() => Editor.FileMode)"
+                         Compact="true"
+                         Class="@RequiredModeFieldClass(Editor.FileMode)"
+                         Placeholder="0777" />
+
+            <UiTextField Label="Directory mode"
+                         Helper="Client-side directory mode. Use 0777 for open local access."
+                         Value="@Editor.DirectoryMode"
+                         ValueChanged="SetDirectoryModeAsync"
+                         ValueExpression="@(() => Editor.DirectoryMode)"
+                         Compact="true"
+                         Class="@RequiredModeFieldClass(Editor.DirectoryMode)"
+                         Placeholder="0777" />
+        </div>
+    </section>
+
     <details class="share-mapping-guidance">
         <summary>Best practice guidance</summary>
         <div class="share-mapping-guidance-grid">
@@ -214,6 +251,7 @@
     private ShareMappingMountLocation selectedLocation = ShareMappingMountLocation.LmsDefault;
     private string localUserName = string.Empty;
     private bool mountPathEdited;
+    private bool localOwnerEdited;
     private bool HasRemoteSource => !string.IsNullOrWhiteSpace(Editor.Target) &&
                                     !string.IsNullOrWhiteSpace(Editor.ShareName);
     private string MountPathFieldClass => $"share-mapping-mount-path {RequiredFieldClass(Editor.LocalMountPath)}";
@@ -264,6 +302,8 @@
         !string.IsNullOrWhiteSpace(Editor.Target) &&
         !string.IsNullOrWhiteSpace(Editor.ShareName) &&
         !string.IsNullOrWhiteSpace(Editor.LocalMountPath) &&
+        IsValidCifsMode(Editor.FileMode) &&
+        IsValidCifsMode(Editor.DirectoryMode) &&
         Path.IsPathRooted(Editor.LocalMountPath);
 
     protected override void OnParametersSet()
@@ -277,11 +317,29 @@
             selectedLocation = InferLocation(Editor.LocalMountPath);
             mountPathEdited = selectedLocation == ShareMappingMountLocation.Custom &&
                               !string.IsNullOrWhiteSpace(Editor.LocalMountPath);
+            localOwnerEdited = !string.IsNullOrWhiteSpace(Editor.LocalOwner) &&
+                               !Editor.LocalOwner.Trim().Equals(localUserName, StringComparison.Ordinal);
         }
 
         if (string.IsNullOrWhiteSpace(Editor.LocalMountPath) && !mountPathEdited)
         {
             ApplySelectedMountPath();
+        }
+
+        if (string.IsNullOrWhiteSpace(Editor.LocalOwner))
+        {
+            Editor.LocalOwner = localUserName;
+            localOwnerEdited = false;
+        }
+
+        if (string.IsNullOrWhiteSpace(Editor.FileMode))
+        {
+            Editor.FileMode = "0777";
+        }
+
+        if (string.IsNullOrWhiteSpace(Editor.DirectoryMode))
+        {
+            Editor.DirectoryMode = "0777";
         }
     }
 
@@ -329,8 +387,36 @@
 
     private Task SetLocalUserNameAsync(string? value)
     {
+        var previousLocalUserName = localUserName;
         localUserName = string.IsNullOrWhiteSpace(value) ? ResolveDefaultLocalUserName() : value.Trim();
+        if (!localOwnerEdited &&
+            (string.IsNullOrWhiteSpace(Editor.LocalOwner) ||
+             Editor.LocalOwner.Trim().Equals(previousLocalUserName, StringComparison.Ordinal)))
+        {
+            Editor.LocalOwner = localUserName;
+        }
+
         ApplySelectedMountPathIfAutomatic();
+        return Task.CompletedTask;
+    }
+
+    private Task SetLocalOwnerAsync(string? value)
+    {
+        Editor.LocalOwner = value ?? string.Empty;
+        localOwnerEdited = !string.IsNullOrWhiteSpace(Editor.LocalOwner) &&
+                           !Editor.LocalOwner.Trim().Equals(localUserName, StringComparison.Ordinal);
+        return Task.CompletedTask;
+    }
+
+    private Task SetFileModeAsync(string? value)
+    {
+        Editor.FileMode = NormalizeModeInput(value);
+        return Task.CompletedTask;
+    }
+
+    private Task SetDirectoryModeAsync(string? value)
+    {
+        Editor.DirectoryMode = NormalizeModeInput(value);
         return Task.CompletedTask;
     }
 
@@ -470,9 +556,37 @@
             ? "share-mapping-required share-mapping-required-missing"
             : "share-mapping-required";
 
+    private static string RequiredModeFieldClass(string value) =>
+        IsValidCifsMode(value)
+            ? "share-mapping-required"
+            : "share-mapping-required share-mapping-required-missing";
+
+    private static string NormalizeModeInput(string? value)
+    {
+        var trimmed = value?.Trim() ?? string.Empty;
+        return trimmed.Length == 3 ? $"0{trimmed}" : trimmed;
+    }
+
+    private static bool IsValidCifsMode(string? value)
+    {
+        var trimmed = value?.Trim() ?? string.Empty;
+        var mode = trimmed.Length == 3 ? $"0{trimmed}" : trimmed;
+        return mode.Length == 4 && mode.All(character => character is >= '0' and <= '7');
+    }
+
     private static string ResolveDefaultLocalUserName()
     {
-        var userName = Environment.UserName;
+        var userName = Environment.GetEnvironmentVariable("SUDO_USER");
+        if (string.IsNullOrWhiteSpace(userName) || userName.Equals("root", StringComparison.OrdinalIgnoreCase))
+        {
+            userName = Environment.GetEnvironmentVariable("USER");
+        }
+
+        if (string.IsNullOrWhiteSpace(userName) || userName.Equals("root", StringComparison.OrdinalIgnoreCase))
+        {
+            userName = Environment.UserName;
+        }
+
         return string.IsNullOrWhiteSpace(userName) || userName.Equals("root", StringComparison.OrdinalIgnoreCase)
             ? "user"
             : userName;
