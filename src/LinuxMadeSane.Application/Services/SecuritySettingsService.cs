@@ -788,7 +788,8 @@ public sealed class SecuritySettingsService(
         CancellationToken cancellationToken)
     {
         var manualEntryKey = TotpAuthenticator.FormatManualEntryKey(secret);
-        var otpUri = TotpAuthenticator.BuildOtpUri(user.Email, secret);
+        var authenticatorIssuer = BuildAuthenticatorIssuer(lmsLoginUrl);
+        var otpUri = TotpAuthenticator.BuildOtpUri(user.Email, secret, authenticatorIssuer);
         var emailResult = sendEmail
             ? await SendLoginSetupEmailIfAvailableAsync(
                 user,
@@ -925,6 +926,21 @@ public sealed class SecuritySettingsService(
         }
 
         return "http://localhost:5080/login";
+    }
+
+    private static string BuildAuthenticatorIssuer(string? lmsLoginUrl) =>
+        $"LMS ({ResolveLmsHostname(lmsLoginUrl)})";
+
+    private static string ResolveLmsHostname(string? lmsLoginUrl)
+    {
+        if (Uri.TryCreate(lmsLoginUrl?.Trim(), UriKind.Absolute, out var uri) &&
+            uri.Scheme is "http" or "https" &&
+            !string.IsNullOrWhiteSpace(uri.Host))
+        {
+            return uri.Host;
+        }
+
+        return "localhost";
     }
 
     private static SecurityUserViewModel MapUser(SecurityUser user) =>

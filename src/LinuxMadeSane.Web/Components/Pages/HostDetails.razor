@@ -57,21 +57,14 @@ else
                                          OnClick="@(() => ConnectToRemoteLmsAsync("/"))" />
                     }
                 }
-                @if (CanInstallLmsHost)
+                @if (CanRegisterLmsHost)
                 {
-                    <UiCommandButton Label="Install LMS"
-                                     Glyph="UiIconGlyph.Download"
+                    <UiCommandButton Label="@LmsRegisterButtonLabel"
+                                     Glyph="UiIconGlyph.Plus"
                                      Variant="UiButtonVariant.PrimaryMuted"
-                                     OnClick="ShowLmsInstallPrompt"
-                                     Disabled="@isInstallingLms" />
-                }
-                else if (ShouldShowLmsInstallUnavailableAction)
-                {
-                    <UiCommandButton Label="Install unavailable"
-                                     Glyph="UiIconGlyph.Download"
-                                     Variant="UiButtonVariant.Ghost"
-                                     Title="@LmsInstallUnavailableMessage"
-                                     Disabled="true" />
+                                     Title="@LmsRegisterButtonTitle"
+                                     OnClick="ShowLmsRegisterPrompt"
+                                     Disabled="@(!CanRunLmsRegistration || isInstallingLms)" />
                 }
                 @if (CanUpdateLmsHost)
                 {
@@ -178,14 +171,18 @@ else
                                 </p>
                                 <p class="callout warning">@LmsInstallPanelWarning</p>
 
-                                @if ((CanInstallLmsHost || CanUpdateLmsHost || CanUninstallLmsHost) && showLmsInstallPrompt)
+                                @if ((CanRegisterLmsHost || CanInstallLmsHost || CanUpdateLmsHost || CanUninstallLmsHost) && showLmsInstallPrompt)
                                 {
                                     @if (details is not null && !HasStoredCredentials(details.Host))
                                     {
                                         <p class="callout warning">Save SSH credentials for this host before running this remote operation.</p>
                                     }
 
-                                    @if (isLmsUninstallMode)
+                                    @if (isLmsRegisterMode)
+                                    {
+                                        <p class="meta-text">No installer will be run. This checks the saved SSH connection for an existing LMS service, app directory, config, or data store, then registers the host when one is found.</p>
+                                    }
+                                    else if (isLmsUninstallMode)
                                     {
                                         <div class="lms-install-options">
                                             <UiCheckboxField @bind-Value="lmsUninstallOptions.RemoveData"
@@ -226,7 +223,7 @@ else
                                                          Glyph="UiIconGlyph.Run"
                                                          Variant="UiButtonVariant.Primary"
                                                          OnClick="RunLmsHostOperationAsync"
-                                                         Disabled="@(!CanRunLmsInstaller || isInstallingLms)" />
+                                                         Disabled="@(!CanRunLmsHostOperation || isInstallingLms)" />
                                     </div>
                                 }
 
@@ -236,6 +233,17 @@ else
                                         <strong>@lmsInstallResult.Summary</strong>
                                         @lmsInstallResult.Detail
                                     </p>
+                                }
+
+                                @if (lmsInstallResult is { Success: false } && isLmsRegisterMode && CanInstallLmsHost)
+                                {
+                                    <div class="lms-install-actions">
+                                        <UiCommandButton Label="Run installer"
+                                                         Glyph="UiIconGlyph.Download"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         OnClick="ShowLmsInstallPrompt"
+                                                         Disabled="@isInstallingLms" />
+                                    </div>
                                 }
 
                                 @if (lmsInstallResult?.Success == true && details is not null && !isLmsUninstallMode)
@@ -362,6 +370,7 @@ else
     private ManagedHostLmsInstallResult? lmsInstallResult;
     private readonly List<ManagedHostLmsInstallProgressUpdate> lmsInstallProgress = [];
     private bool showLmsInstallPrompt;
+    private bool isLmsRegisterMode;
     private bool isLmsUpdateMode;
     private bool isLmsUninstallMode;
     private bool isInstallingLms;
@@ -376,12 +385,14 @@ else
     private string lmsBackgroundUpdateStatus = string.Empty;
     private string lmsBackgroundUpdateTone = "info";
 
+    private bool CanRegisterLmsHost =>
+        details is { Capabilities.IsLmsHost: false } &&
+        !IsCurrentLmsEndpoint(details.Host);
+
     private bool CanInstallLmsHost => details is { Capabilities.SupportsLmsInstall: true };
 
-    private bool ShouldShowLmsInstallUnavailableAction =>
+    private bool ShouldShowLmsInstallUnavailableNote =>
         details is { Capabilities.IsLmsHost: false, Capabilities.SupportsLmsInstall: false };
-
-    private bool ShouldShowLmsInstallUnavailableNote => ShouldShowLmsInstallUnavailableAction;
 
     private string LmsInstallUnavailableMessage =>
         details?.Capabilities.LmsInstallSupportMessage ?? "LMS cannot be installed on this host.";
@@ -407,6 +418,8 @@ else
     private bool CanRunRemoteLmsTunnel =>
         details is not null && HasStoredCredentials(details.Host);
 
+    private bool CanRunLmsRegistration => details is not null && HasStoredCredentials(details.Host);
+
     private string RemoteLmsConnectTitle =>
         CanOpenRemoteLmsDirectly
             ? "Open the directly reachable LMS web UI on port 5080."
@@ -415,6 +428,16 @@ else
                 : "Save SSH credentials for this host before opening its LMS UI through the relay.";
 
     private bool CanRunLmsInstaller => details is not null && HasStoredCredentials(details.Host);
+
+    private bool CanRunLmsHostOperation => isLmsRegisterMode ? CanRunLmsRegistration : CanRunLmsInstaller;
+
+    private string LmsRegisterButtonLabel =>
+        isInstallingLms && isLmsRegisterMode ? "Checking..." : "Add LMS Server";
+
+    private string LmsRegisterButtonTitle =>
+        CanRunLmsRegistration
+            ? "Check this SSH host for an existing LMS install and add it to the LMS hosts list."
+            : "Save SSH credentials for this host before adding it as an LMS server.";
 
     private string LmsUpdateButtonLabel =>
         isInstallingLms && isBackgroundLmsUpdate ? "Updating..." : "Update LMS";
@@ -466,25 +489,33 @@ else
         return "Use the LMS Edge Gateway page to publish services from this SSH host. Caddy and Cloudflare are no longer configured separately here.";
     }
 
-    private string LmsOperationEyebrow => isLmsUninstallMode
+    private string LmsOperationEyebrow => isLmsRegisterMode
+        ? "Host registration"
+        : isLmsUninstallMode
         ? "Host uninstall"
         : isLmsUpdateMode
             ? "Host update"
             : "Host conversion";
 
-    private string LmsInstallPanelTitle => isLmsUninstallMode
+    private string LmsInstallPanelTitle => isLmsRegisterMode
+        ? "Add existing LMS server"
+        : isLmsUninstallMode
         ? "Uninstall Linux Made Sane from this LMS host"
         : isLmsUpdateMode
             ? "Update Linux Made Sane on this LMS host"
             : "Install Linux Made Sane on this SSH host";
 
-    private string LmsInstallPanelDescription => isLmsUninstallMode
+    private string LmsInstallPanelDescription => isLmsRegisterMode
+        ? "Checks the saved SSH connection for an existing Linux Made Sane service, application files, config, or data store, then adds the host to the LMS hosts list when detected."
+        : isLmsUninstallMode
         ? "Runs the public Community Edition installer over the saved SSH connection with uninstall mode. The remote account must be root or have non-interactive sudo."
         : isLmsUpdateMode
             ? "Runs the public Community Edition installer over the saved SSH connection, updates the existing remote LMS install, and restarts the service. The remote account must be root or have non-interactive sudo."
             : "Runs the public Community Edition installer over the saved SSH connection, updates an existing install when one is present, and marks the host as an LMS host after a successful run. The remote account must be root or have non-interactive sudo.";
 
-    private string LmsInstallPanelWarning => isLmsUninstallMode
+    private string LmsInstallPanelWarning => isLmsRegisterMode
+        ? "This operation is read-only on the remote host. If no LMS install is found, the host stays registered as an SSH host."
+        : isLmsUninstallMode
         ? "This stops and removes the remote LMS service and application files. Data and config are kept unless you explicitly choose to remove them."
         : isLmsUpdateMode
             ? "This updates the remote LMS service over SSH. The UI on that remote host may restart while the installer swaps the release."
@@ -494,12 +525,16 @@ else
     {
         if (isInstallingLms)
         {
-            return isLmsUninstallMode
+            return isLmsRegisterMode
+                ? "Checking..."
+                : isLmsUninstallMode
                 ? "Uninstalling..."
                 : isLmsUpdateMode ? "Updating..." : "Installing...";
         }
 
-        return isLmsUninstallMode
+        return isLmsRegisterMode
+            ? "Add LMS Server"
+            : isLmsUninstallMode
             ? "Run uninstall"
             : isLmsUpdateMode ? "Run update" : "Run installer";
     }
@@ -514,9 +549,9 @@ else
             string.Equals(InstallAction, "lms", StringComparison.OrdinalIgnoreCase))
         {
             installQueryHandledForHostId = HostId;
-            if (CanInstallLmsHost)
+            if (CanRegisterLmsHost)
             {
-                ShowLmsInstallPrompt();
+                ShowLmsRegisterPrompt();
             }
         }
 
@@ -563,6 +598,21 @@ else
         lmsUninstallOptions = new ManagedHostLmsUninstallOptions();
         lmsInstallResult = null;
         lmsInstallProgress.Clear();
+        isLmsRegisterMode = false;
+        isLmsUpdateMode = false;
+        isLmsUninstallMode = false;
+        isBackgroundLmsUpdate = false;
+        showLmsInstallPrompt = true;
+        activeTab = OverviewTabValue;
+    }
+
+    private void ShowLmsRegisterPrompt()
+    {
+        lmsInstallOptions = new ManagedHostLmsInstallOptions();
+        lmsUninstallOptions = new ManagedHostLmsUninstallOptions();
+        lmsInstallResult = null;
+        lmsInstallProgress.Clear();
+        isLmsRegisterMode = true;
         isLmsUpdateMode = false;
         isLmsUninstallMode = false;
         isBackgroundLmsUpdate = false;
@@ -583,6 +633,7 @@ else
         lmsUninstallOptions = new ManagedHostLmsUninstallOptions();
         lmsInstallResult = null;
         lmsInstallProgress.Clear();
+        isLmsRegisterMode = false;
         isLmsUpdateMode = true;
         isLmsUninstallMode = false;
         isBackgroundLmsUpdate = false;
@@ -600,6 +651,7 @@ else
         };
         lmsInstallResult = null;
         lmsInstallProgress.Clear();
+        isLmsRegisterMode = false;
         isLmsUpdateMode = false;
         isLmsUninstallMode = true;
         isBackgroundLmsUpdate = false;
@@ -615,6 +667,7 @@ else
         }
 
         showLmsInstallPrompt = false;
+        isLmsRegisterMode = false;
         isLmsUpdateMode = false;
         isLmsUninstallMode = false;
         isBackgroundLmsUpdate = false;
@@ -635,6 +688,7 @@ else
 
         isInstallingLms = true;
         isBackgroundLmsUpdate = true;
+        isLmsRegisterMode = false;
         isLmsUpdateMode = true;
         isLmsUninstallMode = false;
         showLmsInstallPrompt = false;
@@ -775,9 +829,11 @@ else
 
         try
         {
-            lmsInstallResult = isLmsUninstallMode
-                ? await HostService.UninstallLmsAsync(details.Host.Id, lmsUninstallOptions, progress)
-                : await HostService.InstallLmsAsync(details.Host.Id, lmsInstallOptions, progress);
+            lmsInstallResult = isLmsRegisterMode
+                ? await HostService.RegisterLmsHostAsync(details.Host.Id, progress)
+                : isLmsUninstallMode
+                    ? await HostService.UninstallLmsAsync(details.Host.Id, lmsUninstallOptions, progress)
+                    : await HostService.InstallLmsAsync(details.Host.Id, lmsInstallOptions, progress);
             if (lmsInstallResult.Success)
             {
                 showLmsInstallPrompt = false;
@@ -793,7 +849,9 @@ else
                 now));
             lmsInstallResult = new ManagedHostLmsInstallResult(
                 false,
-                isLmsUninstallMode
+                isLmsRegisterMode
+                    ? "Add LMS Server failed."
+                    : isLmsUninstallMode
                     ? "Linux Made Sane uninstall failed."
                     : "Linux Made Sane install failed.",
                 ex.Message,

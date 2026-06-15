@@ -18,9 +18,12 @@ internal static class TotpAuthenticator
         return EncodeBase32(buffer);
     }
 
-    public static string BuildOtpUri(string email, string secret)
+    public static string BuildOtpUri(string email, string secret, string issuer)
     {
-        var encodedIssuer = Uri.EscapeDataString("Linux Made Sane");
+        var normalizedIssuer = string.IsNullOrWhiteSpace(issuer)
+            ? "LMS (localhost)"
+            : issuer.Trim();
+        var encodedIssuer = Uri.EscapeDataString(normalizedIssuer);
         var encodedEmail = Uri.EscapeDataString(email);
         return $"otpauth://totp/{encodedIssuer}:{encodedEmail}?secret={secret}&issuer={encodedIssuer}&digits=6&period=30";
     }

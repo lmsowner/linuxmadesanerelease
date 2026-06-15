@@ -359,6 +359,165 @@ public sealed class ManagedHostService(
             result.CompletedAtUtc);
     }
 
+    public async Task<ManagedHostLmsInstallResult> RegisterLmsHostAsync(
+        Guid id,
+        IProgress<ManagedHostLmsInstallProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var host = await hostStore.GetAsync(id, cancellationToken);
+        if (host is null)
+        {
+            throw new InvalidOperationException("Host not found.");
+        }
+
+        if (IsCurrentLmsEndpoint(host))
+        {
+            throw new InvalidOperationException("This machine is already the local Linux Made Sane host.");
+        }
+
+        if (ManagedHostCapabilities.IsLmsHost(host))
+        {
+            var now = DateTimeOffset.UtcNow;
+            return new ManagedHostLmsInstallResult(
+                true,
+                "LMS server already registered.",
+                "This host is already listed as an LMS host.",
+                string.Empty,
+                null,
+                string.Empty,
+                string.Empty,
+                now,
+                now);
+        }
+
+        if (!HasStoredConnectionMaterial(host))
+        {
+            throw new InvalidOperationException("Save SSH credentials for this host before adding it as an LMS server.");
+        }
+
+        var sudoPassword = await ResolveStoredSudoPasswordAsync(host, cancellationToken);
+        var inputExecutionService = commandExecutionService as ICommandExecutionInputService;
+        var canUseStoredSudoPassword =
+            !string.IsNullOrEmpty(sudoPassword) &&
+            inputExecutionService is not null;
+        var commandText = BuildRemoteLmsDetectionCommand(canUseStoredSudoPassword);
+        var detectionProgress = new SynchronousCommandExecutionProgress(update =>
+            ReportLmsInstallProgress(
+                update,
+                progress,
+                "Checking the remote host for an existing Linux Made Sane install.",
+                "Remote LMS detection completed.",
+                exitCode => $"Remote LMS detection failed with exit code {exitCode}."));
+
+        progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+            ManagedHostLmsInstallProgressState.Starting,
+            "Checking the saved SSH connection for an existing Linux Made Sane install.",
+            DateTimeOffset.UtcNow));
+
+        CommandExecutionResult result;
+        try
+        {
+            result = canUseStoredSudoPassword
+                ? await inputExecutionService!.ExecuteAsync(
+                    host,
+                    commandText,
+                    new CommandExecutionInput($"{sudoPassword}\n", true),
+                    detectionProgress,
+                    cancellationToken)
+                : await commandExecutionService.ExecuteAsync(host, commandText, detectionProgress, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var now = DateTimeOffset.UtcNow;
+            progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+                ManagedHostLmsInstallProgressState.Failed,
+                ex.Message,
+                now));
+
+            return new ManagedHostLmsInstallResult(
+                false,
+                "Add LMS Server failed.",
+                ex.Message,
+                commandText,
+                null,
+                string.Empty,
+                ex.ToString(),
+                now,
+                now);
+        }
+
+        if (!result.IsSuccess)
+        {
+            var failureDetail = string.IsNullOrWhiteSpace(result.StandardError)
+                ? "The remote LMS detection command returned a non-zero exit code."
+                : result.StandardError.Trim();
+
+            return new ManagedHostLmsInstallResult(
+                false,
+                "Add LMS Server failed.",
+                failureDetail,
+                result.CommandText,
+                result.ExitCode,
+                result.StandardOutput,
+                result.StandardError,
+                result.StartedAtUtc,
+                result.CompletedAtUtc);
+        }
+
+        if (!IsRemoteLmsDetected(result.StandardOutput))
+        {
+            var detail = "No Linux Made Sane service, install directory, config, or data store was detected on this host.";
+            progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+                ManagedHostLmsInstallProgressState.Failed,
+                detail,
+                result.CompletedAtUtc));
+
+            return new ManagedHostLmsInstallResult(
+                false,
+                "No LMS install detected.",
+                detail,
+                result.CommandText,
+                result.ExitCode,
+                result.StandardOutput,
+                result.StandardError,
+                result.StartedAtUtc,
+                result.CompletedAtUtc);
+        }
+
+        var updatedHost = host with
+        {
+            Kind = ManagedHostKind.LmsHost,
+            LastSeenUtc = result.CompletedAtUtc,
+            LastConnectionTestStatus = ConnectionTestStatus.Succeeded
+        };
+        await hostStore.SaveAsync(updatedHost, cancellationToken);
+
+        var version = ParseRemoteLmsVersion(result.StandardOutput);
+        var versionDetail = string.IsNullOrWhiteSpace(version)
+            ? "The remote install was detected."
+            : $"The remote LMS install was detected as version {version}.";
+
+        progress?.Report(new ManagedHostLmsInstallProgressUpdate(
+            ManagedHostLmsInstallProgressState.Completed,
+            "Linux Made Sane install found; host registered as an LMS server.",
+            result.CompletedAtUtc));
+
+        return new ManagedHostLmsInstallResult(
+            true,
+            "LMS server added.",
+            $"{versionDetail} Try http://{host.Hostname}:5080/ if the network and firewall allow browser access.",
+            result.CommandText,
+            result.ExitCode,
+            result.StandardOutput,
+            result.StandardError,
+            result.StartedAtUtc,
+            result.CompletedAtUtc);
+    }
+
     public async Task<ManagedHostLmsInstallResult> UninstallLmsAsync(
         Guid id,
         ManagedHostLmsUninstallOptions options,
@@ -702,6 +861,60 @@ public sealed class ManagedHostService(
             false);
     }
 
+    private static string BuildRemoteLmsDetectionCommand(bool canUseStoredSudoPassword)
+    {
+        var script = string.Join(
+            "\n",
+            "set -u",
+            "LMS_SERVICE_UNIT='linux-made-sane.service'",
+            "LMS_CURRENT_DIR='/opt/linuxmadesane/ce/current'",
+            "LMS_CONFIG_ROOT='/etc/linuxmadesane/ce'",
+            "LMS_DATA_ROOT='/var/lib/linuxmadesane/ce'",
+            "SUDO=''",
+            "if [ \"$(id -u)\" -ne 0 ] && command -v sudo >/dev/null 2>&1; then",
+            canUseStoredSudoPassword
+                ? "  if IFS= read -r LMS_SUDO_PASSWORD; then\n    if printf '%s\\n' \"$LMS_SUDO_PASSWORD\" | sudo -S -p '' -v >/dev/null 2>&1; then\n      SUDO='sudo -n'\n    fi\n    unset LMS_SUDO_PASSWORD\n  fi"
+                : "  if sudo -n true >/dev/null 2>&1; then\n    SUDO='sudo -n'\n  fi",
+            "fi",
+            "lms_marker_found=false",
+            "if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then",
+            "  if systemctl list-unit-files \"$LMS_SERVICE_UNIT\" --no-legend --no-pager 2>/dev/null | grep -q \"^$LMS_SERVICE_UNIT\"; then",
+            "    echo \"LMS_SERVICE_UNIT=$LMS_SERVICE_UNIT\"",
+            "    lms_marker_found=true",
+            "  elif systemctl list-units --all \"$LMS_SERVICE_UNIT\" --no-legend --no-pager 2>/dev/null | grep -q \"^$LMS_SERVICE_UNIT\"; then",
+            "    echo \"LMS_SERVICE_UNIT=$LMS_SERVICE_UNIT\"",
+            "    lms_marker_found=true",
+            "  fi",
+            "  if systemctl is-active --quiet \"$LMS_SERVICE_UNIT\" >/dev/null 2>&1; then",
+            "    echo 'LMS_SERVICE_ACTIVE=true'",
+            "  fi",
+            "fi",
+            "for path in \"$LMS_CURRENT_DIR\" \"$LMS_CONFIG_ROOT/service.env\" \"$LMS_DATA_ROOT/linuxmadesane.db\" '/etc/systemd/system/linux-made-sane.service' '/opt/linuxmadesane/pro/current' '/etc/linuxmadesane/pro/service.env' '/var/lib/linuxmadesane/pro/linuxmadesane.db'; do",
+            "  if [ -e \"$path\" ] || { [ -n \"$SUDO\" ] && $SUDO test -e \"$path\" 2>/dev/null; }; then",
+            "    echo \"LMS_MARKER=$path\"",
+            "    lms_marker_found=true",
+            "  fi",
+            "done",
+            "for version_path in \"$LMS_CURRENT_DIR/version.txt\" '/opt/linuxmadesane/pro/current/version.txt'; do",
+            "  if [ -r \"$version_path\" ]; then",
+            "    printf 'LMS_VERSION='",
+            "    sed -n '1p' \"$version_path\" | tr -d '\\r'",
+            "    break",
+            "  elif [ -n \"$SUDO\" ] && $SUDO test -r \"$version_path\" 2>/dev/null; then",
+            "    printf 'LMS_VERSION='",
+            "    $SUDO sed -n '1p' \"$version_path\" | tr -d '\\r'",
+            "    break",
+            "  fi",
+            "done",
+            "if [ \"$lms_marker_found\" = true ]; then",
+            "  echo 'LMS_DETECTED=true'",
+            "else",
+            "  echo 'LMS_DETECTED=false'",
+            "fi");
+
+        return $"bash -lc {QuoteShellArgument(script)}";
+    }
+
     private static string BuildRemoteLmsInstallerCommand(
         string installUrl,
         string source,
@@ -792,6 +1005,19 @@ public sealed class ManagedHostService(
 
     private static string QuoteShellArgument(string value) =>
         $"'{value.Replace("'", "'\"'\"'", StringComparison.Ordinal)}'";
+
+    private static bool IsRemoteLmsDetected(string output) =>
+        output
+            .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Any(line => string.Equals(line, "LMS_DETECTED=true", StringComparison.Ordinal));
+
+    private static string? ParseRemoteLmsVersion(string output) =>
+        output
+            .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.StartsWith("LMS_VERSION=", StringComparison.Ordinal)
+                ? line["LMS_VERSION=".Length..].Trim()
+                : null)
+            .FirstOrDefault(version => !string.IsNullOrWhiteSpace(version));
 
     private static void ReportLmsInstallProgress(
         CommandExecutionUpdate update,

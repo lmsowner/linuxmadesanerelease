@@ -14,13 +14,7 @@ public sealed class ServiceOperationsService(ILinuxServiceModuleDataService serv
     public async Task<ServiceDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default)
     {
         var services = await serviceDataService.ListServicesAsync(cancellationToken);
-        var highlightSource = services.FirstOrDefault();
-
-        var highlightedIssues = highlightSource is null
-            ? Array.Empty<ServiceRepairIssue>()
-            : (await serviceDataService.GetRepairPlanAsync(highlightSource.Id, cancellationToken)).Issues.Take(3).ToArray();
-
-        return new ServiceDashboardViewModel(services, highlightedIssues);
+        return new ServiceDashboardViewModel(services, Array.Empty<ServiceRepairIssue>());
     }
 
     public async Task<ServiceEditor> GetEditorAsync(Guid? serviceId, CancellationToken cancellationToken = default)

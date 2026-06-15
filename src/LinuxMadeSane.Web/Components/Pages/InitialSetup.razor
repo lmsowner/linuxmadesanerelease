@@ -7,6 +7,7 @@
 @using LinuxMadeSane.Application.Contracts.Security
 @using LinuxMadeSane.Application.Interfaces
 @inject ISecuritySettingsService SecuritySettingsService
+@inject NavigationManager Navigation
 
 <PageTitle>Initial Setup | Linux Made Sane</PageTitle>
 
@@ -153,7 +154,7 @@
         setupState = await SecuritySettingsService.GetInitialSetupAsync();
         if (setupState.CanVerify)
         {
-            provisioning = await SecuritySettingsService.GetInitialSetupProvisioningAsync();
+            provisioning = await SecuritySettingsService.GetInitialSetupProvisioningAsync(BuildLmsLoginUrl(setupState.PendingEmail));
         }
     }
 
@@ -178,4 +179,19 @@
         string.IsNullOrWhiteSpace(homeDirectory)
             ? string.Empty
             : $" ({homeDirectory})";
+
+    private string BuildLmsLoginUrl(string? email)
+    {
+        var loginUri = new Uri(new Uri(Navigation.BaseUri), "login");
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            return loginUri.ToString();
+        }
+
+        var builder = new UriBuilder(loginUri)
+        {
+            Query = $"email={Uri.EscapeDataString(email.Trim())}"
+        };
+        return builder.Uri.ToString();
+    }
 }

@@ -46,6 +46,11 @@ public interface IManagedHostService
         IProgress<ManagedHostLmsInstallProgressUpdate>? progress = null,
         CancellationToken cancellationToken = default);
 
+    Task<ManagedHostLmsInstallResult> RegisterLmsHostAsync(
+        Guid id,
+        IProgress<ManagedHostLmsInstallProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default);
+
     Task<ManagedHostLmsInstallResult> UninstallLmsAsync(
         Guid id,
         ManagedHostLmsUninstallOptions options,

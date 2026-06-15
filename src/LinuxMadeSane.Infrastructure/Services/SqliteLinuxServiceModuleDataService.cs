@@ -22,11 +22,14 @@ public sealed class SqliteLinuxServiceModuleDataService(
 {
     public async Task<IReadOnlyList<LinuxServiceDefinition>> ListServicesAsync(CancellationToken cancellationToken = default)
     {
-        var liveServices = await LoadLiveServicesAsync(cancellationToken);
-        var overrides = await dbContext.LinuxServices
+        var liveServicesTask = LoadLiveServicesAsync(cancellationToken);
+        var overridesTask = dbContext.LinuxServices
             .AsNoTracking()
             .ToListAsync(cancellationToken);
 
+        await Task.WhenAll(liveServicesTask, overridesTask);
+        var liveServices = await liveServicesTask;
+        var overrides = await overridesTask;
         var overridesByUnit = overrides.ToDictionary(item => item.UnitName, StringComparer.OrdinalIgnoreCase);
 
         return liveServices
@@ -102,7 +105,7 @@ public sealed class SqliteLinuxServiceModuleDataService(
         ServiceControlAction action,
         CancellationToken cancellationToken = default)
     {
-        var service = await GetServiceAsync(serviceId, cancellationToken)
+        var service = await ResolveServiceForLiveOperationAsync(serviceId, cancellationToken)
             ?? throw new InvalidOperationException("Service was not found on the local machine.");
 
         var verb = action switch
@@ -134,7 +137,7 @@ public sealed class SqliteLinuxServiceModuleDataService(
 
     public async Task<ServiceInspectionResult> InspectServiceAsync(Guid serviceId, CancellationToken cancellationToken = default)
     {
-        var service = await GetServiceAsync(serviceId, cancellationToken)
+        var service = await ResolveServiceForLiveOperationAsync(serviceId, cancellationToken)
             ?? throw new InvalidOperationException("Service was not found on the local machine.");
 
         var properties = await GetSystemdPropertiesAsync(service.UnitName, cancellationToken)
@@ -357,16 +360,19 @@ public sealed class SqliteLinuxServiceModuleDataService(
 
     private async Task<IReadOnlyList<LinuxServiceDefinition>> LoadLiveServicesAsync(CancellationToken cancellationToken)
     {
-        var serviceRows = await RunCommandAsync(
+        var serviceRowsTask = RunCommandAsync(
             "systemctl",
             ["list-units", "--type=service", "--all", "--no-legend", "--plain"],
             cancellationToken);
 
-        var unitFileRows = await RunCommandAsync(
+        var unitFileRowsTask = RunCommandAsync(
             "systemctl",
             ["list-unit-files", "--type=service", "--no-legend", "--plain"],
             cancellationToken);
 
+        await Task.WhenAll(serviceRowsTask, unitFileRowsTask);
+        var serviceRows = await serviceRowsTask;
+        var unitFileRows = await unitFileRowsTask;
         var unitStates = ParseUnitFileStates(unitFileRows);
 
         return serviceRows
@@ -414,6 +420,22 @@ public sealed class SqliteLinuxServiceModuleDataService(
             lastStart,
             0,
             logs.Where(line => line.Contains("fail", StringComparison.OrdinalIgnoreCase) || line.Contains("error", StringComparison.OrdinalIgnoreCase)).Take(5).ToArray());
+    }
+
+    private async Task<LinuxServiceDefinition?> ResolveServiceForLiveOperationAsync(Guid serviceId, CancellationToken cancellationToken)
+    {
+        var services = await ListServicesAsync(cancellationToken);
+        var selected = services.FirstOrDefault(service => service.Id == serviceId);
+        if (selected is not null)
+        {
+            return selected;
+        }
+
+        var entity = await dbContext.LinuxServices
+            .AsNoTracking()
+            .SingleOrDefaultAsync(service => service.Id == serviceId, cancellationToken);
+
+        return entity is null ? null : Map(entity);
     }
 
     private async Task<Dictionary<string, string>?> GetSystemdPropertiesAsync(string unitName, CancellationToken cancellationToken)
