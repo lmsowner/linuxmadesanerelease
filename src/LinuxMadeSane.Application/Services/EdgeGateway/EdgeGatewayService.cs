@@ -38,12 +38,13 @@ public sealed class EdgeGatewayService(
     private const int StatusFound = 302;
     private const int StatusForbidden = 403;
     private const int StatusNotFound = 404;
+    private static readonly TimeSpan AuditDeduplicationWindow = TimeSpan.FromMinutes(5);
 
     public async Task<EdgeGatewayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default)
     {
         var settingsTask = GetGatewaySettingsAsync(cancellationToken);
         var routesTask = store.ListRoutesAsync(cancellationToken);
-        var auditEntriesTask = store.ListAuditEntriesAsync(take: 80, cancellationToken: cancellationToken);
+        var auditEntriesTask = store.ListAuditEntriesAsync(take: 250, cancellationToken: cancellationToken);
 
         var settings = await settingsTask;
         var connectorStatusTask = TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
@@ -53,7 +54,9 @@ public sealed class EdgeGatewayService(
 
         await Task.WhenAll(routesTask, auditEntriesTask, cloudflareTask, runtimeTask);
         var routes = await routesTask;
-        var auditEntries = await auditEntriesTask;
+        var auditEntries = CollapseRepeatedAuditEntries(await auditEntriesTask)
+            .Take(80)
+            .ToArray();
         var cloudflare = await cloudflareTask;
         var runtime = await runtimeTask;
         var generatedCaddyfile = caddyfileGenerator.Generate(routes);
@@ -1295,14 +1298,7 @@ public sealed class EdgeGatewayService(
     public Task<IReadOnlyList<EdgeGatewayAuditEntry>> ListAuditEntriesAsync(
         EdgeGatewayAuditFilter filter,
         CancellationToken cancellationToken = default) =>
-        store.ListAuditEntriesAsync(
-            filter.Hostname,
-            filter.UserEmail,
-            filter.Decision,
-            filter.FromUtc,
-            filter.ToUtc,
-            Math.Clamp(filter.Take, 1, 1000),
-            cancellationToken);
+        ListCollapsedAuditEntriesAsync(filter, cancellationToken);
 
     public async Task<EdgeGatewayAuthCheckResult> EvaluateAuthAsync(
         EdgeGatewayAuthCheckContext context,
@@ -1570,7 +1566,8 @@ public sealed class EdgeGatewayService(
         var targetPath = IsEdgeAuthenticationPath(requestedPath) ? "/" : requestedPath;
         var targetUrl = BuildRequestedUrl(requestedHost, targetPath);
         var safeReturnPath = await BuildSafeReturnPathAsync(targetUrl, cancellationToken);
-        var loginPath = $"/login?returnUrl={Uri.EscapeDataString(safeReturnPath)}&error={Uri.EscapeDataString(reason)}";
+        var loginPath =
+            $"{EdgeGatewayAuthenticationPaths.Login}?returnUrl={Uri.EscapeDataString(safeReturnPath)}&error={Uri.EscapeDataString(reason)}";
         var location = string.IsNullOrWhiteSpace(options.PublicLoginBaseUrl)
             ? loginPath
             : $"{options.PublicLoginBaseUrl.TrimEnd('/')}{loginPath}";
@@ -1597,6 +1594,25 @@ public sealed class EdgeGatewayService(
     {
         await AddAuditAsync(route, requestedHost, requestedPath, sourceIp, userEmail, decision, reason, authMode, cancellationToken);
         return new EdgeGatewayAuthCheckResult(statusCode, decision, reason);
+    }
+
+    private async Task<IReadOnlyList<EdgeGatewayAuditEntry>> ListCollapsedAuditEntriesAsync(
+        EdgeGatewayAuditFilter filter,
+        CancellationToken cancellationToken)
+    {
+        var requestedTake = Math.Clamp(filter.Take, 1, 1000);
+        var entries = await store.ListAuditEntriesAsync(
+            filter.Hostname,
+            filter.UserEmail,
+            filter.Decision,
+            filter.FromUtc,
+            filter.ToUtc,
+            Math.Min(requestedTake * 4, 1000),
+            cancellationToken);
+
+        return CollapseRepeatedAuditEntries(entries)
+            .Take(requestedTake)
+            .ToArray();
     }
 
     private async Task<EdgeGatewayRoute?> FindRouteForRequestAsync(
@@ -1653,10 +1669,55 @@ public sealed class EdgeGatewayService(
         string reason,
         EdgeGatewayAuthMode authMode,
         CancellationToken cancellationToken) =>
-        store.AddAuditEntryAsync(
+        AddAuditEntryUnlessRepeatedAsync(
+            route,
+            hostname,
+            requestedPath,
+            sourceIp,
+            userEmail,
+            decision,
+            reason,
+            authMode,
+            cancellationToken);
+
+    private async Task AddAuditEntryUnlessRepeatedAsync(
+        EdgeGatewayRoute? route,
+        string hostname,
+        string requestedPath,
+        string sourceIp,
+        string userEmail,
+        EdgeGatewayDecision decision,
+        string reason,
+        EdgeGatewayAuthMode authMode,
+        CancellationToken cancellationToken)
+    {
+        var timestampUtc = DateTimeOffset.UtcNow;
+        var recentEntries = await store.ListAuditEntriesAsync(
+            hostname,
+            string.IsNullOrWhiteSpace(userEmail) ? null : userEmail,
+            decision.ToString(),
+            timestampUtc.Subtract(AuditDeduplicationWindow),
+            timestampUtc,
+            take: 25,
+            cancellationToken);
+
+        if (recentEntries.Any(entry => IsSameAuditBucket(
+                entry,
+                route,
+                hostname,
+                sourceIp,
+                userEmail,
+                decision,
+                reason,
+                authMode)))
+        {
+            return;
+        }
+
+        await store.AddAuditEntryAsync(
             new EdgeGatewayAuditEntry(
                 Guid.NewGuid(),
-                DateTimeOffset.UtcNow,
+                timestampUtc,
                 hostname,
                 route?.Id,
                 requestedPath,
@@ -1666,6 +1727,71 @@ public sealed class EdgeGatewayService(
                 reason,
                 authMode),
             cancellationToken);
+    }
+
+    private static IReadOnlyList<EdgeGatewayAuditEntry> CollapseRepeatedAuditEntries(
+        IReadOnlyList<EdgeGatewayAuditEntry> entries)
+    {
+        var collapsed = new List<EdgeGatewayAuditEntry>(entries.Count);
+        foreach (var entry in entries.OrderByDescending(static item => item.TimestampUtc))
+        {
+            if (collapsed.Any(existing =>
+                    entry.TimestampUtc <= existing.TimestampUtc &&
+                    existing.TimestampUtc - entry.TimestampUtc <= AuditDeduplicationWindow &&
+                    IsSameAuditBucket(
+                        entry,
+                        existing.RouteId,
+                        existing.Hostname,
+                        existing.SourceIp,
+                        existing.UserEmail,
+                        existing.Decision,
+                        existing.Reason,
+                        existing.AuthMode)))
+            {
+                continue;
+            }
+
+            collapsed.Add(entry);
+        }
+
+        return collapsed;
+    }
+
+    private static bool IsSameAuditBucket(
+        EdgeGatewayAuditEntry entry,
+        EdgeGatewayRoute? route,
+        string hostname,
+        string sourceIp,
+        string userEmail,
+        EdgeGatewayDecision decision,
+        string reason,
+        EdgeGatewayAuthMode authMode) =>
+        IsSameAuditBucket(
+            entry,
+            route?.Id,
+            hostname,
+            sourceIp,
+            userEmail,
+            decision,
+            reason,
+            authMode);
+
+    private static bool IsSameAuditBucket(
+        EdgeGatewayAuditEntry entry,
+        Guid? routeId,
+        string hostname,
+        string sourceIp,
+        string userEmail,
+        EdgeGatewayDecision decision,
+        string reason,
+        EdgeGatewayAuthMode authMode) =>
+        entry.RouteId == routeId &&
+        entry.Decision == decision &&
+        entry.AuthMode == authMode &&
+        string.Equals(entry.Hostname, hostname, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(entry.SourceIp, sourceIp, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(entry.UserEmail, userEmail, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(entry.Reason, reason, StringComparison.Ordinal);
 
     private bool IsTrustedAuthProxy(IPAddress? remoteIpAddress)
     {
@@ -1817,10 +1943,9 @@ public sealed class EdgeGatewayService(
         }
 
         var path = requestedPath.Split('?', 2)[0].Trim();
-        return IsPathOrChild(path, "/login") ||
-               IsPathOrChild(path, "/auth") ||
-               IsPathOrChild(path, "/edge-auth") ||
-               IsPathOrChild(path, "/access-denied");
+        return IsPathOrChild(path, EdgeGatewayAuthenticationPaths.Login) ||
+               IsPathOrChild(path, EdgeGatewayAuthenticationPaths.ApiPrefix) ||
+               IsPathOrChild(path, "/edge-auth");
     }
 
     private static bool IsPathOrChild(string path, string prefix) =>

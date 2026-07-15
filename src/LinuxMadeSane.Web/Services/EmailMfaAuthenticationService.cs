@@ -21,12 +21,21 @@ public sealed class EmailMfaAuthenticationService(
 {
     private static readonly TimeSpan ChallengeLifetime = TimeSpan.FromMinutes(10);
     private const int MaximumCodeAttempts = 5;
+    private const string DefaultEmailLinkPath = "/auth/email-mfa/login";
     private const string GenericSentMessage = "If that LMS account can receive email sign-in, check your inbox for the code or secure login link.";
+
+    public Task<EmailMfaRequestResult> SendLoginChallengeAsync(
+        string email,
+        string requestOrigin,
+        string returnUrl,
+        CancellationToken cancellationToken = default) =>
+        SendLoginChallengeAsync(email, requestOrigin, returnUrl, DefaultEmailLinkPath, cancellationToken);
 
     public async Task<EmailMfaRequestResult> SendLoginChallengeAsync(
         string email,
         string requestOrigin,
         string returnUrl,
+        string emailLinkPath,
         CancellationToken cancellationToken = default)
     {
         var normalizedEmail = NormalizeEmail(email);
@@ -56,7 +65,7 @@ public sealed class EmailMfaAuthenticationService(
         memoryCache.Set(BuildEmailChallengeKey(normalizedEmail), challenge, ChallengeLifetime);
         memoryCache.Set(BuildTokenChallengeKey(token), challenge, ChallengeLifetime);
 
-        var loginLink = BuildLoginLink(requestOrigin, token, returnUrl);
+        var loginLink = BuildLoginLink(requestOrigin, token, returnUrl, emailLinkPath);
         var html = BuildEmailHtml(user.Email, code, loginLink, ChallengeLifetime);
         var result = await emailDeliveryService.SendHtmlAsync(
             user.Email,
@@ -179,16 +188,26 @@ public sealed class EmailMfaAuthenticationService(
         settings.Provider != MessagingEmailProvider.Disabled &&
         settings.LastVerifiedAtUtc.HasValue;
 
-    private static string BuildLoginLink(string requestOrigin, string token, string returnUrl)
+    private static string BuildLoginLink(string requestOrigin, string token, string returnUrl, string emailLinkPath)
     {
         var origin = ResolveRequestOrigin(requestOrigin);
         var builder = new UriBuilder(origin)
         {
-            Path = "/auth/email-mfa/login",
+            Path = NormalizeEmailLinkPath(emailLinkPath),
             Query = $"token={Uri.EscapeDataString(token)}&returnUrl={Uri.EscapeDataString(NormalizeReturnUrl(returnUrl))}"
         };
 
         return builder.Uri.ToString();
+    }
+
+    private static string NormalizeEmailLinkPath(string emailLinkPath)
+    {
+        var trimmed = emailLinkPath.Trim();
+        return trimmed.StartsWith("/", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("//", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("/\\", StringComparison.Ordinal)
+            ? trimmed
+            : DefaultEmailLinkPath;
     }
 
     private static string ResolveRequestOrigin(string requestOrigin)

@@ -51,13 +51,47 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
 
             if (route.AuthMode != EdgeGatewayAuthMode.PassThrough)
             {
+                var authAssetMatcherName = BuildAuthAssetMatcherName(route);
+                var authReturnMatcherName = BuildAuthReturnMatcherName(route);
                 builder.AppendLine($"    @{authMatcherName} {{");
                 builder.AppendLine($"        host {route.Hostname}");
-                builder.AppendLine("        path /InitialSetup /initial-setup /login /login/* /auth/initial-setup/* /auth/login /auth/logout /auth/setup-passkey /auth/email-mfa/* /edge-auth/* /api/email-mfa/login/* /api/passkeys/login/* /api/passkeys/enroll/* /api/passkeys/register/* /access-denied /scripts/theme*.js /scripts/passkeys*.js /styles/* /lib/xterm/* /lib/pdfjs/pdf_viewer*.css /app*.css /LinuxMadeSane.Web*.styles.css /Components/Pages/Login* /Components/Pages/InitialSetup* /Components/Pages/PasskeySetupPrompt* /images/lms-auth-panel.png /images/lms-splash.png /favicon.png /favicon.ico");
+                builder.AppendLine($"        path {EdgeGatewayAuthenticationPaths.Login} {EdgeGatewayAuthenticationPaths.ApiPrefix}/* /InitialSetup /initial-setup /auth/initial-setup/*");
                 builder.AppendLine("    }");
                 builder.AppendLine($"    handle @{authMatcherName} {{");
                 builder.AppendLine($"        reverse_proxy 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
+                builder.AppendLine("            header_up Host {host}");
                 builder.AppendLine("            header_up X-Forwarded-Proto https");
+                builder.AppendLine("            header_up X-Forwarded-Host {host}");
+                builder.AppendLine("            header_up X-Forwarded-Port 443");
+                builder.AppendLine("        }");
+                builder.AppendLine("    }");
+                builder.AppendLine();
+                builder.AppendLine($"    @{authAssetMatcherName} {{");
+                builder.AppendLine($"        host {route.Hostname}");
+                builder.AppendLine("        path /scripts/theme*.js /scripts/passkeys*.js /styles/* /lib/xterm/* /lib/pdfjs/pdf_viewer*.css /app*.css /LinuxMadeSane.Web*.styles.css /Components/Pages/Login* /Components/Pages/InitialSetup* /images/lms-auth-panel.png /images/lms-splash.png /images/lms-logo-180.png /favicon.png /favicon.ico");
+                builder.AppendLine("        not {");
+                builder.AppendLine("            header Cookie *lms.remote=*");
+                builder.AppendLine("        }");
+                builder.AppendLine("    }");
+                builder.AppendLine($"    handle @{authAssetMatcherName} {{");
+                builder.AppendLine($"        reverse_proxy 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
+                builder.AppendLine("            header_up Host {host}");
+                builder.AppendLine("            header_up X-Forwarded-Proto https");
+                builder.AppendLine("            header_up X-Forwarded-Host {host}");
+                builder.AppendLine("            header_up X-Forwarded-Port 443");
+                builder.AppendLine("        }");
+                builder.AppendLine("    }");
+                builder.AppendLine();
+                builder.AppendLine($"    @{authReturnMatcherName} {{");
+                builder.AppendLine($"        host {route.Hostname}");
+                builder.AppendLine("        path /edge-auth/*");
+                builder.AppendLine("    }");
+                builder.AppendLine($"    handle @{authReturnMatcherName} {{");
+                builder.AppendLine($"        reverse_proxy 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
+                builder.AppendLine("            header_up Host {host}");
+                builder.AppendLine("            header_up X-Forwarded-Proto https");
+                builder.AppendLine("            header_up X-Forwarded-Host {host}");
+                builder.AppendLine("            header_up X-Forwarded-Port 443");
                 builder.AppendLine("        }");
                 builder.AppendLine("    }");
                 builder.AppendLine();
@@ -82,6 +116,11 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
             {
                 builder.AppendLine($"        forward_auth 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
                 builder.AppendLine("            uri /edge-auth/check");
+                builder.AppendLine("            header_up Cookie {http.request.header.Cookie}");
+                builder.AppendLine("            header_up X-Forwarded-Proto https");
+                builder.AppendLine("            header_up X-Forwarded-Host {host}");
+                builder.AppendLine("            header_up X-Forwarded-Uri {uri}");
+                builder.AppendLine("            header_up X-Forwarded-Port 443");
                 builder.AppendLine("            copy_headers X-LMS-User X-LMS-Email X-LMS-Groups");
                 builder.AppendLine("        }");
                 builder.AppendLine();
@@ -131,6 +170,12 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
 
     private static string BuildAuthMatcherName(EdgeGatewayRoute route) =>
         $"edge_auth_{route.Id:N}";
+
+    private static string BuildAuthAssetMatcherName(EdgeGatewayRoute route) =>
+        $"edge_auth_assets_{route.Id:N}";
+
+    private static string BuildAuthReturnMatcherName(EdgeGatewayRoute route) =>
+        $"edge_auth_return_{route.Id:N}";
 
     private string BuildReverseProxyBlock(EdgeGatewayRoute route)
     {

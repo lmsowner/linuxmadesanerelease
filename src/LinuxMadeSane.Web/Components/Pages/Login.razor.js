@@ -15,6 +15,10 @@ for (const form of forms) {
     const emailCodeGroup = form.querySelector("[data-email-code-group]");
     const emailCodeHiddenInput = form.querySelector("[data-email-code-hidden]");
     const emailCodeInputs = Array.from(form.querySelectorAll("[data-email-code-digit]"));
+    const passkeyOptionsUrl = form.dataset.passkeyOptionsUrl || "/api/passkeys/login/options";
+    const passkeyCompleteUrl = form.dataset.passkeyCompleteUrl || "/api/passkeys/login/complete";
+    const emailMfaSendUrl = form.dataset.emailMfaSendUrl || "/api/email-mfa/login/send";
+    const emailMfaCompleteUrl = form.dataset.emailMfaCompleteUrl || "/api/email-mfa/login/complete";
     let isSubmitting = false;
     let isCompletingEmailCode = false;
 
@@ -38,6 +42,9 @@ for (const form of forms) {
     };
 
     const codeValue = () => digitInputs.map(input => input.value).join("");
+
+    const appendReturnUrl = endpoint =>
+        `${endpoint}${endpoint.includes("?") ? "&" : "?"}returnUrl=${encodeURIComponent(returnUrlInput.value || "/")}`;
 
     const syncHiddenInput = () => {
         hiddenInput.value = codeValue();
@@ -185,7 +192,7 @@ for (const form of forms) {
             setAuthStatus("Waiting for device MFA...");
 
             try {
-                const optionsResponse = await postJson("/api/passkeys/login/options", { email });
+                const optionsResponse = await postJson(passkeyOptionsUrl, { email });
                 if (!optionsResponse.succeeded) {
                     setAuthStatus(optionsResponse.message ?? "No passkey is available for this email.", true);
                     return;
@@ -199,7 +206,7 @@ for (const form of forms) {
                 }
 
                 const completeResponse = await postJson(
-                    `/api/passkeys/login/complete?returnUrl=${encodeURIComponent(returnUrlInput.value || "/")}`,
+                    appendReturnUrl(passkeyCompleteUrl),
                     {
                         stateId: optionsResponse.stateId,
                         credential: publicKeyCredentialToJson(credential)
@@ -232,7 +239,7 @@ for (const form of forms) {
             setAuthStatus("Sending secure email...");
 
             try {
-                const response = await postJson("/api/email-mfa/login/send", {
+                const response = await postJson(emailMfaSendUrl, {
                     email,
                     returnUrl: returnUrlInput.value || "/"
                 });
@@ -315,7 +322,7 @@ for (const form of forms) {
         setAuthStatus("Verifying email code...");
 
         try {
-            const response = await postJson("/api/email-mfa/login/complete", {
+            const response = await postJson(emailMfaCompleteUrl, {
                 email,
                 code,
                 returnUrl: returnUrlInput.value || "/"

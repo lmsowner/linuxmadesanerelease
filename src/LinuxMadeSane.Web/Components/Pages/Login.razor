@@ -2,8 +2,11 @@
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/login"
+@page "/LMSMFALogin"
 @layout AuthLayout
+@using LinuxMadeSane.Application.Contracts.EdgeGateway
 @inject LocalAccessRecoveryService AccessRecovery
+@inject NavigationManager Navigation
 
 <script type="module" src="@Assets["Components/Pages/Login.razor.js"]"></script>
 
@@ -26,7 +29,13 @@
             <p class="callout error">@Error</p>
         }
 
-        <form method="post" action="/auth/login" class="stack-form auth-login-form">
+        <form method="post"
+              action="@LoginPostPath"
+              class="stack-form auth-login-form"
+              data-passkey-options-url="@PasskeyOptionsPath"
+              data-passkey-complete-url="@PasskeyCompletePath"
+              data-email-mfa-send-url="@EmailMfaSendPath"
+              data-email-mfa-complete-url="@EmailMfaCompletePath">
             <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
 
             <label class="auth-login-field-group">
@@ -166,7 +175,7 @@
             <p class="auth-login-footnote">For Edge Gateway routes, LMS checks this local session before proxying.</p>
         </form>
 
-        @if (showRecovery)
+        @if (showRecovery && !IsEdgeGatewayLogin)
         {
             <form method="post" action="/auth/recovery" class="stack-form auth-recovery-form">
                 <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
@@ -217,7 +226,20 @@
 
     private bool showRecovery;
 
+    private bool IsEdgeGatewayLogin =>
+        new Uri(Navigation.Uri).AbsolutePath.Equals(EdgeGatewayAuthenticationPaths.Login, StringComparison.OrdinalIgnoreCase);
+
     private string NormalizedReturnUrl => NormalizeReturnUrl(ReturnUrl);
+
+    private string LoginPostPath => IsEdgeGatewayLogin ? EdgeGatewayAuthenticationPaths.LoginPost : "/auth/login";
+
+    private string PasskeyOptionsPath => IsEdgeGatewayLogin ? EdgeGatewayAuthenticationPaths.PasskeyOptions : "/api/passkeys/login/options";
+
+    private string PasskeyCompletePath => IsEdgeGatewayLogin ? EdgeGatewayAuthenticationPaths.PasskeyComplete : "/api/passkeys/login/complete";
+
+    private string EmailMfaSendPath => IsEdgeGatewayLogin ? EdgeGatewayAuthenticationPaths.EmailSend : "/api/email-mfa/login/send";
+
+    private string EmailMfaCompletePath => IsEdgeGatewayLogin ? EdgeGatewayAuthenticationPaths.EmailComplete : "/api/email-mfa/login/complete";
 
     protected override async Task OnParametersSetAsync()
     {
