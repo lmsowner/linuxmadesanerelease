@@ -15,6 +15,9 @@ public sealed class EdgeGatewayRouteEntity
     public int TargetPort { get; set; }
     public string TargetPathPrefix { get; set; } = string.Empty;
     public int AuthMode { get; set; }
+    public bool UsePublicHostHeader { get; set; }
+    public bool StripForwardedFor { get; set; }
+    public bool SkipUpstreamTlsVerification { get; set; }
     public string AllowedUsers { get; set; } = string.Empty;
     public string AllowedGroups { get; set; } = string.Empty;
     public bool AllowLanOnly { get; set; }

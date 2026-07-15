@@ -114,6 +114,18 @@
                                                                     @BuildRouteAccessLabel(route.AuthMode)
                                                                 </UiPill>
                                                                 <UiPill Tone="@GetStatusTone(route.LastTestStatus)">@BuildRouteTestStatusLabel(route.LastTestStatus)</UiPill>
+                                                                @if (route.UsePublicHostHeader)
+                                                                {
+                                                                    <UiPill Tone="UiPillTone.Neutral">Public Host</UiPill>
+                                                                }
+                                                                @if (route.StripForwardedFor)
+                                                                {
+                                                                    <UiPill Tone="UiPillTone.Neutral">XFF stripped</UiPill>
+                                                                }
+                                                                @if (route.SkipUpstreamTlsVerification && IsHttpsTarget(route))
+                                                                {
+                                                                    <UiPill Tone="UiPillTone.Warning">TLS verify skipped</UiPill>
+                                                                }
                                                             </div>
                                                             <div class="edge-route-actions">
                                                                 <UiCommandButton Label="@BuildRouteToggleLabel(route)"
@@ -771,6 +783,23 @@
                                 <UiCheckboxField @bind-Value="routeEditor.AllowLanOnly" Label="LAN sources only" Helper="Reject public source IPs before auth policy checks." Compact="true" />
                             </div>
                         </div>
+                        <div class="edge-proxy-options-grid">
+                            <UiCheckboxField @bind-Value="routeEditor.UsePublicHostHeader"
+                                             Label="Send public Host header"
+                                             Helper="Send the browser-facing hostname upstream instead of the backend host and port."
+                                             Compact="true"
+                                             Card="true" />
+                            <UiCheckboxField @bind-Value="routeEditor.StripForwardedFor"
+                                             Label="Strip X-Forwarded-For"
+                                             Helper="Remove forwarded client IP data before the request reaches the backend."
+                                             Compact="true"
+                                             Card="true" />
+                            <UiCheckboxField @bind-Value="routeEditor.SkipUpstreamTlsVerification"
+                                             Label="Skip upstream TLS verification"
+                                             Helper="For HTTPS backends with self-signed, local, or mismatched certificates."
+                                             Compact="true"
+                                             Card="true" />
+                        </div>
                     </details>
 
                     <ValidationSummary />
@@ -1368,6 +1397,7 @@
         routeEditor.TargetHost = "127.0.0.1";
         routeEditor.TargetPort = Math.Clamp(EdgeGatewayOptions.LmsForwardAuthPort, 1, 65535);
         routeEditor.AuthMode = EdgeGatewayAuthMode.PassThrough;
+        routeEditor.StripForwardedFor = false;
         routeEditor.Notes = "Exposes the LMS web UI. LMS handles login directly.";
         if (string.IsNullOrWhiteSpace(routeEditor.DomainName) && CloudflareDomains.Count > 0)
         {
@@ -2210,6 +2240,9 @@
         EdgeGatewayDiagnosticStatus.Broken => "Failed",
         _ => "Unknown"
     };
+
+    private static bool IsHttpsTarget(EdgeGatewayRouteListItem route) =>
+        route.TargetUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
 
     private static string BuildRuntimeStatusLabel(EdgeGatewayDiagnosticStatus status) => status switch
     {

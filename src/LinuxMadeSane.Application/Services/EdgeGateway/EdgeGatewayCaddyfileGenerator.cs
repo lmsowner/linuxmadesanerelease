@@ -136,17 +136,31 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
     {
         var targetUrl = EdgeGatewayRouteValidator.BuildTargetUrl(route);
         var shouldTreatAsLocalLmsHop = IsPassThroughLocalLmsBackend(route);
-        var shouldSkipBackendTlsVerification = route.TargetScheme == EdgeGatewayTargetScheme.Https;
+        var shouldSkipBackendTlsVerification = route.TargetScheme == EdgeGatewayTargetScheme.Https &&
+                                               route.SkipUpstreamTlsVerification;
 
         var builder = new StringBuilder();
         builder.AppendLine($"        reverse_proxy {targetUrl} {{");
-        builder.AppendLine("            header_up X-Forwarded-Proto https");
-        builder.AppendLine("            header_up X-Forwarded-Host {host}");
-        builder.AppendLine("            header_up X-Forwarded-Port 443");
-        if (shouldTreatAsLocalLmsHop)
+        builder.AppendLine(route.UsePublicHostHeader
+            ? "            header_up Host {host}"
+            : "            header_up Host {upstream_hostport}");
+        if (route.StripForwardedFor)
+        {
+            builder.AppendLine("            header_up -X-Forwarded-For");
+        }
+        else if (shouldTreatAsLocalLmsHop)
         {
             builder.AppendLine("            header_up X-Forwarded-For 127.0.0.1");
         }
+
+        if (route.UsePublicHostHeader)
+        {
+            builder.AppendLine("            header_up X-Real-IP {remote_host}");
+        }
+
+        builder.AppendLine("            header_up X-Forwarded-Proto https");
+        builder.AppendLine("            header_up X-Forwarded-Host {host}");
+        builder.AppendLine("            header_up X-Forwarded-Port 443");
 
         if (shouldSkipBackendTlsVerification)
         {

@@ -172,6 +172,9 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
             Enum.IsDefined(typeof(EdgeGatewayAuthMode), entity.AuthMode)
                 ? (EdgeGatewayAuthMode)entity.AuthMode
                 : EdgeGatewayAuthMode.RequireMfa,
+            entity.UsePublicHostHeader,
+            entity.StripForwardedFor,
+            entity.SkipUpstreamTlsVerification,
             entity.AllowedUsers,
             entity.AllowedGroups,
             entity.AllowLanOnly,
@@ -202,6 +205,9 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
             TargetPort = route.TargetPort,
             TargetPathPrefix = route.TargetPathPrefix,
             AuthMode = (int)route.AuthMode,
+            UsePublicHostHeader = route.UsePublicHostHeader,
+            StripForwardedFor = route.StripForwardedFor,
+            SkipUpstreamTlsVerification = route.SkipUpstreamTlsVerification,
             AllowedUsers = route.AllowedUsers,
             AllowedGroups = route.AllowedGroups,
             AllowLanOnly = route.AllowLanOnly,
@@ -229,6 +235,9 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
         entity.TargetPort = route.TargetPort;
         entity.TargetPathPrefix = route.TargetPathPrefix;
         entity.AuthMode = (int)route.AuthMode;
+        entity.UsePublicHostHeader = route.UsePublicHostHeader;
+        entity.StripForwardedFor = route.StripForwardedFor;
+        entity.SkipUpstreamTlsVerification = route.SkipUpstreamTlsVerification;
         entity.AllowedUsers = route.AllowedUsers;
         entity.AllowedGroups = route.AllowedGroups;
         entity.AllowLanOnly = route.AllowLanOnly;
