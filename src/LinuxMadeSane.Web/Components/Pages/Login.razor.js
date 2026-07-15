@@ -31,6 +31,8 @@ for (const form of forms) {
         continue;
     }
 
+    form.classList.add("is-scripted");
+
     const setAuthStatus = (message, isError = false) => {
         if (!(passkeyStatus instanceof HTMLElement)) {
             return;
