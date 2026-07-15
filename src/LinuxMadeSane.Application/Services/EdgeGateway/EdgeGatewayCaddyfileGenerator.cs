@@ -69,9 +69,6 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
                 builder.AppendLine($"    @{authAssetMatcherName} {{");
                 builder.AppendLine($"        host {route.Hostname}");
                 builder.AppendLine("        path /scripts/theme*.js /scripts/passkeys*.js /styles/* /lib/xterm/* /lib/pdfjs/pdf_viewer*.css /app*.css /LinuxMadeSane.Web*.styles.css /Components/Pages/Login* /Components/Pages/InitialSetup* /images/lms-auth-panel.png /images/lms-splash.png /images/lms-logo-180.png /favicon.png /favicon.ico");
-                builder.AppendLine("        not {");
-                builder.AppendLine("            header Cookie *lms.remote=*");
-                builder.AppendLine("        }");
                 builder.AppendLine("    }");
                 builder.AppendLine($"    handle @{authAssetMatcherName} {{");
                 builder.AppendLine($"        reverse_proxy 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
