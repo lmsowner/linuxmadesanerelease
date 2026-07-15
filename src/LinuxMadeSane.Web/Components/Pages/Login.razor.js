@@ -10,8 +10,7 @@ for (const form of forms) {
     const passkeyButton = form.querySelector("[data-passkey-login]");
     const emailMfaButton = form.querySelector("[data-email-mfa-send]");
     const passkeyStatus = form.querySelector("[data-passkey-status]");
-    const hiddenInput = form.querySelector("[data-otp-hidden]");
-    const digitInputs = Array.from(form.querySelectorAll("[data-otp-digit]"));
+    const otpInput = form.querySelector("[data-otp-input]");
     const emailCodeGroup = form.querySelector("[data-email-code-group]");
     const emailCodeHiddenInput = form.querySelector("[data-email-code-hidden]");
     const emailCodeInputs = Array.from(form.querySelectorAll("[data-email-code-digit]"));
@@ -25,9 +24,7 @@ for (const form of forms) {
     if (!(form instanceof HTMLFormElement) ||
         !(emailInput instanceof HTMLInputElement) ||
         !(returnUrlInput instanceof HTMLInputElement) ||
-        !(hiddenInput instanceof HTMLInputElement) ||
-        digitInputs.length !== otpLength ||
-        digitInputs.some(input => !(input instanceof HTMLInputElement))) {
+        !(otpInput instanceof HTMLInputElement)) {
         continue;
     }
 
@@ -41,29 +38,11 @@ for (const form of forms) {
         passkeyStatus.classList.toggle("error", isError);
     };
 
-    const codeValue = () => digitInputs.map(input => input.value).join("");
-
     const appendReturnUrl = endpoint =>
         `${endpoint}${endpoint.includes("?") ? "&" : "?"}returnUrl=${encodeURIComponent(returnUrlInput.value || "/")}`;
 
-    const syncHiddenInput = () => {
-        hiddenInput.value = codeValue();
-    };
-
-    const focusDigit = index => {
-        const input = digitInputs[index];
-        if (!input) {
-            return;
-        }
-
-        input.focus();
-        input.select();
-    };
-
     const submitWhenComplete = () => {
-        syncHiddenInput();
-
-        if (isSubmitting || !/^\d{6}$/.test(hiddenInput.value)) {
+        if (isSubmitting || !/^\d{6}$/.test(otpInput.value)) {
             return;
         }
 
@@ -75,98 +54,16 @@ for (const form of forms) {
         form.requestSubmit();
     };
 
-    const setCode = (rawValue, startIndex = 0) => {
-        const digits = rawValue.replace(/\D/g, "").slice(0, otpLength - startIndex).split("");
-        if (digits.length === 0) {
-            return;
-        }
-
-        digits.forEach((digit, offset) => {
-            digitInputs[startIndex + offset].value = digit;
-        });
-
-        syncHiddenInput();
-
-        const nextIndex = Math.min(startIndex + digits.length, otpLength - 1);
-        focusDigit(nextIndex);
+    const normalizeOtpInput = () => {
+        otpInput.value = otpInput.value.replace(/\D/g, "").slice(0, otpLength);
         submitWhenComplete();
     };
 
-    const clearFrom = index => {
-        digitInputs.slice(index).forEach(input => {
-            input.value = "";
-        });
-
-        syncHiddenInput();
-    };
-
-    digitInputs.forEach((input, index) => {
-        input.addEventListener("focus", () => input.select());
-
-        input.addEventListener("input", event => {
-            const target = event.target;
-            const value = target.value.replace(/\D/g, "");
-
-            if (value.length > 1) {
-                clearFrom(0);
-                setCode(value, 0);
-                return;
-            }
-
-            target.value = value;
-            syncHiddenInput();
-
-            if (value !== "" && index < otpLength - 1) {
-                focusDigit(index + 1);
-            }
-
-            submitWhenComplete();
-        });
-
-        input.addEventListener("keydown", event => {
-            if (event.key === "Backspace") {
-                event.preventDefault();
-                if (input.value !== "") {
-                    input.value = "";
-                } else if (index > 0) {
-                    digitInputs[index - 1].value = "";
-                }
-
-                syncHiddenInput();
-                focusDigit(Math.max(0, index - 1));
-                return;
-            }
-
-            if (event.key === "Delete") {
-                event.preventDefault();
-                input.value = "";
-                syncHiddenInput();
-                focusDigit(Math.max(0, index - 1));
-                return;
-            }
-
-            if (event.key === "ArrowLeft" && index > 0) {
-                event.preventDefault();
-                focusDigit(index - 1);
-                return;
-            }
-
-            if (event.key === "ArrowRight" && index < otpLength - 1) {
-                event.preventDefault();
-                focusDigit(index + 1);
-            }
-        });
-
-        input.addEventListener("paste", event => {
-            event.preventDefault();
-            const pasted = event.clipboardData?.getData("text") ?? "";
-            clearFrom(0);
-            setCode(pasted, 0);
-        });
-    });
+    otpInput.addEventListener("input", normalizeOtpInput);
+    otpInput.addEventListener("paste", () => window.setTimeout(normalizeOtpInput, 0));
 
     form.addEventListener("submit", () => {
-        syncHiddenInput();
+        otpInput.value = otpInput.value.replace(/\D/g, "").slice(0, otpLength);
     });
 
     if (passkeyButton instanceof HTMLButtonElement) {
