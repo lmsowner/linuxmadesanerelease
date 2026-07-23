@@ -1,0 +1,67 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+<div class="terminal-connect-as-submenu">
+    <button type="button"
+            class="ui-context-menu-button terminal-connect-as-trigger"
+            title="Connect this terminal using another Linux account"
+            disabled="@Disabled">
+        <span class="ui-context-menu-button-icon" aria-hidden="true">
+            <UiGlyphIcon Glyph="UiIconGlyph.User" />
+        </span>
+        <span class="ui-context-menu-button-label">Connect as...</span>
+        <span class="terminal-connect-as-arrow" aria-hidden="true">›</span>
+    </button>
+
+    <div class="terminal-connect-as-panel">
+        <UiContextMenuButton Label="@HostDefaultLabel"
+                             Glyph="UiIconGlyph.Key"
+                             OnClick="@(() => RequestConnectionAsync(ConnectionProfileSelectionKeys.HostDefault))" />
+
+        @if (ShowLinkedLinuxUser)
+        {
+            <UiContextMenuButton Label="@LinkedLinuxUserLabel"
+                                 Glyph="UiIconGlyph.User"
+                                 OnClick="@(() => RequestConnectionAsync(ConnectionProfileSelectionKeys.LinkedLinuxUser))" />
+        }
+
+        @if (SavedUsers.Count > 0)
+        {
+            <div class="terminal-connect-as-divider"></div>
+            @foreach (var savedUser in SavedUsers)
+            {
+                <UiContextMenuButton Label="@FormatSavedUser(savedUser)"
+                                     Glyph="UiIconGlyph.User"
+                                     OnClick="@(() => RequestConnectionAsync(ConnectionProfileSelectionKeys.Saved(savedUser.Id)))" />
+            }
+        }
+
+        <div class="terminal-connect-as-divider"></div>
+        <UiContextMenuButton Label="Add connection user..."
+                             Glyph="UiIconGlyph.Plus"
+                             OnClick="AddUserRequested" />
+        <UiContextMenuButton Label="Manage saved users..."
+                             Glyph="UiIconGlyph.Edit"
+                             Disabled="@(SavedUsers.Count == 0)"
+                             OnClick="ManageUsersRequested" />
+    </div>
+</div>
+
+@code {
+    [Parameter] public string HostDefaultLabel { get; set; } = "Host default";
+    [Parameter] public bool ShowLinkedLinuxUser { get; set; }
+    [Parameter] public string LinkedLinuxUserLabel { get; set; } = "My Linux user";
+    [Parameter] public IReadOnlyList<UserManagedHostCredentialProfileSummary> SavedUsers { get; set; } = [];
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public EventCallback<string> ConnectionRequested { get; set; }
+    [Parameter] public EventCallback AddUserRequested { get; set; }
+    [Parameter] public EventCallback ManageUsersRequested { get; set; }
+
+    private Task RequestConnectionAsync(string connectionProfileKey) =>
+        ConnectionRequested.InvokeAsync(connectionProfileKey);
+
+    private static string FormatSavedUser(UserManagedHostCredentialProfileSummary savedUser) =>
+        string.Equals(savedUser.Name, savedUser.Username, StringComparison.Ordinal)
+            ? savedUser.Name
+            : $"{savedUser.Name} ({savedUser.Username})";
+}

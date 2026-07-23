@@ -186,11 +186,11 @@ else
                                             {
                                                 <option value="@ConnectionProfileSelectionKeys.Saved(profile.Id)">@FormatCredentialProfileOption(profile)</option>
                                             }
-                                            <option value="@ConnectionProfileSelectionKeys.Custom">Custom...</option>
+                                            <option value="@ConnectionProfileSelectionKeys.Custom">Another user...</option>
                                         </UiSelectField>
 
                                         <UiTextField @bind-Value="connectionProfileName"
-                                                     Label="Profile name"
+                                                     Label="Saved user name"
                                                      Compact="true"
                                                      Class="host-file-inline-field" />
 
@@ -233,12 +233,12 @@ else
                                                              Variant="UiButtonVariant.Ghost"
                                                              Disabled="@isBusy"
                                                              OnClick="ResetConnectionIdentityAsync" />
-                                            <UiCommandButton Label="Save profile"
+                                            <UiCommandButton Label="Save user"
                                                              Glyph="UiIconGlyph.Save"
                                                              Variant="UiButtonVariant.Ghost"
                                                              Disabled="@(isBusy || userId is null)"
                                                              OnClick="SaveConnectionProfileAsync" />
-                                            <UiCommandButton Label="Delete profile"
+                                            <UiCommandButton Label="Delete user"
                                                              Glyph="UiIconGlyph.Delete"
                                                              Variant="UiButtonVariant.Ghost"
                                                              Disabled="@(isBusy || !CanDeleteSelectedConnectionProfile)"
@@ -634,11 +634,48 @@ else
                 <UiContextMenuButton Label="Open Terminal Here" Glyph="UiIconGlyph.Run" OnClick="OpenTerminalHereFromContextMenuAsync" Disabled="@(!CanOpenTerminalFromContextMenu || isBusy)" />
                 @if (ShowConnectionIdentityEditor)
                 {
-                    <UiContextMenuButton Label="Connect as..."
-                                         Title="Choose another Linux account or a saved connection profile"
-                                         Glyph="UiIconGlyph.User"
-                                         OnClick="OpenConnectionIdentityEditorFromContextMenuAsync"
-                                         Disabled="@isBusy" />
+                    <div class="host-file-context-submenu">
+                        <button class="ui-context-menu-button host-file-context-submenu-trigger"
+                                type="button"
+                                title="Connect this browser using another Linux account"
+                                aria-haspopup="menu"
+                                disabled="@isBusy">
+                            <span class="ui-context-menu-button-icon" aria-hidden="true">
+                                <UiGlyphIcon Glyph="UiIconGlyph.User" />
+                            </span>
+                            <span class="ui-context-menu-button-label">Connect as...</span>
+                            <span class="host-file-context-submenu-arrow" aria-hidden="true">›</span>
+                        </button>
+                        <div class="host-file-context-submenu-panel">
+                            <UiContextMenuButton Label="@BuildHostDefaultProfileLabel()"
+                                                 Glyph="UiIconGlyph.Key"
+                                                 OnClick="@(() => ConnectAsProfileFromContextMenuAsync(ConnectionProfileSelectionKeys.HostDefault))" />
+                            @if (ShouldShowLinkedLinuxUserOption)
+                            {
+                                <UiContextMenuButton Label="@BuildLinkedLinuxUserProfileLabel()"
+                                                     Glyph="UiIconGlyph.User"
+                                                     OnClick="@(() => ConnectAsProfileFromContextMenuAsync(ConnectionProfileSelectionKeys.LinkedLinuxUser))" />
+                            }
+                            @if (credentialProfiles.Count > 0)
+                            {
+                                <div class="host-file-context-submenu-divider"></div>
+                                @foreach (var profile in credentialProfiles)
+                                {
+                                    <UiContextMenuButton Label="@FormatCredentialProfileOption(profile)"
+                                                         Glyph="UiIconGlyph.User"
+                                                         OnClick="@(() => ConnectAsProfileFromContextMenuAsync(ConnectionProfileSelectionKeys.Saved(profile.Id)))" />
+                                }
+                            }
+                            <div class="host-file-context-submenu-divider"></div>
+                            <UiContextMenuButton Label="Add connection user..."
+                                                 Glyph="UiIconGlyph.Plus"
+                                                 OnClick="AddConnectionUserFromContextMenuAsync" />
+                            <UiContextMenuButton Label="Manage saved users..."
+                                                 Glyph="UiIconGlyph.Edit"
+                                                 Disabled="@(credentialProfiles.Count == 0)"
+                                                 OnClick="OpenConnectionIdentityEditorFromContextMenuAsync" />
+                        </div>
+                    </div>
                 }
                 @if (CanBrowseAsContextSuggestedUser)
                 {
@@ -3044,6 +3081,35 @@ else
     {
         DismissContextMenu();
         connectionIdentityEditorOpen = true;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ConnectAsProfileFromContextMenuAsync(string selectedConnectionProfileKey)
+    {
+        DismissContextMenu();
+        await SelectConnectionProfileAsync(selectedConnectionProfileKey);
+        if (string.Equals(operationMessageTone, "error", StringComparison.Ordinal) &&
+            !string.IsNullOrWhiteSpace(operationMessage))
+        {
+            return;
+        }
+
+        await ApplyConnectionIdentityAsync();
+    }
+
+    private Task AddConnectionUserFromContextMenuAsync()
+    {
+        DismissContextMenu();
+        ConnectionSecretStore.Delete(connectionSecretHandle);
+        connectionSecretHandle = null;
+        connectionProfileKey = ConnectionProfileSelectionKeys.Custom;
+        connectionProfileName = string.Empty;
+        connectionUsername = string.Empty;
+        preferStoredCredentials = false;
+        errorMessage = string.Empty;
+        connectionIdentityEditorOpen = true;
+        ResetConnectionScopedBrowserState();
+        PersistDetachedBrowserState();
         return InvokeAsync(StateHasChanged);
     }
 

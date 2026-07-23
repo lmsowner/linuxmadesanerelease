@@ -53,21 +53,13 @@
 
                 <div class="terminal-popup-actions">
                     <UiPill Tone="@GetSessionTone(tab)" Class="terminal-status-pill">@GetSessionLabel(tab)</UiPill>
-                    <button type="button"
-                            class="status-pill neutral terminal-status-pill terminal-identity-pill"
-                            title="Choose which Linux account this terminal connects as"
-                            disabled="@tab.IsBusy"
-                            @onclick="ToggleConnectionPanelAsync">
-                        <UiGlyphIcon Glyph="UiIconGlyph.User" />
-                        <span>@GetConnectionIdentityPillLabel(tab)</span>
-                    </button>
                     @if (tab.SessionId.HasValue)
                     {
                         <UiPill Tone="UiPillTone.Neutral" Class="terminal-status-pill">@tab.Snapshot?.LastActivityUtc.ToLocalTime().ToString("HH:mm:ss")</UiPill>
                     }
                     <CompactUIButton Label="Dock" Glyph="UiIconGlyph.Dock" Class="terminal-popup-window-button" OnClick="ReattachAsync" />
                     <CompactUIButton Label="Close" Glyph="UiIconGlyph.Clear" Class="terminal-popup-window-button" OnClick="CloseWindowAsync" />
-                    <CompactUIButton Label="@GetConnectionActionLabel(tab)" Glyph="UiIconGlyph.Connect" OnClick="ConnectAsync" Disabled="@tab.IsBusy" />
+                    <CompactUIButton Label="Connect" Glyph="UiIconGlyph.Connect" OnClick="ConnectAsync" Disabled="@(tab.IsBusy || tab.IsSessionActive)" />
                     <CompactUIButton Label="Disconnect" Glyph="UiIconGlyph.Disconnect" OnClick="DisconnectAsync" Disabled="@(tab.IsBusy || tab.SessionId is null)" />
                     <CompactUIButton Label="Clear" Glyph="UiIconGlyph.Clear" OnClick="SendClearScreenAsync" Disabled="@(!tab.IsSessionActive)" />
                     <CompactUIButton Label="@(tab.IsAiPanelOpen ? "Hide AI" : "AI")" Glyph="UiIconGlyph.Ai" OnClick="ToggleAiPanelAsync" />
@@ -94,7 +86,7 @@
                             {
                                 <option value="@ConnectionProfileSelectionKeys.Saved(profile.Id)">@FormatCredentialProfileOption(profile)</option>
                             }
-                            <option value="@ConnectionProfileSelectionKeys.Custom">Custom...</option>
+                            <option value="@ConnectionProfileSelectionKeys.Custom">Another user...</option>
                         </UiSelectField>
 
                         <label class="terminal-inline-field">
@@ -103,7 +95,7 @@
                         </label>
 
                         <label class="terminal-inline-field">
-                            <span>Profile name</span>
+                            <span>Saved user name</span>
                             <InputText @bind-Value="tab.ConnectionProfileName" />
                         </label>
 
@@ -127,25 +119,19 @@
                                          Class="terminal-inline-checkbox" />
 
                         <div class="terminal-inline-field">
-                            <span>Session</span>
+                            <span>Saved users</span>
                             <div class="toolbar-row">
-                                <UiCommandButton Label="@GetConnectionActionLabel(tab)"
+                                <UiCommandButton Label="@(tab.IsSessionActive ? "Reconnect" : "Connect")"
                                                  Glyph="UiIconGlyph.Connect"
                                                  Variant="UiButtonVariant.PrimaryMuted"
                                                  Disabled="@tab.IsBusy"
                                                  OnClick="ConnectAsync" />
-                            </div>
-                        </div>
-
-                        <div class="terminal-inline-field">
-                            <span>Profiles</span>
-                            <div class="toolbar-row">
-                                <UiCommandButton Label="Save"
+                                <UiCommandButton Label="Save user"
                                                  Glyph="UiIconGlyph.Save"
-                                                 Variant="UiButtonVariant.PrimaryMuted"
+                                                 Variant="UiButtonVariant.Ghost"
                                                  Disabled="@(userId is null)"
                                                  OnClick="@(() => SaveConnectionProfileAsync(tab))" />
-                                <UiCommandButton Label="Delete"
+                                <UiCommandButton Label="Delete user"
                                                  Glyph="UiIconGlyph.Delete"
                                                  Variant="UiButtonVariant.Ghost"
                                                  Disabled="@(!CanDeleteSelectedConnectionProfile(tab))"
@@ -205,10 +191,14 @@
                                 <TerminalRunbooksMenu HostId="@tab.HostId"
                                                       PasteCommand="RunCommandAsync" />
                                 <UiContextMenuButton Label="Clear local view" Glyph="UiIconGlyph.Clear" OnClick="ClearTerminalAsync" />
-                                <UiContextMenuButton Label="Connect as..."
-                                                     Title="Choose another Linux account or a saved connection profile"
-                                                     Glyph="UiIconGlyph.User"
-                                                     OnClick="OpenConnectionPanelAsync" />
+                                <TerminalConnectAsMenu HostDefaultLabel="@BuildHostDefaultProfileLabel(tab)"
+                                                       ShowLinkedLinuxUser="@ShouldShowLinkedLinuxUserOption(tab)"
+                                                       LinkedLinuxUserLabel="@BuildLinkedLinuxUserProfileLabel()"
+                                                       SavedUsers="@credentialProfiles"
+                                                       Disabled="@tab.IsBusy"
+                                                       ConnectionRequested="ConnectAsProfileAsync"
+                                                       AddUserRequested="AddConnectionUserAsync"
+                                                       ManageUsersRequested="OpenConnectionPanelAsync" />
                                 <UiContextMenuButton Label="Disconnect" Glyph="UiIconGlyph.Disconnect" OnClick="DisconnectAsync" />
                                 <UiContextMenuButton Label="Dock" Glyph="UiIconGlyph.Dock" OnClick="ReattachAsync" />
                             </div>
@@ -586,6 +576,39 @@
         contextMenuOpen = false;
         hasContextMenuSelection = false;
         await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ConnectAsProfileAsync(string connectionProfileKey)
+    {
+        if (tab is null)
+        {
+            return;
+        }
+
+        await SelectConnectionProfileAsync(tab, connectionProfileKey);
+        if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
+        {
+            return;
+        }
+
+        await ConnectAsync();
+    }
+
+    private async Task AddConnectionUserAsync()
+    {
+        if (tab is null)
+        {
+            return;
+        }
+
+        ConnectionSecretStore.Delete(tab.SecretHandle);
+        tab.SecretHandle = null;
+        tab.ConnectionProfileKey = ConnectionProfileSelectionKeys.Custom;
+        tab.ConnectionProfileName = string.Empty;
+        tab.Username = string.Empty;
+        tab.PreferStoredCredentials = false;
+        tab.ErrorMessage = string.Empty;
+        await OpenConnectionPanelAsync();
     }
 
     private async Task ToggleAiPanelAsync()
@@ -1009,17 +1032,6 @@
             TerminalSessionStatus.Closed => "Closed",
             _ => terminalTab.SessionId.HasValue ? "Opening" : "Ready"
         };
-
-    private static string GetConnectionIdentityDisplayName(TerminalTabState terminalTab) =>
-        string.IsNullOrWhiteSpace(terminalTab.Username) ? "another user" : terminalTab.Username.Trim();
-
-    private static string GetConnectionIdentityPillLabel(TerminalTabState terminalTab) =>
-        $"Connect as {GetConnectionIdentityDisplayName(terminalTab)}";
-
-    private static string GetConnectionActionLabel(TerminalTabState terminalTab) =>
-        terminalTab.IsSessionActive
-            ? $"Reconnect as {GetConnectionIdentityDisplayName(terminalTab)}"
-            : $"Connect as {GetConnectionIdentityDisplayName(terminalTab)}";
 
     private sealed class TerminalContextMenuPosition
     {
