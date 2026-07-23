@@ -37,6 +37,7 @@ public sealed class SqliteDatabaseInitializer(
         await EnsureSftpTablesAsync(cancellationToken);
         await EnsureUserDisplayPreferenceTablesAsync(cancellationToken);
         await EnsureFileBrowserShortcutTablesAsync(cancellationToken);
+        await EnsureUserManagedHostCredentialProfileTablesAsync(cancellationToken);
         await RemoveLegacyScaffoldDataAsync(cancellationToken);
 
         if (!await dbContext.ManagedHosts.AnyAsync(cancellationToken))
@@ -1862,6 +1863,43 @@ public sealed class SqliteDatabaseInitializer(
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(fileBrowserShortcutsTargetIndexSql, cancellationToken);
+    }
+
+    private async Task EnsureUserManagedHostCredentialProfileTablesAsync(CancellationToken cancellationToken)
+    {
+        const string profilesSql = """
+            CREATE TABLE IF NOT EXISTS user_managed_host_credential_profiles (
+                Id TEXT NOT NULL PRIMARY KEY,
+                UserId TEXT NOT NULL,
+                ManagedHostId TEXT NOT NULL,
+                Name TEXT NOT NULL,
+                NormalizedName TEXT NOT NULL,
+                Username TEXT NOT NULL,
+                PasswordSecretReference TEXT NULL,
+                PrivateKeySecretReference TEXT NULL,
+                PrivateKeyPassphraseSecretReference TEXT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL,
+                FOREIGN KEY (UserId) REFERENCES security_users(Id) ON DELETE CASCADE,
+                FOREIGN KEY (ManagedHostId) REFERENCES managed_hosts(Id) ON DELETE CASCADE
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(profilesSql, cancellationToken);
+
+        const string profileLookupIndexSql = """
+            CREATE INDEX IF NOT EXISTS IX_user_managed_host_credential_profiles_UserId_ManagedHostId
+            ON user_managed_host_credential_profiles (UserId, ManagedHostId);
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(profileLookupIndexSql, cancellationToken);
+
+        const string profileNameIndexSql = """
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_user_managed_host_credential_profiles_UserId_ManagedHostId_NormalizedName
+            ON user_managed_host_credential_profiles (UserId, ManagedHostId, NormalizedName);
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(profileNameIndexSql, cancellationToken);
     }
 
     private async Task EnsureCloudflareTablesAsync(CancellationToken cancellationToken)

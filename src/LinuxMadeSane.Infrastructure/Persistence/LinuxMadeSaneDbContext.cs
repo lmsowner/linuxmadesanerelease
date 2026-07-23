@@ -46,6 +46,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<AiProviderSettingsEntity> AiProviderSettings => Set<AiProviderSettingsEntity>();
     public DbSet<UserDisplayPreferenceEntity> UserDisplayPreferences => Set<UserDisplayPreferenceEntity>();
     public DbSet<FileBrowserShortcutEntity> FileBrowserShortcuts => Set<FileBrowserShortcutEntity>();
+    public DbSet<UserManagedHostCredentialProfileEntity> UserManagedHostCredentialProfiles => Set<UserManagedHostCredentialProfileEntity>();
     public DbSet<ProtectedSecretEntity> ProtectedSecrets => Set<ProtectedSecretEntity>();
     public DbSet<SecurityUserEntity> SecurityUsers => Set<SecurityUserEntity>();
     public DbSet<SecurityPasskeyCredentialEntity> SecurityPasskeyCredentials => Set<SecurityPasskeyCredentialEntity>();
@@ -82,6 +83,28 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.HasMany(host => host.SavedCommands)
                 .WithOne(command => command.Host)
                 .HasForeignKey(command => command.HostId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<UserManagedHostCredentialProfileEntity>(entity =>
+        {
+            entity.ToTable("user_managed_host_credential_profiles");
+            entity.HasKey(profile => profile.Id);
+            entity.Property(profile => profile.Name).HasMaxLength(80);
+            entity.Property(profile => profile.NormalizedName).HasMaxLength(80);
+            entity.Property(profile => profile.Username).HasMaxLength(128);
+            entity.Property(profile => profile.PasswordSecretReference).HasMaxLength(255);
+            entity.Property(profile => profile.PrivateKeySecretReference).HasMaxLength(255);
+            entity.Property(profile => profile.PrivateKeyPassphraseSecretReference).HasMaxLength(255);
+            entity.HasIndex(profile => new { profile.UserId, profile.ManagedHostId, profile.NormalizedName }).IsUnique();
+            entity.HasIndex(profile => new { profile.UserId, profile.ManagedHostId });
+            entity.HasOne<ManagedHostEntity>()
+                .WithMany()
+                .HasForeignKey(profile => profile.ManagedHostId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<SecurityUserEntity>()
+                .WithMany()
+                .HasForeignKey(profile => profile.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

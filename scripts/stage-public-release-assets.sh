@@ -20,6 +20,7 @@ APP_VERSION="$(lms_resolve_version)"
 RUNTIMES="${RUNTIMES:-linux-x64 linux-arm64 linux-arm}"
 PACKAGE_DIR="${PACKAGE_DIR:-$REPO_ROOT/artifacts/packages}"
 STAGE_EDITIONS="${STAGE_EDITIONS:-${EDITIONS:-community pro}}"
+KEEP_ONLY_LATEST_PUBLIC_SITE_RELEASE="${KEEP_ONLY_LATEST_PUBLIC_SITE_RELEASE:-true}"
 
 read_public_site_setting() {
   local key="$1"
@@ -81,6 +82,34 @@ stage_enabled() {
   done
 
   return 1
+}
+
+keep_only_latest_public_site_release_enabled() {
+  case "$KEEP_ONLY_LATEST_PUBLIC_SITE_RELEASE" in
+    false|False|FALSE|0|no|No|NO|off|Off|OFF)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+prune_edition_releases() {
+  local edition_root="$1"
+  local keep_version="$2"
+  local label="$3"
+
+  keep_only_latest_public_site_release_enabled || return 0
+  [[ -d "$edition_root" ]] || return 0
+
+  lms_log "Pruning old $label public website releases"
+  find "$edition_root" \
+    -mindepth 1 \
+    -maxdepth 1 \
+    -type d \
+    ! -name "$keep_version" \
+    -exec rm -rf {} +
 }
 
 stage_edition() {
@@ -150,11 +179,13 @@ staged_any=false
 
 if stage_enabled community; then
   stage_edition "community" "linux-made-sane-ce" "$COMMUNITY_ASSET_DIR" "Community"
+  prune_edition_releases "$COMMUNITY_RELEASE_ROOT" "$APP_VERSION" "Community"
   staged_any=true
 fi
 
 if stage_enabled pro; then
   stage_edition "pro" "linux-made-sane-pro" "$PRO_ASSET_DIR" "Pro"
+  prune_edition_releases "$PRO_RELEASE_ROOT" "$APP_VERSION" "Pro"
   staged_any=true
 fi
 

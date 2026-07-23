@@ -20,6 +20,7 @@ public static class DependencyInjection
         services.AddScoped<IAiProviderSettingsService, AiProviderSettingsService>();
         services.AddScoped<IUserDisplayPreferenceService, UserDisplayPreferenceService>();
         services.AddScoped<IFileBrowserShortcutService, FileBrowserShortcutService>();
+        services.AddScoped<IUserManagedHostCredentialProfileService, UserManagedHostCredentialProfileService>();
         services.AddScoped<ILocalAiEngineManagerService, LocalAiEngineManagerService>();
         services.AddScoped<LinuxMadeSane.Core.Abstractions.ILocalAiEngineService, LocalAiEngineManagerService>();
         services.AddScoped<ITerminalAiAssistantService, TerminalAiAssistantService>();

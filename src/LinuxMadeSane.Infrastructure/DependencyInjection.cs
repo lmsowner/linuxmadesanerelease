@@ -3,6 +3,7 @@
 
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Application.Contracts.EdgeGateway;
+using LinuxMadeSane.Application.Services.EdgeGateway;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Abstractions.Portal;
 using LinuxMadeSane.Core.Models.Cloudflare;
@@ -84,6 +85,7 @@ public static class DependencyInjection
         services.AddScoped<IPortalConnectionStore, DisabledPortalConnectionStore>();
         services.AddScoped<ICloudflareExposureStore, SqliteCloudflareExposureStore>();
         services.AddScoped<IEdgeGatewaySettingsStore, SqliteEdgeGatewaySettingsStore>();
+        services.AddScoped<IEdgeGatewayTemporaryIpApprovalStore, SqliteEdgeGatewayTemporaryIpApprovalStore>();
         services.AddScoped<IMessagingEmailSettingsStore, SqliteMessagingEmailSettingsStore>();
         services.AddScoped<IEmailDeliveryService, ConfiguredEmailDeliveryService>();
         services.AddHttpClient(nameof(ConfiguredEmailDeliveryService));
@@ -95,6 +97,7 @@ public static class DependencyInjection
         services.AddScoped<ITrustedNetworkStore, SqliteTrustedNetworkStore>();
         services.AddScoped<ITrustedNetworkAccessService, TrustedNetworkAccessService>();
         services.AddScoped<IManagedHostStore, SqliteManagedHostStore>();
+        services.AddScoped<IUserManagedHostCredentialProfileStore, SqliteUserManagedHostCredentialProfileStore>();
         services.AddScoped<IManagedHostHealthProbe, ManagedHostHealthProbe>();
         services.AddScoped<ISavedCommandStore, SqliteSavedCommandStore>();
         services.AddScoped<ILinuxShareModuleDataService, SqliteLinuxShareModuleDataService>();
@@ -103,6 +106,7 @@ public static class DependencyInjection
         services.AddScoped<ILinuxSchedulingModuleDataService, SqliteLinuxSchedulingModuleDataService>();
         services.AddScoped<ICaddyIntegrationDataService, SqliteCaddyIntegrationDataService>();
         services.AddScoped<IEdgeGatewayStore, SqliteEdgeGatewayStore>();
+        services.AddScoped<IEdgeGatewayTemporaryIpApprovalService, EdgeGatewayTemporaryIpApprovalService>();
         services.AddScoped<IEdgeGatewayCaddyManager, LocalEdgeGatewayCaddyManager>();
         services.AddScoped<IMediaLibraryIntegrationDataService, SqliteMediaLibraryIntegrationDataService>();
         services.AddScoped<ISftpServerStore, SqliteSftpServerStore>();
@@ -119,6 +123,7 @@ public static class DependencyInjection
         services.AddScoped<ILocalAiHardwareInspectionService, LocalAiHardwareInspectionService>();
         services.AddScoped<ILocalModelManagementService, LocalModelManagementService>();
         services.AddScoped<IOllamaRuntimeService, OllamaRuntimeService>();
+        services.AddScoped<IDockerAiEngineDiscoveryService, DockerAiEngineDiscoveryService>();
         services.AddScoped<IRemoteLmsAiEngineGateway, DisabledRemoteLmsAiEngineGateway>();
         services.AddScoped<ISshHostDiscoveryService, SshHostDiscoveryService>();
         services.AddScoped<IDesktopInspectionService, DesktopInspectionService>();

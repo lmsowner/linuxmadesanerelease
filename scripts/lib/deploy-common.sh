@@ -916,7 +916,51 @@ lms_create_tarball() {
   tar -C "$(dirname "$source_dir")" -czf "$destination" "$(basename "$source_dir")"
 }
 
+lms_version_file() {
+  local repo_root
+  repo_root="${REPO_ROOT:-$(lms_repo_root)}"
+  printf '%s\n' "${LINUX_MADE_SANE_VERSION_FILE:-$repo_root/VERSION}"
+}
+
+lms_read_version_file() {
+  local version_file version
+  version_file="$(lms_version_file)"
+  [[ -f "$version_file" ]] || return 1
+
+  version="$(awk 'NF { print $1; exit }' "$version_file")"
+  [[ -n "$version" ]] || return 1
+  printf '%s\n' "$version"
+}
+
+lms_keep_expanded_release_outputs() {
+  local default_value="${1:-false}"
+
+  case "${KEEP_EXPANDED_RELEASE_OUTPUTS:-$default_value}" in
+    true|True|TRUE|1|yes|Yes|YES|on|On|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+lms_cleanup_expanded_release_output() {
+  local package_root="$1"
+  local default_keep="${2:-false}"
+
+  if lms_keep_expanded_release_outputs "$default_keep"; then
+    lms_log "Keeping expanded package output at $package_root"
+    return
+  fi
+
+  lms_log "Removing expanded package output at $package_root"
+  rm -rf "$package_root"
+}
+
 lms_resolve_version_date() {
+  local version_file_version
+
   if [[ -n "${LINUX_MADE_SANE_VERSION:-}" ]]; then
     lms_extract_version_date "$LINUX_MADE_SANE_VERSION"
     return
@@ -937,10 +981,17 @@ lms_resolve_version_date() {
     return
   fi
 
+  if version_file_version="$(lms_read_version_file)"; then
+    lms_extract_version_date "$version_file_version"
+    return
+  fi
+
   date -u +%Y.%m.%d.%H.%M
 }
 
 lms_resolve_version_revision() {
+  local version_file_version
+
   if [[ -n "${LINUX_MADE_SANE_VERSION:-}" ]]; then
     lms_extract_version_revision "$LINUX_MADE_SANE_VERSION"
     return
@@ -961,10 +1012,17 @@ lms_resolve_version_revision() {
     return
   fi
 
+  if version_file_version="$(lms_read_version_file)"; then
+    lms_extract_version_revision "$version_file_version"
+    return
+  fi
+
   printf '0\n'
 }
 
 lms_resolve_version() {
+  local version_file_version
+
   if [[ -n "${LINUX_MADE_SANE_VERSION:-}" ]]; then
     printf '%s\n' "$LINUX_MADE_SANE_VERSION"
     return
@@ -972,6 +1030,16 @@ lms_resolve_version() {
 
   if [[ -n "${VERSION:-}" ]]; then
     printf '%s\n' "$VERSION"
+    return
+  fi
+
+  if [[ -n "${LINUX_MADE_SANE_VERSION_DATE:-}" || -n "${VERSION_DATE:-}" ]]; then
+    printf 'v%s\n' "$(lms_resolve_version_date)"
+    return
+  fi
+
+  if version_file_version="$(lms_read_version_file)"; then
+    printf '%s\n' "$version_file_version"
     return
   fi
 

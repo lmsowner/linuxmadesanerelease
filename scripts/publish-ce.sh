@@ -59,6 +59,7 @@ printf 'ce\n' > "$PACKAGE_ROOT/edition.txt"
 printf '%s\n' "$APP_VERSION" > "$PACKAGE_ROOT/version.txt"
 printf '%s\n' "$APP_VERSION" > "$PACKAGE_ROOT/app/version.txt"
 lms_create_tarball "$PACKAGE_ROOT" "$PACKAGE_TARBALL"
+lms_cleanup_expanded_release_output "$PACKAGE_ROOT" "${OUTPUT_ROOT:+true}"
 
 lms_log "CE package ready:"
 printf 'version: %s\nartifact: %s\n' "$APP_VERSION" "$PACKAGE_TARBALL"

@@ -35,7 +35,9 @@ public sealed class TerminalWorkspaceRegistry(ITerminalSessionService terminalSe
             .Select(tab => new TerminalConnectionSnapshot(
                 tab.Username,
                 tab.SecretHandle,
-                tab.PreferStoredCredentials))
+                tab.PreferStoredCredentials,
+                tab.ConnectionProfileKey,
+                tab.ConnectionProfileName))
             .FirstOrDefault(snapshot =>
                 !string.IsNullOrWhiteSpace(snapshot.Username) ||
                 snapshot.SecretHandle.HasValue ||
@@ -47,7 +49,9 @@ public sealed class TerminalWorkspaceRegistry(ITerminalSessionService terminalSe
 public sealed record TerminalConnectionSnapshot(
     string Username,
     Guid? SecretHandle,
-    bool PreferStoredCredentials);
+    bool PreferStoredCredentials,
+    string ConnectionProfileKey,
+    string ConnectionProfileName);
 
 public sealed class TerminalWorkspaceState(ITerminalSessionService terminalSessionService) : IAsyncDisposable
 {
@@ -369,6 +373,10 @@ public sealed class TerminalTabState
 
     public bool ConnectionOptionsOpen { get; set; }
 
+    public string ConnectionProfileKey { get; set; } = ConnectionProfileSelectionKeys.HostDefault;
+
+    public string ConnectionProfileName { get; set; } = string.Empty;
+
     public bool IsDetached { get; set; }
 
     public bool IsAiPanelOpen { get; set; }
@@ -407,6 +415,8 @@ public sealed class TerminalTabState
         tab.PreferStoredCredentials =
             !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
             !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+        tab.ConnectionProfileKey = ConnectionProfileSelectionKeys.HostDefault;
+        tab.ConnectionProfileName = host.Username;
         tab.ConnectionOptionsOpen = true;
         return tab;
     }

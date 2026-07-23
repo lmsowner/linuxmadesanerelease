@@ -13,11 +13,15 @@
 @using LinuxMadeSane.Core.Models.Shares
 @using LinuxMadeSane.Infrastructure.Services
 @using LinuxMadeSane.Web.Services
+@using System.Security.Claims
 @using System.Text.Json
+@using Microsoft.AspNetCore.Components.Authorization
 @implements IAsyncDisposable
 @inject IManagedHostService HostService
 @inject IShareManagementService ShareService
 @inject IFileBrowserShortcutService FileBrowserShortcutService
+@inject IUserManagedHostCredentialProfileService CredentialProfileService
+@inject ISecurityUserStore SecurityUserStore
 @inject IManagedHostFileAccessService FileAccessService
 @inject ITransientConnectionSecretStore ConnectionSecretStore
 @inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
@@ -164,7 +168,31 @@ else
                                     @if (connectionIdentityEditorOpen)
                                     {
                                     <div class="host-file-address-auth-panel">
-                                        <p class="host-file-address-auth-help">Choose the Linux account used by this file browser. Saved host credentials are used unless you enter a password or private key here.</p>
+                                        <p class="host-file-address-auth-help">Choose the Linux account used by this file browser. Host credentials are used only for the host-default identity.</p>
+
+                                        <UiSelectField TValue="string"
+                                                       Label="Identity"
+                                                       Value="@connectionProfileKey"
+                                                       ValueChanged="SelectConnectionProfileAsync"
+                                                       ValueExpression="@(() => connectionProfileKey)"
+                                                       Compact="true"
+                                                       Class="host-file-inline-field">
+                                            <option value="@ConnectionProfileSelectionKeys.HostDefault">@BuildHostDefaultProfileLabel()</option>
+                                            @if (ShouldShowLinkedLinuxUserOption)
+                                            {
+                                                <option value="@ConnectionProfileSelectionKeys.LinkedLinuxUser">@BuildLinkedLinuxUserProfileLabel()</option>
+                                            }
+                                            @foreach (var profile in credentialProfiles)
+                                            {
+                                                <option value="@ConnectionProfileSelectionKeys.Saved(profile.Id)">@FormatCredentialProfileOption(profile)</option>
+                                            }
+                                            <option value="@ConnectionProfileSelectionKeys.Custom">Custom...</option>
+                                        </UiSelectField>
+
+                                        <UiTextField @bind-Value="connectionProfileName"
+                                                     Label="Profile name"
+                                                     Compact="true"
+                                                     Class="host-file-inline-field" />
 
                                         <UiTextField @bind-Value="connectionUsername"
                                                      Label="User"
@@ -190,7 +218,7 @@ else
                                                      Class="host-file-inline-field" />
 
                                         <UiCheckboxField @bind-Value="preferStoredCredentials"
-                                                         Label="Use saved credentials"
+                                                         Label="Use host credentials"
                                                          Compact="true"
                                                          Class="host-file-checkbox-row" />
 
@@ -205,6 +233,16 @@ else
                                                              Variant="UiButtonVariant.Ghost"
                                                              Disabled="@isBusy"
                                                              OnClick="ResetConnectionIdentityAsync" />
+                                            <UiCommandButton Label="Save profile"
+                                                             Glyph="UiIconGlyph.Save"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@(isBusy || userId is null)"
+                                                             OnClick="SaveConnectionProfileAsync" />
+                                            <UiCommandButton Label="Delete profile"
+                                                             Glyph="UiIconGlyph.Delete"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@(isBusy || !CanDeleteSelectedConnectionProfile)"
+                                                             OnClick="DeleteConnectionProfileAsync" />
                                         </div>
                                     </div>
                                     }
@@ -1124,6 +1162,10 @@ else
     [Parameter] public string? ConnectionUsernameOverride { get; set; }
     [Parameter] public Guid? ConnectionSecretHandle { get; set; }
     [Parameter] public bool? PreferStoredCredentialsOverride { get; set; }
+    [Parameter] public string? ConnectionProfileKeyOverride { get; set; }
+    [Parameter] public string? ConnectionProfileNameOverride { get; set; }
+
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
 
     private const int PreviewMaxBytes = 262_144;
     private const int VisualPreviewMaxBytes = 20_971_520;
@@ -1160,6 +1202,8 @@ else
     private IReadOnlyList<SftpItem> items = Array.Empty<SftpItem>();
     private string connectionUsername = string.Empty;
     private Guid? connectionSecretHandle;
+    private string connectionProfileKey = ConnectionProfileSelectionKeys.HostDefault;
+    private string connectionProfileName = string.Empty;
     private string currentPath = string.Empty;
     private string pathInput = string.Empty;
     private string browserStatus = "Credentials required";
@@ -1264,6 +1308,9 @@ else
     private ElementReference uploadDropTargetElement;
     private DotNetObjectReference<HostFileBrowserWorkspace>? uploadInteropReference;
     private bool uploadTargetRegistered;
+    private Guid? userId;
+    private string currentLinuxUsername = string.Empty;
+    private IReadOnlyList<UserManagedHostCredentialProfileSummary> credentialProfiles = [];
 
     private bool IsLocalBrowser => browser is not null && AiLocalMachine.IsLocalMachine(browser.Host.Id);
     private string? EffectiveRootPath => IsLocalBrowser && !string.IsNullOrWhiteSpace(RootPath) ? NormalizeBrowserPath(RootPath) : null;
@@ -1304,6 +1351,11 @@ else
         HasSavedCredentials ||
         HasInlineBrowseCredentials;
     private bool ShowConnectionIdentityEditor => !IsLocalBrowser;
+    private bool ShouldShowLinkedLinuxUserOption => browser is not null &&
+        !string.IsNullOrWhiteSpace(currentLinuxUsername) &&
+        !string.Equals(currentLinuxUsername, browser.Host.Username, StringComparison.Ordinal);
+    private bool CanDeleteSelectedConnectionProfile =>
+        userId.HasValue && ConnectionProfileSelectionKeys.TryParseSaved(connectionProfileKey, out _);
     private string ConnectionIdentityDisplayName =>
         string.IsNullOrWhiteSpace(connectionUsername) ? "the selected account" : connectionUsername.Trim();
     private string ConnectionIdentitySummary =>
@@ -1570,6 +1622,7 @@ else
 
     protected override async Task OnParametersSetAsync()
     {
+        await ResolveCurrentUserContextAsync();
         detachedBrowserUnavailable = false;
         detachedSearchUnavailable = false;
         contextMenuRequest = null;
@@ -1682,6 +1735,17 @@ else
             PreferStoredCredentialsOverride ??
             (!string.IsNullOrWhiteSpace(browser.Host.PasswordSecretReference) ||
              !string.IsNullOrWhiteSpace(browser.Host.PrivateKeySecretReference));
+        connectionProfileKey = detachedState?.ConnectionProfileKey ??
+            detachedSearchState?.ConnectionProfileKey ??
+            ConnectionProfileKeyOverride ??
+            connectionProfileKey;
+        connectionProfileName = detachedState?.ConnectionProfileName ??
+            detachedSearchState?.ConnectionProfileName ??
+            ConnectionProfileNameOverride ??
+            connectionProfileName;
+        await LoadCredentialProfilesAsync();
+        await ResolveSavedConnectionProfileSelectionAsync();
+        InitializeConnectionProfileSelection();
         EnsureInlineDetachedBrowserState();
 
         browserStatus = IsLocalBrowser
@@ -1816,6 +1880,104 @@ else
         }
 
         fileBrowserShortcuts = await FileBrowserShortcutService.ListAsync(browser.Host.Id);
+    }
+
+    private async Task ResolveCurrentUserContextAsync()
+    {
+        var authenticationState = AuthenticationStateTask is null
+            ? null
+            : await AuthenticationStateTask;
+        var value = authenticationState?.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (!Guid.TryParse(value, out var resolvedUserId))
+        {
+            userId = null;
+            currentLinuxUsername = string.Empty;
+            return;
+        }
+
+        userId = resolvedUserId;
+        var user = await SecurityUserStore.GetAsync(resolvedUserId);
+        currentLinuxUsername = user?.LinuxUsername.Trim() ?? string.Empty;
+    }
+
+    private async Task LoadCredentialProfilesAsync()
+    {
+        if (!userId.HasValue || browser is null)
+        {
+            credentialProfiles = [];
+            return;
+        }
+
+        credentialProfiles = await CredentialProfileService.ListAsync(userId.Value, browser.Host.Id);
+    }
+
+    private async Task ResolveSavedConnectionProfileSelectionAsync()
+    {
+        if (browser is null ||
+            !userId.HasValue ||
+            !ConnectionProfileSelectionKeys.TryParseSaved(connectionProfileKey, out var profileId))
+        {
+            return;
+        }
+
+        var credentials = await CredentialProfileService.ResolveAsync(userId.Value, browser.Host.Id, profileId);
+        if (credentials is null)
+        {
+            connectionProfileKey = ConnectionProfileSelectionKeys.Custom;
+            return;
+        }
+
+        connectionUsername = credentials.Username;
+        connectionProfileName = credentials.Name;
+        preferStoredCredentials = false;
+        connectionSecretHandle = ConnectionSecretStore.Save(
+            connectionSecretHandle,
+            credentials.Password,
+            credentials.PrivateKey,
+            credentials.PrivateKeyPassphrase);
+    }
+
+    private void InitializeConnectionProfileSelection()
+    {
+        if (browser is null)
+        {
+            connectionProfileKey = ConnectionProfileSelectionKeys.HostDefault;
+            connectionProfileName = string.Empty;
+            return;
+        }
+
+        if (ConnectionProfileSelectionKeys.TryParseSaved(connectionProfileKey, out var profileId) &&
+            credentialProfiles.Any(profile => profile.Id == profileId))
+        {
+            var profile = credentialProfiles.First(item => item.Id == profileId);
+            connectionProfileName = string.IsNullOrWhiteSpace(connectionProfileName)
+                ? profile.Name
+                : connectionProfileName.Trim();
+            return;
+        }
+
+        if (preferStoredCredentials &&
+            string.Equals(connectionUsername, browser.Host.Username, StringComparison.Ordinal) &&
+            !HasInlineBrowseCredentials)
+        {
+            connectionProfileKey = ConnectionProfileSelectionKeys.HostDefault;
+            connectionProfileName = browser.Host.Username.Trim();
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(currentLinuxUsername) &&
+            string.Equals(connectionUsername, currentLinuxUsername, StringComparison.Ordinal) &&
+            !HasInlineBrowseCredentials)
+        {
+            connectionProfileKey = ConnectionProfileSelectionKeys.LinkedLinuxUser;
+            connectionProfileName = currentLinuxUsername;
+            return;
+        }
+
+        connectionProfileKey = ConnectionProfileSelectionKeys.Custom;
+        connectionProfileName = string.IsNullOrWhiteSpace(connectionProfileName)
+            ? connectionUsername.Trim()
+            : connectionProfileName.Trim();
     }
 
     private async Task RefreshStoredBrowseCredentialStateAsync()
@@ -2876,6 +3038,65 @@ else
         return Task.CompletedTask;
     }
 
+    private async Task SelectConnectionProfileAsync(string value)
+    {
+        connectionProfileKey = value;
+        ClearOperationMessage();
+
+        if (browser is null)
+        {
+            return;
+        }
+
+        if (value == ConnectionProfileSelectionKeys.HostDefault)
+        {
+            connectionUsername = browser.Host.Username.Trim();
+            connectionProfileName = browser.Host.Username.Trim();
+            preferStoredCredentials = HostHasConfiguredStoredCredentials(browser.Host);
+            ConnectionSecretStore.Delete(connectionSecretHandle);
+            connectionSecretHandle = null;
+            ResetConnectionScopedBrowserState();
+            PersistDetachedBrowserState();
+            return;
+        }
+
+        if (value == ConnectionProfileSelectionKeys.LinkedLinuxUser)
+        {
+            connectionUsername = currentLinuxUsername;
+            connectionProfileName = currentLinuxUsername;
+            preferStoredCredentials = false;
+            ConnectionSecretStore.Delete(connectionSecretHandle);
+            connectionSecretHandle = null;
+            ResetConnectionScopedBrowserState();
+            PersistDetachedBrowserState();
+            return;
+        }
+
+        if (!ConnectionProfileSelectionKeys.TryParseSaved(value, out var profileId) || !userId.HasValue)
+        {
+            connectionProfileKey = ConnectionProfileSelectionKeys.Custom;
+            return;
+        }
+
+        var credentials = await CredentialProfileService.ResolveAsync(userId.Value, browser.Host.Id, profileId);
+        if (credentials is null)
+        {
+            SetOperationMessage("Credential profile not found.", "error");
+            return;
+        }
+
+        connectionUsername = credentials.Username;
+        connectionProfileName = credentials.Name;
+        preferStoredCredentials = false;
+        connectionSecretHandle = ConnectionSecretStore.Save(
+            connectionSecretHandle,
+            credentials.Password,
+            credentials.PrivateKey,
+            credentials.PrivateKeyPassphrase);
+        ResetConnectionScopedBrowserState();
+        PersistDetachedBrowserState();
+    }
+
     private async Task ApplyConnectionIdentityAsync()
     {
         if (browser is null)
@@ -2902,7 +3123,9 @@ else
 
         connectionUsername = browser.Host.Username.Trim();
         connectionSecretHandle = null;
-        preferStoredCredentials = true;
+        connectionProfileKey = ConnectionProfileSelectionKeys.HostDefault;
+        connectionProfileName = browser.Host.Username.Trim();
+        preferStoredCredentials = HostHasConfiguredStoredCredentials(browser.Host);
         connectionIdentityEditorOpen = false;
         DismissContextMenu();
         ClearOperationMessage();
@@ -2925,6 +3148,10 @@ else
         DismissContextMenu();
         ClearOperationMessage();
         connectionUsername = suggestedUser;
+        connectionProfileKey = string.Equals(suggestedUser, currentLinuxUsername, StringComparison.Ordinal)
+            ? ConnectionProfileSelectionKeys.LinkedLinuxUser
+            : ConnectionProfileSelectionKeys.Custom;
+        connectionProfileName = suggestedUser;
         preferStoredCredentials = false;
         connectionSecretHandle = null;
         connectionIdentityEditorOpen = true;
@@ -2935,6 +3162,69 @@ else
         QueuePathSuggestionsRefresh(pathInput);
         PersistDetachedBrowserState();
         return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task SaveConnectionProfileAsync()
+    {
+        if (browser is null)
+        {
+            return;
+        }
+
+        if (!userId.HasValue)
+        {
+            SetOperationMessage("Sign in before saving connection profiles.", "warning");
+            return;
+        }
+
+        try
+        {
+            var secrets = ConnectionSecretStore.Get(connectionSecretHandle);
+            var editor = new UserManagedHostCredentialProfileEditor
+            {
+                Id = ConnectionProfileSelectionKeys.TryParseSaved(connectionProfileKey, out var profileId)
+                    ? profileId
+                    : null,
+                UserId = userId.Value,
+                ManagedHostId = browser.Host.Id,
+                Name = connectionProfileName,
+                Username = connectionUsername,
+                Password = secrets.Password,
+                PrivateKey = secrets.PrivateKey,
+                PrivateKeyPassphrase = secrets.PrivateKeyPassphrase
+            };
+
+            var saved = await CredentialProfileService.SaveAsync(editor);
+            await LoadCredentialProfilesAsync();
+            connectionProfileKey = ConnectionProfileSelectionKeys.Saved(saved.Id);
+            connectionProfileName = saved.Name;
+            preferStoredCredentials = false;
+            PersistDetachedBrowserState();
+            SetOperationMessage($"Saved connection profile {saved.Name}.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetOperationMessage(exception.Message, "error");
+        }
+    }
+
+    private async Task DeleteConnectionProfileAsync()
+    {
+        if (browser is null ||
+            !userId.HasValue ||
+            !ConnectionProfileSelectionKeys.TryParseSaved(connectionProfileKey, out var profileId))
+        {
+            return;
+        }
+
+        await CredentialProfileService.DeleteAsync(userId.Value, browser.Host.Id, profileId);
+        await LoadCredentialProfilesAsync();
+        if (browser is not null)
+        {
+            await SelectConnectionProfileAsync(ConnectionProfileSelectionKeys.HostDefault);
+        }
+
+        SetOperationMessage("Deleted connection profile.", "success");
     }
 
     private void ResetConnectionScopedBrowserState()
@@ -3042,6 +3332,8 @@ else
         terminalTab.Username = connectionUsername;
         terminalTab.SecretHandle = ConnectionSecretStore.Clone(connectionSecretHandle);
         terminalTab.PreferStoredCredentials = preferStoredCredentials;
+        terminalTab.ConnectionProfileKey = connectionProfileKey;
+        terminalTab.ConnectionProfileName = connectionProfileName;
         terminalTab.ConnectionOptionsOpen = false;
         terminalWorkspace.SetDetached(terminalTab.Id, true);
 
@@ -4649,6 +4941,8 @@ else
             connectionUsername,
             secretHandleOverride ?? connectionSecretHandle,
             preferStoredCredentials,
+            connectionProfileKey,
+            connectionProfileName,
             previewPanelOpen,
             previewPanelFocused && previewPanelOpen,
             previewDock,
@@ -4664,6 +4958,8 @@ else
             connectionUsername,
             secretHandleOverride ?? connectionSecretHandle,
             preferStoredCredentials,
+            connectionProfileKey,
+            connectionProfileName,
             pathSuggestions.ToArray());
 
     private void PersistDetachedBrowserState()
@@ -6017,6 +6313,28 @@ else
 
     private static string? NullIfEmpty(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private string BuildHostDefaultProfileLabel()
+    {
+        var username = browser?.Host.Username.Trim() ?? string.Empty;
+        return string.IsNullOrWhiteSpace(username)
+            ? "Host default"
+            : $"Host default ({username})";
+    }
+
+    private string BuildLinkedLinuxUserProfileLabel() =>
+        string.IsNullOrWhiteSpace(currentLinuxUsername)
+            ? "My Linux user"
+            : $"My Linux user ({currentLinuxUsername})";
+
+    private static string FormatCredentialProfileOption(UserManagedHostCredentialProfileSummary profile) =>
+        string.Equals(profile.Name, profile.Username, StringComparison.Ordinal)
+            ? profile.Name
+            : $"{profile.Name} ({profile.Username})";
+
+    private static bool HostHasConfiguredStoredCredentials(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
 
     private ManagedHostConnectionProfile BuildConnectionProfile() =>
         new(connectionUsername, connectionSecretHandle, preferStoredCredentials);

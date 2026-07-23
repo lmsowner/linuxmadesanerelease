@@ -5,6 +5,7 @@
 @rendermode InteractiveServer
 @implements IAsyncDisposable
 @using System.Security.Claims
+@using LinuxMadeSane.Application.Contracts
 @using Microsoft.AspNetCore.Components.Authorization
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Abstractions
@@ -13,6 +14,8 @@
 @inject IManagedHostService HostService
 @inject ITerminalSessionService TerminalSessionService
 @inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject IUserManagedHostCredentialProfileService CredentialProfileService
+@inject ISecurityUserStore SecurityUserStore
 @inject ITransientConnectionSecretStore ConnectionSecretStore
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
@@ -158,9 +161,33 @@
                                         {
                                             <section class="terminal-inline-panel">
                                                 <div class="terminal-inline-grid">
+                                                    <UiSelectField TValue="string"
+                                                                   Label="Identity"
+                                                                   Value="@tab.ConnectionProfileKey"
+                                                                   ValueChanged="@((string value) => SelectConnectionProfileAsync(tab, value))"
+                                                                   ValueExpression="@(() => tab.ConnectionProfileKey)"
+                                                                   Compact="true"
+                                                                   Class="terminal-inline-field">
+                                                        <option value="@ConnectionProfileSelectionKeys.HostDefault">@BuildHostDefaultProfileLabel(tab)</option>
+                                                        @if (ShouldShowLinkedLinuxUserOption(tab))
+                                                        {
+                                                            <option value="@ConnectionProfileSelectionKeys.LinkedLinuxUser">@BuildLinkedLinuxUserProfileLabel()</option>
+                                                        }
+                                                        @foreach (var profile in GetCredentialProfiles(tab.HostId))
+                                                        {
+                                                            <option value="@ConnectionProfileSelectionKeys.Saved(profile.Id)">@FormatCredentialProfileOption(profile)</option>
+                                                        }
+                                                        <option value="@ConnectionProfileSelectionKeys.Custom">Custom...</option>
+                                                    </UiSelectField>
+
                                                     <label class="terminal-inline-field">
                                                         <span>Username</span>
                                                         <InputText @bind-Value="tab.Username" />
+                                                    </label>
+
+                                                    <label class="terminal-inline-field">
+                                                        <span>Profile name</span>
+                                                        <InputText @bind-Value="tab.ConnectionProfileName" />
                                                     </label>
 
                                                     <label class="terminal-inline-field">
@@ -178,9 +205,25 @@
                                                     </label>
 
                                                     <UiCheckboxField @bind-Value="tab.PreferStoredCredentials"
-                                                                     Label="Use saved credentials"
+                                                                     Label="Use host credentials"
                                                                      Compact="true"
                                                                      Class="terminal-inline-checkbox" />
+
+                                                    <div class="terminal-inline-field">
+                                                        <span>Profiles</span>
+                                                        <div class="toolbar-row">
+                                                            <UiCommandButton Label="Save"
+                                                                             Glyph="UiIconGlyph.Save"
+                                                                             Variant="UiButtonVariant.PrimaryMuted"
+                                                                             Disabled="@(userId is null)"
+                                                                             OnClick="@(() => SaveConnectionProfileAsync(tab))" />
+                                                            <UiCommandButton Label="Delete"
+                                                                             Glyph="UiIconGlyph.Delete"
+                                                                             Variant="UiButtonVariant.Ghost"
+                                                                             Disabled="@(!CanDeleteSelectedConnectionProfile(tab))"
+                                                                             OnClick="@(() => DeleteConnectionProfileAsync(tab))" />
+                                                        </div>
+                                                    </div>
                                                 </div>
 
                                                 <details class="terminal-advanced-auth terminal-advanced-auth-compact">
@@ -294,6 +337,7 @@
     private ElementReference terminalConsoleLayoutElement;
     private TerminalWorkspaceState? terminalWorkspace;
     private IReadOnlyList<ManagedHost> hosts = [];
+    private Dictionary<Guid, IReadOnlyList<UserManagedHostCredentialProfileSummary>> credentialProfilesByHost = [];
     private CancellationTokenSource? pollingCts;
     private Guid? renderedTabId;
     private Guid newTabHostId;
@@ -310,6 +354,7 @@
     private Guid? pendingAiSelectionTabId;
     private string? pendingAiSelectionText;
     private Guid? userId;
+    private string currentLinuxUsername = string.Empty;
 
     private TerminalWorkspaceState? TerminalWorkspace => terminalWorkspace;
 
@@ -344,6 +389,8 @@
         userId = await ResolveUserIdAsync();
         if (userId.HasValue)
         {
+            var currentUser = await SecurityUserStore.GetAsync(userId.Value);
+            currentLinuxUsername = currentUser?.LinuxUsername.Trim() ?? string.Empty;
             var preference = await UserDisplayPreferenceService.GetAsync(userId.Value);
             if (preference is not null)
             {
@@ -439,6 +486,7 @@
             .ToArray();
 
         TerminalWorkspace?.SyncHosts(hosts);
+        await LoadCredentialProfilesAsync();
 
         var requestedHost = hosts.FirstOrDefault(host => host.Id == HostId);
         if (requestedHost is not null)
@@ -626,16 +674,7 @@
 
         try
         {
-            var request = new TerminalConnectionRequest(
-                tab.Username.Trim(),
-                string.IsNullOrWhiteSpace(GetPassword(tab)) ? null : GetPassword(tab),
-                string.IsNullOrWhiteSpace(GetPrivateKey(tab)) ? null : GetPrivateKey(tab),
-                string.IsNullOrWhiteSpace(GetPrivateKeyPassphrase(tab)) ? null : GetPrivateKeyPassphrase(tab),
-                tab.PreferStoredCredentials,
-                terminalColumns,
-                terminalRows,
-                tab.DefaultWorkingDirectory);
-
+            var request = await BuildTerminalConnectionRequestAsync(tab);
             var session = await TerminalSessionService.StartSessionAsync(host, request);
             tab.SessionId = session.Id;
             await Task.Delay(200);
@@ -1329,6 +1368,199 @@
         var existing = ConnectionSecretStore.Get(tab.SecretHandle);
         tab.SecretHandle = ConnectionSecretStore.Save(tab.SecretHandle, existing.Password, existing.PrivateKey, value);
     }
+
+    private async Task LoadCredentialProfilesAsync()
+    {
+        if (!userId.HasValue || hosts.Count == 0)
+        {
+            credentialProfilesByHost = [];
+            return;
+        }
+
+        var profiles = new Dictionary<Guid, IReadOnlyList<UserManagedHostCredentialProfileSummary>>();
+        foreach (var host in hosts)
+        {
+            profiles[host.Id] = await CredentialProfileService.ListAsync(userId.Value, host.Id);
+        }
+
+        credentialProfilesByHost = profiles;
+    }
+
+    private IReadOnlyList<UserManagedHostCredentialProfileSummary> GetCredentialProfiles(Guid hostId) =>
+        credentialProfilesByHost.TryGetValue(hostId, out var profiles)
+            ? profiles
+            : Array.Empty<UserManagedHostCredentialProfileSummary>();
+
+    private async Task SelectConnectionProfileAsync(TerminalTabState tab, string value)
+    {
+        tab.ConnectionProfileKey = value;
+        tab.ErrorMessage = string.Empty;
+
+        if (value == ConnectionProfileSelectionKeys.HostDefault)
+        {
+            var host = hosts.FirstOrDefault(item => item.Id == tab.HostId);
+            if (host is not null)
+            {
+                tab.Username = host.Username.Trim();
+                tab.ConnectionProfileName = host.Username.Trim();
+                tab.PreferStoredCredentials = HasConfiguredStoredCredentials(host);
+                ConnectionSecretStore.Delete(tab.SecretHandle);
+                tab.SecretHandle = null;
+            }
+
+            return;
+        }
+
+        if (value == ConnectionProfileSelectionKeys.LinkedLinuxUser)
+        {
+            tab.Username = currentLinuxUsername;
+            tab.ConnectionProfileName = currentLinuxUsername;
+            tab.PreferStoredCredentials = false;
+            ConnectionSecretStore.Delete(tab.SecretHandle);
+            tab.SecretHandle = null;
+            return;
+        }
+
+        if (!ConnectionProfileSelectionKeys.TryParseSaved(value, out var profileId) || !userId.HasValue)
+        {
+            return;
+        }
+
+        var credentials = await CredentialProfileService.ResolveAsync(userId.Value, tab.HostId, profileId);
+        if (credentials is null)
+        {
+            tab.ErrorMessage = "Credential profile not found.";
+            return;
+        }
+
+        tab.Username = credentials.Username;
+        tab.ConnectionProfileName = credentials.Name;
+        tab.PreferStoredCredentials = false;
+        tab.SecretHandle = ConnectionSecretStore.Save(
+            tab.SecretHandle,
+            credentials.Password,
+            credentials.PrivateKey,
+            credentials.PrivateKeyPassphrase);
+    }
+
+    private async Task<TerminalConnectionRequest> BuildTerminalConnectionRequestAsync(TerminalTabState tab)
+    {
+        var username = tab.Username.Trim();
+        var password = string.IsNullOrWhiteSpace(GetPassword(tab)) ? null : GetPassword(tab);
+        var privateKey = string.IsNullOrWhiteSpace(GetPrivateKey(tab)) ? null : GetPrivateKey(tab);
+        var privateKeyPassphrase = string.IsNullOrWhiteSpace(GetPrivateKeyPassphrase(tab)) ? null : GetPrivateKeyPassphrase(tab);
+        var preferStoredCredentials = tab.PreferStoredCredentials;
+
+        if (ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId) && userId.HasValue)
+        {
+            var credentials = await CredentialProfileService.ResolveAsync(userId.Value, tab.HostId, profileId);
+            if (credentials is not null)
+            {
+                username = credentials.Username;
+                password = string.IsNullOrWhiteSpace(credentials.Password) ? null : credentials.Password;
+                privateKey = string.IsNullOrWhiteSpace(credentials.PrivateKey) ? null : credentials.PrivateKey;
+                privateKeyPassphrase = string.IsNullOrWhiteSpace(credentials.PrivateKeyPassphrase)
+                    ? null
+                    : credentials.PrivateKeyPassphrase;
+                preferStoredCredentials = false;
+            }
+        }
+
+        return new TerminalConnectionRequest(
+            username,
+            password,
+            privateKey,
+            privateKeyPassphrase,
+            preferStoredCredentials,
+            terminalColumns,
+            terminalRows,
+            tab.DefaultWorkingDirectory);
+    }
+
+    private async Task SaveConnectionProfileAsync(TerminalTabState tab)
+    {
+        if (!userId.HasValue)
+        {
+            tab.ErrorMessage = "Sign in before saving connection profiles.";
+            return;
+        }
+
+        try
+        {
+            var secrets = ConnectionSecretStore.Get(tab.SecretHandle);
+            var editor = new UserManagedHostCredentialProfileEditor
+            {
+                Id = ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId)
+                    ? profileId
+                    : null,
+                UserId = userId.Value,
+                ManagedHostId = tab.HostId,
+                Name = tab.ConnectionProfileName,
+                Username = tab.Username,
+                Password = secrets.Password,
+                PrivateKey = secrets.PrivateKey,
+                PrivateKeyPassphrase = secrets.PrivateKeyPassphrase
+            };
+
+            var saved = await CredentialProfileService.SaveAsync(editor);
+            await LoadCredentialProfilesAsync();
+            tab.ConnectionProfileKey = ConnectionProfileSelectionKeys.Saved(saved.Id);
+            tab.ConnectionProfileName = saved.Name;
+            tab.PreferStoredCredentials = false;
+            tab.ErrorMessage = string.Empty;
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = exception.Message;
+        }
+    }
+
+    private async Task DeleteConnectionProfileAsync(TerminalTabState tab)
+    {
+        if (!userId.HasValue ||
+            !ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId))
+        {
+            return;
+        }
+
+        await CredentialProfileService.DeleteAsync(userId.Value, tab.HostId, profileId);
+        await LoadCredentialProfilesAsync();
+        await SelectConnectionProfileAsync(tab, ConnectionProfileSelectionKeys.HostDefault);
+    }
+
+    private bool CanDeleteSelectedConnectionProfile(TerminalTabState tab) =>
+        userId.HasValue && ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out _);
+
+    private bool ShouldShowLinkedLinuxUserOption(TerminalTabState tab)
+    {
+        var host = hosts.FirstOrDefault(item => item.Id == tab.HostId);
+        return !string.IsNullOrWhiteSpace(currentLinuxUsername) &&
+               host is not null &&
+               !string.Equals(currentLinuxUsername, host.Username, StringComparison.Ordinal);
+    }
+
+    private string BuildHostDefaultProfileLabel(TerminalTabState tab)
+    {
+        var host = hosts.FirstOrDefault(item => item.Id == tab.HostId);
+        var username = host?.Username.Trim() ?? tab.Username.Trim();
+        return string.IsNullOrWhiteSpace(username)
+            ? "Host default"
+            : $"Host default ({username})";
+    }
+
+    private string BuildLinkedLinuxUserProfileLabel() =>
+        string.IsNullOrWhiteSpace(currentLinuxUsername)
+            ? "My Linux user"
+            : $"My Linux user ({currentLinuxUsername})";
+
+    private static string FormatCredentialProfileOption(UserManagedHostCredentialProfileSummary profile) =>
+        string.Equals(profile.Name, profile.Username, StringComparison.Ordinal)
+            ? profile.Name
+            : $"{profile.Name} ({profile.Username})";
+
+    private static bool HasConfiguredStoredCredentials(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
 
     private string BuildDetachedTerminalUrl(Guid tabId) =>
         NavigationManager.ToAbsoluteUri($"/terminal-window/{tabId}").ToString();

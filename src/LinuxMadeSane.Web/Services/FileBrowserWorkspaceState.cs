@@ -69,6 +69,8 @@ public sealed class FileBrowserWorkspaceState
                 snapshot.Username,
                 snapshot.SecretHandle,
                 snapshot.PreferStoredCredentials,
+                snapshot.ConnectionProfileKey,
+                snapshot.ConnectionProfileName,
                 snapshot.PreviewOpen,
                 snapshot.PreviewFocused,
                 snapshot.PreviewDock,
@@ -108,6 +110,8 @@ public sealed class FileBrowserWorkspaceState
                 Username = snapshot.Username,
                 SecretHandle = snapshot.SecretHandle,
                 PreferStoredCredentials = snapshot.PreferStoredCredentials,
+                ConnectionProfileKey = snapshot.ConnectionProfileKey,
+                ConnectionProfileName = snapshot.ConnectionProfileName,
                 PreviewOpen = snapshot.PreviewOpen,
                 PreviewFocused = snapshot.PreviewFocused,
                 PreviewDock = snapshot.PreviewDock,
@@ -140,6 +144,8 @@ public sealed class FileBrowserWorkspaceState
                 snapshot.Username,
                 snapshot.SecretHandle,
                 snapshot.PreferStoredCredentials,
+                snapshot.ConnectionProfileKey,
+                snapshot.ConnectionProfileName,
                 snapshot.PathSuggestions,
                 now,
                 now);
@@ -174,6 +180,8 @@ public sealed class FileBrowserWorkspaceState
                 Username = snapshot.Username,
                 SecretHandle = snapshot.SecretHandle,
                 PreferStoredCredentials = snapshot.PreferStoredCredentials,
+                ConnectionProfileKey = snapshot.ConnectionProfileKey,
+                ConnectionProfileName = snapshot.ConnectionProfileName,
                 PathSuggestions = snapshot.PathSuggestions,
                 UpdatedAtUtc = DateTimeOffset.UtcNow
             };
@@ -229,6 +237,8 @@ public sealed record DetachedFileBrowserSnapshot(
     string Username,
     Guid? SecretHandle,
     bool PreferStoredCredentials,
+    string ConnectionProfileKey,
+    string ConnectionProfileName,
     bool PreviewOpen,
     bool PreviewFocused,
     FileBrowserPreviewDock PreviewDock,
@@ -243,6 +253,8 @@ public sealed record DetachedFileBrowserState(
     string Username,
     Guid? SecretHandle,
     bool PreferStoredCredentials,
+    string ConnectionProfileKey,
+    string ConnectionProfileName,
     bool PreviewOpen,
     bool PreviewFocused,
     FileBrowserPreviewDock PreviewDock,
@@ -257,6 +269,8 @@ public sealed record DetachedFileSearchSnapshot(
     string Username,
     Guid? SecretHandle,
     bool PreferStoredCredentials,
+    string ConnectionProfileKey,
+    string ConnectionProfileName,
     IReadOnlyList<string> PathSuggestions);
 
 public sealed record DetachedFileSearchState(
@@ -266,6 +280,8 @@ public sealed record DetachedFileSearchState(
     string Username,
     Guid? SecretHandle,
     bool PreferStoredCredentials,
+    string ConnectionProfileKey,
+    string ConnectionProfileName,
     IReadOnlyList<string> PathSuggestions,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
