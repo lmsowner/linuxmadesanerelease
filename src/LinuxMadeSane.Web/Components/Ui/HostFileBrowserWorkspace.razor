@@ -167,84 +167,102 @@ else
                                     </button>
                                     @if (connectionIdentityEditorOpen)
                                     {
-                                    <div class="host-file-address-auth-panel">
-                                        <p class="host-file-address-auth-help">Choose the Linux account used by this file browser. Host credentials are used only for the host-default identity.</p>
+                                        <div class="host-file-address-auth-panel connection-user-editor"
+                                             role="dialog"
+                                             aria-label="Connection users">
+                                            <div class="connection-user-editor-heading">
+                                                <strong>Connection users</strong>
+                                                <button type="button"
+                                                        class="connection-user-editor-close"
+                                                        title="Close connection users"
+                                                        aria-label="Close connection users"
+                                                        @onclick="ToggleConnectionIdentityEditorAsync">
+                                                    <UiGlyphIcon Glyph="UiIconGlyph.Clear" />
+                                                </button>
+                                            </div>
 
-                                        <UiSelectField TValue="string"
-                                                       Label="Identity"
-                                                       Value="@connectionProfileKey"
-                                                       ValueChanged="SelectConnectionProfileAsync"
-                                                       ValueExpression="@(() => connectionProfileKey)"
-                                                       Compact="true"
-                                                       Class="host-file-inline-field">
-                                            <option value="@ConnectionProfileSelectionKeys.HostDefault">@BuildHostDefaultProfileLabel()</option>
-                                            @if (ShouldShowLinkedLinuxUserOption)
-                                            {
-                                                <option value="@ConnectionProfileSelectionKeys.LinkedLinuxUser">@BuildLinkedLinuxUserProfileLabel()</option>
-                                            }
-                                            @foreach (var profile in credentialProfiles)
-                                            {
-                                                <option value="@ConnectionProfileSelectionKeys.Saved(profile.Id)">@FormatCredentialProfileOption(profile)</option>
-                                            }
-                                            <option value="@ConnectionProfileSelectionKeys.Custom">Another user...</option>
-                                        </UiSelectField>
+                                            <div class="host-file-address-auth-grid">
+                                                <UiSelectField TValue="string"
+                                                               Label="Identity"
+                                                               Value="@connectionProfileKey"
+                                                               ValueChanged="SelectConnectionProfileAsync"
+                                                               ValueExpression="@(() => connectionProfileKey)"
+                                                               Compact="true"
+                                                               Class="host-file-inline-field host-file-inline-field-wide">
+                                                    <option value="@ConnectionProfileSelectionKeys.HostDefault">@BuildHostDefaultProfileLabel()</option>
+                                                    @if (ShouldShowLinkedLinuxUserOption)
+                                                    {
+                                                        <option value="@ConnectionProfileSelectionKeys.LinkedLinuxUser">@BuildLinkedLinuxUserProfileLabel()</option>
+                                                    }
+                                                    @foreach (var profile in credentialProfiles)
+                                                    {
+                                                        <option value="@ConnectionProfileSelectionKeys.Saved(profile.Id)">@FormatCredentialProfileOption(profile)</option>
+                                                    }
+                                                    <option value="@ConnectionProfileSelectionKeys.Custom">Another user...</option>
+                                                </UiSelectField>
 
-                                        <UiTextField @bind-Value="connectionProfileName"
-                                                     Label="Saved user name"
-                                                     Compact="true"
-                                                     Class="host-file-inline-field" />
+                                                <UiTextField @bind-Value="connectionProfileName"
+                                                             Label="Saved user name"
+                                                             Compact="true"
+                                                             Class="host-file-inline-field" />
 
-                                        <UiTextField @bind-Value="connectionUsername"
-                                                     Label="User"
-                                                     Compact="true"
-                                                     Class="host-file-inline-field" />
+                                                <UiTextField @bind-Value="connectionUsername"
+                                                             Label="Username"
+                                                             Compact="true"
+                                                             Class="host-file-inline-field" />
 
-                                        <UiTextField @bind-Value="ConnectionPassword"
-                                                     Label="Password"
-                                                     Type="password"
-                                                     Compact="true"
-                                                     Class="host-file-inline-field" />
+                                                <UiTextField @bind-Value="ConnectionPassword"
+                                                             Label="Password"
+                                                             Type="password"
+                                                             Compact="true"
+                                                             Class="host-file-inline-field" />
 
-                                        <UiTextAreaField @bind-Value="ConnectionPrivateKey"
-                                                         Label="Client private key PEM"
-                                                         Rows="5"
-                                                         Compact="true"
-                                                         Class="host-file-inline-field host-file-inline-field-wide" />
+                                                <UiCheckboxField @bind-Value="preferStoredCredentials"
+                                                                 Label="Use host credentials"
+                                                                 Compact="true"
+                                                                 Class="host-file-checkbox-row host-file-inline-field-wide" />
+                                            </div>
 
-                                        <UiTextField @bind-Value="ConnectionPrivateKeyPassphrase"
-                                                     Label="Client key passphrase"
-                                                     Type="password"
-                                                     Compact="true"
-                                                     Class="host-file-inline-field" />
+                                            <details class="host-file-address-auth-key">
+                                                <summary>Private key</summary>
+                                                <div class="host-file-address-auth-key-grid">
+                                                    <UiTextAreaField @bind-Value="ConnectionPrivateKey"
+                                                                     Label="Client private key PEM"
+                                                                     Rows="5"
+                                                                     Compact="true"
+                                                                     Class="host-file-inline-field" />
+                                                    <UiTextField @bind-Value="ConnectionPrivateKeyPassphrase"
+                                                                 Label="Key passphrase"
+                                                                 Type="password"
+                                                                 Compact="true"
+                                                                 Class="host-file-inline-field" />
+                                                </div>
+                                            </details>
 
-                                        <UiCheckboxField @bind-Value="preferStoredCredentials"
-                                                         Label="Use host credentials"
-                                                         Compact="true"
-                                                         Class="host-file-checkbox-row" />
-
-                                        <div class="host-file-address-auth-actions">
-                                            <UiCommandButton Label="Apply"
-                                                             Glyph="UiIconGlyph.Connect"
-                                                             Variant="UiButtonVariant.PrimaryMuted"
-                                                             Disabled="@isBusy"
-                                                             OnClick="ApplyConnectionIdentityAsync" />
-                                            <UiCommandButton Label="Host default"
-                                                             Glyph="UiIconGlyph.Key"
-                                                             Variant="UiButtonVariant.Ghost"
-                                                             Disabled="@isBusy"
-                                                             OnClick="ResetConnectionIdentityAsync" />
-                                            <UiCommandButton Label="Save user"
-                                                             Glyph="UiIconGlyph.Save"
-                                                             Variant="UiButtonVariant.Ghost"
-                                                             Disabled="@(isBusy || userId is null)"
-                                                             OnClick="SaveConnectionProfileAsync" />
-                                            <UiCommandButton Label="Delete user"
-                                                             Glyph="UiIconGlyph.Delete"
-                                                             Variant="UiButtonVariant.Ghost"
-                                                             Disabled="@(isBusy || !CanDeleteSelectedConnectionProfile)"
-                                                             OnClick="DeleteConnectionProfileAsync" />
+                                            <div class="host-file-address-auth-actions connection-user-editor-actions">
+                                                <UiCommandButton Label="Delete"
+                                                                 Glyph="UiIconGlyph.Delete"
+                                                                 Variant="UiButtonVariant.Ghost"
+                                                                 HideIcon="true"
+                                                                 Class="connection-user-editor-action"
+                                                                 Disabled="@(isBusy || !CanDeleteSelectedConnectionProfile)"
+                                                                 OnClick="DeleteConnectionProfileAsync" />
+                                                <UiCommandButton Label="Connect"
+                                                                 Glyph="UiIconGlyph.Connect"
+                                                                 Variant="UiButtonVariant.Ghost"
+                                                                 HideIcon="true"
+                                                                 Class="connection-user-editor-action"
+                                                                 Disabled="@isBusy"
+                                                                 OnClick="ApplyConnectionIdentityAsync" />
+                                                <UiCommandButton Label="Save user"
+                                                                 Glyph="UiIconGlyph.Save"
+                                                                 Variant="UiButtonVariant.PrimaryMuted"
+                                                                 HideIcon="true"
+                                                                 Class="connection-user-editor-action"
+                                                                 Disabled="@(isBusy || userId is null)"
+                                                                 OnClick="SaveConnectionProfileAsync" />
+                                            </div>
                                         </div>
-                                    </div>
                                     }
                                 </div>
                             }
@@ -3189,29 +3207,6 @@ else
         ClearOperationMessage();
         ResetConnectionScopedBrowserState();
         browserStatus = $"Connecting as {ConnectionIdentityDisplayName}";
-        PersistDetachedBrowserState();
-
-        var targetPath = ResolveAddressInputPath(string.IsNullOrWhiteSpace(pathInput) ? currentPath : pathInput);
-        await LoadItemsAsync(targetPath, preserveSessionOnFailure: false, updatePathInputOnSuccess: true);
-    }
-
-    private async Task ResetConnectionIdentityAsync()
-    {
-        if (browser is null)
-        {
-            return;
-        }
-
-        connectionUsername = browser.Host.Username.Trim();
-        connectionSecretHandle = null;
-        connectionProfileKey = ConnectionProfileSelectionKeys.HostDefault;
-        connectionProfileName = browser.Host.Username.Trim();
-        preferStoredCredentials = HostHasConfiguredStoredCredentials(browser.Host);
-        connectionIdentityEditorOpen = false;
-        DismissContextMenu();
-        ClearOperationMessage();
-        ResetConnectionScopedBrowserState();
-        await RefreshStoredBrowseCredentialStateAsync();
         PersistDetachedBrowserState();
 
         var targetPath = ResolveAddressInputPath(string.IsNullOrWhiteSpace(pathInput) ? currentPath : pathInput);
