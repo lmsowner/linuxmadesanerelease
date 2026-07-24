@@ -213,6 +213,7 @@ public sealed class FileBrowserWorkspaceState
                 snapshot.Username,
                 snapshot.SecretHandle,
                 snapshot.PreferStoredCredentials,
+                snapshot.UseSshTransport,
                 DateTimeOffset.UtcNow);
 
             return Clipboard;
@@ -310,7 +311,8 @@ public sealed record FileBrowserClipboardSnapshot(
     IReadOnlyList<FileBrowserClipboardItemSnapshot> Items,
     string Username,
     Guid? SecretHandle,
-    bool PreferStoredCredentials);
+    bool PreferStoredCredentials,
+    bool UseSshTransport);
 
 public sealed record FileBrowserClipboardItemState(
     string SourcePath,
@@ -325,6 +327,7 @@ public sealed record FileBrowserClipboardState(
     string Username,
     Guid? SecretHandle,
     bool PreferStoredCredentials,
+    bool UseSshTransport,
     DateTimeOffset CapturedAtUtc)
 {
     public Guid HostId => Host.Id;

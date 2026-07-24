@@ -20,7 +20,7 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return new ManagedHostConnectionValidationResult(true, string.Empty);
         }
@@ -52,7 +52,7 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ListItemsAsync(host.DefaultWorkingDirectory, path, cancellationToken);
         }
@@ -76,7 +76,7 @@ public sealed class ManagedHostFileAccessService(
         IProgress<FileSearchProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.SearchAsync(host.DefaultWorkingDirectory, request, progress, cancellationToken);
         }
@@ -101,7 +101,7 @@ public sealed class ManagedHostFileAccessService(
         int maxBytes,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ReadFileAsync(host.DefaultWorkingDirectory, path, maxBytes, cancellationToken);
         }
@@ -126,7 +126,7 @@ public sealed class ManagedHostFileAccessService(
         int maxBytes,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ReadBinaryFileAsync(host.DefaultWorkingDirectory, path, maxBytes, cancellationToken);
         }
@@ -152,7 +152,7 @@ public sealed class ManagedHostFileAccessService(
         IProgress<FileTransferProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.DownloadFileAsync(host.DefaultWorkingDirectory, sourcePath, localDestinationPath, progress, cancellationToken);
         }
@@ -179,7 +179,7 @@ public sealed class ManagedHostFileAccessService(
         IProgress<FileTransferProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.UploadFileAsync(host.DefaultWorkingDirectory, localSourcePath, destinationPath, progress, cancellationToken);
         }
@@ -207,7 +207,7 @@ public sealed class ManagedHostFileAccessService(
         string? encodingName = null,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.WriteFileAsync(host.DefaultWorkingDirectory, path, content, createDirectories, encodingName, cancellationToken);
         }
@@ -233,7 +233,7 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.CreateDirectoryAsync(host.DefaultWorkingDirectory, path, cancellationToken);
         }
@@ -257,7 +257,7 @@ public sealed class ManagedHostFileAccessService(
         bool recursive,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.DeleteAsync(host.DefaultWorkingDirectory, path, recursive, cancellationToken);
         }
@@ -283,7 +283,7 @@ public sealed class ManagedHostFileAccessService(
         CancellationToken cancellationToken = default,
         IProgress<FileTransferProgress>? progress = null)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.CopyAsync(host.DefaultWorkingDirectory, sourcePath, destinationPath, cancellationToken, progress);
         }
@@ -309,7 +309,7 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.MoveAsync(host.DefaultWorkingDirectory, sourcePath, destinationPath, cancellationToken);
         }
@@ -349,7 +349,7 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.CreateArchiveAsync(host.DefaultWorkingDirectory, sourcePath, destinationArchivePath, format, cancellationToken);
         }
@@ -390,7 +390,7 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ExtractArchiveAsync(host.DefaultWorkingDirectory, archivePath, destinationDirectoryPath, format, cancellationToken);
         }
@@ -417,7 +417,7 @@ public sealed class ManagedHostFileAccessService(
         int maxEntries,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ListArchiveEntriesAsync(host.DefaultWorkingDirectory, archivePath, format, maxEntries, cancellationToken);
         }
@@ -442,7 +442,7 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
-        if (AiLocalMachine.IsLocalMachine(host.Id))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.SetOwnershipAndPermissionsAsync(host.DefaultWorkingDirectory, request, cancellationToken);
         }
@@ -471,6 +471,11 @@ public sealed class ManagedHostFileAccessService(
             NullIfEmpty(secrets.PrivateKeyPassphrase),
             connectionProfile.PreferStoredCredentials);
     }
+
+    private static bool ShouldUseLocalFileBrowsing(
+        ManagedHost host,
+        ManagedHostConnectionProfile connectionProfile) =>
+        AiLocalMachine.IsLocalMachine(host.Id) && !connectionProfile.UseSshTransport;
 
     private static string? NullIfEmpty(string value) =>
         string.IsNullOrWhiteSpace(value) ? null : value;

@@ -1247,18 +1247,22 @@ else
     private bool HasInlineBrowseCredentials =>
         !string.IsNullOrWhiteSpace(ConnectionSecretStore.Get(connectionSecretHandle).Password) ||
         !string.IsNullOrWhiteSpace(ConnectionSecretStore.Get(connectionSecretHandle).PrivateKey);
+    private bool UseSshTransport =>
+        IsLocalBrowser &&
+        ConnectionProfileSelectionKeys.TryParseSaved(connectionProfileKey, out _);
+    private bool UsesSshTransport => !IsLocalBrowser || UseSshTransport;
     private bool ShouldValidateStoredBrowseCredentials =>
         browser is not null &&
-        !IsLocalBrowser &&
+        UsesSshTransport &&
         preferStoredCredentials &&
         HasConfiguredStoredCredentials &&
         !HasInlineBrowseCredentials;
     private bool HasAvailableBrowseCredentials =>
-        IsLocalBrowser ||
+        !UsesSshTransport ||
         HasScopedRoot ||
         HasSavedCredentials ||
         HasInlineBrowseCredentials;
-    private bool ShowConnectAsContextMenu => !IsLocalBrowser;
+    private bool ShowConnectAsContextMenu => browser is not null;
     private string ConnectionIdentityDisplayName =>
         string.IsNullOrWhiteSpace(connectionUsername) ? "the selected account" : connectionUsername.Trim();
     private bool HasBrowseFailure => !string.IsNullOrWhiteSpace(errorMessage) && !canBrowse;
@@ -1272,14 +1276,14 @@ else
         : $"Files - {BuildBrowserTitleHostLabel(browser.Host)} - {FormatBrowserTitlePath(currentPath)} | Linux Made Sane";
     private string AccessMetaText => HasScopedRoot
         ? EffectiveRootPath ?? string.Empty
-        : IsLocalBrowser
+        : !UsesSshTransport
             ? string.Empty
             : browser is null
                 ? string.Empty
                 : $"{browser.Host.Hostname}:{browser.Host.Port} over SSH/SFTP.";
     private string NotConnectedMessage => HasScopedRoot
         ? "Enter a directory path to browse this filesystem root."
-        : IsLocalBrowser
+        : !UsesSshTransport
             ? "Enter a directory path to browse the LMS filesystem."
             : HasSavedCredentials && preferStoredCredentials && !HasInlineCredentialOverrides
                 ? "Enter a directory path to browse the remote host. Saved credentials will be used automatically."
@@ -1595,7 +1599,7 @@ else
         InitializeConnectionProfileSelection();
         EnsureInlineDetachedBrowserState();
 
-        browserStatus = IsLocalBrowser
+        browserStatus = !UsesSshTransport
             ? "Local filesystem ready"
             : detachedState is not null
                 ? "Browser ready"
@@ -1893,7 +1897,7 @@ else
             browserStatus = HasSavedCredentials ? "Saved credentials ready" : "Credentials required";
         }
 
-        if (!IsLocalBrowser && !HasAvailableBrowseCredentials)
+        if (UsesSshTransport && !HasAvailableBrowseCredentials)
         {
             errorMessage = string.IsNullOrWhiteSpace(storedBrowseCredentialsFailureMessage)
                 ? "Provide a password or private key to browse files."
@@ -1946,7 +1950,7 @@ else
                 pathInput = normalizedPath;
             }
 
-            browserStatus = IsLocalBrowser ? "Live local listing" : "Live remote listing";
+            browserStatus = UsesSshTransport ? "Live SSH listing" : "Live local listing";
             canBrowse = true;
             if (refreshAncillaryNavigation)
             {
@@ -1988,10 +1992,10 @@ else
             else
             {
                 browserStatus = isAccessDenied
-                    ? (IsLocalBrowser ? "Folder not accessible" : "Remote path not accessible")
+                    ? (UsesSshTransport ? "Remote path not accessible" : "Folder not accessible")
                     : isPathNotFound
                         ? "Folder not found"
-                    : (IsLocalBrowser ? "Browse failed" : "Connection failed");
+                    : (UsesSshTransport ? "Connection failed" : "Browse failed");
                 canBrowse = false;
                 directoryNodes = Array.Empty<FileBrowserDirectoryNode>();
                 RefreshPathSuggestions(pathInput, refreshAncillaryNavigation);
@@ -2032,10 +2036,10 @@ else
         }
 
         browserStatus = isAccessDenied
-            ? (IsLocalBrowser ? "Folder not accessible" : "Remote path not accessible")
+            ? (UsesSshTransport ? "Remote path not accessible" : "Folder not accessible")
             : isPathNotFound
                 ? "Folder not found"
-                : (IsLocalBrowser ? "Browse failed" : "Connection failed");
+                : (UsesSshTransport ? "Connection failed" : "Browse failed");
         canBrowse = false;
         directoryNodes = Array.Empty<FileBrowserDirectoryNode>();
         QueuePathSuggestionsRefresh(pathInput);
@@ -3266,7 +3270,7 @@ else
             ? "names, metadata, and file contents"
             : "names and metadata";
 
-        return IsLocalBrowser
+        return !UsesSshTransport
             ? $"Starting {searchPlan} search in {request.RootPath}..."
             : $"Connecting for {searchPlan} search in {request.RootPath}...";
     }
@@ -3545,7 +3549,8 @@ else
                 .ToArray(),
             connectionUsername,
             ConnectionSecretStore.Clone(connectionSecretHandle),
-            preferStoredCredentials));
+            preferStoredCredentials,
+            UseSshTransport));
         SetOperationMessage($"{(operation == FileBrowserClipboardOperation.Cut ? "Cut" : "Copied")} {DescribeItems(actionItems.Select(item => item.Name).ToArray())}.", "success");
         await InvokeAsync(StateHasChanged);
     }
@@ -3570,7 +3575,8 @@ else
                 request.IsDirectory ? null : request.Item?.SizeBytes)],
             connectionUsername,
             ConnectionSecretStore.Clone(connectionSecretHandle),
-            preferStoredCredentials));
+            preferStoredCredentials,
+            UseSshTransport));
         SetOperationMessage($"{(operation == FileBrowserClipboardOperation.Cut ? "Cut" : "Copied")} {request.DisplayName}.", "success");
         await InvokeAsync(StateHasChanged);
     }
@@ -4334,7 +4340,7 @@ else
     private void SetBrowseBusyState(string path, bool previousCanBrowse)
     {
         var normalizedPath = string.IsNullOrWhiteSpace(path) ? "/" : path;
-        if (IsLocalBrowser)
+        if (!UsesSshTransport)
         {
             browseBusyTitle = "Loading folder";
             browseBusyMessage = $"Enumerating {normalizedPath}.";
@@ -4460,7 +4466,7 @@ else
             return;
         }
 
-        if (!IsLocalBrowser && !HasAvailableBrowseCredentials)
+        if (UsesSshTransport && !HasAvailableBrowseCredentials)
         {
             return;
         }
@@ -4557,7 +4563,7 @@ else
 
     private async Task<bool> TryCacheDirectoryAsync(string path)
     {
-        if (!IsLocalBrowser && !canBrowse)
+        if (UsesSshTransport && !canBrowse)
         {
             return false;
         }
@@ -5370,15 +5376,16 @@ else
     private string BuildAccessGuidanceMessage(string path, string? suggestedUser)
     {
         var normalizedPath = ResolveBrowserPath(path);
-        if (!string.IsNullOrWhiteSpace(suggestedUser) && !IsLocalBrowser)
+        if (!string.IsNullOrWhiteSpace(suggestedUser))
         {
-            return string.Equals(suggestedUser, connectionUsername, StringComparison.Ordinal)
+            return UsesSshTransport &&
+                   string.Equals(suggestedUser, connectionUsername, StringComparison.Ordinal)
                 ? $"{normalizedPath} looks like {suggestedUser}'s home folder, but the current SSH account still cannot read it. Check that account's permissions or use an explicit terminal/sudo action."
                 : $"{normalizedPath} looks like {suggestedUser}'s home folder. Set that user up in Terminal, then right-click in this browser and choose Connect as.";
         }
 
-        return IsLocalBrowser
-            ? $"{normalizedPath} is blocked by local filesystem permissions. Browse it as the Linux account that owns it, or open a terminal for explicit sudo, ownership, or ACL work."
+        return !UsesSshTransport
+            ? $"{normalizedPath} is blocked by local filesystem permissions. Set up the owning Linux account in Terminal, then right-click and choose Connect as, or use a terminal for explicit sudo, ownership, or ACL work."
             : $"{normalizedPath} is blocked by the SSH account currently in use. Set up the owning Linux account in Terminal, then right-click and choose Connect as, or use a terminal for explicit sudo, ownership, or ACL work.";
     }
 
@@ -6031,19 +6038,21 @@ else
         !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
 
     private ManagedHostConnectionProfile BuildConnectionProfile() =>
-        new(connectionUsername, connectionSecretHandle, preferStoredCredentials);
+        new(connectionUsername, connectionSecretHandle, preferStoredCredentials, UseSshTransport);
 
     private FileActionExecutionContext BuildFileActionExecutionContext() =>
         new(
             connectionUsername,
             connectionSecretHandle,
-            preferStoredCredentials);
+            preferStoredCredentials,
+            UseSshTransport);
 
     private static FileActionExecutionContext BuildExecutionContextForClipboard(FileBrowserClipboardState clipboard) =>
         new(
             clipboard.Username,
             clipboard.SecretHandle,
-            clipboard.PreferStoredCredentials);
+            clipboard.PreferStoredCredentials,
+            clipboard.UseSshTransport);
 
     private Task EnsureFileActionsPopupAsync() =>
         JSRuntime.InvokeAsync<bool>(

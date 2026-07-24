@@ -6,7 +6,8 @@ namespace LinuxMadeSane.Core.Models;
 public sealed record ManagedHostConnectionProfile(
     string Username,
     Guid? SecretHandle,
-    bool PreferStoredCredentials);
+    bool PreferStoredCredentials,
+    bool UseSshTransport = false);
 
 public sealed record ManagedHostConnectionSecrets(
     string Password,

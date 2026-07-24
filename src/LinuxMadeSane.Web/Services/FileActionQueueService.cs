@@ -1669,7 +1669,11 @@ public sealed class FileActionQueueService(
     }
 
     private static ManagedHostConnectionProfile BuildConnectionProfile(FileActionExecutionContext executionContext) =>
-        new(executionContext.Username, executionContext.SecretHandle, executionContext.PreferStoredCredentials);
+        new(
+            executionContext.Username,
+            executionContext.SecretHandle,
+            executionContext.PreferStoredCredentials,
+            executionContext.UseSshTransport);
 
     private static IReadOnlyList<FileActionAffectedLocation> BuildAffectedLocations(FileActionJob job)
     {
@@ -1804,7 +1808,8 @@ public sealed class FileActionQueueService(
 public sealed record FileActionExecutionContext(
     string Username,
     Guid? SecretHandle,
-    bool PreferStoredCredentials);
+    bool PreferStoredCredentials,
+    bool UseSshTransport);
 
 public sealed record FileActionSourceItem(
     string SourcePath,
