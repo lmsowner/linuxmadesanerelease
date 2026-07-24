@@ -13,17 +13,24 @@ internal static class SshAuthenticationBuilder
 {
     public static List<AuthenticationMethod> BuildAuthenticationMethods(
         ManagedHost host,
-        ManagedHostSshCredentials credentials) =>
-        BuildAuthenticationMethods(
+        ManagedHostSshCredentials credentials)
+    {
+        var primaryAuthenticationType = credentials.AuthenticationTypeOverride ?? host.PrimaryAuthenticationType;
+        var fallbackAuthenticationType = credentials.AuthenticationTypeOverride.HasValue
+            ? null
+            : host.FallbackAuthenticationType;
+
+        return BuildAuthenticationMethods(
             credentials.Username,
             credentials.Password,
             credentials.PrivateKey,
             credentials.PrivateKeyPassphrase,
-            host.PrimaryAuthenticationType,
-            host.FallbackAuthenticationType,
+            primaryAuthenticationType,
+            fallbackAuthenticationType,
             host.UseKeyboardInteractiveFallback ||
-            host.PrimaryAuthenticationType is AuthenticationType.Conditional or AuthenticationType.PasswordAndPrivateKey ||
-            host.FallbackAuthenticationType is AuthenticationType.Conditional or AuthenticationType.PasswordAndPrivateKey);
+            primaryAuthenticationType is AuthenticationType.Conditional or AuthenticationType.PasswordAndPrivateKey ||
+            fallbackAuthenticationType is AuthenticationType.Conditional or AuthenticationType.PasswordAndPrivateKey);
+    }
 
     public static List<AuthenticationMethod> BuildAuthenticationMethods(
         string username,

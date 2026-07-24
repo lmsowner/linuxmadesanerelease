@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -113,4 +114,5 @@ public sealed record ManagedHostSshCredentials(
     string Username,
     string? Password,
     string? PrivateKey,
-    string? PrivateKeyPassphrase);
+    string? PrivateKeyPassphrase,
+    AuthenticationType? AuthenticationTypeOverride = null);

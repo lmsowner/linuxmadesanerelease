@@ -1,6 +1,7 @@
 // Copyright (c) Richard D. Kiernan.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
 using Microsoft.Extensions.DependencyInjection;
 using Renci.SshNet;
@@ -43,7 +44,8 @@ public sealed class ManagedHostSshConnectionFactory(IServiceScopeFactory scopeFa
             username,
             string.IsNullOrWhiteSpace(request.Password) ? stored?.Password : request.Password,
             string.IsNullOrWhiteSpace(request.PrivateKey) ? stored?.PrivateKey : request.PrivateKey,
-            string.IsNullOrWhiteSpace(request.PrivateKeyPassphrase) ? stored?.PrivateKeyPassphrase : request.PrivateKeyPassphrase);
+            string.IsNullOrWhiteSpace(request.PrivateKeyPassphrase) ? stored?.PrivateKeyPassphrase : request.PrivateKeyPassphrase,
+            request.PreferStoredCredentials ? null : ResolveExplicitAuthenticationType(request));
 
         if (string.IsNullOrWhiteSpace(credentials.Password) &&
             string.IsNullOrWhiteSpace(credentials.PrivateKey) &&
@@ -53,6 +55,20 @@ public sealed class ManagedHostSshConnectionFactory(IServiceScopeFactory scopeFa
         }
 
         return credentials;
+    }
+
+    private static AuthenticationType? ResolveExplicitAuthenticationType(ManagedHostSshCredentialRequest request)
+    {
+        var hasPassword = !string.IsNullOrWhiteSpace(request.Password);
+        var hasPrivateKey = !string.IsNullOrWhiteSpace(request.PrivateKey);
+
+        return (hasPassword, hasPrivateKey) switch
+        {
+            (true, true) => AuthenticationType.Conditional,
+            (true, false) => AuthenticationType.Password,
+            (false, true) => AuthenticationType.PrivateKey,
+            _ => null
+        };
     }
 
     public ConnectionInfo CreateConnectionInfo(
