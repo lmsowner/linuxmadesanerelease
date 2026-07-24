@@ -114,6 +114,7 @@ public class Program
         builder.Services.AddSingleton<FileActionQueueService>();
         builder.Services.AddSingleton<BrowserFileTransferService>();
         builder.Services.AddScoped<ShareMountsWorkspaceService>();
+        builder.Services.AddScoped<ConnectionProfileUserResolver>();
         builder.Services.AddSingleton<MediaLibrarySignedUrlService>();
         builder.Services.AddSingleton<RemoteLmsTunnelAccessService>();
         builder.Services.AddSingleton<RemoteLmsRelayCaddyService>();
