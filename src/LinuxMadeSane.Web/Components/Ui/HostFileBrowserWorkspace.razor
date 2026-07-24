@@ -13,7 +13,6 @@
 @using LinuxMadeSane.Core.Models.Shares
 @using LinuxMadeSane.Infrastructure.Services
 @using LinuxMadeSane.Web.Services
-@using System.Security.Claims
 @using System.Text.Json
 @using Microsoft.AspNetCore.Components.Authorization
 @implements IAsyncDisposable
@@ -21,9 +20,9 @@
 @inject IShareManagementService ShareService
 @inject IFileBrowserShortcutService FileBrowserShortcutService
 @inject IUserManagedHostCredentialProfileService CredentialProfileService
-@inject ISecurityUserStore SecurityUserStore
 @inject IManagedHostFileAccessService FileAccessService
 @inject ITransientConnectionSecretStore ConnectionSecretStore
+@inject ConnectionProfileUserResolver ConnectionProfileUserResolver
 @inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject FileBrowserWorkspaceRegistry FileBrowserWorkspaceRegistry
@@ -1950,17 +1949,16 @@ else
         var authenticationState = AuthenticationStateTask is null
             ? null
             : await AuthenticationStateTask;
-        var value = authenticationState?.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        if (!Guid.TryParse(value, out var resolvedUserId))
+        var currentUser = await ConnectionProfileUserResolver.ResolveAsync(authenticationState?.User);
+        if (currentUser is null)
         {
             userId = null;
             currentLinuxUsername = string.Empty;
             return;
         }
 
-        userId = resolvedUserId;
-        var user = await SecurityUserStore.GetAsync(resolvedUserId);
-        currentLinuxUsername = user?.LinuxUsername.Trim() ?? string.Empty;
+        userId = currentUser.Id;
+        currentLinuxUsername = currentUser.LinuxUsername.Trim();
     }
 
     private async Task LoadCredentialProfilesAsync()

@@ -5,7 +5,6 @@
 @layout PopupLayout
 @rendermode InteractiveServer
 @implements IAsyncDisposable
-@using System.Security.Claims
 @using LinuxMadeSane.Application.Contracts
 @using Microsoft.AspNetCore.Components.Authorization
 @using LinuxMadeSane.Application.Interfaces
@@ -16,8 +15,8 @@
 @inject ITerminalSessionService TerminalSessionService
 @inject IUserDisplayPreferenceService UserDisplayPreferenceService
 @inject IUserManagedHostCredentialProfileService CredentialProfileService
-@inject ISecurityUserStore SecurityUserStore
 @inject ITransientConnectionSecretStore ConnectionSecretStore
+@inject ConnectionProfileUserResolver ConnectionProfileUserResolver
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
 @inject IJSRuntime JSRuntime
@@ -290,12 +289,12 @@
     protected override async Task OnInitializedAsync()
     {
         terminalWorkspace = TerminalWorkspaceRegistry.GetOrCreate(TerminalWorkspaceAccessor.GetWorkspaceId());
-        userId = await ResolveUserIdAsync();
-        if (userId.HasValue)
+        var currentUser = await ResolveCurrentUserAsync();
+        userId = currentUser?.Id;
+        if (currentUser is not null)
         {
-            var currentUser = await SecurityUserStore.GetAsync(userId.Value);
-            currentLinuxUsername = currentUser?.LinuxUsername.Trim() ?? string.Empty;
-            var preference = await UserDisplayPreferenceService.GetAsync(userId.Value);
+            currentLinuxUsername = currentUser.LinuxUsername.Trim();
+            var preference = await UserDisplayPreferenceService.GetAsync(currentUser.Id);
             if (preference is not null)
             {
                 terminalWorkspace.SetDefaultCopyOnSelect(preference.TerminalCopyOnSelect, applyToExisting: true);
@@ -758,16 +757,12 @@
             _ => false
         };
 
-    private async Task<Guid?> ResolveUserIdAsync()
+    private async Task<SecurityUser?> ResolveCurrentUserAsync()
     {
         var authenticationState = AuthenticationStateTask is null
             ? null
             : await AuthenticationStateTask;
-        var value = authenticationState?.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-
-        return Guid.TryParse(value, out var parsed)
-            ? parsed
-            : null;
+        return await ConnectionProfileUserResolver.ResolveAsync(authenticationState?.User);
     }
 
     private async Task AskAiAsync()
