@@ -7,6 +7,10 @@ namespace LinuxMadeSane.Application.Interfaces;
 
 public interface IMailRelayProvisioningService
 {
+    Task<MailRelayPublicIpSyncResult> SynchronizePublicIpAsync(
+        string detectedPublicIp,
+        CancellationToken cancellationToken = default);
+
     Task<MailRelaySetupPreview> PreviewAsync(
         MailRelaySetupRequest request,
         CancellationToken cancellationToken = default);

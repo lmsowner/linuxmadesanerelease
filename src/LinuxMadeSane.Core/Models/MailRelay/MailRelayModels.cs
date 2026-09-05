@@ -41,6 +41,16 @@ public enum MailRelayDnsChangeType
     ModifiedShared = 2
 }
 
+public enum MailRelayPublicIpMonitorStatus
+{
+    Disabled = 0,
+    NotChecked = 1,
+    Healthy = 2,
+    Updated = 3,
+    Warning = 4,
+    Error = 5
+}
+
 public sealed record MailRelayConfiguration(
     Guid Id,
     bool Enabled,
@@ -65,6 +75,12 @@ public sealed record MailRelayConfiguration(
 {
     public IReadOnlyList<string> EffectiveLegacyListenAddresses => LegacyListenAddresses;
     public IReadOnlyList<string> EffectiveLegacyAllowedNetworks => LegacyAllowedNetworks;
+    public bool MonitorPublicIpChanges { get; init; }
+    public int PublicIpCheckIntervalMinutes { get; init; } = 60;
+    public DateTimeOffset? LastPublicIpCheckUtc { get; init; }
+    public DateTimeOffset? LastPublicIpChangeUtc { get; init; }
+    public MailRelayPublicIpMonitorStatus PublicIpMonitorStatus { get; init; } = MailRelayPublicIpMonitorStatus.Disabled;
+    public string PublicIpMonitorDetail { get; init; } = string.Empty;
 
     public static MailRelayConfiguration CreateDefault(DateTimeOffset now) =>
         new(

@@ -14,7 +14,8 @@ public sealed class MailRelayService(
     IMailRelayProvisioningService provisioningService,
     IMailRelayProvisioningQueue provisioningQueue,
     IMailRelayTestService testService,
-    IMailRelayClientService clientService) : IMailRelayService
+    IMailRelayClientService clientService,
+    IMailRelayPublicIpMonitorService publicIpMonitorService) : IMailRelayService
 {
     public async Task<MailRelayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default)
     {
@@ -76,6 +77,15 @@ public sealed class MailRelayService(
         testService.SendAsync(request, cancellationToken);
 
     public string GenerateClientPassword() => clientService.GeneratePassword();
+
+    public Task<MailRelayConfiguration> SavePublicIpMonitorSettingsAsync(
+        MailRelayPublicIpMonitorSettingsRequest request,
+        CancellationToken cancellationToken = default) =>
+        publicIpMonitorService.SaveSettingsAsync(request, cancellationToken);
+
+    public Task<MailRelayPublicIpSyncResult> CheckPublicIpNowAsync(
+        CancellationToken cancellationToken = default) =>
+        publicIpMonitorService.CheckNowAsync(cancellationToken);
 
     public Task<MailRelayClientSaveResult> SaveClientAsync(
         MailRelayClientSaveRequest request,

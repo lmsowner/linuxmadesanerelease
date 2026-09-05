@@ -146,6 +146,364 @@ public sealed partial class MailRelayProvisioningService(
         return new MailRelaySetupPreview(normalized, preflight, changes, existingEmailConfiguration, warnings, errors.Distinct(StringComparer.Ordinal).ToArray());
     }
 
+    public async Task<MailRelayPublicIpSyncResult> SynchronizePublicIpAsync(
+        string detectedPublicIp,
+        CancellationToken cancellationToken = default)
+    {
+        var checkedAt = DateTimeOffset.UtcNow;
+        var configuration = await store.GetConfigurationAsync(cancellationToken)
+            ?? throw new InvalidOperationException("Set up Mail Relay before synchronising its public IP.");
+        if (!configuration.Enabled)
+        {
+            throw new InvalidOperationException("Mail Relay is not running.");
+        }
+        if (!IPAddress.TryParse(detectedPublicIp, out var parsedAddress) ||
+            parsedAddress.AddressFamily != AddressFamily.InterNetwork)
+        {
+            throw new InvalidOperationException("The detected public address is not a valid IPv4 address.");
+        }
+
+        detectedPublicIp = parsedAddress.ToString();
+        var previousPublicIp = configuration.PublicIpAddress;
+        var publicIpChanged = !previousPublicIp.Equals(detectedPublicIp, StringComparison.Ordinal);
+        var domains = (await store.ListDomainsAsync(cancellationToken))
+            .Where(item => item.Enabled && !string.IsNullOrWhiteSpace(item.CloudflareZoneId))
+            .ToArray();
+        if (domains.Length == 0)
+        {
+            throw new InvalidOperationException("Mail Relay has no configured sending domains to validate.");
+        }
+
+        var (apiToken, _) = await GetCloudflareAsync(cancellationToken);
+        var recordsByZone = new Dictionary<string, IReadOnlyList<CloudflareDnsRecord>>(StringComparer.Ordinal);
+        var trackingByDomain = new Dictionary<Guid, IReadOnlyList<MailRelayDnsRecord>>();
+        foreach (var domain in domains)
+        {
+            if (!recordsByZone.ContainsKey(domain.CloudflareZoneId))
+            {
+                recordsByZone[domain.CloudflareZoneId] = await cloudflareDnsService.ListRecordsAsync(
+                    apiToken,
+                    domain.CloudflareZoneId,
+                    cancellationToken);
+            }
+            trackingByDomain[domain.Id] = await store.ListDnsRecordsAsync(domain.Id, cancellationToken);
+        }
+
+        var checks = new List<MailRelayPublicIpDnsCheck>();
+        var changedAnyRecord = false;
+        var essentialDnsReady = true;
+
+        var relayOwner = domains
+            .Select(domain => new
+            {
+                Domain = domain,
+                Tracking = trackingByDomain[domain.Id].FirstOrDefault(item =>
+                    item.Purpose.Equals("Relay hostname", StringComparison.OrdinalIgnoreCase) &&
+                    item.Name.TrimEnd('.').Equals(configuration.RelayHostname.TrimEnd('.'), StringComparison.OrdinalIgnoreCase))
+            })
+            .FirstOrDefault(item => item.Tracking is not null);
+        if (relayOwner is null)
+        {
+            essentialDnsReady = false;
+            checks.Add(new MailRelayPublicIpDnsCheck(
+                "Relay A record",
+                configuration.RelayHostname,
+                MailRelayDnsStatus.Failed,
+                false,
+                "LMS has no DNS ownership record for the relay hostname, so it was not changed automatically."));
+        }
+        else
+        {
+            var before = recordsByZone[relayOwner.Domain.CloudflareZoneId];
+            var tracked = relayOwner.Tracking!;
+            var matches = before.Where(item =>
+                    item.Type.Equals("A", StringComparison.OrdinalIgnoreCase) &&
+                    item.Name.TrimEnd('.').Equals(configuration.RelayHostname.TrimEnd('.'), StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            var current = before.FirstOrDefault(item => item.Id.Equals(tracked.CloudflareRecordId, StringComparison.Ordinal));
+            if (current is null && matches.Length == 1)
+            {
+                current = matches[0];
+            }
+            CloudflareDnsRecord? saved = null;
+            if (matches.Length > 1)
+            {
+                essentialDnsReady = false;
+                checks.Add(new MailRelayPublicIpDnsCheck(
+                    "Relay A record", configuration.RelayHostname, MailRelayDnsStatus.Failed, false,
+                    "Multiple A records exist for the relay hostname. LMS left them unchanged."));
+            }
+            else if (current is null && !tracked.CreatedByLms)
+            {
+                essentialDnsReady = false;
+                checks.Add(new MailRelayPublicIpDnsCheck(
+                    "Relay A record", configuration.RelayHostname, MailRelayDnsStatus.Failed, false,
+                    "The relay A record is missing, but LMS did not create it, so it was not recreated automatically."));
+            }
+            else if (current is not null &&
+                     !tracked.CreatedByLms &&
+                     !tracked.ModifiedByLms &&
+                     (!current.Content.Equals(detectedPublicIp, StringComparison.Ordinal) || current.Proxied))
+            {
+                essentialDnsReady = false;
+                checks.Add(new MailRelayPublicIpDnsCheck(
+                    "Relay A record", configuration.RelayHostname, MailRelayDnsStatus.Failed, false,
+                    "This relay A record existed before LMS and is not LMS-owned, so automatic monitoring did not overwrite it."));
+            }
+            else
+            {
+                saved = current is null
+                    ? await cloudflareDnsService.CreateRecordAsync(
+                        apiToken,
+                        relayOwner.Domain.CloudflareZoneId,
+                        new CloudflareDnsRecord(
+                            string.Empty,
+                            relayOwner.Domain.CloudflareZoneId,
+                            configuration.RelayHostname,
+                            "A",
+                            detectedPublicIp,
+                            false,
+                            1,
+                            ManagedDnsComment,
+                            null),
+                        cancellationToken)
+                    : current.Content.Equals(detectedPublicIp, StringComparison.Ordinal) && !current.Proxied
+                        ? current
+                        : await cloudflareDnsService.UpdateRecordAsync(
+                            apiToken,
+                            relayOwner.Domain.CloudflareZoneId,
+                            current with { Content = detectedPublicIp, Proxied = false },
+                            cancellationToken);
+                var changed = current is null || !current.Content.Equals(saved.Content, StringComparison.Ordinal) || current.Proxied;
+                changedAnyRecord |= changed;
+                await SaveDnsOwnershipAsync(relayOwner.Domain.Id, saved, "Relay hostname", before, checkedAt, cancellationToken);
+                var publicMatch = await PublicAddressMatchesAsync(configuration.RelayHostname, detectedPublicIp, cancellationToken);
+                checks.Add(new MailRelayPublicIpDnsCheck(
+                    "Relay A record",
+                    configuration.RelayHostname,
+                    publicMatch ? MailRelayDnsStatus.Pass : MailRelayDnsStatus.Pending,
+                    changed,
+                    publicMatch
+                        ? $"Public DNS resolves to {detectedPublicIp}."
+                        : $"Cloudflare is set to {detectedPublicIp}; public DNS propagation is still pending."));
+            }
+        }
+
+        foreach (var domain in domains)
+        {
+            var before = recordsByZone[domain.CloudflareZoneId];
+            var trackedRecords = trackingByDomain[domain.Id];
+            var spfTracking = trackedRecords.FirstOrDefault(item => item.Purpose.Equals("SPF", StringComparison.OrdinalIgnoreCase));
+            var spfRecords = Find(before, "TXT", domain.DomainName)
+                .Where(item => item.Content.StartsWith("v=spf1", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            MailRelayDnsStatus spfStatus;
+            if (spfTracking is null)
+            {
+                essentialDnsReady = false;
+                spfStatus = MailRelayDnsStatus.Failed;
+                checks.Add(new MailRelayPublicIpDnsCheck(
+                    "SPF", domain.DomainName, spfStatus, false,
+                    "LMS has no ownership record for this shared SPF configuration, so it was left unchanged."));
+            }
+            else if (spfRecords.Length > 1)
+            {
+                essentialDnsReady = false;
+                spfStatus = MailRelayDnsStatus.Failed;
+                checks.Add(new MailRelayPublicIpDnsCheck(
+                    "SPF", domain.DomainName, spfStatus, false,
+                    "Multiple SPF records exist. Merge them into one record before automatic updates can continue."));
+            }
+            else
+            {
+                var current = spfRecords.SingleOrDefault();
+                var baseValue = current?.Content ?? string.Empty;
+                if (current is not null && (spfTracking.CreatedByLms || spfTracking.ModifiedByLms))
+                {
+                    baseValue = RemoveLmsSpfIpv4Authorization(baseValue, previousPublicIp);
+                }
+
+                var analysisRecords = current is null
+                    ? before
+                    : before.Select(item => item.Id.Equals(current.Id, StringComparison.Ordinal)
+                            ? item with { Content = baseValue }
+                            : item)
+                        .ToArray();
+                var analysis = AnalyzeSpf(analysisRecords, domain.DomainName, detectedPublicIp);
+                if (analysis.Errors.Count > 0)
+                {
+                    essentialDnsReady = false;
+                    spfStatus = MailRelayDnsStatus.Failed;
+                    checks.Add(new MailRelayPublicIpDnsCheck(
+                        "SPF", domain.DomainName, spfStatus, false,
+                        $"SPF was not changed: {string.Join(" ", analysis.Errors)}"));
+                }
+                else
+                {
+                    var proposed = analysis.ProposedValue;
+                    CloudflareDnsRecord saved;
+                    if (current is null)
+                    {
+                        if (!spfTracking.CreatedByLms)
+                        {
+                            essentialDnsReady = false;
+                            spfStatus = MailRelayDnsStatus.Failed;
+                            checks.Add(new MailRelayPublicIpDnsCheck(
+                                "SPF", domain.DomainName, spfStatus, false,
+                                "The SPF record is missing, but LMS did not create it, so it was not recreated automatically."));
+                            await store.SaveDomainAsync(domain with { SpfStatus = spfStatus, UpdatedUtc = checkedAt }, cancellationToken);
+                            continue;
+                        }
+                        saved = await cloudflareDnsService.CreateRecordAsync(
+                            apiToken,
+                            domain.CloudflareZoneId,
+                            new CloudflareDnsRecord(string.Empty, domain.CloudflareZoneId, domain.DomainName, "TXT", proposed, false, 1, ManagedDnsComment, null),
+                            cancellationToken);
+                    }
+                    else
+                    {
+                        saved = current.Content.Equals(proposed, StringComparison.Ordinal)
+                            ? current
+                            : await cloudflareDnsService.UpdateRecordAsync(
+                                apiToken,
+                                domain.CloudflareZoneId,
+                                current with { Content = proposed, Proxied = false },
+                                cancellationToken);
+                    }
+                    var changed = current is null || !current.Content.Equals(saved.Content, StringComparison.Ordinal);
+                    changedAnyRecord |= changed;
+                    await SaveDnsOwnershipAsync(domain.Id, saved, "SPF", before, checkedAt, cancellationToken);
+                    var publicMatch = await PublicTxtMatchesAsync(domain.DomainName, proposed, cancellationToken);
+                    spfStatus = publicMatch ? MailRelayDnsStatus.Pass : MailRelayDnsStatus.Pending;
+                    checks.Add(new MailRelayPublicIpDnsCheck(
+                        "SPF", domain.DomainName, spfStatus, changed,
+                        publicMatch
+                            ? $"The shared SPF record authorises {detectedPublicIp} and preserves its other mechanisms."
+                            : "Cloudflare has the merged SPF value; public DNS propagation is still pending."));
+                }
+            }
+
+            var dkimName = $"{domain.CurrentDkimSelector}._domainkey.{domain.DomainName}";
+            var dkimStatus = MailRelayDnsStatus.Failed;
+            if (string.IsNullOrWhiteSpace(domain.CurrentDkimPrivateKeySecretReference))
+            {
+                checks.Add(new MailRelayPublicIpDnsCheck("DKIM", dkimName, dkimStatus, false, "The LMS DKIM private key reference is missing."));
+            }
+            else
+            {
+                try
+                {
+                    var privateKey = await secretStore.ResolveSecretAsync(domain.CurrentDkimPrivateKeySecretReference, cancellationToken);
+                    if (string.IsNullOrWhiteSpace(privateKey))
+                    {
+                        throw new InvalidOperationException("The LMS DKIM private key could not be resolved.");
+                    }
+                    using var rsa = RSA.Create();
+                    rsa.ImportFromPem(privateKey);
+                    var expected = BuildDkimDnsValue(rsa);
+                    var matches = before.Where(item =>
+                            item.Name.TrimEnd('.').Equals(dkimName, StringComparison.OrdinalIgnoreCase) &&
+                            (item.Type.Equals("TXT", StringComparison.OrdinalIgnoreCase) || item.Type.Equals("CNAME", StringComparison.OrdinalIgnoreCase)))
+                        .ToArray();
+                    if (matches.Length != 1 ||
+                        !matches[0].Type.Equals("TXT", StringComparison.OrdinalIgnoreCase) ||
+                        !matches[0].Content.Equals(expected, StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException(
+                            "The Cloudflare LMS DKIM record does not match the private signing key. It was not rewritten because DKIM does not depend on the public IP; open the sending domain to repair it deliberately.");
+                    }
+
+                    var publicMatch = await PublicTxtMatchesAsync(dkimName, expected, cancellationToken);
+                    dkimStatus = publicMatch ? MailRelayDnsStatus.Pass : MailRelayDnsStatus.Pending;
+                    checks.Add(new MailRelayPublicIpDnsCheck(
+                        "DKIM", dkimName, dkimStatus, false,
+                        publicMatch
+                            ? "The public LMS DKIM key matches the private signing key."
+                            : "Cloudflare has the correct LMS DKIM key; public DNS propagation is still pending."));
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    checks.Add(new MailRelayPublicIpDnsCheck("DKIM", dkimName, dkimStatus, false, exception.Message));
+                }
+            }
+
+            var dmarcName = $"_dmarc.{domain.DomainName}";
+            var dmarcRecords = Find(before, "TXT", dmarcName)
+                .Where(item => item.Content.StartsWith("v=DMARC1", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            var dmarcPublicMatch = dmarcRecords.Length == 1 &&
+                                   await PublicTxtMatchesAsync(dmarcName, dmarcRecords[0].Content, cancellationToken);
+            var dmarcStatus = dmarcRecords.Length == 1
+                ? dmarcPublicMatch ? MailRelayDnsStatus.Pass : MailRelayDnsStatus.Pending
+                : MailRelayDnsStatus.Failed;
+            checks.Add(new MailRelayPublicIpDnsCheck(
+                "DMARC", dmarcName, dmarcStatus, false,
+                dmarcPublicMatch
+                    ? "The existing shared DMARC policy is present and unchanged."
+                    : dmarcRecords.Length == 1
+                        ? "Cloudflare has the shared DMARC policy unchanged; public DNS propagation is still pending."
+                    : dmarcRecords.Length == 0
+                        ? "No DMARC policy is currently published. LMS did not invent or weaken a shared policy."
+                        : "Multiple DMARC policies are published; consolidate them into one record."));
+
+            await store.SaveDomainAsync(domain with
+            {
+                SpfStatus = spfStatus,
+                DkimStatus = dkimStatus,
+                DmarcStatus = dmarcStatus,
+                UpdatedUtc = checkedAt
+            }, cancellationToken);
+        }
+
+        checks.Add(await InspectPtrAlignmentAsync(detectedPublicIp, configuration.RelayHostname, cancellationToken));
+        var hasFailure = checks.Any(item => item.Status == MailRelayDnsStatus.Failed);
+        var hasWarning = checks.Any(item => item.Status == MailRelayDnsStatus.Warning);
+        var hasPending = checks.Any(item => item.Status == MailRelayDnsStatus.Pending);
+        var status = hasFailure
+            ? MailRelayPublicIpMonitorStatus.Error
+            : hasWarning
+                ? MailRelayPublicIpMonitorStatus.Warning
+                : changedAnyRecord
+                    ? MailRelayPublicIpMonitorStatus.Updated
+                    : hasPending
+                        ? MailRelayPublicIpMonitorStatus.Warning
+                        : MailRelayPublicIpMonitorStatus.Healthy;
+        var addressWasAccepted = essentialDnsReady;
+        var summary = hasFailure
+            ? "The public IP check found DNS configuration that LMS could not safely repair. Review the failed records below."
+            : publicIpChanged
+                ? hasPending
+                    ? $"Public IPv4 changed from {previousPublicIp} to {detectedPublicIp}. Cloudflare was updated; public DNS propagation is pending."
+                    : $"Public IPv4 changed from {previousPublicIp} to {detectedPublicIp}. LMS updated the relay A record and every sending domain SPF record."
+                : changedAnyRecord
+                    ? $"Public IPv4 is still {detectedPublicIp}. LMS repaired drift in its managed DNS records."
+                    : $"Public IPv4 is still {detectedPublicIp}; Mail Relay DNS matches.";
+
+        configuration = configuration with
+        {
+            PublicIpAddress = addressWasAccepted ? detectedPublicIp : configuration.PublicIpAddress,
+            LastPublicIpCheckUtc = checkedAt,
+            LastPublicIpChangeUtc = publicIpChanged && addressWasAccepted ? checkedAt : configuration.LastPublicIpChangeUtc,
+            PublicIpMonitorStatus = status,
+            PublicIpMonitorDetail = summary,
+            UpdatedUtc = checkedAt
+        };
+        await store.SaveConfigurationAsync(configuration, cancellationToken);
+        return new MailRelayPublicIpSyncResult(
+            !hasFailure,
+            publicIpChanged,
+            previousPublicIp,
+            detectedPublicIp,
+            status,
+            checks,
+            summary,
+            checkedAt);
+    }
+
     public async Task<MailRelaySetupResult> ProvisionAsync(
         MailRelaySetupRequest request,
         IProgress<MailRelaySetupProgressUpdate>? progress = null,
@@ -1089,6 +1447,65 @@ public sealed partial class MailRelayProvisioningService(
             .Any(value => value.Equals(expectedValue, StringComparison.Ordinal));
     }
 
+    private async Task<bool> PublicAddressMatchesAsync(
+        string name,
+        string expectedAddress,
+        CancellationToken cancellationToken)
+    {
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "dig",
+                ["+short", "A", name, "@1.1.1.1"],
+                false,
+                TimeSpan.FromSeconds(15),
+                $"Read public A DNS for {name}")
+            {
+                IsOptionalExternalTool = true
+            },
+            false,
+            cancellationToken);
+        return result.ExitCode == 0 && result.StandardOutput
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(value => value.Equals(expectedAddress, StringComparison.Ordinal));
+    }
+
+    private static async Task<MailRelayPublicIpDnsCheck> InspectPtrAlignmentAsync(
+        string publicIp,
+        string relayHostname,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var address = IPAddress.Parse(publicIp);
+            var reverse = await Dns.GetHostEntryAsync(address).WaitAsync(cancellationToken);
+            var ptrHostname = reverse.HostName.Trim().TrimEnd('.');
+            var forward = await Dns.GetHostAddressesAsync(ptrHostname, cancellationToken);
+            var aligned = ptrHostname.Equals(relayHostname.TrimEnd('.'), StringComparison.OrdinalIgnoreCase) &&
+                          forward.Any(candidate => candidate.Equals(address));
+            return new MailRelayPublicIpDnsCheck(
+                "PTR / reverse DNS",
+                publicIp,
+                aligned ? MailRelayDnsStatus.Pass : MailRelayDnsStatus.Warning,
+                false,
+                aligned
+                    ? $"{publicIp} and {relayHostname} resolve back to each other."
+                    : $"PTR currently resolves to {ptrHostname}. Set the provider-managed PTR to {relayHostname}; Cloudflare cannot change reverse DNS.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new MailRelayPublicIpDnsCheck(
+                "PTR / reverse DNS",
+                publicIp,
+                MailRelayDnsStatus.Warning,
+                false,
+                $"No matching PTR was found. Set the provider-managed PTR for {publicIp} to {relayHostname}; Cloudflare cannot change reverse DNS.");
+        }
+    }
+
     private static string NormalizeDigTxt(string value) => value
         .Replace("\" \"", string.Empty, StringComparison.Ordinal)
         .Trim()
@@ -1110,8 +1527,13 @@ public sealed partial class MailRelayProvisioningService(
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var existingTracking = (await store.ListDnsRecordsAsync(domainId, cancellationToken))
-            .FirstOrDefault(item => item.CloudflareRecordId.Equals(record.Id, StringComparison.Ordinal));
+        var trackedRecords = await store.ListDnsRecordsAsync(domainId, cancellationToken);
+        var existingTracking = trackedRecords
+            .FirstOrDefault(item => item.CloudflareRecordId.Equals(record.Id, StringComparison.Ordinal))
+            ?? trackedRecords.FirstOrDefault(item =>
+                item.Purpose.Equals(purpose, StringComparison.OrdinalIgnoreCase) &&
+                item.Type.Equals(record.Type, StringComparison.OrdinalIgnoreCase) &&
+                item.Name.TrimEnd('.').Equals(record.Name.TrimEnd('.'), StringComparison.OrdinalIgnoreCase));
         var originalRecord = recordsBefore.FirstOrDefault(item => item.Id.Equals(record.Id, StringComparison.Ordinal));
         var createdByLms = existingTracking?.CreatedByLms ?? originalRecord is null;
         var modifiedByLms = existingTracking?.ModifiedByLms == true ||
@@ -1138,6 +1560,7 @@ public sealed partial class MailRelayProvisioningService(
                 now)
             : existingTracking with
             {
+                CloudflareRecordId = record.Id,
                 Type = record.Type,
                 Name = record.Name,
                 Purpose = purpose,

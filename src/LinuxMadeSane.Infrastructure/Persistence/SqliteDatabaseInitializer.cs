@@ -1981,6 +1981,12 @@ public sealed class SqliteDatabaseInitializer(
                 AllowLegacyPort25 INTEGER NOT NULL DEFAULT 0,
                 LegacyListenAddressesJson TEXT NOT NULL DEFAULT '[]',
                 LegacyAllowedNetworksJson TEXT NOT NULL DEFAULT '[]',
+                MonitorPublicIpChanges INTEGER NOT NULL DEFAULT 0,
+                PublicIpCheckIntervalMinutes INTEGER NOT NULL DEFAULT 60,
+                LastPublicIpCheckUtc TEXT NULL,
+                LastPublicIpChangeUtc TEXT NULL,
+                PublicIpMonitorStatus INTEGER NOT NULL DEFAULT 0,
+                PublicIpMonitorDetail TEXT NOT NULL DEFAULT '',
                 DefaultMessagesPerMinute INTEGER NOT NULL,
                 DefaultMessagesPerDay INTEGER NOT NULL,
                 QueueLimit INTEGER NOT NULL,
@@ -2124,6 +2130,36 @@ public sealed class SqliteDatabaseInitializer(
             "mail_relay_configurations",
             "LegacyAllowedNetworksJson",
             "TEXT NOT NULL DEFAULT '[]'",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "MonitorPublicIpChanges",
+            "INTEGER NOT NULL DEFAULT 0",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "PublicIpCheckIntervalMinutes",
+            "INTEGER NOT NULL DEFAULT 60",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "LastPublicIpCheckUtc",
+            "TEXT NULL",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "LastPublicIpChangeUtc",
+            "TEXT NULL",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "PublicIpMonitorStatus",
+            "INTEGER NOT NULL DEFAULT 0",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "PublicIpMonitorDetail",
+            "TEXT NOT NULL DEFAULT ''",
             cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(
             "CREATE UNIQUE INDEX IF NOT EXISTS IX_mail_relay_domains_ConfigurationId_DomainName ON mail_relay_domains (MailRelayConfigurationId, DomainName);",

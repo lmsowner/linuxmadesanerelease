@@ -176,8 +176,16 @@ public sealed class MailRelayPreflightService(
         await Task.WhenAll(publicIpTask, smtpTask, dockerTask, tailscaleTask);
 
         var publicIpResult = await publicIpTask;
-        checks.Add(publicIpResult.Check);
-        checks.Add(await InspectReverseDnsAsync(publicIpResult.Address, cancellationToken));
+        var publicAddress = IPAddress.TryParse(publicIpResult.Address, out var parsedPublicAddress)
+            ? parsedPublicAddress
+            : null;
+        checks.Add(Check(
+            MailRelayPreflightCheckKeys.PublicIpv4,
+            "Public IPv4",
+            publicIpResult.Success ? MailRelayPreflightCheckState.Pass : MailRelayPreflightCheckState.Failed,
+            publicIpResult.Success ? publicIpResult.Address : "NOT AVAILABLE",
+            publicIpResult.Detail));
+        checks.Add(await InspectReverseDnsAsync(publicAddress, cancellationToken));
         checks.Add(await smtpTask);
         checks.Add(await dockerTask);
         checks.Add(await tailscaleTask);
@@ -192,7 +200,7 @@ public sealed class MailRelayPreflightService(
             selectedZone.Id,
             zoneName,
             availableZones,
-            publicIpResult.Address?.ToString() ?? string.Empty,
+            publicIpResult.Address,
             reverseHostname,
             checks,
             true,
@@ -293,7 +301,7 @@ public sealed class MailRelayPreflightService(
         }
     }
 
-    private async Task<(MailRelayPreflightCheck Check, IPAddress? Address)> DetectPublicIpv4Async(
+    public async Task<MailRelayPublicIpv4DetectionResult> DetectPublicIpv4Async(
         CancellationToken cancellationToken)
     {
         try
@@ -309,12 +317,16 @@ public sealed class MailRelayPreflightService(
                 address.AddressFamily == AddressFamily.InterNetwork &&
                 !IsPrivateIpv4(address))
             {
-                return (Check(MailRelayPreflightCheckKeys.PublicIpv4, "Public IPv4",
-                    MailRelayPreflightCheckState.Pass, address.ToString(), "The public egress IPv4 address was detected."), address);
+                return new MailRelayPublicIpv4DetectionResult(
+                    true,
+                    address.ToString(),
+                    "The public egress IPv4 address was detected.");
             }
 
-            return (Check(MailRelayPreflightCheckKeys.PublicIpv4, "Public IPv4",
-                MailRelayPreflightCheckState.Failed, "NOT AVAILABLE", "A public IPv4 address could not be detected."), null);
+            return new MailRelayPublicIpv4DetectionResult(
+                false,
+                string.Empty,
+                "A public IPv4 address could not be detected.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -322,8 +334,10 @@ public sealed class MailRelayPreflightService(
         }
         catch
         {
-            return (Check(MailRelayPreflightCheckKeys.PublicIpv4, "Public IPv4",
-                MailRelayPreflightCheckState.Failed, "NOT AVAILABLE", "The public IPv4 check could not reach its detection endpoint."), null);
+            return new MailRelayPublicIpv4DetectionResult(
+                false,
+                string.Empty,
+                "The public IPv4 check could not reach its detection endpoint.");
         }
     }
 

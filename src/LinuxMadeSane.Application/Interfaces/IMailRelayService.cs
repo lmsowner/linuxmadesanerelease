@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Application.Contracts.MailRelay;
+using LinuxMadeSane.Core.Models.MailRelay;
 
 namespace LinuxMadeSane.Application.Interfaces;
 
@@ -22,6 +23,11 @@ public interface IMailRelayService
         CancellationToken cancellationToken = default);
     Task<MailRelayTestResult> SendTestAsync(
         MailRelayTestRequest request,
+        CancellationToken cancellationToken = default);
+    Task<MailRelayConfiguration> SavePublicIpMonitorSettingsAsync(
+        MailRelayPublicIpMonitorSettingsRequest request,
+        CancellationToken cancellationToken = default);
+    Task<MailRelayPublicIpSyncResult> CheckPublicIpNowAsync(
         CancellationToken cancellationToken = default);
     string GenerateClientPassword();
     Task<MailRelayClientSaveResult> SaveClientAsync(

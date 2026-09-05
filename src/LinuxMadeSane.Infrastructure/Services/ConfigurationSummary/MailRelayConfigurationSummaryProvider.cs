@@ -37,6 +37,10 @@ public sealed class MailRelayConfigurationSummaryProvider(IMailRelayStore store)
         {
             warnings.Add("No SMTP applications are enabled.");
         }
+        if (configuration.MonitorPublicIpChanges && configuration.PublicIpMonitorStatus == MailRelayPublicIpMonitorStatus.Error)
+        {
+            warnings.Add("Automatic public IP protection needs attention.");
+        }
 
         var status = !configuration.Enabled
             ? LmsConfigurationSummaryStatus.Disabled
@@ -61,6 +65,9 @@ public sealed class MailRelayConfigurationSummaryProvider(IMailRelayStore store)
                 new("Applications", clients.Count(client => client.Enabled).ToString()),
                 new("Delivery", SummaryValueFormatter.Words(configuration.DeliveryMode.ToString())),
                 new("Submission", submissionModes.Length == 0 ? "Localhost only" : string.Join(" / ", submissionModes)),
+                new("Public IP protection", configuration.MonitorPublicIpChanges
+                    ? $"Every {configuration.PublicIpCheckIntervalMinutes} minutes"
+                    : "Disabled"),
                 new("Authentication", authentication),
                 new("DMARC policy", dmarcPolicies.Length == 0 ? "Not configured" : string.Join(" / ", dmarcPolicies))
             ],

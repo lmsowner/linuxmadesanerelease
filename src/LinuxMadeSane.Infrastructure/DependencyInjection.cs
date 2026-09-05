@@ -10,6 +10,7 @@ using LinuxMadeSane.Core.Models.Cloudflare;
 using LinuxMadeSane.Infrastructure.Persistence;
 using LinuxMadeSane.Infrastructure.Services.Cloudflare;
 using LinuxMadeSane.Infrastructure.Services;
+using LinuxMadeSane.Infrastructure.Services.ConfigurationSummary;
 using LinuxMadeSane.Infrastructure.Stores;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Data.Sqlite;
@@ -37,6 +38,7 @@ public static class DependencyInjection
         var connectionString = BuildSqliteConnectionString(
             configuration.GetConnectionString("LinuxMadeSane") ?? "Data Source=data/linuxmadesane.db",
             contentRootPath);
+        var databaseDirectory = Path.GetDirectoryName(new SqliteConnectionStringBuilder(connectionString).DataSource) ?? contentRootPath;
 
         services.AddDataProtection()
             .SetApplicationName("LinuxMadeSane")
@@ -53,6 +55,12 @@ public static class DependencyInjection
         services.AddSingleton<AiChatRunQueue>();
         services.AddSingleton<IAiChatRunQueue>(serviceProvider => serviceProvider.GetRequiredService<AiChatRunQueue>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<AiChatRunQueue>());
+        services.AddSingleton<MailRelayProvisioningQueue>();
+        services.AddSingleton<IMailRelayProvisioningQueue>(serviceProvider => serviceProvider.GetRequiredService<MailRelayProvisioningQueue>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<MailRelayProvisioningQueue>());
+        services.AddSingleton<MailRelayPublicIpMonitorService>();
+        services.AddSingleton<IMailRelayPublicIpMonitorService>(serviceProvider => serviceProvider.GetRequiredService<MailRelayPublicIpMonitorService>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<MailRelayPublicIpMonitorService>());
         services.AddSingleton<MediaLibraryScanQueue>();
         services.AddSingleton<IMediaLibraryScanQueue>(serviceProvider => serviceProvider.GetRequiredService<MediaLibraryScanQueue>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<MediaLibraryScanQueue>());
@@ -62,6 +70,8 @@ public static class DependencyInjection
         services.AddSingleton(new ShareMountStorageSettings(Path.Combine(contentRootPath, "data", "share-mounts")));
         services.AddSingleton(new SftpBackupStorageSettings(Path.Combine(contentRootPath, "data", "sftp-backups")));
         services.AddSingleton(new HttpServiceDiscoveryStorageSettings(Path.Combine(contentRootPath, "data", "http-service-discovery")));
+        services.AddSingleton(new FirewallTrialStorageSettings(Path.Combine(databaseDirectory, "firewall-trials")));
+        services.AddSingleton(new SshAdminStorageSettings(Path.Combine(databaseDirectory, "ssh-admin-trials")));
         services.Configure<DesktopSessionBrokerOptions>(configuration.GetSection("DesktopSession"));
         services.AddSingleton<IDesktopSessionBroker, DesktopSessionBroker>();
         services.AddHostedService<DesktopSessionBrokerHostedService>();
@@ -84,6 +94,7 @@ public static class DependencyInjection
         services.AddScoped<ISecretStore, SqliteProtectedSecretStore>();
         services.AddScoped<IPortalConnectionStore, DisabledPortalConnectionStore>();
         services.AddScoped<ICloudflareExposureStore, SqliteCloudflareExposureStore>();
+        services.AddScoped<IMailRelayStore, SqliteMailRelayStore>();
         services.AddScoped<IEdgeGatewaySettingsStore, SqliteEdgeGatewaySettingsStore>();
         services.AddScoped<IEdgeGatewayTemporaryIpApprovalStore, SqliteEdgeGatewayTemporaryIpApprovalStore>();
         services.AddScoped<IMessagingEmailSettingsStore, SqliteMessagingEmailSettingsStore>();
@@ -118,7 +129,14 @@ public static class DependencyInjection
         services.AddScoped<ISftpServerInspectionService, LocalSftpServerInspectionService>();
         services.AddScoped<ISftpServerConfigurationService, LocalSftpServerConfigurationService>();
         services.AddScoped<ISftpUserManagementService, LocalSftpUserManagementService>();
-        services.AddScoped<ILinuxCommandRunner, LinuxCommandRunner>();
+        services.AddSingleton<ILinuxCommandRunner, LinuxCommandRunner>();
+        services.AddSingleton<LocalUfwFirewallService>();
+        services.AddSingleton<IFirewallManagementService>(serviceProvider =>
+            serviceProvider.GetRequiredService<LocalUfwFirewallService>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LocalUfwFirewallService>());
+        services.AddSingleton<LocalSshAdminService>();
+        services.AddSingleton<ISshAdminService>(serviceProvider => serviceProvider.GetRequiredService<LocalSshAdminService>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LocalSshAdminService>());
         services.AddSingleton<ManagedHostSshConnectionFactory>();
         services.AddScoped<ILocalAiHardwareInspectionService, LocalAiHardwareInspectionService>();
         services.AddScoped<ILocalModelManagementService, LocalModelManagementService>();
@@ -135,6 +153,26 @@ public static class DependencyInjection
         services.AddScoped<ISshKeyPairGenerator, SshKeyPairGenerator>();
         services.AddScoped<ICloudflareZoneService, CloudflareZoneService>();
         services.AddScoped<ICloudflareDnsService, CloudflareDnsService>();
+        services.AddScoped<IMailRelayPreflightService, MailRelayPreflightService>();
+        services.AddScoped<IMailRelayProvisioningService, MailRelayProvisioningService>();
+        services.AddScoped<IMailRelayTestService, MailRelayTestService>();
+        services.AddScoped<IMailRelayClientService, MailRelayClientService>();
+        services.AddScoped<IConfigurationSummaryService, ConfigurationSummaryService>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, SystemConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, EdgeGatewayConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, TailscaleConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, DockerConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, FirewallConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, SftpConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, SharesConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, ReverseProxyConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, ServiceDiscoveryConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, MailRelayConfigurationSummaryProvider>();
+        services.AddHttpClient(nameof(MailRelayPreflightService), client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("LinuxMadeSane-MailRelay/1.0");
+        });
         services.AddScoped<ICloudflareTunnelService, CloudflareTunnelService>();
         services.AddScoped<ICloudflareAccessService, CloudflareAccessService>();
         services.AddScoped<ISshConnectionService, SshConnectionService>();
@@ -142,6 +180,9 @@ public static class DependencyInjection
         services.AddScoped<ILocalHttpServiceDiscoveryService, LocalHttpServiceDiscoveryService>();
         services.AddScoped<IManagedHostFileAccessService, ManagedHostFileAccessService>();
         services.AddSingleton<ITerminalSessionService, SshTerminalSessionService>();
+        services.AddSingleton<ILocalSystemMonitorService, LocalProcSystemMonitorService>();
+        services.AddSingleton<ILocalSystemMaintenanceService, LocalSystemMaintenanceService>();
+        services.AddSingleton<ILocalDriveUsageService, LocalDriveUsageService>();
         services.AddScoped<ILocalFileBrowsingService, LocalFileBrowsingService>();
         services.AddScoped<ISftpFileBrowsingService, SshSftpFileBrowsingService>();
         return services;

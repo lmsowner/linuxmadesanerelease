@@ -161,6 +161,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(item => item.PublicIpAddress).HasMaxLength(64);
             entity.Property(item => item.LegacyListenAddressesJson).HasColumnType("TEXT");
             entity.Property(item => item.LegacyAllowedNetworksJson).HasColumnType("TEXT");
+            entity.Property(item => item.PublicIpMonitorDetail).HasColumnType("TEXT");
         });
 
         modelBuilder.Entity<MailRelayDomainEntity>(entity =>

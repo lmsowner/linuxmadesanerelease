@@ -46,6 +46,12 @@ public sealed class SqliteMailRelayStore(LinuxMadeSaneDbContext dbContext) : IMa
             entity.AllowLegacyPort25 = configuration.AllowLegacyPort25;
             entity.LegacyListenAddressesJson = JsonSerializer.Serialize(configuration.EffectiveLegacyListenAddresses);
             entity.LegacyAllowedNetworksJson = JsonSerializer.Serialize(configuration.EffectiveLegacyAllowedNetworks);
+            entity.MonitorPublicIpChanges = configuration.MonitorPublicIpChanges;
+            entity.PublicIpCheckIntervalMinutes = configuration.PublicIpCheckIntervalMinutes;
+            entity.LastPublicIpCheckUtc = configuration.LastPublicIpCheckUtc;
+            entity.LastPublicIpChangeUtc = configuration.LastPublicIpChangeUtc;
+            entity.PublicIpMonitorStatus = (int)configuration.PublicIpMonitorStatus;
+            entity.PublicIpMonitorDetail = configuration.PublicIpMonitorDetail;
             entity.DefaultMessagesPerMinute = configuration.DefaultMessagesPerMinute;
             entity.DefaultMessagesPerDay = configuration.DefaultMessagesPerDay;
             entity.QueueLimit = configuration.QueueLimit;
@@ -206,7 +212,15 @@ public sealed class SqliteMailRelayStore(LinuxMadeSaneDbContext dbContext) : IMa
             (MailRelayDeliveryMode)entity.DeliveryMode,
             entity.AllowLegacyPort25,
             Deserialize(entity.LegacyListenAddressesJson),
-            Deserialize(entity.LegacyAllowedNetworksJson));
+            Deserialize(entity.LegacyAllowedNetworksJson))
+        {
+            MonitorPublicIpChanges = entity.MonitorPublicIpChanges,
+            PublicIpCheckIntervalMinutes = entity.PublicIpCheckIntervalMinutes <= 0 ? 60 : entity.PublicIpCheckIntervalMinutes,
+            LastPublicIpCheckUtc = entity.LastPublicIpCheckUtc,
+            LastPublicIpChangeUtc = entity.LastPublicIpChangeUtc,
+            PublicIpMonitorStatus = (MailRelayPublicIpMonitorStatus)entity.PublicIpMonitorStatus,
+            PublicIpMonitorDetail = entity.PublicIpMonitorDetail
+        };
 
     private static MailRelayConfigurationEntity Map(MailRelayConfiguration model) =>
         new()
@@ -223,6 +237,12 @@ public sealed class SqliteMailRelayStore(LinuxMadeSaneDbContext dbContext) : IMa
             AllowLegacyPort25 = model.AllowLegacyPort25,
             LegacyListenAddressesJson = JsonSerializer.Serialize(model.EffectiveLegacyListenAddresses),
             LegacyAllowedNetworksJson = JsonSerializer.Serialize(model.EffectiveLegacyAllowedNetworks),
+            MonitorPublicIpChanges = model.MonitorPublicIpChanges,
+            PublicIpCheckIntervalMinutes = model.PublicIpCheckIntervalMinutes,
+            LastPublicIpCheckUtc = model.LastPublicIpCheckUtc,
+            LastPublicIpChangeUtc = model.LastPublicIpChangeUtc,
+            PublicIpMonitorStatus = (int)model.PublicIpMonitorStatus,
+            PublicIpMonitorDetail = model.PublicIpMonitorDetail,
             DefaultMessagesPerMinute = model.DefaultMessagesPerMinute,
             DefaultMessagesPerDay = model.DefaultMessagesPerDay,
             QueueLimit = model.QueueLimit,

@@ -168,6 +168,103 @@
                                      OnClick="OpenLegacyEditor" />
                 </div>
             </section>
+
+            <section class="surface-card mail-relay-public-ip" aria-labelledby="mail-relay-public-ip-title">
+                <div class="mail-relay-public-ip-row">
+                    <div class="mail-relay-public-ip-copy">
+                        <div class="mail-relay-inline-title">
+                            <h2 id="mail-relay-public-ip-title">Public IP protection</h2>
+                            <UiPill Tone="@GetPublicIpMonitorTone(DisplayPublicIpMonitorStatus)">
+                                @FormatPublicIpMonitorStatus(DisplayPublicIpMonitorStatus)
+                            </UiPill>
+                        </div>
+                        <small>
+                            @dashboard.Configuration.PublicIpAddress ·
+                            @(dashboard.Configuration.MonitorPublicIpChanges
+                                ? $"every {FormatPublicIpInterval(dashboard.Configuration.PublicIpCheckIntervalMinutes)}"
+                                : "automatic checks off") ·
+                            @FormatPublicIpLastChecked(dashboard.Configuration.LastPublicIpCheckUtc)
+                        </small>
+                        @if (!string.IsNullOrWhiteSpace(dashboard.Configuration.PublicIpMonitorDetail))
+                        {
+                            <small>@dashboard.Configuration.PublicIpMonitorDetail</small>
+                        }
+                    </div>
+                    <div class="mail-relay-heading-actions">
+                        <UiCommandButton Label="@(isCheckingPublicIp ? "Checking…" : "Check now")"
+                                         Glyph="UiIconGlyph.Refresh"
+                                         Disabled="@isCheckingPublicIp"
+                                         OnClick="CheckPublicIpNowAsync" />
+                        <UiCommandButton Label="Configure"
+                                         Glyph="UiIconGlyph.Edit"
+                                         Disabled="@isCheckingPublicIp"
+                                         OnClick="OpenPublicIpMonitorEditor" />
+                    </div>
+                </div>
+
+                @if (publicIpSyncResult is not null)
+                {
+                    <details class="mail-relay-public-ip-result" open="@(!publicIpSyncResult.Success)">
+                        <summary>@publicIpSyncResult.Summary</summary>
+                        <div>
+                            @foreach (var check in publicIpSyncResult.DnsChecks)
+                            {
+                                <article>
+                                    <span>@check.Purpose</span>
+                                    <code>@check.RecordName</code>
+                                    <UiPill Tone="@GetDnsTone(check.Status)">@FormatDnsStatus(check.Status)</UiPill>
+                                    <small>@check.Detail</small>
+                                </article>
+                            }
+                        </div>
+                    </details>
+                }
+            </section>
+
+            <UiModal IsOpen="@publicIpMonitorEditorOpen"
+                     Title="Public IP protection"
+                     Subtitle="Keep direct Internet delivery working when this network's public IPv4 changes"
+                     Class="mail-relay-public-ip-modal"
+                     CloseOnBackdrop="@(!isSavingPublicIpMonitor)"
+                     OnClose="ClosePublicIpMonitorEditor">
+                <div class="mail-relay-public-ip-editor">
+                    <UiCheckboxField @bind-Value="publicIpMonitorEnabled"
+                                     Label="Automatically detect and repair public IP changes"
+                                     Helper="LMS checks in the background even when no mail is queued. Static-IP servers can leave this off."
+                                     Card="true"
+                                     Disabled="@isSavingPublicIpMonitor" />
+                    <UiNumberField TValue="int"
+                                   @bind-Value="publicIpMonitorIntervalMinutes"
+                                   Label="Check interval (minutes)"
+                                   Helper="15 to 1,440 minutes. Hourly is a sensible default for most dynamic connections."
+                                   min="15"
+                                   max="1440"
+                                   step="15"
+                                   Disabled="@isSavingPublicIpMonitor" />
+                    <div class="mail-relay-public-ip-scope">
+                        <strong>What LMS will change</strong>
+                        <span>Its DNS-only relay A record and only the LMS-owned <code>ip4:</code> authorisation inside each shared SPF record.</span>
+                        <strong>What LMS will only check</strong>
+                        <span>DKIM, DMARC and PTR. Existing MX, provider DKIM and DMARC policies are never replaced. PTR remains controlled by the IP provider.</span>
+                        <strong>What this cannot fix</strong>
+                        <span>Provider TCP/25 blocks, reverse DNS, or the reputation of a newly assigned IP. A static server IP remains the most reliable direct-delivery setup.</span>
+                    </div>
+                    @if (!string.IsNullOrWhiteSpace(publicIpMonitorMessage))
+                    {
+                        <p class="callout @(publicIpMonitorSaveFailed ? "error" : "success")">@publicIpMonitorMessage</p>
+                    }
+                    <div class="mail-relay-actions">
+                        <UiCommandButton Label="@(isSavingPublicIpMonitor ? "Saving…" : "Save")"
+                                         Glyph="UiIconGlyph.Save"
+                                         Variant="UiButtonVariant.Primary"
+                                         Disabled="@isSavingPublicIpMonitor"
+                                         OnClick="SavePublicIpMonitorAsync" />
+                        <UiCommandButton Label="Cancel"
+                                         Disabled="@isSavingPublicIpMonitor"
+                                         OnClick="ClosePublicIpMonitorEditor" />
+                    </div>
+                </div>
+            </UiModal>
         }
 
         @if (dashboard.Configuration is not null)
@@ -849,6 +946,14 @@
     private bool isProvisioning;
     private bool isSendingTest;
     private bool isSavingClient;
+    private bool publicIpMonitorEditorOpen;
+    private bool publicIpMonitorEnabled;
+    private int publicIpMonitorIntervalMinutes = 60;
+    private bool isSavingPublicIpMonitor;
+    private bool isCheckingPublicIp;
+    private bool publicIpMonitorSaveFailed;
+    private string? publicIpMonitorMessage;
+    private MailRelayPublicIpSyncResult? publicIpSyncResult;
     private string selectedCloudflareZoneId = string.Empty;
     private string? relayHostname;
     private string? sendingDomain;
@@ -940,6 +1045,11 @@
         dashboard.Preflight.DnsEditWasTested &&
         dashboard.Preflight.GetCheck(MailRelayPreflightCheckKeys.DnsEdit).State == MailRelayPreflightCheckState.Failed &&
         dashboard.Preflight.GetCheck(MailRelayPreflightCheckKeys.DnsEdit).Value == "PERMISSION REQUIRED";
+
+    private MailRelayPublicIpMonitorStatus DisplayPublicIpMonitorStatus =>
+        dashboard?.Configuration is { MonitorPublicIpChanges: true } configuration
+            ? configuration.PublicIpMonitorStatus
+            : MailRelayPublicIpMonitorStatus.Disabled;
 
     private string ReadinessLabel => dashboard?.Preflight.CanConfigure == true
         ? "Suitable"
@@ -1195,6 +1305,95 @@
         legacyProgress = null;
         legacyResult = null;
         legacyEditorOpen = true;
+    }
+
+    private void OpenPublicIpMonitorEditor()
+    {
+        if (dashboard?.Configuration is not { } configuration)
+        {
+            return;
+        }
+
+        publicIpMonitorEnabled = configuration.MonitorPublicIpChanges;
+        publicIpMonitorIntervalMinutes = configuration.PublicIpCheckIntervalMinutes;
+        publicIpMonitorMessage = null;
+        publicIpMonitorSaveFailed = false;
+        publicIpMonitorEditorOpen = true;
+    }
+
+    private void ClosePublicIpMonitorEditor()
+    {
+        if (isSavingPublicIpMonitor)
+        {
+            return;
+        }
+
+        publicIpMonitorEditorOpen = false;
+        publicIpMonitorMessage = null;
+    }
+
+    private async Task SavePublicIpMonitorAsync()
+    {
+        if (isSavingPublicIpMonitor || dashboard?.Configuration is null)
+        {
+            return;
+        }
+
+        isSavingPublicIpMonitor = true;
+        publicIpMonitorMessage = null;
+        publicIpMonitorSaveFailed = false;
+        try
+        {
+            var configuration = await MailRelayService.SavePublicIpMonitorSettingsAsync(
+                new MailRelayPublicIpMonitorSettingsRequest(
+                    publicIpMonitorEnabled,
+                    publicIpMonitorIntervalMinutes));
+            dashboard = dashboard with { Configuration = configuration };
+            publicIpMonitorMessage = publicIpMonitorEnabled
+                ? "Automatic public IP protection is enabled. Running the first check now…"
+                : "Automatic public IP checks are disabled. Check now remains available.";
+            if (publicIpMonitorEnabled)
+            {
+                publicIpSyncResult = await MailRelayService.CheckPublicIpNowAsync();
+                dashboard = await MailRelayService.GetDashboardAsync();
+                publicIpMonitorMessage = publicIpSyncResult.Summary;
+                publicIpMonitorSaveFailed = !publicIpSyncResult.Success;
+            }
+        }
+        catch (Exception exception)
+        {
+            publicIpMonitorSaveFailed = true;
+            publicIpMonitorMessage = $"Public IP protection could not be saved: {exception.Message}";
+        }
+        finally
+        {
+            isSavingPublicIpMonitor = false;
+        }
+    }
+
+    private async Task CheckPublicIpNowAsync()
+    {
+        if (isCheckingPublicIp)
+        {
+            return;
+        }
+
+        isCheckingPublicIp = true;
+        publicIpSyncResult = null;
+        errorMessage = null;
+        try
+        {
+            publicIpSyncResult = await MailRelayService.CheckPublicIpNowAsync();
+            dashboard = await MailRelayService.GetDashboardAsync();
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"Public IP check could not complete: {exception.Message}";
+        }
+        finally
+        {
+            isCheckingPublicIp = false;
+        }
     }
 
     private void CloseLegacyEditor()
@@ -1772,6 +1971,44 @@
         MailRelayDnsStatus.Failed => "Failed",
         _ => "Not checked"
     };
+
+    private static UiPillTone GetDnsTone(MailRelayDnsStatus status) => status switch
+    {
+        MailRelayDnsStatus.Pass => UiPillTone.Success,
+        MailRelayDnsStatus.Pending or MailRelayDnsStatus.Warning => UiPillTone.Warning,
+        MailRelayDnsStatus.Failed => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+
+    private static UiPillTone GetPublicIpMonitorTone(MailRelayPublicIpMonitorStatus status) => status switch
+    {
+        MailRelayPublicIpMonitorStatus.Healthy or MailRelayPublicIpMonitorStatus.Updated => UiPillTone.Success,
+        MailRelayPublicIpMonitorStatus.Warning => UiPillTone.Warning,
+        MailRelayPublicIpMonitorStatus.Error => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+
+    private static string FormatPublicIpMonitorStatus(MailRelayPublicIpMonitorStatus status) => status switch
+    {
+        MailRelayPublicIpMonitorStatus.NotChecked => "Not checked",
+        MailRelayPublicIpMonitorStatus.Healthy => "Healthy",
+        MailRelayPublicIpMonitorStatus.Updated => "Updated",
+        MailRelayPublicIpMonitorStatus.Warning => "Warning",
+        MailRelayPublicIpMonitorStatus.Error => "Needs attention",
+        _ => "Off"
+    };
+
+    private static string FormatPublicIpInterval(int minutes) => minutes switch
+    {
+        60 => "hour",
+        1_440 => "day",
+        >= 60 when minutes % 60 == 0 => $"{minutes / 60} hours",
+        _ => $"{minutes} minutes"
+    };
+
+    private static string FormatPublicIpLastChecked(DateTimeOffset? checkedAtUtc) => checkedAtUtc is null
+        ? "not checked yet"
+        : $"checked {checkedAtUtc.Value.LocalDateTime:g}";
 
     private string FormatDomainZone(MailRelayDomain domain)
     {
