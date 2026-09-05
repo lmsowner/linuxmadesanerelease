@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Application.Contracts.Security;
+using LinuxMadeSane.Core.Enums;
 
 namespace LinuxMadeSane.Application.Interfaces;
 
@@ -29,5 +30,6 @@ public interface ISecuritySettingsService
     Task SetTrustedNetworkEnabledAsync(Guid entryId, bool isEnabled, CancellationToken cancellationToken = default);
     Task SetTrustedNetworkTrustedAccessEnabledAsync(Guid entryId, bool isEnabled, CancellationToken cancellationToken = default);
     Task SetTrustedNetworkAuthenticationEnabledAsync(Guid entryId, bool isEnabled, CancellationToken cancellationToken = default);
+    Task SetTrustedNetworkDeniedResponseModeAsync(Guid entryId, NetworkAccessDeniedResponseMode mode, CancellationToken cancellationToken = default);
     Task DeleteTrustedNetworkAsync(Guid entryId, CancellationToken cancellationToken = default);
 }

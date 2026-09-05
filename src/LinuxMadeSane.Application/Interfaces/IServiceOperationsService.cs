@@ -45,7 +45,4 @@ public interface IServiceOperationsService
     Task<ServiceIssueFixerViewModel?> GetIssueFixerAsync(
         Guid serviceId,
         CancellationToken cancellationToken = default);
-
-    Task<ServiceDeploymentPatternsViewModel> GetDeploymentPatternsAsync(
-        CancellationToken cancellationToken = default);
 }

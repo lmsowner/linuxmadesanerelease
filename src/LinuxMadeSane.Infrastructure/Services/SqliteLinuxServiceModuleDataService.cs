@@ -343,21 +343,6 @@ public sealed class SqliteLinuxServiceModuleDataService(
             ["Capture `systemctl status` and recent logs.", "Verify user, group, working directory, and env file.", "Normalize ownership and runtime paths.", "Reload systemd if the unit definition changed.", "Restart and verify the expected port and health checks."]);
     }
 
-    public Task<IReadOnlyList<ServiceDeploymentPattern>> ListDeploymentPatternsAsync(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        IReadOnlyList<ServiceDeploymentPattern> patterns =
-        [
-            new(DeploymentPatternType.AspNetKestrel, "ASP.NET / Kestrel app", "Create a systemd-backed ASP.NET deployment from a release folder with sane user, working directory, and health defaults.", "You get a versioned release path, a dedicated service account, a health-checked systemd unit, and a predictable logs/data layout.", ["Dedicated app user and group", "Versioned release folders with current symlink", "Environment file wired into systemd", "Health endpoint check after restart"], ["systemd unit", "environment file", "release folder layout", "logs and data directories"]),
-            new(DeploymentPatternType.NodeService, "Node service", "Set up a long-running Node process with working directory, environment file, and restart policy already sane.", "The service starts under the right user, from the right directory, with npm/runtime drift called out early.", ["Explicit node exec path", "Writable logs/data paths", "Restart on failure", "Environment file support"], ["systemd unit", "logs directory", "runtime checklist"]),
-            new(DeploymentPatternType.PythonApp, "Python app", "Create a Python service with venv-aware paths and dependency validation.", "The service definition stays readable and the runtime assumptions are explicit.", ["Dedicated venv path", "Stable working directory", "Environment file for secrets/config", "Dependency check before restart"], ["systemd unit", "venv path conventions", "health checklist"]),
-            new(DeploymentPatternType.DockerBackedService, "Docker-backed service", "Wrap a containerized workload in a predictable host-side control pattern.", "Container services still need sane host paths, env handling, and restart expectations.", ["Explicit compose or run command", "Environment file separation", "Health check and restart verification", "Host bind paths documented"], ["systemd wrapper unit", "env file", "host path checklist"])
-        ];
-
-        return Task.FromResult(patterns);
-    }
-
     private async Task<IReadOnlyList<LinuxServiceDefinition>> LoadLiveServicesAsync(CancellationToken cancellationToken)
     {
         var serviceRowsTask = RunCommandAsync(

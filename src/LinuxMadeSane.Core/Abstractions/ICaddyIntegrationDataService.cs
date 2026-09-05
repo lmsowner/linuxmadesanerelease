@@ -9,6 +9,8 @@ public interface ICaddyIntegrationDataService
 {
     Task<CaddyIntegrationSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<CaddyProxyRouteDefinition>> ListRoutesAsync(CancellationToken cancellationToken = default);
+
     Task<CaddyProxyRouteDefinition?> GetRouteAsync(Guid id, CancellationToken cancellationToken = default);
 
     Task SaveRouteAsync(CaddyProxyRouteDefinition route, CancellationToken cancellationToken = default);

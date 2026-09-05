@@ -23,6 +23,7 @@
 @inject IWebHostEnvironment WebHostEnvironment
 @inject IConfiguration Configuration
 @inject NavigationManager NavigationManager
+@inject DesktopHelperSetupService DesktopHelperSetupService
 
 <PageTitle>Desktop Assistant | Linux Made Sane</PageTitle>
 
@@ -131,9 +132,13 @@
                                 {
                                     var desktopDebugSnapshot = viewModel.Inspection.DesktopSessionBroker;
                                     <div class="callout info desktop-chat-connection-note">
-                                        The desktop agent is connecting. When this page is opened from the tray it links to the current graphical session automatically.
+                                        @(IsDesktopHelperConfiguredOff
+                                            ? "Desktop Helper is disabled for this host. Enable it from the Setup tab only if this Linux machine has a graphical desktop."
+                                            : "The desktop agent is connecting. When this page is opened from the tray it links to the current graphical session automatically.")
                                     </div>
-                                    <details class="desktop-chat-debug-panel" open>
+                                    @if (!IsDesktopHelperConfiguredOff)
+                                    {
+                                        <details class="desktop-chat-debug-panel" open>
                                         <summary>Temporary link debug</summary>
                                         <dl>
                                             <div>
@@ -205,7 +210,8 @@
                                                 </section>
                                             }
                                         }
-                                    </details>
+                                        </details>
+                                    }
                                 }
 
                                 <div class="desktop-chat-message-list" @ref="desktopChatMessageListElement">
@@ -313,7 +319,7 @@
                             <p class="meta-text">@GetDesktopSetupSummary()</p>
                         </div>
                         <div class="token-row">
-                            <UiPill Tone="@GetDesktopHelperTone()">@GetDesktopSetupStatus()</UiPill>
+                            <UiPill Tone="@GetDesktopSetupTone()">@GetDesktopSetupStatus()</UiPill>
                         </div>
                     </div>
 
@@ -322,10 +328,10 @@
                             <span class="desktop-assistant-step-index">1</span>
                             <div>
                                 <div class="desktop-assistant-step-header">
-                                    <strong>Helper installed</strong>
-                                    <UiPill Tone="UiPillTone.Success">Installer managed</UiPill>
+                                    <strong>Desktop Helper choice</strong>
+                                    <UiPill Tone="@GetDesktopSetupTone()">@(desktopHelperSetup?.Summary ?? "Loading")</UiPill>
                                 </div>
-                                <p class="meta-text">LMS ships the Desktop Assistant helper with the app and registers it for graphical login sessions.</p>
+                                <p class="meta-text">Fresh installs keep this off. Enable it only when this LMS host has a graphical Linux desktop.</p>
                             </div>
                         </div>
                         <div class="desktop-assistant-step">
@@ -333,9 +339,9 @@
                             <div>
                                 <div class="desktop-assistant-step-header">
                                     <strong>Desktop user trusted</strong>
-                                    <UiPill Tone="UiPillTone.Warning">May need login refresh</UiPill>
+                                    <UiPill Tone="@(IsDesktopHelperConfiguredOff ? UiPillTone.Neutral : UiPillTone.Warning)">@(IsDesktopHelperConfiguredOff ? "Not required" : "May need login refresh")</UiPill>
                                 </div>
-                                <p class="meta-text">The installer grants the desktop user access to the protected LMS helper socket when it can identify that user.</p>
+                                <p class="meta-text">When enabled, LMS grants active desktop users access to the protected helper socket without changing the core service.</p>
                             </div>
                         </div>
                         <div class="desktop-assistant-step">
@@ -343,7 +349,7 @@
                             <div>
                                 <div class="desktop-assistant-step-header">
                                     <strong>Session connected</strong>
-                                    <UiPill Tone="@GetDesktopHelperTone()">@GetDesktopSetupStatus()</UiPill>
+                                    <UiPill Tone="@GetDesktopSetupTone()">@GetDesktopSetupStatus()</UiPill>
                                 </div>
                                 <p class="meta-text">After the next desktop login, LMS should see your XFCE/X11 or Wayland session without manual shell work.</p>
                             </div>
@@ -352,15 +358,71 @@
 
                     <div class="desktop-assistant-action-grid">
                         <div>
-                            <strong>@GetDesktopSetupActionTitle()</strong>
-                            <p class="meta-text">@GetDesktopSetupActionText()</p>
+                            <UiCheckboxField Value="@desktopHelperEnabledEditor"
+                                             ValueChanged="SetDesktopHelperEnabledEditorAsync"
+                                             Label="Enable Desktop Helper on this host"
+                                             Helper="Starts the per-user tray/helper only for graphical Linux sessions. Leave this off on headless servers."
+                                             Disabled="@(desktopHelperSetup?.IsManaged != true || isDesktopHelperSetupBusy)"
+                                             Compact="true" />
+                            <p class="meta-text">@(desktopHelperSetup?.Detail ?? "Reading the installed host setting...")</p>
                         </div>
                         <div class="toolbar-row">
-                            <UiPill Tone="UiPillTone.Neutral">Auto-detected</UiPill>
+                            <UiCommandButton Label="@(isDesktopHelperSetupBusy ? "Applying..." : "Apply host setting")"
+                                             Glyph="UiIconGlyph.Repair"
+                                             Variant="UiButtonVariant.Primary"
+                                             OnClick="ApplyDesktopHelperSetupAsync"
+                                             Disabled="@(!CanApplyDesktopHelperSetup)" />
                         </div>
                     </div>
 
-                    <div class="desktop-assistant-manual-start">
+                    @if (!string.IsNullOrWhiteSpace(desktopHelperSetupMessage))
+                    {
+                        <div class="callout @(desktopHelperSetupMessageIsError ? "error" : "success")">@desktopHelperSetupMessage</div>
+                    }
+
+                    <div class="desktop-assistant-action-grid">
+                        <div>
+                            <strong>Host graphical desktop</strong>
+                            <p class="meta-text">@(graphicalDesktopStatus?.Detail ?? "Reading the host boot target and display manager...")</p>
+                            <p class="meta-text">LMS does not install GNOME Shell. Disable this on a headless host to stop GDM, LightDM, or another active display manager, disable every LMS Desktop Helper launch path, and boot in multi-user mode.</p>
+                        </div>
+                        <div class="toolbar-row">
+                            <UiPill Tone="@GetGraphicalDesktopTone()">@(graphicalDesktopStatus?.Summary ?? "Loading")</UiPill>
+                            @if (GraphicalDesktopIsEnabled)
+                            {
+                                <UiCommandButton Label="Disable GNOME / desktop"
+                                                 Glyph="UiIconGlyph.Stop"
+                                                 Variant="UiButtonVariant.Danger"
+                                                 OnClick="OpenDisableGraphicalDesktopModal"
+                                                 Disabled="@(graphicalDesktopStatus?.IsManaged != true || isGraphicalDesktopBusy)" />
+                            }
+                            else
+                            {
+                                <UiCommandButton Label="@(isGraphicalDesktopBusy ? "Enabling..." : "Enable graphical desktop")"
+                                                 Glyph="UiIconGlyph.Run"
+                                                 Variant="UiButtonVariant.Primary"
+                                                 OnClick="@(() => ApplyGraphicalDesktopModeAsync(true))"
+                                                 Disabled="@(graphicalDesktopStatus?.IsManaged != true || isGraphicalDesktopBusy)" />
+                            }
+                        </div>
+                    </div>
+
+                    @if (!string.IsNullOrWhiteSpace(graphicalDesktopMessage))
+                    {
+                        <div class="callout @(graphicalDesktopMessageIsError ? "error" : "success")">@graphicalDesktopMessage</div>
+                    }
+
+                    <div class="desktop-assistant-action-grid">
+                        <div>
+                            <strong>@GetDesktopSetupActionTitle()</strong>
+                            <p class="meta-text">@GetDesktopSetupActionText()</p>
+                        </div>
+                        <UiPill Tone="UiPillTone.Neutral">Updates preserve this choice</UiPill>
+                    </div>
+
+                    @if (!IsDesktopHelperConfiguredOff)
+                    {
+                        <div class="desktop-assistant-manual-start">
                         <div class="desktop-assistant-manual-header">
                             <div>
                                 <strong>Manual fallback from your XFCE terminal</strong>
@@ -387,7 +449,8 @@
                                 </article>
                             }
                         </div>
-                    </div>
+                        </div>
+                    }
 
                     <div class="desktop-assistant-security-strip">
                         <span>Security boundary</span>
@@ -396,8 +459,8 @@
                 </section>
             </TabPage>
 
-            <TabPage Title="Desktop Option" Value="desktop" Disabled="@(!HasDesktopHelperSession)">
-                @if (!HasDesktopHelperSession)
+            <TabPage Title="Desktop Option" Value="desktop" Disabled="@(!HasDesktopHelperSession || IsDesktopHelperConfiguredOff)">
+                @if (!HasDesktopHelperSession || IsDesktopHelperConfiguredOff)
                 {
                     <section class="surface-card desktop-assistant-gate">
                         <div>
@@ -684,6 +747,32 @@
     }
 </div>
 
+<UiModal IsOpen="@showDisableGraphicalDesktopModal"
+         Title="Disable GNOME / graphical desktop?"
+         Subtitle="This immediately ends local graphical login sessions on this LMS host."
+         Class="desktop-assistant-disable-desktop-modal"
+         CloseOnBackdrop="@(!isGraphicalDesktopBusy)"
+         OnClose="CloseDisableGraphicalDesktopModal">
+    <ChildContent>
+        <p class="callout warning">
+            The host will disable and stop every LMS Desktop Helper agent, remove its automatic launch paths, switch to <code>multi-user.target</code>, and stop its active display manager. LMS and SSH remain running, and no desktop packages are removed.
+        </p>
+        <p class="meta-text">You can enable the graphical desktop again from this page over LMS or SSH.</p>
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Cancel"
+                         Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Ghost"
+                         Disabled="@isGraphicalDesktopBusy"
+                         OnClick="CloseDisableGraphicalDesktopModal" />
+        <UiCommandButton Label="@(isGraphicalDesktopBusy ? "Disabling..." : "Disable desktop now")"
+                         Glyph="UiIconGlyph.Stop"
+                         Variant="UiButtonVariant.Danger"
+                         Disabled="@isGraphicalDesktopBusy"
+                         OnClick="@(() => ApplyGraphicalDesktopModeAsync(false))" />
+    </Footer>
+</UiModal>
+
 @code {
     private RdpOptimizerWorkspaceViewModel? viewModel;
     private RdpOptimizationRequestEditor editor = new();
@@ -691,6 +780,16 @@
     private RdpOptimizationResult? result;
     private RdpOptimizationResult? restoreResult;
     private string desktopHelperCopyStatus = string.Empty;
+    private DesktopHelperSetupStatus? desktopHelperSetup;
+    private bool desktopHelperEnabledEditor;
+    private bool isDesktopHelperSetupBusy;
+    private string desktopHelperSetupMessage = string.Empty;
+    private bool desktopHelperSetupMessageIsError;
+    private GraphicalDesktopStatus? graphicalDesktopStatus;
+    private bool isGraphicalDesktopBusy;
+    private bool showDisableGraphicalDesktopModal;
+    private string graphicalDesktopMessage = string.Empty;
+    private bool graphicalDesktopMessageIsError;
     private string activeDesktopAssistantTab = "assistant";
     private DesktopAssistantChatWorkspaceViewModel? desktopChatWorkspace;
     private Guid? activeDesktopChatSessionId;
@@ -745,7 +844,13 @@
 
     private async Task LoadAsync()
     {
-        viewModel = await RdpOptimizationService.GetWorkspaceAsync();
+        var workspaceTask = RdpOptimizationService.GetWorkspaceAsync();
+        var desktopHelperSetupTask = DesktopHelperSetupService.GetStatusAsync();
+        var graphicalDesktopStatusTask = DesktopHelperSetupService.GetGraphicalDesktopStatusAsync();
+        viewModel = await workspaceTask;
+        desktopHelperSetup = await desktopHelperSetupTask;
+        graphicalDesktopStatus = await graphicalDesktopStatusTask;
+        desktopHelperEnabledEditor = desktopHelperSetup.IsEnabled;
         editor = viewModel.Editor;
         await EnsureDesktopProviderContextAsync();
         await LoadDesktopAssistantChatAsync();
@@ -803,7 +908,8 @@
     private Task SetDesktopAssistantTabAsync(string? tab)
     {
         activeDesktopAssistantTab = string.IsNullOrWhiteSpace(tab) ? "assistant" : tab;
-        if (!HasDesktopHelperSession && string.Equals(activeDesktopAssistantTab, "desktop", StringComparison.Ordinal))
+        if ((!HasDesktopHelperSession || IsDesktopHelperConfiguredOff) &&
+            string.Equals(activeDesktopAssistantTab, "desktop", StringComparison.Ordinal))
         {
             activeDesktopAssistantTab = "setup";
         }
@@ -1095,7 +1201,7 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
 
     private void UpdateDesktopHelperAutoRefreshLoop()
     {
-        if (HasDesktopHelperSession)
+        if (HasDesktopHelperSession || IsDesktopHelperConfiguredOff)
         {
             desktopHelperAutoRefreshCancellation?.Cancel();
             desktopHelperAutoRefreshCancellation?.Dispose();
@@ -1123,7 +1229,7 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
                 await Task.Delay(delay, cancellationToken);
                 await InvokeAsync(async () =>
                 {
-                    if (viewModel is null || HasDesktopHelperSession)
+                    if (viewModel is null || HasDesktopHelperSession || IsDesktopHelperConfiguredOff)
                     {
                         return;
                     }
@@ -1132,7 +1238,7 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
                     StateHasChanged();
                 });
 
-                if (HasDesktopHelperSession)
+                if (HasDesktopHelperSession || IsDesktopHelperConfiguredOff)
                 {
                     return;
                 }
@@ -1335,15 +1441,142 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
     private bool HasDesktopHelperSession =>
         viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession is not null;
 
+    private bool IsDesktopHelperConfiguredOff =>
+        desktopHelperSetup is { IsManaged: true, IsEnabled: false };
+
+    private bool CanApplyDesktopHelperSetup =>
+        desktopHelperSetup?.IsManaged == true &&
+        !isDesktopHelperSetupBusy &&
+        desktopHelperEnabledEditor != desktopHelperSetup.IsEnabled;
+
+    private Task SetDesktopHelperEnabledEditorAsync(bool enabled)
+    {
+        desktopHelperEnabledEditor = enabled;
+        desktopHelperSetupMessage = string.Empty;
+        desktopHelperSetupMessageIsError = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task ApplyDesktopHelperSetupAsync()
+    {
+        if (!CanApplyDesktopHelperSetup)
+        {
+            return;
+        }
+
+        isDesktopHelperSetupBusy = true;
+        desktopHelperSetupMessage = string.Empty;
+        desktopHelperSetupMessageIsError = false;
+        try
+        {
+            var setupResult = await DesktopHelperSetupService.SetEnabledAsync(desktopHelperEnabledEditor);
+            desktopHelperSetup = setupResult.Status;
+            desktopHelperEnabledEditor = setupResult.Status.IsEnabled;
+            desktopHelperSetupMessage = setupResult.Message;
+            desktopHelperSetupMessageIsError = !setupResult.Succeeded;
+            UpdateDesktopHelperAutoRefreshLoop();
+            if (setupResult.Succeeded && setupResult.Status.IsEnabled)
+            {
+                await RefreshWorkspaceAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            desktopHelperSetupMessage = exception.Message;
+            desktopHelperSetupMessageIsError = true;
+        }
+        finally
+        {
+            isDesktopHelperSetupBusy = false;
+        }
+    }
+
+    private bool GraphicalDesktopIsEnabled =>
+        graphicalDesktopStatus is { IsManaged: true } status &&
+        (status.StartsOnBoot || status.DisplayManagerActive);
+
+    private UiPillTone GetGraphicalDesktopTone() =>
+        graphicalDesktopStatus?.IsManaged != true
+            ? UiPillTone.Warning
+            : GraphicalDesktopIsEnabled ? UiPillTone.Warning : UiPillTone.Success;
+
+    private Task OpenDisableGraphicalDesktopModal()
+    {
+        if (graphicalDesktopStatus?.IsManaged == true && !isGraphicalDesktopBusy)
+        {
+            showDisableGraphicalDesktopModal = true;
+            graphicalDesktopMessage = string.Empty;
+            graphicalDesktopMessageIsError = false;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task CloseDisableGraphicalDesktopModal()
+    {
+        if (!isGraphicalDesktopBusy)
+        {
+            showDisableGraphicalDesktopModal = false;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ApplyGraphicalDesktopModeAsync(bool enabled)
+    {
+        if (graphicalDesktopStatus?.IsManaged != true || isGraphicalDesktopBusy)
+        {
+            return;
+        }
+
+        isGraphicalDesktopBusy = true;
+        graphicalDesktopMessage = string.Empty;
+        graphicalDesktopMessageIsError = false;
+        try
+        {
+            var setupResult = await DesktopHelperSetupService.SetGraphicalDesktopEnabledAsync(enabled);
+            graphicalDesktopStatus = setupResult.Status;
+            graphicalDesktopMessage = setupResult.Message;
+            graphicalDesktopMessageIsError = !setupResult.Succeeded;
+            if (!enabled)
+            {
+                desktopHelperSetup = await DesktopHelperSetupService.GetStatusAsync();
+                desktopHelperEnabledEditor = desktopHelperSetup.IsEnabled;
+                UpdateDesktopHelperAutoRefreshLoop();
+            }
+            if (setupResult.Succeeded)
+            {
+                showDisableGraphicalDesktopModal = false;
+            }
+        }
+        catch (Exception exception)
+        {
+            graphicalDesktopMessage = exception.Message;
+            graphicalDesktopMessageIsError = true;
+        }
+        finally
+        {
+            isGraphicalDesktopBusy = false;
+        }
+    }
+
     private string GetDesktopSetupStatus() =>
-        HasDesktopHelperSession ? "Ready" : "Connecting";
+        IsDesktopHelperConfiguredOff ? "Disabled" : HasDesktopHelperSession ? "Ready" : "Connecting";
+
+    private UiPillTone GetDesktopSetupTone() =>
+        IsDesktopHelperConfiguredOff ? UiPillTone.Neutral : GetDesktopHelperTone();
 
     private string GetDesktopAssistantStatusLabel() =>
-        HasDesktopHelperSession ? "Live session" : "Connecting";
+        IsDesktopHelperConfiguredOff ? "Helper disabled" : HasDesktopHelperSession ? "Live session" : "Connecting";
 
     private string GetDesktopAssistantStatusText()
     {
         var session = viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession;
+        if (IsDesktopHelperConfiguredOff)
+        {
+            return "This host is configured without Desktop Helper. Enable it from Setup only for a graphical Linux host.";
+        }
+
         return session is null
             ? "Waiting for the tray agent to attach to this graphical login."
             : $"{session.CapabilityReport.DisplayServer} session for {session.CapabilityReport.UserName} on {session.CapabilityReport.MachineName}.";
@@ -1351,6 +1584,11 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
 
     private string GetDesktopSetupSummary()
     {
+        if (IsDesktopHelperConfiguredOff)
+        {
+            return "Desktop Helper is intentionally off; the core LMS service remains available for this headless host.";
+        }
+
         if (HasDesktopHelperSession)
         {
             var session = viewModel!.Inspection.DesktopSessionBroker.BestAvailableSession!;
@@ -1361,21 +1599,35 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
     }
 
     private string GetDesktopSetupActionTitle() =>
-        HasDesktopHelperSession ? "Desktop Assistant is connected" : "Waiting for your desktop session";
+        IsDesktopHelperConfiguredOff
+            ? "Headless host mode"
+            : HasDesktopHelperSession ? "Desktop Assistant is connected" : "Waiting for your desktop session";
 
     private string GetDesktopSetupActionText() =>
-        HasDesktopHelperSession
+        IsDesktopHelperConfiguredOff
+            ? "No desktop tray process is started. LMS installation and updates continue normally and preserve this choice."
+            : HasDesktopHelperSession
             ? "The tray agent is attached and Desktop Assistant can use GUI-session context."
             : "If the tray agent has just been installed, it should attach automatically from the next graphical login.";
 
     private string GetDesktopHelperValue()
     {
+        if (IsDesktopHelperConfiguredOff)
+        {
+            return "Disabled";
+        }
+
         var session = viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession;
         return session is null ? "Not connected" : $"{session.CapabilityReport.DisplayServer} as {session.CapabilityReport.UserName}";
     }
 
     private string GetDesktopHelperMeta()
     {
+        if (IsDesktopHelperConfiguredOff)
+        {
+            return "Disabled in Desktop Assistant Setup";
+        }
+
         var snapshot = viewModel?.Inspection.DesktopSessionBroker;
         var session = snapshot?.BestAvailableSession;
         if (session is null)
@@ -1429,7 +1681,9 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
     }
 
     private UiPillTone GetDesktopHelperTone() =>
-        viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession is null
+        IsDesktopHelperConfiguredOff
+            ? UiPillTone.Neutral
+            : viewModel?.Inspection.DesktopSessionBroker.BestAvailableSession is null
             ? UiPillTone.Warning
             : UiPillTone.Success;
 

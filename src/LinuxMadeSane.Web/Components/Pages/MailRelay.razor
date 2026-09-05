@@ -1,0 +1,1807 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@page "/mail-relay"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IDisposable
+@using LinuxMadeSane.Application.Contracts.MailRelay
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.MailRelay
+@inject IMailRelayService MailRelayService
+@inject IJSRuntime Js
+
+<PageTitle>Mail Relay | Linux Made Sane</PageTitle>
+
+<div class="page-shell mail-relay-page">
+    <header class="mail-relay-header">
+        <div>
+            <h1>Mail Relay</h1>
+            <p>Private outbound SMTP for applications.</p>
+        </div>
+        @if (dashboard is not null && dashboard.Preflight.CloudflareZonesAvailable)
+        {
+            <UiCommandButton Label="Run preflight"
+                             Glyph="UiIconGlyph.Analyze"
+                             Variant="UiButtonVariant.Primary"
+                             Disabled="@(isRunningPreflight || isChangingZone)"
+                             OnClick="RunPreflightAsync" />
+        }
+    </header>
+
+    @if (dashboard is null)
+    {
+        <section class="surface-card mail-relay-loading" aria-busy="true">
+            <p class="meta-text">@(string.IsNullOrWhiteSpace(errorMessage) ? "Checking Mail Relay prerequisites..." : errorMessage)</p>
+        </section>
+    }
+    else if (!dashboard.Preflight.CloudflareZonesAvailable)
+    {
+        <section class="surface-card mail-relay-prerequisite" aria-labelledby="mail-relay-prerequisite-title">
+            <div class="mail-relay-section-heading">
+                <div>
+                    <p class="eyebrow">Required first</p>
+                    <h2 id="mail-relay-prerequisite-title">Mail Relay requires Edge Gateway to be configured first.</h2>
+                    <p>Cloudflare DNS is used to configure and validate SPF, DKIM and DMARC records.</p>
+                </div>
+                <UiPill Tone="UiPillTone.Warning">Not configured</UiPill>
+            </div>
+
+            <div class="mail-relay-status-list" aria-label="Edge Gateway status">
+                <div>
+                    <span>Cloudflare connection</span>
+                    <strong>NOT CONFIGURED</strong>
+                </div>
+                <div>
+                    <span>DNS access</span>
+                    <strong>NOT AVAILABLE</strong>
+                </div>
+            </div>
+
+            <UiCommandButton Label="Configure Edge Gateway"
+                             Glyph="UiIconGlyph.Connect"
+                             Variant="UiButtonVariant.Primary"
+                             Href="/edge-gateway" />
+        </section>
+    }
+    else
+    {
+        @if (!string.IsNullOrWhiteSpace(errorMessage))
+        {
+            <p class="callout error">@errorMessage</p>
+        }
+
+        @if (DnsEditPermissionMissing)
+        {
+            <section class="surface-card mail-relay-permission" aria-labelledby="mail-relay-permission-title">
+                <div class="mail-relay-section-heading">
+                    <div>
+                        <p class="eyebrow">Action required</p>
+                        <h2 id="mail-relay-permission-title">Cloudflare DNS Permission Required</h2>
+                        <p>Your existing Cloudflare token cannot manage the DNS records required by Mail Relay.</p>
+                    </div>
+                    <UiPill Tone="UiPillTone.Failure">Permission required</UiPill>
+                </div>
+                <div class="mail-relay-permission-value">
+                    <span>Required permission</span>
+                    <strong>Zone → DNS → Edit</strong>
+                </div>
+                <UiCommandButton Label="Re-test"
+                                 Glyph="UiIconGlyph.Refresh"
+                                 Variant="UiButtonVariant.Primary"
+                                 Disabled="@(isRunningPreflight || isChangingZone)"
+                                 OnClick="RunPreflightAsync" />
+            </section>
+        }
+
+        <section class="surface-card mail-relay-overview" aria-labelledby="mail-relay-overview-title">
+            <h2 id="mail-relay-overview-title" class="visually-hidden">Relay status</h2>
+            <div class="mail-relay-summary-grid">
+                <div class="mail-relay-summary-item mail-relay-summary-zone">
+                    <UiSelectField TValue="string"
+                                   Label="Working Cloudflare zone"
+                                   Value="@selectedCloudflareZoneId"
+                                   ValueChanged="SelectCloudflareZoneAsync"
+                                   ValueExpression="@(() => selectedCloudflareZoneId)"
+                                   Disabled="@(isRunningPreflight || isChangingZone)"
+                                   Compact="true"
+                                   Class="mail-relay-zone-select">
+                        @foreach (var zone in dashboard.Preflight.AvailableZones)
+                        {
+                            <option value="@zone.ZoneId">@BuildZoneOptionLabel(zone)</option>
+                        }
+                    </UiSelectField>
+                </div>
+                <div class="mail-relay-summary-item">
+                    <span>Status</span>
+                    <UiPill Tone="@ReadinessTone">@ReadinessLabel</UiPill>
+                </div>
+                <div class="mail-relay-summary-item">
+                    <span>Relay</span>
+                    <strong>@(dashboard.Configuration?.RelayHostname ?? dashboard.Preflight.SuggestedRelayHostname)</strong>
+                </div>
+                <div class="mail-relay-summary-item">
+                    <span>Submission</span>
+                    <strong>@(dashboard.Configuration?.AllowLegacyPort25 == true ? "Private 587 + legacy 25" : "Private TCP/587")</strong>
+                </div>
+            </div>
+            @if (dashboard.Configuration?.Enabled != true || dashboard.Preflight.CanConfigure != true)
+            {
+                <div class="mail-relay-summary-footer">
+                    <span class="meta-text">@ReadinessSummary</span>
+                    @if (dashboard.Configuration?.Enabled != true)
+                    {
+                    <UiCommandButton Label="Set up Mail Relay"
+                                     Glyph="UiIconGlyph.Run"
+                                     Variant="UiButtonVariant.Primary"
+                                     Disabled="@SetupBusy"
+                                     OnClick="OpenInitialSetup" />
+                    }
+                </div>
+            }
+        </section>
+
+        @if (dashboard.Configuration?.Enabled == true)
+        {
+            <section class="surface-card mail-relay-legacy" aria-labelledby="mail-relay-legacy-title">
+                <div class="mail-relay-legacy-row">
+                    <div class="mail-relay-legacy-copy">
+                        <div class="mail-relay-inline-title">
+                            <h2 id="mail-relay-legacy-title">Submission access</h2>
+                            <UiPill Tone="@(dashboard.Configuration.AllowLegacyPort25 ? UiPillTone.Warning : UiPillTone.Neutral)">
+                                @(dashboard.Configuration.AllowLegacyPort25 ? "Legacy TCP/25 on" : "Private TCP/587")
+                            </UiPill>
+                        </div>
+                        @if (dashboard.Configuration.AllowLegacyPort25)
+                        {
+                            <small>
+                                Listen: @string.Join(", ", dashboard.Configuration.EffectiveLegacyListenAddresses) ·
+                                Allowed: @string.Join(", ", dashboard.Configuration.EffectiveLegacyAllowedNetworks)
+                            </small>
+                        }
+                        else
+                        {
+                            <small>Authenticated STARTTLS only. Add restricted unauthenticated access for trusted older devices if required.</small>
+                        }
+                    </div>
+                    <UiCommandButton Label="Configure access"
+                                     Glyph="UiIconGlyph.Edit"
+                                     OnClick="OpenLegacyEditor" />
+                </div>
+            </section>
+        }
+
+        @if (dashboard.Configuration is not null)
+        {
+            <section class="surface-card mail-relay-domains" aria-labelledby="mail-relay-domains-title">
+                <div class="mail-relay-section-heading">
+                    <div class="mail-relay-heading-title">
+                        <h2 id="mail-relay-domains-title">Sending domains</h2>
+                        <UiPill Tone="UiPillTone.Neutral">@dashboard.Domains.Count</UiPill>
+                    </div>
+                    <div class="mail-relay-heading-actions">
+                        <UiCommandButton Label="Add Sending Domain"
+                                         Glyph="UiIconGlyph.Plus"
+                                         Variant="UiButtonVariant.Primary"
+                                         OnClick="AddDomainAsync" />
+                    </div>
+                </div>
+                @if (dashboard.Domains.Count == 0)
+                {
+                    <p class="mail-relay-empty">No sending domains have been configured yet.</p>
+                }
+                else
+                {
+                    <div class="mail-relay-domain-list">
+                        @foreach (var domain in dashboard.Domains)
+                        {
+                            <article class="mail-relay-domain-row">
+                                <div class="mail-relay-record-identity">
+                                    <strong>@domain.DomainName</strong>
+                                    <small>@FormatDomainZone(domain) · DKIM @domain.CurrentDkimSelector</small>
+                                </div>
+                                <UiPill Tone="@(domain.Enabled ? UiPillTone.Success : UiPillTone.Warning)">@(domain.Enabled ? "Configured" : "Setup pending")</UiPill>
+                                <dl class="mail-relay-domain-status">
+                                    <div><dt>SPF</dt><dd>@FormatDnsStatus(domain.SpfStatus)</dd></div>
+                                    <div><dt>DKIM</dt><dd>@FormatDnsStatus(domain.DkimStatus)</dd></div>
+                                    <div><dt>DMARC</dt><dd>@FormatDnsStatus(domain.DmarcStatus)</dd></div>
+                                </dl>
+                                <UiCommandButton Label="Edit settings"
+                                                 Glyph="UiIconGlyph.Edit"
+                                                 Class="mail-relay-row-action"
+                                                 OnClick="@(() => EditDomainAsync(domain))" />
+                            </article>
+                        }
+                    </div>
+                }
+            </section>
+        }
+
+        @if (dashboard.Configuration?.Enabled == true)
+        {
+            <section class="surface-card mail-relay-clients" aria-labelledby="mail-relay-clients-title">
+                <div class="mail-relay-section-heading">
+                    <div class="mail-relay-heading-title">
+                        <h2 id="mail-relay-clients-title">SMTP users</h2>
+                        <UiPill Tone="UiPillTone.Neutral">@dashboard.Clients.Count</UiPill>
+                    </div>
+                    <div class="mail-relay-heading-actions">
+                        <UiCommandButton Label="Add SMTP User"
+                                         Glyph="UiIconGlyph.Plus"
+                                         Variant="UiButtonVariant.Primary"
+                                         OnClick="OpenNewClientEditor" />
+                    </div>
+                </div>
+
+                @if (dashboard.Clients.Count == 0)
+                {
+                    <p class="mail-relay-empty">No SMTP users have been configured.</p>
+                }
+                else
+                {
+                    <div class="mail-relay-client-list">
+                        @foreach (var client in dashboard.Clients)
+                        {
+                            <article class="mail-relay-client-row">
+                                <div class="mail-relay-record-identity">
+                                    <strong>@client.Name</strong>
+                                    <code>@client.Username</code>
+                                </div>
+                                <UiPill Tone="@(client.Enabled ? UiPillTone.Success : UiPillTone.Warning)">@(client.Enabled ? "Enabled" : "Disabled")</UiPill>
+                                <div class="mail-relay-record-detail">
+                                    <span>Sender domains</span>
+                                    <strong>@FormatSenderDomains(client.AllowedSenderDomains)</strong>
+                                </div>
+                                <small class="mail-relay-record-activity">@FormatLastUsed(client.LastUsedUtc)</small>
+                                <UiCommandButton Label="Edit user"
+                                                 Glyph="UiIconGlyph.Edit"
+                                                 Class="mail-relay-row-action"
+                                                 OnClick="@(() => OpenClientEditor(client))" />
+                            </article>
+                        }
+                    </div>
+                }
+            </section>
+
+            @if (clientEditorOpen)
+            {
+                <UiModal IsOpen="@clientEditorOpen"
+                         Title="@(editingClientId is null ? "Add SMTP user" : "Edit SMTP user")"
+                         Subtitle="@(editingClientId is null ? "Login, password and sender permissions" : "Sender permissions and credential rotation")"
+                         Class="mail-relay-client-modal"
+                         CloseOnBackdrop="@(!isSavingClient)"
+                         OnClose="CloseClientEditor">
+                    <div class="mail-relay-client-editor">
+                        <div class="mail-relay-client-editor-grid">
+                            <UiTextField Label="Name"
+                                         Helper="A useful label such as Flow Production."
+                                         @bind-Value="clientEditorName"
+                                         Disabled="@isSavingClient" />
+                            <UiTextField Label="SMTP username"
+                                         Helper="Used with STARTTLS on TCP/587. Usernames cannot be renamed."
+                                         @bind-Value="clientEditorUsername"
+                                         Disabled="@(isSavingClient || editingClientId is not null)"
+                                         Autocomplete="off" />
+                            <UiTextField Label="@(editingClientId is null ? "Password" : "New password")"
+                                         Helper="@(editingClientId is null ? "Enter your own or generate one below." : "Leave blank to keep the current password.")"
+                                         @bind-Value="clientEditorPassword"
+                                         Type="@(showClientPassword ? "text" : "password")"
+                                         Disabled="@isSavingClient"
+                                         Autocomplete="new-password" />
+                            <UiCheckboxField @bind-Value="showClientPassword"
+                                             Label="Show password"
+                                             Helper="Only changes how the current field is displayed."
+                                             Card="true"
+                                             Disabled="@isSavingClient" />
+                        </div>
+
+                        <div class="mail-relay-password-actions">
+                            <UiCommandButton Label="Generate secure password"
+                                             Glyph="UiIconGlyph.Key"
+                                             OnClick="GenerateClientPassword"
+                                             Disabled="@isSavingClient" />
+                            <UiCommandButton Label="Copy password"
+                                             Glyph="UiIconGlyph.Copy"
+                                             OnClick="CopyClientPasswordAsync"
+                                             Disabled="@(isSavingClient || string.IsNullOrEmpty(clientEditorPassword))" />
+                        </div>
+
+                        <fieldset class="mail-relay-client-domains" disabled="@isSavingClient">
+                            <legend>Allowed sender domains</legend>
+                            @foreach (var domain in dashboard.Domains.Where(item => item.Enabled))
+                            {
+                                <UiCheckboxField Value="@clientEditorDomainIds.Contains(domain.Id)"
+                                                 ValueChanged="@((bool selected) => SetClientDomain(domain.Id, selected))"
+                                                 Label="@domain.DomainName"
+                                                 Helper="Allow this SMTP user to send From addresses in this domain."
+                                                 Card="true" />
+                            }
+                        </fieldset>
+
+                        <p class="meta-text">SMTP passwords are never stored as readable text. You can choose one you already manage, or replace it here whenever required.</p>
+
+                        @if (clientSaveResult is not null)
+                        {
+                            <p class="callout @(clientSaveResult.Success ? "success" : "error")">@clientSaveResult.Summary</p>
+                        }
+
+                        <UiCommandButton Label="@(isSavingClient ? "Saving SMTP user…" : "Save SMTP User")"
+                                         Glyph="UiIconGlyph.Save"
+                                         Variant="UiButtonVariant.Primary"
+                                         Disabled="@isSavingClient"
+                                         OnClick="SaveClientAsync" />
+                    </div>
+                </UiModal>
+            }
+        }
+
+        @if (dashboard.Configuration?.Enabled == true && dashboard.Clients.Any(item => item.Enabled))
+        {
+            <section class="surface-card mail-relay-test" aria-labelledby="mail-relay-test-title">
+                <div class="mail-relay-section-heading">
+                    <h2 id="mail-relay-test-title">Send a test email</h2>
+                    @if (testResult is not null)
+                    {
+                        <UiPill Tone="@GetTestStatusTone(testResult.Status)">@FormatTestStatus(testResult.Status)</UiPill>
+                    }
+                </div>
+
+                <div class="mail-relay-test-grid">
+                    <UiSelectField TValue="string"
+                                   Label="SMTP user"
+                                   Helper="The configured sender policy to test. No password is needed."
+                                   Value="@selectedTestClientId"
+                                   ValueChanged="SelectTestClient"
+                                   ValueExpression="@(() => selectedTestClientId)"
+                                   Disabled="@isSendingTest">
+                        @foreach (var client in dashboard.Clients.Where(item => item.Enabled))
+                        {
+                            <option value="@client.Id.ToString("D")">@client.Name (@client.Username)</option>
+                        }
+                    </UiSelectField>
+                    <UiTextField Label="From"
+                                 Helper="Must use one of this application's allowed sender domains."
+                                 @bind-Value="testFromAddress"
+                                 Disabled="@isSendingTest"
+                                 Autocomplete="off" />
+                    <UiTextField Label="Recipient"
+                                 Helper="The mailbox that should receive the diagnostic email."
+                                 @bind-Value="testRecipientAddress"
+                                 Disabled="@isSendingTest"
+                                 Autocomplete="email" />
+                </div>
+
+                @if (SelectedTestClient is { } selectedClient)
+                {
+                    <p class="mail-relay-allowed-senders">
+                        <span>Allowed sender domains</span>
+                        <strong>@string.Join(", ", selectedClient.AllowedSenderDomains)</strong>
+                    </p>
+                }
+
+                <div class="mail-relay-actions">
+                    <UiCommandButton Label="@(isSendingTest ? "Sending and checking delivery…" : "Send Test")"
+                                     Glyph="UiIconGlyph.Send"
+                                     Variant="UiButtonVariant.Primary"
+                                     Disabled="@(!CanSendTest)"
+                                     OnClick="SendTestAsync" />
+                    <span class="meta-text">Queued means accepted by the relay, not delivered to the inbox.</span>
+                </div>
+
+                @if (testResult is not null)
+                {
+                    <div class="mail-relay-test-result @(testResult.Passed ? "success" : "failure")" aria-live="polite">
+                        <div>
+                            <strong>@FormatTestStatus(testResult.Status)</strong>
+                            <p>@testResult.Summary</p>
+                        </div>
+                        <dl>
+                            <div><dt>Selected user policy</dt><dd>@(testResult.ClientPolicyValidated ? "PASS" : "FAIL")</dd></div>
+                            <div><dt>Accepted by relay</dt><dd>@(testResult.AcceptedByRelay ? "PASS" : "FAIL")</dd></div>
+                            <div><dt>DMARC identity alignment</dt><dd>@(testResult.DmarcIdentityAligned ? "PASS" : "NOT VERIFIED")</dd></div>
+                            <div><dt>Queue ID</dt><dd>@(testResult.QueueId ?? "Not assigned")</dd></div>
+                            <div><dt>Destination server</dt><dd>@(testResult.DestinationServer ?? "Not known yet")</dd></div>
+                        </dl>
+                        @if (!string.IsNullOrWhiteSpace(testResult.SmtpResponse))
+                        {
+                            <div class="mail-relay-test-diagnostic">
+                                <span>Diagnostic</span>
+                                <code>@testResult.SmtpResponse</code>
+                            </div>
+                        }
+                    </div>
+                }
+            </section>
+        }
+
+        @if (dashboard.Configuration is not null)
+        {
+            <details class="surface-card mail-relay-maintenance">
+                <summary>
+                    <span>
+                        <strong>Maintenance</strong>
+                        <small>Remove the relay or selected LMS-managed configuration</small>
+                    </span>
+                </summary>
+                <div class="mail-relay-maintenance-row">
+                    <p>Existing MX, provider DKIM and unrelated shared mail settings remain protected.</p>
+                    <UiCommandButton Label="Remove Mail Relay…"
+                                     Glyph="UiIconGlyph.Delete"
+                                     Variant="UiButtonVariant.Danger"
+                                     Disabled="@(SetupBusy || isRemovingRelay)"
+                                     OnClick="OpenRemovalEditor" />
+                </div>
+            </details>
+        }
+
+        <UiModal IsOpen="@domainEditorOpen"
+                 Title="@DomainSetupTitle"
+                 Subtitle="@(dashboard.Configuration?.Enabled == true ? "DNS authentication and sender access" : "Relay identity, private access and first SMTP user")"
+                 Class="mail-relay-domain-modal"
+                 CloseOnBackdrop="@(!SetupBusy)"
+                 OnClose="CloseDomainEditor">
+            <div id="mail-relay-setup" class="mail-relay-domain-form">
+            <div class="mail-relay-setup-grid @(dashboard.Configuration?.Enabled == true ? "mail-relay-setup-grid-compact" : null)">
+                @if (dashboard.Configuration?.Enabled != true)
+                {
+                    <UiTextField Label="Relay hostname"
+                                 Helper="The DNS-only hostname Postfix uses for EHLO."
+                                 @bind-Value="relayHostname"
+                                 Disabled="@SetupBusy" />
+                }
+                <UiTextField Label="Sending domain"
+                             Helper="The domain this relay may send from."
+                             @bind-Value="sendingDomain"
+                             Disabled="@SetupBusy" />
+                <UiTextField Label="DKIM selector"
+                             Helper="Creates selector._domainkey on this domain."
+                             @bind-Value="dkimSelector"
+                             Disabled="@SetupBusy" />
+                @if (dashboard.Configuration?.Enabled == true && dashboard.Clients.Any(item => item.Enabled))
+                {
+                    <UiSelectField TValue="string"
+                                   Label="Allow an SMTP user"
+                                   Helper="This user will be permitted to send From addresses in the domain. Permissions can be changed under SMTP users."
+                                   Value="@selectedSetupClientId"
+                                   ValueChanged="SelectSetupClient"
+                                   ValueExpression="@(() => selectedSetupClientId)"
+                                   Disabled="@SetupBusy">
+                        @foreach (var client in dashboard.Clients.Where(item => item.Enabled))
+                        {
+                            <option value="@client.Id.ToString("D")">@client.Name (@client.Username)</option>
+                        }
+                    </UiSelectField>
+                }
+                else
+                {
+                    <UiTextField Label="Application name"
+                                 Helper="A useful name such as Flow Production."
+                                 @bind-Value="applicationName"
+                                 Disabled="@SetupBusy" />
+                    <UiTextField Label="SMTP username"
+                                 Helper="A separate credential for this application."
+                                 @bind-Value="applicationUsername"
+                                 Disabled="@SetupBusy" />
+                }
+            </div>
+
+            @if (dashboard.Configuration?.Enabled != true)
+            {
+                <div class="mail-relay-access-options">
+                    <UiCheckboxField @bind-Value="allowTailscale"
+                                     Label="Tailscale submission"
+                                     Helper="Bind TCP/587 to localhost and this machine's private Tailscale address."
+                                     Card="true"
+                                     Disabled="@SetupBusy" />
+                    <UiCheckboxField @bind-Value="allowTrustedLan"
+                                     Label="Trusted LAN submission"
+                                     Helper="Also bind TCP/587 to this machine's private LAN addresses. Public submission stays off."
+                                     Card="true"
+                                     Disabled="@SetupBusy" />
+                </div>
+            }
+
+            <div class="mail-relay-actions">
+                <UiCommandButton Label="@(dashboard.Configuration?.Enabled == true ? "Review DNS changes" : "Review setup")"
+                                 Glyph="UiIconGlyph.Analyze"
+                                 Variant="UiButtonVariant.Primary"
+                                 Disabled="@SetupBusy"
+                                 OnClick="PreviewSetupAsync" />
+                @if (dashboard.Configuration?.Enabled != true)
+                {
+                    <span class="meta-text">Reviews the exact changes before installing anything.</span>
+                }
+            </div>
+
+            @if (setupPreview is not null)
+            {
+                <div class="mail-relay-review">
+                    <div class="mail-relay-existing-email">
+                        <div class="mail-relay-inline-title">
+                            <h3>@ExistingMailHeading(setupPreview.ExistingEmailConfiguration.Provider)</h3>
+                            <UiPill Tone="UiPillTone.Success">Preserve + merge</UiPill>
+                        </div>
+                        <p>LMS is an additional outbound path. Existing human and inbound email stays with the current provider.</p>
+                        <dl>
+                            <div><dt>Mail provider</dt><dd>@FormatExistingProvider(setupPreview.ExistingEmailConfiguration.Provider)</dd></div>
+                            <div><dt>Incoming email / MX</dt><dd>@(setupPreview.ExistingEmailConfiguration.MxRecords.Count == 0 ? "No MX detected · NO CHANGE" : "PRESERVED · UNCHANGED")</dd></div>
+                            <div><dt>Human outgoing email</dt><dd>@(setupPreview.ExistingEmailConfiguration.Provider == MailRelayExistingProvider.NoneDetected ? "NO CHANGE" : $"{FormatExistingProvider(setupPreview.ExistingEmailConfiguration.Provider)} · UNCHANGED")</dd></div>
+                            <div><dt>Machine / application email</dt><dd>LMS Mail Relay · ADDING</dd></div>
+                            <div><dt>Existing DKIM</dt><dd>@(setupPreview.ExistingEmailConfiguration.ExistingDkimRecords.Count == 0 ? "None detected" : $"{setupPreview.ExistingEmailConfiguration.ExistingDkimRecords.Count} · PRESERVED")</dd></div>
+                            <div><dt>DMARC</dt><dd>@(setupPreview.ExistingEmailConfiguration.ExistingDmarc is null ? "ADDING · monitor policy" : $"PRESERVED · {setupPreview.ExistingEmailConfiguration.ExistingDmarcPolicy ?? "existing policy"}")</dd></div>
+                            <div><dt>LMS DMARC alignment</dt><dd>READY · From and DKIM use @setupPreview.ExistingEmailConfiguration.Domain</dd></div>
+                            <div><dt>LMS delivery mode</dt><dd>Direct Internet</dd></div>
+                        </dl>
+
+                        @if (setupPreview.ExistingEmailConfiguration.MxRecords.Count > 0)
+                        {
+                            <div class="mail-relay-preserved-records">
+                                <span>MX records — unchanged</span>
+                                @foreach (var mx in setupPreview.ExistingEmailConfiguration.MxRecords)
+                                {
+                                    <code>@mx</code>
+                                }
+                            </div>
+                        }
+
+                        <div class="mail-relay-spf-merge">
+                            <div>
+                                <span>Existing SPF</span>
+                                <code>@(setupPreview.ExistingEmailConfiguration.ExistingSpf ?? "No SPF record")</code>
+                            </div>
+                            <div>
+                                <span>Proposed SPF</span>
+                                <code>@setupPreview.ExistingEmailConfiguration.ProposedSpf</code>
+                            </div>
+                            <small>@setupPreview.ExistingEmailConfiguration.SpfDnsLookupTerms/10 direct DNS lookup terms · existing provider authorisation and final policy PRESERVED · LMS IP @(setupPreview.ExistingEmailConfiguration.ExistingSpf == setupPreview.ExistingEmailConfiguration.ProposedSpf ? "ALREADY AUTHORISED" : "ADDING")</small>
+                        </div>
+
+                        @if (setupPreview.ExistingEmailConfiguration.ExistingDkimRecords.Count > 0)
+                        {
+                            <div class="mail-relay-preserved-records">
+                                <span>Existing DKIM selectors — unchanged</span>
+                                @foreach (var selector in setupPreview.ExistingEmailConfiguration.ExistingDkimRecords)
+                                {
+                                    <code>@selector</code>
+                                }
+                            </div>
+                        }
+
+                        <p class="meta-text">Messages delivered directly by LMS do not pass through a Microsoft 365 or Google mailbox and normally will not appear in its Sent Items. This is expected for devices and applications.</p>
+                    </div>
+
+                    <h3>Changes LMS will make</h3>
+                    <div class="mail-relay-change-list">
+                        @foreach (var change in setupPreview.DnsChanges)
+                        {
+                            <article>
+                                <div>
+                                    <strong>@change.Purpose</strong>
+                                    <UiPill Tone="@GetChangeTone(change.Kind)">@change.Kind</UiPill>
+                                </div>
+                                <code>@change.RecordType @change.RecordName</code>
+                                <p>@change.ProposedValue</p>
+                                <small>@change.Detail</small>
+                            </article>
+                        }
+                    </div>
+
+                    @foreach (var warning in setupPreview.Warnings)
+                    {
+                        <p class="callout warning">@warning</p>
+                    }
+                    @foreach (var setupError in setupPreview.Errors)
+                    {
+                        <p class="callout error">@setupError</p>
+                    }
+
+                    @if (setupPreview.CanInstall)
+                    {
+                        <UiCheckboxField @bind-Value="setupConfirmed"
+                                         Label="Apply these DNS and server changes"
+                                         Helper="@(dashboard.Configuration?.Enabled == true
+                                             ? "Updates this domain's DNS, DKIM and SMTP sender permission."
+                                             : "Installs the outbound relay, creates the first SMTP credential and verifies it is not an open relay.")"
+                                         Card="true"
+                                         Disabled="@isProvisioning" />
+                        <UiCommandButton Label="@(dashboard.Configuration?.Enabled == true ? "Apply Domain Settings" : "Install Mail Relay")"
+                                         Glyph="UiIconGlyph.Run"
+                                         Variant="UiButtonVariant.Primary"
+                                         Disabled="@(!setupConfirmed || isProvisioning)"
+                                         OnClick="ProvisionAsync" />
+                    }
+                </div>
+            }
+
+            @if (setupProgress.Count > 0)
+            {
+                <div class="mail-relay-progress" aria-live="polite">
+                    @foreach (var step in setupProgress)
+                    {
+                        <div class="@($"step-{step.State.ToString().ToLowerInvariant()}")">
+                            <span>@GetStepMarker(step.State)</span>
+                            <div><strong>@step.Label</strong><small>@step.Detail</small></div>
+                        </div>
+                    }
+                </div>
+            }
+
+            @if (provisioningJob is not null && !provisioningJob.IsTerminal)
+            {
+                <div class="mail-relay-background-job" aria-live="polite">
+                    <div>
+                        <strong>Setup continues in the background</strong>
+                        <UiPill Tone="UiPillTone.Warning">@FormatJobStatus(provisioningJob.Status)</UiPill>
+                    </div>
+                    <p>@provisioningJob.Summary</p>
+                    <small>You can reload this page or reconnect to LMS. The server-side setup job will continue and this page will reattach to it.</small>
+                </div>
+            }
+
+            @if (setupResult is not null)
+            {
+                <div class="mail-relay-result @(setupResult.Success ? "success" : "failure")">
+                    <h3>@(setupResult.Success ? "Mail Relay is running" : "Setup stopped")</h3>
+                    <p>@setupResult.Summary</p>
+                    @if (setupResult.Success)
+                    {
+                        <div class="mail-relay-connection">
+                            <div><span>Host</span><strong>@setupResult.SubmissionHost</strong></div>
+                            <div><span>Port</span><strong>@setupResult.SubmissionPort</strong></div>
+                            <div><span>Security</span><strong>STARTTLS</strong></div>
+                            <div><span>Username</span><strong>@setupResult.Username</strong></div>
+                            <div><span>Password</span><strong>@(setupResult.GeneratedPassword ?? "Existing password unchanged")</strong></div>
+                        </div>
+                        @if (!string.IsNullOrWhiteSpace(setupResult.GeneratedPassword))
+                        {
+                            <UiCommandButton Label="Copy SMTP password"
+                                             Glyph="UiIconGlyph.Copy"
+                                             Variant="UiButtonVariant.Primary"
+                                             OnClick="CopyGeneratedPasswordAsync" />
+                            <p class="meta-text">Copy this bootstrap password now, or set a password you manage under SMTP users at any time. LMS stores only a one-way verifier.</p>
+                        }
+                    }
+                </div>
+            }
+            </div>
+        </UiModal>
+
+        <UiModal IsOpen="@legacyEditorOpen"
+                 Title="Legacy devices"
+                 Subtitle="Restricted unauthenticated SMTP on TCP/25"
+                 Class="mail-relay-legacy-modal"
+                 CloseOnBackdrop="@(!isSavingLegacy)"
+                 OnClose="CloseLegacyEditor">
+            <div class="mail-relay-legacy-editor">
+                <UiCheckboxField @bind-Value="legacyEnabled"
+                                 Label="Allow legacy TCP/25 submission"
+                                 Helper="No SMTP login and no TLS requirement. Access is restricted to the exact listeners and source networks below."
+                                 Card="true"
+                                 Disabled="@isSavingLegacy" />
+
+                @if (legacyEnabled)
+                {
+                    @if (HasPublicLegacyListener)
+                    {
+                        <div class="callout error mail-relay-public-listener-warning" role="alert">
+                            <strong>Public interface selected — do not expose this listener unrestricted.</strong>
+                            <span>Unauthenticated TCP/25 on a public IP will attract relay and abuse attempts and can damage the server IP's mail reputation or trigger provider blocking. Use it only when UFW or an upstream firewall restricts source addresses, and keep the LMS source allowlist below.</span>
+                        </div>
+                    }
+                    else
+                    {
+                        <p class="callout warning">
+                            Use this only for trusted devices. The listener binds only to the interfaces you select and rejects clients outside the source allowlist.
+                        </p>
+                    }
+                    <div class="mail-relay-legacy-grid">
+                        <UiNetworkInterfaceIpPicker Label="Listen network interfaces"
+                                                    Helper="Choose the actual LMS NIC/IPs that should accept legacy SMTP. All-interfaces binding is deliberately unavailable."
+                                                    Placeholder="Choose one or more NICs"
+                                                    Value="@(legacyListenAddresses ?? string.Empty)"
+                                                    ValueChanged="SetLegacyListenAddressesAsync"
+                                                    Ipv4Only="true"
+                                                    IncludeAllIpv4="false"
+                                                    IncludeLoopback="true"
+                                                    Disabled="@isSavingLegacy"
+                                                    Class="mail-relay-legacy-listen-picker" />
+                        <UiTextAreaField Label="Allowed devices or networks"
+                                         Helper="Prefilled with localhost, all private LAN ranges and Tailscale. Remove ranges you do not need, or add exact device IPs/CIDRs."
+                                         Placeholder="192.168.1.40&#10;192.168.1.64/28"
+                                         Rows="6"
+                                         Compact="true"
+                                         @bind-Value="legacyAllowedNetworks"
+                                         Disabled="@isSavingLegacy" />
+                    </div>
+                    <div class="mail-relay-legacy-notes">
+                        <p><strong>Firewall filtering is supported.</strong> Selecting a public NIC can be valid when UFW or the upstream firewall admits only known sources; LMS still applies the source list above.</p>
+                        <p><strong>Bridged networks are supported.</strong> A Caddy TCP/layer-4 forwarder or another bridge can connect a private network to Tailscale. Select the NIC where Postfix receives the forwarded connection and allow the source IP/network the bridge presents.</p>
+                        <p>Legacy devices may send only from domains already configured above. Authenticated TCP/587 remains separate and unchanged.</p>
+                    </div>
+                }
+
+                @if (!string.IsNullOrWhiteSpace(legacyProgress))
+                {
+                    <p class="callout info" aria-live="polite">@legacyProgress</p>
+                }
+                @if (legacyResult is not null)
+                {
+                    <p class="callout @(legacyResult.Success ? "success" : "error")">@legacyResult.Summary</p>
+                }
+
+                <div class="mail-relay-actions">
+                    <UiCommandButton Label="@(isSavingLegacy ? "Applying…" : "Apply")"
+                                     Glyph="UiIconGlyph.Save"
+                                     Variant="UiButtonVariant.Primary"
+                                     Disabled="@isSavingLegacy"
+                                     OnClick="SaveLegacyAsync" />
+                    <UiCommandButton Label="Cancel"
+                                     Disabled="@isSavingLegacy"
+                                     OnClick="CloseLegacyEditor" />
+                </div>
+            </div>
+        </UiModal>
+
+        <UiModal IsOpen="@removalEditorOpen"
+                 Title="Remove Mail Relay"
+                 Subtitle="Existing mail-provider records are never treated as LMS-owned"
+                 Class="mail-relay-removal-modal"
+                 CloseOnBackdrop="@(!isRemovingRelay)"
+                 OnClose="CloseRemovalEditor">
+            <div class="mail-relay-removal-editor">
+                <UiCheckboxField @bind-Value="removeContainer"
+                                 Label="Remove SMTP container"
+                                 Helper="Stops and removes the relay container, local managed configuration and transient queue."
+                                 Card="true"
+                                 Disabled="@isRemovingRelay" />
+                <UiCheckboxField @bind-Value="removeApplicationCredentials"
+                                 Label="Remove application credentials"
+                                 Helper="Deletes SMTP users and the Postfix verifier volume. Requires container removal."
+                                 Card="true"
+                                 Disabled="@isRemovingRelay" />
+                <UiCheckboxField @bind-Value="removeManagedDnsRecords"
+                                 Label="Remove LMS-managed DNS changes"
+                                 Helper="Removes only the LMS ip4 term from current shared SPF and unchanged records LMS created. MX is never touched."
+                                 Card="true"
+                                 Disabled="@isRemovingRelay" />
+                <UiCheckboxField @bind-Value="removeDkimKeys"
+                                 Label="Remove DKIM keys"
+                                 Helper="Deletes Mail Relay private keys from LMS secret storage. Requires container removal."
+                                 Card="true"
+                                 Disabled="@isRemovingRelay" />
+
+                <p class="mail-relay-removal-rule"><strong>Preserve + merge also applies on removal.</strong> LMS reads current DNS first. Any LMS-created record changed by another system is preserved and reported.</p>
+                <UiCheckboxField @bind-Value="removalConfirmed"
+                                 Label="I understand these selected Mail Relay items will be removed"
+                                 Helper="Microsoft 365, Google Workspace and other existing provider records remain unchanged."
+                                 Card="true"
+                                 Disabled="@isRemovingRelay" />
+
+                @if (!string.IsNullOrWhiteSpace(removalProgress))
+                {
+                    <p class="callout info" aria-live="polite">@removalProgress</p>
+                }
+                @if (removalResult is not null)
+                {
+                    <div class="mail-relay-removal-result">
+                        <p class="callout @(removalResult.Success ? "success" : "error")">@removalResult.Summary</p>
+                        @if (removalResult.Changes.Count > 0)
+                        {
+                            <ul>
+                                @foreach (var change in removalResult.Changes)
+                                {
+                                    <li>@change</li>
+                                }
+                            </ul>
+                        }
+                        @foreach (var warning in removalResult.Warnings)
+                        {
+                            <p class="callout warning">@warning</p>
+                        }
+                    </div>
+                }
+
+                <div class="mail-relay-actions">
+                    <UiCommandButton Label="@(isRemovingRelay ? "Removing…" : "Remove selected items")"
+                                     Glyph="UiIconGlyph.Delete"
+                                     Variant="UiButtonVariant.Danger"
+                                     Disabled="@(!CanRemoveRelay)"
+                                     OnClick="RemoveRelayAsync" />
+                    <UiCommandButton Label="Cancel"
+                                     Disabled="@isRemovingRelay"
+                                     OnClick="CloseRemovalEditor" />
+                </div>
+            </div>
+        </UiModal>
+
+        <details class="surface-card mail-relay-checks">
+            <summary>
+                <span>
+                    <strong>Preflight diagnostics</strong>
+                    <small>Cloudflare, public IP, outbound TCP/25, PTR, Docker and Tailscale</small>
+                </span>
+                @if (isRunningPreflight)
+                {
+                    <UiPill Tone="UiPillTone.Warning">Checking</UiPill>
+                }
+            </summary>
+            <div class="mail-relay-check-grid">
+                @foreach (var check in dashboard.Preflight.Checks)
+                {
+                    <article class="mail-relay-check">
+                        <div>
+                            <span>@check.Label</span>
+                            <UiPill Tone="@GetCheckTone(check.State)">@check.Value</UiPill>
+                        </div>
+                        <p>@check.Detail</p>
+                    </article>
+                }
+            </div>
+        </details>
+
+    }
+</div>
+
+@code {
+    private MailRelayDashboardViewModel? dashboard;
+    private bool isRunningPreflight;
+    private bool isChangingZone;
+    private bool isReviewingSetup;
+    private bool isProvisioning;
+    private bool isSendingTest;
+    private bool isSavingClient;
+    private string selectedCloudflareZoneId = string.Empty;
+    private string? relayHostname;
+    private string? sendingDomain;
+    private string? dkimSelector = $"lms{DateTime.UtcNow.Year}";
+    private string? applicationName = "LMS Notifications";
+    private string? applicationUsername = "lms-notifications";
+    private string selectedSetupClientId = string.Empty;
+    private bool allowTailscale = true;
+    private bool allowTrustedLan;
+    private bool setupConfirmed;
+    private MailRelaySetupPreview? setupPreview;
+    private MailRelaySetupResult? setupResult;
+    private MailRelayProvisioningJobSnapshot? provisioningJob;
+    private Guid? refreshedProvisioningJobId;
+    private CancellationTokenSource? provisioningPollCancellation;
+    private readonly List<MailRelaySetupProgressUpdate> setupProgress = [];
+    private string selectedTestClientId = string.Empty;
+    private string? testFromAddress;
+    private string? testRecipientAddress;
+    private MailRelayTestResult? testResult;
+    private Guid? editingDomainId;
+    private bool domainEditorOpen;
+    private bool clientEditorOpen;
+    private Guid? editingClientId;
+    private string? clientEditorName;
+    private string? clientEditorUsername;
+    private string? clientEditorPassword;
+    private bool showClientPassword;
+    private readonly HashSet<Guid> clientEditorDomainIds = [];
+    private MailRelayClientSaveResult? clientSaveResult;
+    private bool legacyEditorOpen;
+    private bool legacyEnabled;
+    private bool isSavingLegacy;
+    private string? legacyListenAddresses;
+    private string? legacyAllowedNetworks;
+    private string? legacyProgress;
+    private MailRelayLegacySubmissionResult? legacyResult;
+    private bool removalEditorOpen;
+    private bool removeContainer = true;
+    private bool removeApplicationCredentials = true;
+    private bool removeManagedDnsRecords = true;
+    private bool removeDkimKeys = true;
+    private bool removalConfirmed;
+    private bool isRemovingRelay;
+    private string? removalProgress;
+    private MailRelayRemovalResult? removalResult;
+    private string? errorMessage;
+
+    private static readonly IReadOnlyList<string> DefaultLegacyAllowedNetworks =
+    [
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10"
+    ];
+
+    private bool SetupBusy => isRunningPreflight || isChangingZone || isReviewingSetup || isProvisioning;
+
+    private bool HasPublicLegacyListener =>
+        SplitNetworkEntries(legacyListenAddresses).Any(UiNetworkInterfaceIpCatalog.IsPublicIpv4Address);
+
+    private MailRelayClient? SelectedTestClient =>
+        Guid.TryParse(selectedTestClientId, out var clientId)
+            ? dashboard?.Clients.FirstOrDefault(item => item.Id == clientId && item.Enabled)
+            : null;
+
+    private bool CanSendTest =>
+        !isSendingTest &&
+        !isProvisioning &&
+        SelectedTestClient is not null &&
+        !string.IsNullOrWhiteSpace(testFromAddress) &&
+        !string.IsNullOrWhiteSpace(testRecipientAddress);
+
+    private bool CanRemoveRelay =>
+        !isRemovingRelay &&
+        removalConfirmed &&
+        (removeContainer || removeApplicationCredentials || removeManagedDnsRecords || removeDkimKeys) &&
+        (removeContainer || !removeApplicationCredentials && !removeDkimKeys);
+
+    private string DomainSetupTitle => editingDomainId is not null && !string.IsNullOrWhiteSpace(sendingDomain)
+        ? $"Edit {sendingDomain}"
+        : dashboard?.Configuration?.Enabled == true
+            ? "Add sending domain"
+            : "Create the relay";
+
+    private bool DnsEditPermissionMissing =>
+        dashboard is not null &&
+        dashboard.Preflight.DnsEditWasTested &&
+        dashboard.Preflight.GetCheck(MailRelayPreflightCheckKeys.DnsEdit).State == MailRelayPreflightCheckState.Failed &&
+        dashboard.Preflight.GetCheck(MailRelayPreflightCheckKeys.DnsEdit).Value == "PERMISSION REQUIRED";
+
+    private string ReadinessLabel => dashboard?.Preflight.CanConfigure == true
+        ? "Suitable"
+        : dashboard?.Preflight.DnsEditWasTested == true
+            ? "Needs attention"
+            : "Not tested";
+
+    private string ReadinessSummary => dashboard?.Preflight.CanConfigure == true
+        ? dashboard.Preflight.GetCheck(MailRelayPreflightCheckKeys.Docker).State == MailRelayPreflightCheckState.Warning
+            ? "This host is suitable as an SMTP relay. Docker will be installed or started as part of the reviewed setup; PTR may still need to be set with the hosting provider."
+            : "This host is suitable as an SMTP relay. PTR may still need to be set with the hosting provider before production use."
+        : dashboard?.Preflight.DnsEditWasTested == true
+            ? "This host is not yet suitable as an SMTP relay. Resolve the failed checks below, then re-test."
+            : "Run preflight to verify Cloudflare DNS access, public IPv4, outbound TCP/25, PTR, Docker and Tailscale.";
+
+    private UiPillTone ReadinessTone => dashboard?.Preflight.CanConfigure == true
+        ? UiPillTone.Success
+        : dashboard?.Preflight.DnsEditWasTested == true
+            ? UiPillTone.Warning
+            : UiPillTone.Neutral;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            dashboard = await MailRelayService.GetDashboardAsync();
+            var configuredZoneId = dashboard.Domains
+                .Select(item => item.CloudflareZoneId)
+                .FirstOrDefault(zoneId => !string.IsNullOrWhiteSpace(zoneId) &&
+                                          dashboard.Preflight.AvailableZones.Any(zone =>
+                                              zone.ZoneId.Equals(zoneId, StringComparison.Ordinal)));
+            if (!string.IsNullOrWhiteSpace(configuredZoneId) &&
+                !configuredZoneId.Equals(dashboard.Preflight.CloudflareZoneId, StringComparison.Ordinal))
+            {
+                try
+                {
+                    var preflight = await MailRelayService.InspectPreflightAsync(configuredZoneId);
+                    dashboard = dashboard with { Preflight = preflight };
+                }
+                catch
+                {
+                    // Keep the dashboard usable if the configured zone cannot be refreshed during page load.
+                }
+            }
+            selectedCloudflareZoneId = dashboard.Preflight.CloudflareZoneId;
+            var latestJob = MailRelayService.GetLatestProvisioningJob();
+            if (latestJob is not null)
+            {
+                RestoreSetupRequest(latestJob.Request);
+                await ApplyProvisioningJobAsync(latestJob);
+                if (!latestJob.IsTerminal)
+                {
+                    domainEditorOpen = true;
+                    StartProvisioningPoll(latestJob.Id);
+                }
+            }
+            else
+            {
+                ApplySetupDefaults(force: true);
+            }
+            ApplyTestDefaults();
+        }
+        catch
+        {
+            errorMessage = "Mail Relay status could not be loaded.";
+        }
+    }
+
+    private async Task RunPreflightAsync()
+    {
+        if (dashboard is null || isRunningPreflight || isChangingZone)
+        {
+            return;
+        }
+
+        isRunningPreflight = true;
+        errorMessage = null;
+        try
+        {
+            var result = await MailRelayService.RunPreflightAsync(selectedCloudflareZoneId);
+            dashboard = dashboard with { Preflight = result };
+        }
+        catch
+        {
+            errorMessage = "Preflight could not complete. No relay configuration was changed.";
+        }
+        finally
+        {
+            isRunningPreflight = false;
+        }
+    }
+
+    private async Task SelectCloudflareZoneAsync(string zoneId)
+    {
+        if (dashboard is null || isRunningPreflight || isChangingZone || string.IsNullOrWhiteSpace(zoneId))
+        {
+            return;
+        }
+
+        selectedCloudflareZoneId = zoneId;
+        isChangingZone = true;
+        errorMessage = null;
+        try
+        {
+            var result = await MailRelayService.InspectPreflightAsync(selectedCloudflareZoneId);
+            dashboard = dashboard with { Preflight = result };
+            selectedCloudflareZoneId = result.CloudflareZoneId;
+            setupPreview = null;
+            setupConfirmed = false;
+            ApplySetupDefaults(force: true);
+        }
+        catch
+        {
+            errorMessage = "The selected Cloudflare domain could not be inspected.";
+        }
+        finally
+        {
+            isChangingZone = false;
+        }
+    }
+
+    private void ApplySetupDefaults(bool force)
+    {
+        if (dashboard is null)
+        {
+            return;
+        }
+
+        if (force || string.IsNullOrWhiteSpace(relayHostname))
+        {
+            relayHostname = dashboard.Configuration?.RelayHostname is { Length: > 0 } configuredHostname
+                ? configuredHostname
+                : dashboard.Preflight.SuggestedRelayHostname;
+        }
+        if (force || string.IsNullOrWhiteSpace(sendingDomain))
+        {
+            var savedDomain = dashboard.Domains.FirstOrDefault(item =>
+                item.CloudflareZoneId.Equals(dashboard.Preflight.CloudflareZoneId, StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(item.CloudflareZoneId) &&
+                (item.DomainName.Equals(dashboard.Preflight.CloudflareZoneName, StringComparison.OrdinalIgnoreCase) ||
+                 item.DomainName.EndsWith('.' + dashboard.Preflight.CloudflareZoneName, StringComparison.OrdinalIgnoreCase)));
+            sendingDomain = savedDomain?.DomainName ?? dashboard.Preflight.CloudflareZoneName;
+            dkimSelector = savedDomain?.CurrentDkimSelector ?? dkimSelector;
+        }
+    }
+
+    private Task AddDomainAsync()
+    {
+        if (dashboard is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        editingDomainId = null;
+        sendingDomain = dashboard.Preflight.CloudflareZoneName;
+        dkimSelector = $"lms{DateTime.UtcNow.Year}";
+        setupPreview = null;
+        setupResult = null;
+        setupConfirmed = false;
+        ApplyClientToSetup(dashboard.Clients.FirstOrDefault(item => item.Enabled));
+        domainEditorOpen = true;
+        return Task.CompletedTask;
+    }
+
+    private void OpenInitialSetup()
+    {
+        editingDomainId = null;
+        setupPreview = null;
+        setupResult = null;
+        setupConfirmed = false;
+        domainEditorOpen = true;
+    }
+
+    private void CloseDomainEditor()
+    {
+        if (SetupBusy)
+        {
+            return;
+        }
+
+        domainEditorOpen = false;
+        setupPreview = null;
+        setupResult = null;
+        setupConfirmed = false;
+    }
+
+    private async Task EditDomainAsync(MailRelayDomain domain)
+    {
+        if (dashboard is null || SetupBusy)
+        {
+            return;
+        }
+
+        editingDomainId = domain.Id;
+        setupPreview = null;
+        setupResult = null;
+        setupConfirmed = false;
+        sendingDomain = domain.DomainName;
+        dkimSelector = domain.CurrentDkimSelector;
+        relayHostname = dashboard.Configuration?.RelayHostname ?? relayHostname;
+        var domainClient = dashboard.Clients.FirstOrDefault(item =>
+            item.Enabled && item.AllowedSenderDomains.Contains(domain.DomainName, StringComparer.OrdinalIgnoreCase));
+        ApplyClientToSetup(domainClient ?? dashboard.Clients.FirstOrDefault(item => item.Enabled));
+        domainEditorOpen = true;
+        await InvokeAsync(StateHasChanged);
+
+        var zone = dashboard.Preflight.AvailableZones.SingleOrDefault(item =>
+                       item.ZoneId.Equals(domain.CloudflareZoneId, StringComparison.Ordinal)) ??
+                   dashboard.Preflight.AvailableZones
+            .Where(item =>
+                domain.DomainName.Equals(item.ZoneName, StringComparison.OrdinalIgnoreCase) ||
+                domain.DomainName.EndsWith('.' + item.ZoneName, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(item => item.ZoneName.Length)
+            .FirstOrDefault();
+
+        if (zone is not null && !selectedCloudflareZoneId.Equals(zone.ZoneId, StringComparison.Ordinal))
+        {
+            isChangingZone = true;
+            try
+            {
+                var preflight = await MailRelayService.InspectPreflightAsync(zone.ZoneId);
+                dashboard = dashboard with { Preflight = preflight };
+                selectedCloudflareZoneId = preflight.CloudflareZoneId;
+            }
+            catch
+            {
+                errorMessage = $"Cloudflare settings for {domain.DomainName} could not be loaded.";
+            }
+            finally
+            {
+                isChangingZone = false;
+            }
+        }
+
+    }
+
+    private void OpenLegacyEditor()
+    {
+        if (dashboard?.Configuration is not { } configuration)
+        {
+            return;
+        }
+
+        legacyEnabled = configuration.AllowLegacyPort25;
+        legacyListenAddresses = configuration.EffectiveLegacyListenAddresses.Count > 0
+            ? string.Join(", ", configuration.EffectiveLegacyListenAddresses)
+            : "127.0.0.1";
+        legacyAllowedNetworks = string.Join(
+            Environment.NewLine,
+            configuration.EffectiveLegacyAllowedNetworks.Count > 0
+                ? configuration.EffectiveLegacyAllowedNetworks
+                : DefaultLegacyAllowedNetworks);
+        legacyProgress = null;
+        legacyResult = null;
+        legacyEditorOpen = true;
+    }
+
+    private void CloseLegacyEditor()
+    {
+        if (isSavingLegacy)
+        {
+            return;
+        }
+
+        legacyEditorOpen = false;
+        legacyProgress = null;
+        legacyResult = null;
+    }
+
+    private Task SetLegacyListenAddressesAsync(string value)
+    {
+        legacyListenAddresses = value;
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveLegacyAsync()
+    {
+        if (isSavingLegacy)
+        {
+            return;
+        }
+
+        isSavingLegacy = true;
+        legacyResult = null;
+        legacyProgress = "Validating the restricted listener…";
+        var progress = new Progress<string>(message =>
+        {
+            legacyProgress = message;
+            _ = InvokeAsync(StateHasChanged);
+        });
+        try
+        {
+            legacyResult = await MailRelayService.ConfigureLegacySubmissionAsync(
+                new MailRelayLegacySubmissionRequest(
+                    legacyEnabled,
+                    SplitNetworkEntries(legacyListenAddresses),
+                    SplitNetworkEntries(legacyAllowedNetworks)),
+                progress);
+            if (legacyResult.Success)
+            {
+                dashboard = await MailRelayService.GetDashboardAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            legacyResult = new MailRelayLegacySubmissionResult(
+                false,
+                dashboard?.Configuration,
+                $"Legacy device access was not changed: {exception.Message}");
+        }
+        finally
+        {
+            isSavingLegacy = false;
+        }
+    }
+
+    private void OpenRemovalEditor()
+    {
+        removalResult = null;
+        removalProgress = null;
+        removalConfirmed = false;
+        removeContainer = true;
+        removeApplicationCredentials = true;
+        removeManagedDnsRecords = true;
+        removeDkimKeys = true;
+        removalEditorOpen = true;
+    }
+
+    private void CloseRemovalEditor()
+    {
+        if (isRemovingRelay)
+        {
+            return;
+        }
+
+        removalEditorOpen = false;
+        removalProgress = null;
+        removalResult = null;
+    }
+
+    private async Task RemoveRelayAsync()
+    {
+        if (!CanRemoveRelay)
+        {
+            return;
+        }
+
+        isRemovingRelay = true;
+        removalResult = null;
+        removalProgress = "Stopping Mail Relay safely…";
+        var progress = new Progress<string>(message =>
+        {
+            removalProgress = message;
+            _ = InvokeAsync(StateHasChanged);
+        });
+        try
+        {
+            removalResult = await MailRelayService.RemoveAsync(
+                new MailRelayRemovalRequest(
+                    removeContainer,
+                    removeApplicationCredentials,
+                    removeManagedDnsRecords,
+                    removeDkimKeys,
+                    removalConfirmed),
+                progress);
+            dashboard = await MailRelayService.GetDashboardAsync();
+            ApplyTestDefaults();
+        }
+        catch (Exception exception)
+        {
+            removalResult = new MailRelayRemovalResult(
+                false,
+                dashboard?.Configuration,
+                [],
+                [],
+                $"Mail Relay removal stopped safely: {exception.Message}");
+        }
+        finally
+        {
+            isRemovingRelay = false;
+        }
+    }
+
+    private static IReadOnlyList<string> SplitNetworkEntries(string? value) =>
+        (value ?? string.Empty)
+        .Split(['\r', '\n', ',', ';', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    private void ApplyClientToSetup(MailRelayClient? client)
+    {
+        if (client is null)
+        {
+            return;
+        }
+
+        applicationName = client.Name;
+        applicationUsername = client.Username;
+        selectedSetupClientId = client.Id.ToString("D");
+    }
+
+    private void SelectSetupClient(string clientId)
+    {
+        selectedSetupClientId = clientId;
+        if (Guid.TryParse(clientId, out var parsedClientId))
+        {
+            ApplyClientToSetup(dashboard?.Clients.FirstOrDefault(item => item.Id == parsedClientId && item.Enabled));
+        }
+        setupPreview = null;
+        setupConfirmed = false;
+    }
+
+    private void OpenNewClientEditor()
+    {
+        editingClientId = null;
+        clientEditorName = string.Empty;
+        clientEditorUsername = string.Empty;
+        clientEditorPassword = MailRelayService.GenerateClientPassword();
+        showClientPassword = true;
+        clientSaveResult = null;
+        clientEditorDomainIds.Clear();
+        var firstDomain = dashboard?.Domains.FirstOrDefault(item => item.Enabled);
+        if (firstDomain is not null)
+        {
+            clientEditorDomainIds.Add(firstDomain.Id);
+        }
+        clientEditorOpen = true;
+    }
+
+    private void OpenClientEditor(MailRelayClient client)
+    {
+        editingClientId = client.Id;
+        clientEditorName = client.Name;
+        clientEditorUsername = client.Username;
+        clientEditorPassword = string.Empty;
+        showClientPassword = false;
+        clientSaveResult = null;
+        clientEditorDomainIds.Clear();
+        if (dashboard is not null)
+        {
+            foreach (var domain in dashboard.Domains.Where(item =>
+                         item.Enabled && client.AllowedSenderDomains.Contains(item.DomainName, StringComparer.OrdinalIgnoreCase)))
+            {
+                clientEditorDomainIds.Add(domain.Id);
+            }
+        }
+        clientEditorOpen = true;
+    }
+
+    private void CloseClientEditor()
+    {
+        clientEditorOpen = false;
+        clientEditorPassword = null;
+        showClientPassword = false;
+        clientSaveResult = null;
+    }
+
+    private void GenerateClientPassword()
+    {
+        clientEditorPassword = MailRelayService.GenerateClientPassword();
+        showClientPassword = true;
+        clientSaveResult = null;
+    }
+
+    private async Task CopyClientPasswordAsync()
+    {
+        if (!string.IsNullOrEmpty(clientEditorPassword))
+        {
+            await Js.InvokeVoidAsync("navigator.clipboard.writeText", clientEditorPassword);
+        }
+    }
+
+    private void SetClientDomain(Guid domainId, bool selected)
+    {
+        if (selected)
+        {
+            clientEditorDomainIds.Add(domainId);
+        }
+        else
+        {
+            clientEditorDomainIds.Remove(domainId);
+        }
+        clientSaveResult = null;
+    }
+
+    private async Task SaveClientAsync()
+    {
+        if (isSavingClient)
+        {
+            return;
+        }
+
+        isSavingClient = true;
+        clientSaveResult = null;
+        errorMessage = null;
+        var submittedPassword = clientEditorPassword ?? string.Empty;
+        try
+        {
+            clientSaveResult = await MailRelayService.SaveClientAsync(new MailRelayClientSaveRequest(
+                editingClientId,
+                clientEditorName ?? string.Empty,
+                clientEditorUsername ?? string.Empty,
+                submittedPassword,
+                clientEditorDomainIds.ToArray()));
+            if (clientSaveResult.Success && clientSaveResult.Client is { } savedClient)
+            {
+                editingClientId = savedClient.Id;
+                dashboard = await MailRelayService.GetDashboardAsync();
+                selectedTestClientId = savedClient.Id.ToString("D");
+                ApplyTestDefaults();
+                clientEditorPassword = string.Empty;
+                showClientPassword = false;
+            }
+        }
+        catch (Exception exception)
+        {
+            clientSaveResult = new MailRelayClientSaveResult(false, null, false, $"SMTP user could not be saved: {exception.Message}");
+        }
+        finally
+        {
+            isSavingClient = false;
+        }
+    }
+
+    private void ApplyTestDefaults()
+    {
+        if (dashboard is null)
+        {
+            return;
+        }
+
+        var selected = SelectedTestClient ?? dashboard.Clients.FirstOrDefault(item => item.Enabled);
+        if (selected is null)
+        {
+            selectedTestClientId = string.Empty;
+            return;
+        }
+
+        selectedTestClientId = selected.Id.ToString("D");
+        var allowedDomain = selected.AllowedSenderDomains.FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(allowedDomain) &&
+            (string.IsNullOrWhiteSpace(testFromAddress) ||
+             !selected.AllowedSenderDomains.Any(domain => testFromAddress.EndsWith('@' + domain, StringComparison.OrdinalIgnoreCase))))
+        {
+            testFromAddress = $"lms-test@{allowedDomain}";
+        }
+    }
+
+    private void SelectTestClient(string clientId)
+    {
+        selectedTestClientId = clientId;
+        testResult = null;
+        ApplyTestDefaults();
+    }
+
+    private async Task SendTestAsync()
+    {
+        if (!CanSendTest || !Guid.TryParse(selectedTestClientId, out var clientId))
+        {
+            return;
+        }
+
+        isSendingTest = true;
+        testResult = null;
+        errorMessage = null;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            testResult = await MailRelayService.SendTestAsync(new MailRelayTestRequest(
+                clientId,
+                testFromAddress ?? string.Empty,
+                testRecipientAddress ?? string.Empty));
+            dashboard = await MailRelayService.GetDashboardAsync();
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"Mail Relay test could not complete: {exception.Message}";
+        }
+        finally
+        {
+            isSendingTest = false;
+        }
+    }
+
+    private MailRelaySetupRequest BuildSetupRequest() => new(
+        selectedCloudflareZoneId,
+        relayHostname ?? string.Empty,
+        sendingDomain ?? string.Empty,
+        dkimSelector ?? string.Empty,
+        applicationName ?? string.Empty,
+        applicationUsername ?? string.Empty,
+        allowTailscale,
+        allowTrustedLan);
+
+    private async Task PreviewSetupAsync()
+    {
+        if (SetupBusy)
+        {
+            return;
+        }
+
+        isReviewingSetup = true;
+        setupConfirmed = false;
+        setupResult = null;
+        errorMessage = null;
+        try
+        {
+            setupPreview = await MailRelayService.PreviewSetupAsync(BuildSetupRequest());
+            dashboard = dashboard! with { Preflight = setupPreview.Preflight };
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"Setup review failed: {exception.Message}";
+        }
+        finally
+        {
+            isReviewingSetup = false;
+        }
+    }
+
+    private async Task ProvisionAsync()
+    {
+        if (!setupConfirmed || isProvisioning)
+        {
+            return;
+        }
+
+        isProvisioning = true;
+        setupResult = null;
+        errorMessage = null;
+        setupProgress.Clear();
+
+        try
+        {
+            var job = await MailRelayService.StartProvisioningAsync(BuildSetupRequest());
+            await ApplyProvisioningJobAsync(job);
+            StartProvisioningPoll(job.Id);
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"Mail Relay setup stopped: {exception.Message}";
+            isProvisioning = false;
+        }
+    }
+
+    private void StartProvisioningPoll(Guid jobId)
+    {
+        provisioningPollCancellation?.Cancel();
+        provisioningPollCancellation?.Dispose();
+        provisioningPollCancellation = new CancellationTokenSource();
+        _ = PollProvisioningJobAsync(jobId, provisioningPollCancellation.Token);
+    }
+
+    private async Task PollProvisioningJobAsync(Guid jobId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var job = MailRelayService.GetProvisioningJob(jobId);
+                if (job is null)
+                {
+                    await InvokeAsync(() =>
+                    {
+                        isProvisioning = false;
+                        errorMessage = "The background Mail Relay setup job could not be found.";
+                        StateHasChanged();
+                    });
+                    return;
+                }
+
+                await InvokeAsync(async () =>
+                {
+                    await ApplyProvisioningJobAsync(job);
+                    StateHasChanged();
+                });
+                if (job.IsTerminal)
+                {
+                    return;
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            await InvokeAsync(() =>
+            {
+                isProvisioning = false;
+                errorMessage = $"Mail Relay progress could not be refreshed: {exception.Message}";
+                StateHasChanged();
+            });
+        }
+    }
+
+    private async Task ApplyProvisioningJobAsync(MailRelayProvisioningJobSnapshot job)
+    {
+        provisioningJob = job;
+        isProvisioning = !job.IsTerminal;
+        setupProgress.Clear();
+        setupProgress.AddRange(job.Steps);
+
+        if (!job.IsTerminal)
+        {
+            return;
+        }
+
+        setupResult = job.Result;
+        if (job.Status == MailRelayProvisioningJobStatus.Failed && setupResult is null)
+        {
+            errorMessage = $"Mail Relay setup stopped: {job.Summary}";
+        }
+
+        if (job.Status == MailRelayProvisioningJobStatus.Succeeded && refreshedProvisioningJobId != job.Id)
+        {
+            refreshedProvisioningJobId = job.Id;
+            dashboard = await MailRelayService.GetDashboardAsync();
+            selectedCloudflareZoneId = job.Request.CloudflareZoneId;
+            editingDomainId = dashboard.Domains.FirstOrDefault(item =>
+                item.DomainName.Equals(job.Request.SendingDomain, StringComparison.OrdinalIgnoreCase))?.Id;
+            var provisionedClient = dashboard.Clients.FirstOrDefault(item =>
+                item.Username.Equals(job.Request.ApplicationUsername, StringComparison.OrdinalIgnoreCase));
+            if (provisionedClient is not null)
+            {
+                selectedTestClientId = provisionedClient.Id.ToString("D");
+                ApplyTestDefaults();
+            }
+        }
+    }
+
+    private void RestoreSetupRequest(MailRelaySetupRequest request)
+    {
+        selectedCloudflareZoneId = request.CloudflareZoneId;
+        relayHostname = request.RelayHostname;
+        sendingDomain = request.SendingDomain;
+        dkimSelector = request.DkimSelector;
+        applicationName = request.ApplicationName;
+        applicationUsername = request.ApplicationUsername;
+        var restoredClient = dashboard?.Clients.FirstOrDefault(item =>
+            item.Username.Equals(request.ApplicationUsername, StringComparison.OrdinalIgnoreCase));
+        if (restoredClient is not null)
+        {
+            selectedSetupClientId = restoredClient.Id.ToString("D");
+        }
+        allowTailscale = request.AllowTailscale;
+        allowTrustedLan = request.AllowTrustedLan;
+    }
+
+    private async Task CopyGeneratedPasswordAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(setupResult?.GeneratedPassword))
+        {
+            await Js.InvokeVoidAsync("navigator.clipboard.writeText", setupResult.GeneratedPassword);
+        }
+    }
+
+    private static string GetStepMarker(MailRelaySetupStepState state) => state switch
+    {
+        MailRelaySetupStepState.Complete => "✓",
+        MailRelaySetupStepState.Failed => "×",
+        MailRelaySetupStepState.Running => "●",
+        _ => "○"
+    };
+
+    private static string FormatJobStatus(MailRelayProvisioningJobStatus status) => status switch
+    {
+        MailRelayProvisioningJobStatus.Queued => "Queued",
+        MailRelayProvisioningJobStatus.Running => "Running",
+        MailRelayProvisioningJobStatus.Succeeded => "Complete",
+        _ => "Failed"
+    };
+
+    private static UiPillTone GetChangeTone(MailRelaySetupChangeKind kind) => kind switch
+    {
+        MailRelaySetupChangeKind.Create => UiPillTone.Success,
+        MailRelaySetupChangeKind.Update => UiPillTone.Warning,
+        MailRelaySetupChangeKind.Blocked => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+
+    private static string ExistingMailHeading(MailRelayExistingProvider provider) => provider switch
+    {
+        MailRelayExistingProvider.Microsoft365 => "Microsoft 365 detected",
+        MailRelayExistingProvider.GoogleWorkspace => "Google Workspace detected",
+        MailRelayExistingProvider.ExistingMailProvider => "Existing email configuration detected",
+        _ => "Existing email configuration"
+    };
+
+    private static string FormatExistingProvider(MailRelayExistingProvider provider) => provider switch
+    {
+        MailRelayExistingProvider.Microsoft365 => "Microsoft 365 · unchanged",
+        MailRelayExistingProvider.GoogleWorkspace => "Google Workspace · unchanged",
+        MailRelayExistingProvider.ExistingMailProvider => "Existing mail provider · unchanged",
+        _ => "None detected"
+    };
+
+    private static string BuildZoneOptionLabel(MailRelayCloudflareZoneOption zone)
+    {
+        var suffix = zone.Paused
+            ? " · paused"
+            : zone.IsSavedDefault
+                ? " · Edge Gateway default"
+                : string.Empty;
+        return $"{zone.ZoneName}{suffix}";
+    }
+
+    private static UiPillTone GetCheckTone(MailRelayPreflightCheckState state) => state switch
+    {
+        MailRelayPreflightCheckState.Pass => UiPillTone.Success,
+        MailRelayPreflightCheckState.Warning => UiPillTone.Warning,
+        MailRelayPreflightCheckState.Failed => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+
+    private static UiPillTone GetTestStatusTone(MailRelayTestStatus status) => status switch
+    {
+        MailRelayTestStatus.Sent => UiPillTone.Success,
+        MailRelayTestStatus.Queued => UiPillTone.Warning,
+        _ => UiPillTone.Failure
+    };
+
+    private static string FormatDnsStatus(MailRelayDnsStatus status) => status switch
+    {
+        MailRelayDnsStatus.Pass => "PASS",
+        MailRelayDnsStatus.Pending => "Pending",
+        MailRelayDnsStatus.Warning => "Warning",
+        MailRelayDnsStatus.Failed => "Failed",
+        _ => "Not checked"
+    };
+
+    private string FormatDomainZone(MailRelayDomain domain)
+    {
+        var zoneName = dashboard?.Preflight.AvailableZones
+            .SingleOrDefault(item => item.ZoneId.Equals(domain.CloudflareZoneId, StringComparison.Ordinal))
+            ?.ZoneName;
+        return $"Cloudflare · {zoneName ?? domain.DomainName}";
+    }
+
+    private static string FormatSenderDomains(IReadOnlyList<string> domains) =>
+        domains.Count == 0 ? "None" : string.Join(", ", domains);
+
+    private static string FormatLastUsed(DateTimeOffset? lastUsedUtc) => lastUsedUtc is null
+        ? "Not used yet"
+        : $"Last used {lastUsedUtc.Value.LocalDateTime:g}";
+
+    private static string FormatTestStatus(MailRelayTestStatus status) => status switch
+    {
+        MailRelayTestStatus.Failed => "Test failed",
+        MailRelayTestStatus.Rejected => "Rejected",
+        MailRelayTestStatus.Queued => "Queued",
+        MailRelayTestStatus.Sent => "Sent",
+        MailRelayTestStatus.Deferred => "Deferred",
+        MailRelayTestStatus.Bounced => "Bounced",
+        _ => status.ToString()
+    };
+
+    public void Dispose()
+    {
+        provisioningPollCancellation?.Cancel();
+        provisioningPollCancellation?.Dispose();
+    }
+}

@@ -4,14 +4,19 @@
 using System.Net;
 using LinuxMadeSane.Application.Services;
 using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
 
 namespace LinuxMadeSane.Infrastructure.Services;
 
 public sealed class TrustedNetworkAccessService(
     ITrustedNetworkStore trustedNetworkStore,
-    ISecurityUserStore securityUserStore) : ITrustedNetworkAccessService
+    ISecurityUserStore securityUserStore,
+    TrustedNetworkAccessTrialService? trustedNetworkAccessTrialService = null) : ITrustedNetworkAccessService
 {
+    private readonly TrustedNetworkAccessTrialService trustedNetworkAccessTrialService =
+        trustedNetworkAccessTrialService ?? new TrustedNetworkAccessTrialService();
+
     public async Task<TrustedNetworkAccessResult> EvaluateAsync(
         IPAddress? remoteAddress,
         string? requestHost,
@@ -24,7 +29,8 @@ public sealed class TrustedNetworkAccessService(
             ? "unknown"
             : requestHost.Trim();
 
-        var entries = await trustedNetworkStore.ListAsync(cancellationToken);
+        var entries = this.trustedNetworkAccessTrialService.GetEffectiveEntries(
+            await trustedNetworkStore.ListAsync(cancellationToken));
         var match = TrustedNetworkMatcher.Match(remoteAddress, entries);
         var isLocalRequestTarget = LocalRequestTargetEvaluator.IsLocal(normalizedRequestHost);
         var isBootstrapAccess = await IsBootstrapAccessAsync(match, cancellationToken);
@@ -45,7 +51,8 @@ public sealed class TrustedNetworkAccessService(
             requiresAuthentication,
             isAllowed,
             isTrustedAccessEnabled,
-            isAuthenticationEnabled);
+            isAuthenticationEnabled,
+            match?.DeniedResponseMode ?? NetworkAccessDeniedResponseMode.AccessDeniedPage);
     }
 
     private async Task<bool> IsBootstrapAccessAsync(

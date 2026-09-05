@@ -70,6 +70,14 @@ public sealed class SqliteCaddyIntegrationDataService(
             routes);
     }
 
+    public async Task<IReadOnlyList<CaddyProxyRouteDefinition>> ListRoutesAsync(CancellationToken cancellationToken = default) =>
+        (await dbContext.CaddyProxyRoutes
+            .AsNoTracking()
+            .OrderBy(route => route.Name)
+            .ToArrayAsync(cancellationToken))
+        .Select(Map)
+        .ToArray();
+
     public async Task<CaddyProxyRouteDefinition?> GetRouteAsync(Guid id, CancellationToken cancellationToken = default) =>
         MapOrNull(await dbContext.CaddyProxyRoutes
             .AsNoTracking()

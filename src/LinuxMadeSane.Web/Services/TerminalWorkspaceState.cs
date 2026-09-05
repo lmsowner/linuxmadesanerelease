@@ -18,12 +18,16 @@ public sealed class TerminalWorkspaceRegistry(ITerminalSessionService terminalSe
 
     public int GetOpenSessionCount(Guid hostId) =>
         workspaces.Values.Sum(workspace =>
-            workspace.Tabs.Count(tab => tab.HostId == hostId && tab.SessionId.HasValue));
+            workspace.Tabs.Count(tab =>
+                tab.HostId == hostId &&
+                tab.ConnectionDesired &&
+                tab.SessionId.HasValue));
 
     public bool HasActiveSession(Guid hostId) =>
         workspaces.Values.Any(workspace =>
             workspace.Tabs.Any(tab =>
                 tab.HostId == hostId &&
+                tab.ConnectionDesired &&
                 (tab.IsSessionActive ||
                  (tab.SessionId.HasValue && tab.Snapshot?.Status is null or TerminalSessionStatus.Starting))));
 
@@ -323,34 +327,78 @@ public sealed class TerminalWorkspaceState(ITerminalSessionService terminalSessi
             version++;
         }
 
-        if (tab.SessionId.HasValue)
+        tab.RequestDisconnect();
+        tab.CancelAiOperation();
+        await tab.ConnectionGate.WaitAsync(CancellationToken.None);
+        try
         {
-            await terminalSessionService.CloseSessionAsync(tab.SessionId.Value, cancellationToken);
-            tab.SessionId = null;
+            await CloseTabSessionsAsync(tab);
+        }
+        finally
+        {
+            tab.ConnectionGate.Release();
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        Guid[] sessionIds;
+        TerminalTabState[] tabsToClose;
         lock (syncRoot)
         {
-            sessionIds = tabs
-                .Where(tab => tab.SessionId.HasValue)
-                .Select(tab => tab.SessionId!.Value)
-                .Distinct()
-                .ToArray();
+            tabsToClose = tabs.ToArray();
+            foreach (var tab in tabsToClose)
+            {
+                tab.RequestDisconnect();
+                tab.CancelAiOperation();
+            }
         }
 
-        foreach (var sessionId in sessionIds)
+        foreach (var tab in tabsToClose)
         {
-            await terminalSessionService.CloseSessionAsync(sessionId);
+            await tab.ConnectionGate.WaitAsync(CancellationToken.None);
+            try
+            {
+                await CloseTabSessionsAsync(tab);
+            }
+            finally
+            {
+                tab.ConnectionGate.Release();
+            }
         }
+    }
+
+    private async Task CloseTabSessionsAsync(TerminalTabState tab)
+    {
+        var sessionId = tab.SessionId;
+        tab.SessionId = null;
+        if (tab.Snapshot is not null)
+        {
+            tab.Snapshot = tab.Snapshot with
+            {
+                Status = TerminalSessionStatus.Closed,
+                LastActivityUtc = DateTimeOffset.UtcNow
+            };
+        }
+
+        if (sessionId.HasValue)
+        {
+            await terminalSessionService.CloseSessionAsync(sessionId.Value, CancellationToken.None);
+        }
+
+        await terminalSessionService.CloseOwnedSessionsAsync(tab.Id, CancellationToken.None);
     }
 }
 
 public sealed class TerminalTabState
 {
+    private readonly object aiOperationSync = new();
+    private readonly object connectionOperationSync = new();
+    private CancellationTokenSource? activeAiOperation;
+    private CancellationTokenSource? activeConnectionOperation;
+    private volatile bool connectionDesired;
+
+    internal SemaphoreSlim ConnectionGate { get; } = new(1, 1);
+
     public Guid Id { get; } = Guid.NewGuid();
 
     public Guid HostId { get; private set; }
@@ -381,7 +429,9 @@ public sealed class TerminalTabState
 
     public bool IsAiPanelOpen { get; set; }
 
-    public bool SafeInvestigationOnly { get; set; } = true;
+    public TerminalAiAccessMode AiAccessMode { get; set; } = TerminalAiAccessMode.Agent;
+
+    public Guid? AiCommandApprovalSessionId { get; set; }
 
     public bool AllowInternetResearch { get; set; }
 
@@ -405,7 +455,95 @@ public sealed class TerminalTabState
 
     public bool IsSessionActive => Snapshot?.Status == TerminalSessionStatus.Active;
 
+    internal bool ConnectionDesired => connectionDesired;
+
     public string WorkingDirectory => Snapshot?.WorkingDirectory ?? DefaultWorkingDirectory;
+
+    internal void RequestConnection() => connectionDesired = true;
+
+    internal void RequestDisconnect()
+    {
+        connectionDesired = false;
+        CancellationTokenSource? cancellationSource;
+        lock (connectionOperationSync)
+        {
+            cancellationSource = activeConnectionOperation;
+        }
+
+        try
+        {
+            cancellationSource?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        CancelAiOperation();
+    }
+
+    internal void RegisterConnectionOperation(CancellationTokenSource cancellationSource)
+    {
+        ArgumentNullException.ThrowIfNull(cancellationSource);
+        lock (connectionOperationSync)
+        {
+            activeConnectionOperation = cancellationSource;
+        }
+    }
+
+    internal void UnregisterConnectionOperation(CancellationTokenSource cancellationSource)
+    {
+        lock (connectionOperationSync)
+        {
+            if (ReferenceEquals(activeConnectionOperation, cancellationSource))
+            {
+                activeConnectionOperation = null;
+            }
+        }
+    }
+
+    internal void RegisterAiOperation(CancellationTokenSource cancellationSource)
+    {
+        ArgumentNullException.ThrowIfNull(cancellationSource);
+        lock (aiOperationSync)
+        {
+            activeAiOperation = cancellationSource;
+        }
+    }
+
+    internal void UnregisterAiOperation(CancellationTokenSource cancellationSource)
+    {
+        lock (aiOperationSync)
+        {
+            if (ReferenceEquals(activeAiOperation, cancellationSource))
+            {
+                activeAiOperation = null;
+            }
+        }
+    }
+
+    internal bool CancelAiOperation()
+    {
+        CancellationTokenSource? cancellationSource;
+        lock (aiOperationSync)
+        {
+            cancellationSource = activeAiOperation;
+        }
+
+        if (cancellationSource is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            cancellationSource.Cancel();
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
 
     public static TerminalTabState Create(ManagedHost host)
     {

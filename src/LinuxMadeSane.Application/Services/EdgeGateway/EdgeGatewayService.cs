@@ -117,6 +117,75 @@ public sealed class EdgeGatewayService(
             cancellationToken);
     }
 
+    public async Task<EdgeGatewayCloudflaredInstallResult> InstallCloudflaredAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var connectorStatus = await TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
+        if (connectorStatus is { IsInstalled: true, IsRunning: true })
+        {
+            return new EdgeGatewayCloudflaredInstallResult(
+                true,
+                true,
+                true,
+                true,
+                "cloudflared is already installed and its connector service is running.");
+        }
+
+        if (connectorStatus is { IsInstalled: true })
+        {
+            var startResult = await TryStartLocalCloudflaredServiceAsync("the configured tunnel", cancellationToken);
+            return new EdgeGatewayCloudflaredInstallResult(
+                startResult.Succeeded,
+                true,
+                true,
+                startResult.Succeeded,
+                startResult.Summary);
+        }
+
+        if (connectorStatus is { IsBinaryInstalled: true })
+        {
+            return new EdgeGatewayCloudflaredInstallResult(
+                true,
+                true,
+                false,
+                false,
+                "cloudflared is already installed. Set up a relay to attach it to a Cloudflare tunnel and start the connector service.");
+        }
+
+        try
+        {
+            var result = await commandExecutionService.ExecuteAsync(
+                AiLocalMachine.CreateManagedHost(),
+                WrapShellCommand(BuildEnsureCloudflaredInstalledScript()),
+                cancellationToken: cancellationToken);
+            if (!result.IsSuccess)
+            {
+                return new EdgeGatewayCloudflaredInstallResult(
+                    false,
+                    false,
+                    false,
+                    false,
+                    $"cloudflared could not be installed: {FirstNonEmpty(result.StandardError, result.StandardOutput, $"exit {result.ExitCode}")}");
+            }
+
+            return new EdgeGatewayCloudflaredInstallResult(
+                true,
+                true,
+                false,
+                false,
+                "cloudflared is installed. Set up a relay to attach it to a Cloudflare tunnel and start the connector service.");
+        }
+        catch (Exception exception)
+        {
+            return new EdgeGatewayCloudflaredInstallResult(
+                false,
+                false,
+                false,
+                false,
+                $"cloudflared installation could not be run on this LMS host: {exception.Message}");
+        }
+    }
+
     public async Task ResetSetupAsync(CancellationToken cancellationToken = default)
     {
         var current = await GetGatewaySettingsAsync(cancellationToken);
@@ -481,12 +550,20 @@ public sealed class EdgeGatewayService(
         Task<CloudflaredConnectorStatus?> connectorStatusTask)
     {
         var connectorStatus = await connectorStatusTask;
-        if (connectorStatus is null or { IsInstalled: false })
+        if (connectorStatus is null or { IsBinaryInstalled: false })
         {
             return new EdgeGatewayRuntimeComponentStatus(
                 EdgeGatewayDiagnosticStatus.NotConfigured,
                 "cloudflared",
                 "cloudflared is not installed as a local connector yet. Relay setup will install it for the selected tunnel.");
+        }
+
+        if (!connectorStatus.IsInstalled)
+        {
+            return new EdgeGatewayRuntimeComponentStatus(
+                EdgeGatewayDiagnosticStatus.Warning,
+                "cloudflared",
+                "cloudflared is installed, but no connector service is attached yet. Set up a relay to attach and start it.");
         }
 
         if (!connectorStatus.IsRunning)
@@ -2814,11 +2891,13 @@ public sealed class EdgeGatewayService(
             [
                 "fragment=$(systemctl show -p FragmentPath --value cloudflared.service 2>/dev/null || true)",
                 "active=$(systemctl is-active cloudflared.service 2>/dev/null || true)",
+                "binary=$(command -v cloudflared 2>/dev/null || true)",
+                "if [ -n \"$binary\" ]; then binary_installed=1; else binary_installed=0; fi",
                 "if [ -n \"$fragment\" ] && [ -f \"$fragment\" ]; then",
                 "  exec_line=$(sed -n 's/^ExecStart=//p' \"$fragment\" | head -n 1)",
-                "  printf 'installed=1\\nactive=%s\\nfragment=%s\\nexec=%s\\n' \"$active\" \"$fragment\" \"$exec_line\"",
+                "  printf 'binary=%s\\ninstalled=1\\nactive=%s\\nfragment=%s\\nexec=%s\\n' \"$binary_installed\" \"$active\" \"$fragment\" \"$exec_line\"",
                 "else",
-                "  printf 'installed=0\\nactive=%s\\nfragment=%s\\n' \"$active\" \"$fragment\"",
+                "  printf 'binary=%s\\ninstalled=0\\nactive=%s\\nfragment=%s\\n' \"$binary_installed\" \"$active\" \"$fragment\"",
                 "fi"
             ]);
 
@@ -2835,12 +2914,15 @@ public sealed class EdgeGatewayService(
 
         var isInstalled = values.TryGetValue("installed", out var installedValue) &&
                           installedValue == "1";
+        var isBinaryInstalled = isInstalled ||
+                                (values.TryGetValue("binary", out var binaryValue) && binaryValue == "1");
         var isRunning = values.TryGetValue("active", out var activeValue) &&
                         activeValue.Equals("active", StringComparison.OrdinalIgnoreCase);
         values.TryGetValue("fragment", out var serviceFilePath);
         values.TryGetValue("exec", out var execLine);
 
         return new CloudflaredConnectorStatus(
+            isBinaryInstalled,
             isInstalled,
             isRunning,
             string.IsNullOrWhiteSpace(serviceFilePath) ? null : serviceFilePath,
@@ -2923,6 +3005,7 @@ public sealed class EdgeGatewayService(
     private sealed record CloudflaredInstallAttempt(bool Succeeded, string Summary);
 
     private sealed record CloudflaredConnectorStatus(
+        bool IsBinaryInstalled,
         bool IsInstalled,
         bool IsRunning,
         string? ServiceFilePath,

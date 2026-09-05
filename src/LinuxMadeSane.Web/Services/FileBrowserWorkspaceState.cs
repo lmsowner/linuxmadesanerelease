@@ -77,7 +77,8 @@ public sealed class FileBrowserWorkspaceState
                 snapshot.PreviewPanelSizePx,
                 snapshot.FoldersPaneCollapsed,
                 now,
-                now);
+                now,
+                snapshot.SudoEnabled);
 
             detachedBrowsers[state.BrowserId] = state;
             return state;
@@ -117,6 +118,7 @@ public sealed class FileBrowserWorkspaceState
                 PreviewDock = snapshot.PreviewDock,
                 PreviewPanelSizePx = snapshot.PreviewPanelSizePx,
                 FoldersPaneCollapsed = snapshot.FoldersPaneCollapsed,
+                SudoEnabled = snapshot.SudoEnabled,
                 UpdatedAtUtc = DateTimeOffset.UtcNow
             };
 
@@ -148,7 +150,8 @@ public sealed class FileBrowserWorkspaceState
                 snapshot.ConnectionProfileName,
                 snapshot.PathSuggestions,
                 now,
-                now);
+                now,
+                snapshot.SudoEnabled);
 
             detachedSearches[state.SearchId] = state;
             return state;
@@ -183,6 +186,7 @@ public sealed class FileBrowserWorkspaceState
                 ConnectionProfileKey = snapshot.ConnectionProfileKey,
                 ConnectionProfileName = snapshot.ConnectionProfileName,
                 PathSuggestions = snapshot.PathSuggestions,
+                SudoEnabled = snapshot.SudoEnabled,
                 UpdatedAtUtc = DateTimeOffset.UtcNow
             };
 
@@ -214,7 +218,8 @@ public sealed class FileBrowserWorkspaceState
                 snapshot.SecretHandle,
                 snapshot.PreferStoredCredentials,
                 snapshot.UseSshTransport,
-                DateTimeOffset.UtcNow);
+                DateTimeOffset.UtcNow,
+                snapshot.UseSudo);
 
             return Clipboard;
         }
@@ -244,7 +249,8 @@ public sealed record DetachedFileBrowserSnapshot(
     bool PreviewFocused,
     FileBrowserPreviewDock PreviewDock,
     int PreviewPanelSizePx,
-    bool FoldersPaneCollapsed);
+    bool FoldersPaneCollapsed,
+    bool SudoEnabled = false);
 
 public sealed record DetachedFileBrowserState(
     Guid BrowserId,
@@ -262,7 +268,8 @@ public sealed record DetachedFileBrowserState(
     int PreviewPanelSizePx,
     bool FoldersPaneCollapsed,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    bool SudoEnabled = false);
 
 public sealed record DetachedFileSearchSnapshot(
     Guid HostId,
@@ -272,7 +279,8 @@ public sealed record DetachedFileSearchSnapshot(
     bool PreferStoredCredentials,
     string ConnectionProfileKey,
     string ConnectionProfileName,
-    IReadOnlyList<string> PathSuggestions);
+    IReadOnlyList<string> PathSuggestions,
+    bool SudoEnabled = false);
 
 public sealed record DetachedFileSearchState(
     Guid SearchId,
@@ -285,7 +293,8 @@ public sealed record DetachedFileSearchState(
     string ConnectionProfileName,
     IReadOnlyList<string> PathSuggestions,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    bool SudoEnabled = false);
 
 public enum FileBrowserPreviewDock
 {
@@ -312,7 +321,8 @@ public sealed record FileBrowserClipboardSnapshot(
     string Username,
     Guid? SecretHandle,
     bool PreferStoredCredentials,
-    bool UseSshTransport);
+    bool UseSshTransport,
+    bool UseSudo = false);
 
 public sealed record FileBrowserClipboardItemState(
     string SourcePath,
@@ -328,7 +338,8 @@ public sealed record FileBrowserClipboardState(
     Guid? SecretHandle,
     bool PreferStoredCredentials,
     bool UseSshTransport,
-    DateTimeOffset CapturedAtUtc)
+    DateTimeOffset CapturedAtUtc,
+    bool UseSudo = false)
 {
     public Guid HostId => Host.Id;
     public string HostName => Host.Name;

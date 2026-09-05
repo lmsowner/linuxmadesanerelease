@@ -25,8 +25,8 @@ The public installer:
 - installs and starts Caddy for local reverse proxy and Edge Gateway workflows unless system package installation is disabled
 - configures localhost SSH runner access for terminal, runbook, and scheduled automation workflows unless disabled
 - creates `/var/lib/linuxmadesane/runner/workspace` as the default writable local runner workspace
-- installs the Desktop Assistant helper under `/opt/linuxmadesane/ce/current/desktop-helper`
-- writes the Desktop Assistant user service and XDG autostart entry for signed-in Linux GUI sessions
+- stores Desktop Helper as a compressed optional payload on fresh installs and expands it only when selected
+- lets the operator enable Desktop Helper from **Desktop Assistant > Setup** on graphical Linux hosts
 - stops any existing `linux-made-sane.service` before replacing application files during an update
 - installs `linux-made-sane-update` for LMS-managed self-updates
 - starts the service and checks `/healthz`
@@ -52,7 +52,7 @@ Supported environment variables:
 - `LMS_INSTALL_SYSTEM_PACKAGES`: set `false` to skip apt package installation
 - `LMS_CONFIGURE_LOCAL_SSH`: set `false` to skip localhost SSH runner setup
 - `LMS_ENABLE_LOCAL_SUDO`: set `false` to skip passwordless sudo setup for local automation
-- `LMS_INSTALL_DESKTOP_HELPER`: set `false` to skip Desktop Assistant helper setup
+- `LMS_INSTALL_DESKTOP_HELPER`: `auto` by default; installs and updates resolve to `false` unless an explicit saved choice enables it
 - `LMS_DESKTOP_HELPER_LOCAL_LMS_URL`: override the local tray URL, default `http://127.0.0.1:<port>/desktop-assistant`
 - `LMS_RECOVERY_TTL_MINUTES`: local lost-access recovery lifetime, default `30`, clamped to `5`-`240`
 - `LMS_BASE_URL`: override the public website base URL for staging tests
@@ -65,12 +65,15 @@ curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 509
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-system-packages
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-local-ssh
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-local-sudo
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --desktop-helper
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-desktop-helper
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --recovery-ttl 60
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-start
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --uninstall
 curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --purge
 ```
+
+Desktop Helper is optional and does not install GNOME Shell or a display manager. On a host that already has a graphical desktop, **Desktop Assistant > Setup** can switch graphical startup off after confirmation. That selects `multi-user.target` and stops the active display manager while leaving LMS and SSH running.
 
 ## Lost Access Recovery
 
@@ -102,14 +105,22 @@ sudo /usr/local/sbin/linux-made-sane-update
 
 ## Desktop Assistant Helper
 
-On machines with a signed-in Linux GUI session, the installer sets up:
+Fresh installs leave Desktop Helper disabled so headless hosts do not start desktop processes, install optional tray packages, or retain the expanded self-contained desktop runtime. A compressed payload remains available for offline opt-in. Enable it from **Desktop Assistant > Setup**, or opt in during installation:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --desktop-helper
+```
+
+When enabled, LMS sets up:
 
 ```text
 /etc/systemd/user/linux-made-sane-desktop-helper.service
 /etc/xdg/autostart/linux-made-sane-desktop-helper.desktop
 ```
 
-The installer enables the user service globally and tries to start it for the active GUI user. To restart it manually from a terminal inside the GUI session:
+The host setting is stored separately from versioned releases, so updates preserve it. Existing installations that predate the setting are detected as enabled on their first update. Enabling the helper does not reinstall or restart the core LMS service.
+
+LMS enables the user service globally and tries to start it for active GUI users. To restart it manually from a terminal inside the GUI session:
 
 ```bash
 systemctl --user daemon-reload

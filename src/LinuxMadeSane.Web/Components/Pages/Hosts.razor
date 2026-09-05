@@ -14,6 +14,7 @@
 @inject ISshKeyPairGenerator SshKeyPairGenerator
 @inject IServiceScopeFactory ServiceScopeFactory
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+@inject FileThumbnailCacheService FileThumbnailCacheService
 @inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
 @inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
 @inject IJSRuntime JSRuntime
@@ -166,12 +167,22 @@
                                                                  OnClick="@(() => OpenPublicKeySetupAsync(row.Host))" />
                                             }
                                             <UiCommandButton Label="Details" Glyph="UiIconGlyph.Info" Href="@($"/hosts/{row.Host.Id}")" Variant="UiButtonVariant.Action" />
-                                            <UiCommandButton Label="Terminal"
-                                                             Glyph="UiIconGlyph.Run"
-                                                             Href="@($"/hosts/{row.Host.Id}/terminal")"
-                                                             Variant="UiButtonVariant.Action"
-                                                             SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
-                                            <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
+                                            <div class="hosts-browser-action-main">
+                                                <UiCommandButton Label="Terminal"
+                                                                 Glyph="UiIconGlyph.Run"
+                                                                 Href="@($"/hosts/{row.Host.Id}/terminal")"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
+                                                <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
+                                                <UiCommandButton Label="Flush thumbnail cache"
+                                                                 Title="Flush this host's image thumbnail cache"
+                                                                 Glyph="UiIconGlyph.ImageCacheClear"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 Class="hosts-thumbnail-cache-button"
+                                                                 aria-label="Flush this host's image thumbnail cache"
+                                                                 Disabled="@IsThumbnailCacheFlushBusyFor(row.Host)"
+                                                                 OnClick="@(() => FlushHostThumbnailCacheAsync(row.Host))" />
+                                            </div>
                                             <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Href="@($"/hosts/{row.Host.Id}/edit")" Variant="UiButtonVariant.Action" />
                                             @if (CanRemoveHost(row.Host))
                                             {
@@ -259,12 +270,22 @@
                                                                  OnClick="@(() => OpenPublicKeySetupAsync(row.Host))" />
                                             }
                                             <UiCommandButton Label="Details" Glyph="UiIconGlyph.Info" Href="@($"/hosts/{row.Host.Id}")" Variant="UiButtonVariant.Action" />
-                                            <UiCommandButton Label="Terminal"
-                                                             Glyph="UiIconGlyph.Run"
-                                                             Href="@($"/hosts/{row.Host.Id}/terminal")"
-                                                             Variant="UiButtonVariant.Action"
-                                                             SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
-                                            <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
+                                            <div class="hosts-browser-action-main">
+                                                <UiCommandButton Label="Terminal"
+                                                                 Glyph="UiIconGlyph.Run"
+                                                                 Href="@($"/hosts/{row.Host.Id}/terminal")"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
+                                                <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
+                                                <UiCommandButton Label="Flush thumbnail cache"
+                                                                 Title="Flush this host's image thumbnail cache"
+                                                                 Glyph="UiIconGlyph.ImageCacheClear"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 Class="hosts-thumbnail-cache-button"
+                                                                 aria-label="Flush this host's image thumbnail cache"
+                                                                 Disabled="@IsThumbnailCacheFlushBusyFor(row.Host)"
+                                                                 OnClick="@(() => FlushHostThumbnailCacheAsync(row.Host))" />
+                                            </div>
                                             @if (TryGetLmsInstallAction(row.Host) is { } installAction)
                                             {
                                                 <UiCommandButton Label="@installAction.Label"
@@ -455,6 +476,7 @@
     private Guid? lmsConnectHostId;
     private string lmsConnectStatus = string.Empty;
     private string lmsConnectTone = "info";
+    private readonly HashSet<Guid> thumbnailCacheFlushHostIds = [];
     private readonly Dictionary<Guid, LmsHostUpdateOperation> lmsUpdateOperations = [];
 
     private IReadOnlyList<HostRowState> LmsHostRows =>
@@ -908,6 +930,37 @@
     {
         var count = TerminalWorkspaceRegistry.GetOpenSessionCount(hostId);
         return count > 0 ? count.ToString() : null;
+    }
+
+    private bool IsThumbnailCacheFlushBusyFor(ManagedHost host) =>
+        thumbnailCacheFlushHostIds.Contains(host.Id);
+
+    private async Task FlushHostThumbnailCacheAsync(ManagedHost host)
+    {
+        if (!thumbnailCacheFlushHostIds.Add(host.Id))
+        {
+            return;
+        }
+
+        lmsConnectStatus = $"Clearing {host.Name}'s image thumbnail cache...";
+        lmsConnectTone = "info";
+        try
+        {
+            var result = await FileThumbnailCacheService.FlushHostAsync(host.Id);
+            lmsConnectStatus = result.RemovedFileCount == 0
+                ? $"{host.Name}'s image thumbnail cache was already empty."
+                : $"Cleared {result.RemovedFileCount} cached thumbnail{(result.RemovedFileCount == 1 ? string.Empty : "s")} for {host.Name}.";
+            lmsConnectTone = "success";
+        }
+        catch (Exception exception)
+        {
+            lmsConnectStatus = $"Could not clear {host.Name}'s image thumbnail cache: {exception.Message}";
+            lmsConnectTone = "error";
+        }
+        finally
+        {
+            thumbnailCacheFlushHostIds.Remove(host.Id);
+        }
     }
 
     private bool ShouldShowLmsUpdateAction(HostRowState row)

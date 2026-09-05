@@ -1,0 +1,293 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using LinuxMadeSane.Application.Contracts.Security
+@using LinuxMadeSane.Application.Interfaces
+@inject IAttackSurfaceAuditService AttackSurfaceAuditService
+
+<div class="attack-surface-page">
+    <div class="attack-surface-heading">
+        <div>
+            <p class="eyebrow">Defensive review</p>
+            <h2>Attack Surface Audit</h2>
+            <p>Measure the host's residual exposure after firewall, authentication, route, and tunnel controls. A local listener is inventory—not proof of internet risk.</p>
+        </div>
+        <div class="attack-surface-actions">
+            <UiCommandButton Label="@(isBusy && requestedAi ? "Analyzing..." : "Run with AI")"
+                             Glyph="UiIconGlyph.Ai"
+                             Variant="UiButtonVariant.Action"
+                             Disabled="@(isBusy || aiAvailability?.IsAvailable != true)"
+                             OnClick="RunAiAuditAsync" />
+            <UiCommandButton Label="@(isBusy && !requestedAi ? "Scanning..." : "Run fixed audit")"
+                             Glyph="UiIconGlyph.Analyze"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isBusy"
+                             OnClick="RunStaticAuditAsync" />
+        </div>
+    </div>
+
+    <section class="surface-card attack-surface-method" aria-label="Audit method">
+        <div>
+            <span class="attack-surface-kicker">Always available</span>
+            <strong>Contextual, explainable checks</strong>
+            <p>LMS correlates UFW rules with non-loopback TCP/UDP binds, LMS-managed SSH authentication, Edge Gateway route protection, trusted-network bypasses, MFA/passkeys, and an active Cloudflare Tunnel. Loopback sockets are excluded and do not affect the rating.</p>
+        </div>
+        <div>
+            <span class="attack-surface-kicker">Optional</span>
+            @if (aiAvailability is null)
+            {
+                <strong>Checking AI setup</strong>
+                <p>Looking for an enabled provider and model.</p>
+            }
+            else if (aiAvailability.IsAvailable)
+            {
+                <strong>AI-assisted prioritization is ready</strong>
+                <p>@aiAvailability.ProviderName · @aiAvailability.ModelId. Choosing Run with AI sends the findings and listener addresses/ports to that configured provider. No tools or changes are allowed.</p>
+            }
+            else
+            {
+                <strong>AI assistance is not configured</strong>
+                <p>The fixed audit remains fully usable. Add an enabled provider and model under <a href="/ai">AI Services</a> to unlock contextual prioritization.</p>
+            }
+        </div>
+    </section>
+
+    @if (!string.IsNullOrWhiteSpace(errorMessage))
+    {
+        <p class="callout error">@errorMessage</p>
+    }
+
+    @if (audit is null)
+    {
+        <section class="attack-surface-scope" aria-label="Attack vectors covered">
+            <div class="attack-surface-section-heading">
+                <div>
+                    <span class="attack-surface-kicker">Review scope</span>
+                    <h2>Attack vectors to consider</h2>
+                </div>
+                <p>The audit scores residual risk after observed controls. It does not invent exposure from a socket bind or penalize areas it did not inspect.</p>
+            </div>
+            <div class="attack-surface-scope-grid">
+                @foreach (var item in ScopeItems)
+                {
+                    <article>
+                        <span>@item.Number</span>
+                        <div>
+                            <strong>@item.Title</strong>
+                            <p>@item.Description</p>
+                        </div>
+                    </article>
+                }
+            </div>
+        </section>
+    }
+    else
+    {
+        <section class="surface-card attack-surface-posture @LevelClass(audit.Posture.Level)" aria-label="Overall observed posture">
+            <div>
+                <span class="attack-surface-kicker">Residual risk after observed controls</span>
+                <h2>@audit.Posture.Label</h2>
+                <p>@audit.Posture.Summary</p>
+            </div>
+            <div class="attack-surface-control-list">
+                @foreach (var control in audit.Posture.ConfirmedControls)
+                {
+                    <span>@control</span>
+                }
+            </div>
+            <small>@audit.Posture.ConfidenceNote</small>
+        </section>
+
+        <section class="attack-surface-summary" aria-label="Audit summary">
+            <article class="surface-card attention">
+                <span>Confirmed gaps</span>
+                <strong>@audit.AttentionCount</strong>
+                <small>Observed weakened controls</small>
+            </article>
+            <article class="surface-card review">
+                <span>Validate</span>
+                <strong>@audit.ReviewCount</strong>
+                <small>Unknown context, not danger</small>
+            </article>
+            <article class="surface-card protected">
+                <span>Strong controls</span>
+                <strong>@audit.ProtectedCount</strong>
+                <small>Effective mitigations observed</small>
+            </article>
+            <article class="surface-card captured">
+                <span>Bind inventory</span>
+                <strong>@audit.ListeningPorts.Count</strong>
+                <small>Loopback excluded · @audit.CapturedAtUtc.ToLocalTime().ToString("HH:mm:ss")</small>
+            </article>
+        </section>
+
+        @if (!string.IsNullOrWhiteSpace(audit.AiAnalysisError))
+        {
+            <p class="callout warning">@audit.AiAnalysisError</p>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(audit.AiAnalysis))
+        {
+            <section class="surface-card attack-surface-ai-result">
+                <div class="attack-surface-section-heading">
+                    <div>
+                        <span class="attack-surface-kicker">AI-assisted interpretation</span>
+                        <h2>@audit.AiAvailability.ProviderName · @audit.AiAvailability.ModelId</h2>
+                    </div>
+                    <UiPill Tone="@LevelTone(audit.Posture.Level)">@LevelLabel(audit.Posture.Level)</UiPill>
+                </div>
+                <p class="attack-surface-disclaimer">The AI is instructed to assess residual risk after controls and not turn listeners or generic best practices into threats. Validate its narrative against the fixed evidence below.</p>
+                <div class="attack-surface-ai-copy">@audit.AiAnalysis</div>
+            </section>
+        }
+
+        <section class="attack-surface-findings" aria-label="Audit findings">
+            <div class="attack-surface-section-heading">
+                <div>
+                    <span class="attack-surface-kicker">Fixed audit</span>
+                    <h2>Observed controls and gaps</h2>
+                </div>
+                <p>Only a concrete weakened control can produce Attention. Missing deployment context is labelled Validate, not danger.</p>
+            </div>
+
+            <div class="attack-surface-finding-list">
+                @foreach (var finding in SortedFindings)
+                {
+                    <article class="surface-card attack-surface-finding @LevelClass(finding.Level)">
+                        <div class="attack-surface-finding-topline">
+                            <span>@finding.Category</span>
+                            <UiPill Tone="@LevelTone(finding.Level)">@LevelLabel(finding.Level)</UiPill>
+                        </div>
+                        <h3>@finding.Title</h3>
+                        <p>@finding.Summary</p>
+                        <dl>
+                            <div>
+                                <dt>Observed evidence</dt>
+                                <dd>@finding.Evidence</dd>
+                            </div>
+                            <div>
+                                <dt>Interpretation / next check</dt>
+                                <dd>@finding.Recommendation</dd>
+                            </div>
+                        </dl>
+                    </article>
+                }
+            </div>
+        </section>
+
+        <details class="surface-card attack-surface-listeners">
+            <summary>
+                <strong>Local bind inventory — not an exposure score</strong>
+                <span>@audit.ListeningPorts.Count non-loopback TCP/UDP bind(s)</span>
+            </summary>
+            @if (audit.ListeningPorts.Count == 0)
+            {
+                <p class="meta-text">No non-loopback rows were returned. Loopback-only services are intentionally excluded because they cannot be reached remotely.</p>
+            }
+            else
+            {
+                <p class="meta-text">These services bind beyond loopback, but that does not make them internet-accessible. UFW rules are applied before they affect the posture rating; cloud firewalls, routers, VPNs, and proxies can restrict them further.</p>
+                <div class="attack-surface-listener-grid">
+                    @foreach (var listener in audit.ListeningPorts)
+                    {
+                        <div>
+                            <strong>@listener.Protocol.ToUpperInvariant()/@listener.Port</strong>
+                            <span>@listener.Destination</span>
+                        </div>
+                    }
+                </div>
+            }
+        </details>
+
+        <details class="surface-card attack-surface-listeners">
+            <summary>
+                <strong>Not scored as findings</strong>
+                <span>Unobserved areas do not inflate risk</span>
+            </summary>
+            <p class="meta-text">Patch age, backup quality, secret handling, container provenance, router rules, cloud firewall policy, and Cloudflare Access policy need their own evidence. The fixed audit does not mark them risky merely because it did not inspect them.</p>
+        </details>
+    }
+</div>
+
+@code {
+    private AttackSurfaceAiAvailability? aiAvailability;
+    private AttackSurfaceAuditResult? audit;
+    private bool isBusy;
+    private bool requestedAi;
+    private string errorMessage = string.Empty;
+
+    private IReadOnlyList<AttackSurfaceFinding> SortedFindings => audit?.Findings
+        .OrderByDescending(finding => finding.Level)
+        .ThenBy(finding => finding.Category, StringComparer.OrdinalIgnoreCase)
+        .ToArray() ?? [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            aiAvailability = await AttackSurfaceAuditService.GetAiAvailabilityAsync();
+        }
+        catch (Exception exception)
+        {
+            aiAvailability = new AttackSurfaceAiAvailability(false, string.Empty, string.Empty, string.Empty);
+            errorMessage = $"AI setup could not be checked: {exception.Message}";
+        }
+    }
+
+    private Task RunStaticAuditAsync() => RunAuditAsync(false);
+
+    private Task RunAiAuditAsync() => RunAuditAsync(true);
+
+    private async Task RunAuditAsync(bool includeAi)
+    {
+        if (isBusy)
+        {
+            return;
+        }
+
+        isBusy = true;
+        requestedAi = includeAi;
+        errorMessage = string.Empty;
+        try
+        {
+            audit = await AttackSurfaceAuditService.RunAsync(includeAi);
+            aiAvailability = audit.AiAvailability;
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"The attack surface audit could not complete: {exception.Message}";
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private static UiPillTone LevelTone(AttackSurfaceFindingLevel level) => level switch
+    {
+        AttackSurfaceFindingLevel.Attention => UiPillTone.Failure,
+        AttackSurfaceFindingLevel.Review => UiPillTone.Warning,
+        _ => UiPillTone.Success
+    };
+
+    private static string LevelLabel(AttackSurfaceFindingLevel level) => level switch
+    {
+        AttackSurfaceFindingLevel.Attention => "Confirmed gap",
+        AttackSurfaceFindingLevel.Review => "Validate",
+        _ => "Strong control"
+    };
+
+    private static string LevelClass(AttackSurfaceFindingLevel level) => level.ToString().ToLowerInvariant();
+
+    private static readonly IReadOnlyList<ScopeItem> ScopeItems =
+    [
+        new("01", "Network entry points", "Listening ports, bind scope, firewall defaults, allow rules, and upstream exposure."),
+        new("02", "Remote administration", "SSH, SFTP, RDP, VNC, orchestration APIs, and other high-value management paths."),
+        new("03", "Published applications", "Edge Gateway routes, pass-through access, proxy trust, TLS validation, and external tunnels."),
+        new("04", "Identity and recovery", "Enabled operators, MFA and passkey coverage, email sign-in, session lifetime, and offboarding."),
+        new("05", "Trust boundaries", "CIDR-based bypasses, forwarded client identity, LAN assumptions, and access from less-trusted devices."),
+        new("06", "Data and software", "Shares, databases, secrets, backups, logs, containers, plugins, packages, and patch cadence.")
+    ];
+
+    private sealed record ScopeItem(string Number, string Title, string Description);
+}

@@ -12,4 +12,6 @@ public sealed record LinuxCommandRequest(
     string? WorkingDirectory = null)
 {
     public bool IsOptionalExternalTool { get; init; }
+
+    public byte[]? StandardInputBytes { get; init; }
 }

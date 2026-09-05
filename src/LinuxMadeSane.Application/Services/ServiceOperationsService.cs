@@ -140,12 +140,6 @@ public sealed class ServiceOperationsService(ILinuxServiceModuleDataService serv
         return new ServiceIssueFixerViewModel(services, issueReport);
     }
 
-    public async Task<ServiceDeploymentPatternsViewModel> GetDeploymentPatternsAsync(CancellationToken cancellationToken = default)
-    {
-        var patterns = await serviceDataService.ListDeploymentPatternsAsync(cancellationToken);
-        return new ServiceDeploymentPatternsViewModel(patterns);
-    }
-
     private static LinuxServiceDefinition? SelectService(IReadOnlyList<LinuxServiceDefinition> services, Guid serviceId)
     {
         if (services.Count == 0)

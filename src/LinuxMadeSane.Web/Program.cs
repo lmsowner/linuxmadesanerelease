@@ -863,10 +863,9 @@ public class Program
         {
             try
             {
-                var request = await context.Request.ReadFromJsonAsync<PasskeyLoginOptionsRequest>(
-                    cancellationToken: context.RequestAborted) ?? new PasskeyLoginOptionsRequest(null);
+                _ = await context.Request.ReadFromJsonAsync<PasskeyLoginOptionsRequest>(
+                    cancellationToken: context.RequestAborted) ?? new PasskeyLoginOptionsRequest();
                 var result = await passkeyAuthenticationService.BuildLoginOptionsAsync(
-                    request.Email ?? string.Empty,
                     context.Request,
                     context.RequestAborted);
 
@@ -1731,7 +1730,7 @@ public class Program
 
     private sealed record PasskeyEnrollmentOptionsRequest(string? FriendlyName);
 
-    private sealed record PasskeyLoginOptionsRequest(string? Email);
+    private sealed record PasskeyLoginOptionsRequest;
 
     private sealed class ActionProgress<T>(Action<T> report) : IProgress<T>
     {

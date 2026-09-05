@@ -7,8 +7,10 @@ public enum UiIconName
 {
     MachineSection,
     Overview,
+    SystemInfo,
     Hosts,
     Integrations,
+    MailRelay,
     Scheduling,
     Updates,
     Runbooks,

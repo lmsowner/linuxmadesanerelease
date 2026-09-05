@@ -407,11 +407,14 @@ public sealed class ApplicationUpdateService(
     private static string BuildPublicInstallerFallbackScript(string installScriptUrl, bool runsAsRoot)
     {
         var sudoPrefix = runsAsRoot ? string.Empty : "sudo -n ";
+        var installRoot = ResolveInstallRoot();
+        var currentDirectory = Path.Combine(installRoot, "current");
+        var preservedInstallerEnvironment = BuildPreservedInstallerEnvironment(installRoot);
         return string.Join(
             "\n",
             "set -euo pipefail",
             "SERVICE_UNIT='linux-made-sane.service'",
-            "CURRENT_DIR='/opt/linuxmadesane/ce/current'",
+            $"CURRENT_DIR={ShellQuote(currentDirectory)}",
             "PREVIOUS_CURRENT_TARGET=''",
             "SERVICE_WAS_ACTIVE=false",
             "if [[ -e \"$CURRENT_DIR\" || -L \"$CURRENT_DIR\" ]]; then",
@@ -444,7 +447,7 @@ public sealed class ApplicationUpdateService(
             $"  {sudoPrefix}systemctl --no-pager --full status \"$SERVICE_UNIT\" >&2 || true",
             "  return 1",
             "}",
-            $"if ! curl -fsSL {ShellQuote(installScriptUrl)} | {sudoPrefix}env LMS_SOURCE=lms-auto-update bash -s -- --install; then",
+            $"if ! curl -fsSL {ShellQuote(installScriptUrl)} | {sudoPrefix}env LMS_INSTALL_SECOND_STAGE=1 LMS_SOURCE=lms-auto-update {preservedInstallerEnvironment} bash -s -- --install; then",
             "  rollback_self_update 'installer returned a non-zero exit code'",
             "  exit 1",
             "fi",
@@ -459,7 +462,11 @@ public sealed class ApplicationUpdateService(
         try
         {
             var helper = File.ReadAllText(helperPath);
-            return helper.Contains("--background|--detached|--no-wait", StringComparison.Ordinal) &&
+            return helper.Contains("PRESERVES_LMS_STATE_PATHS=true", StringComparison.Ordinal) &&
+                   helper.Contains("LMS_INSTALL_SECOND_STAGE=1", StringComparison.Ordinal) &&
+                   helper.Contains("LMS_DATABASE_CONNECTION_STRING", StringComparison.Ordinal) &&
+                   helper.Contains("LMS_DATA_PROTECTION_KEY_DIRECTORY", StringComparison.Ordinal) &&
+                   helper.Contains("--background|--detached|--no-wait", StringComparison.Ordinal) &&
                    helper.Contains("SYSTEMD_RUN_ARGS+=(--wait)", StringComparison.Ordinal) &&
                    helper.Contains("bash -s -- --install \"${INSTALL_ARGS[@]}\"", StringComparison.Ordinal) &&
                    !helper.Contains("--pipe", StringComparison.Ordinal);
@@ -468,6 +475,99 @@ public sealed class ApplicationUpdateService(
         {
             return false;
         }
+    }
+
+    private static string BuildPreservedInstallerEnvironment(string installRoot)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__LinuxMadeSane")?.Trim();
+        var keyDirectory = Environment.GetEnvironmentVariable("DataProtection__KeyDirectory")?.Trim();
+        var dataRoot = ResolveDataRoot(connectionString, keyDirectory);
+        var configRoot = ResolveConfigRoot(Environment.GetEnvironmentVariable("LocalHostBootstrap__PrivateKeyPath"));
+        var servicePort = ResolveServicePort(Environment.GetEnvironmentVariable("ASPNETCORE_URLS"));
+        var values = new List<(string Name, string? Value)>
+        {
+            ("LMS_INSTALL_ROOT", installRoot),
+            ("LMS_DATA_ROOT", dataRoot),
+            ("LMS_CONFIG_ROOT", configRoot),
+            ("LMS_DATABASE_CONNECTION_STRING", connectionString),
+            ("LMS_DATA_PROTECTION_KEY_DIRECTORY", keyDirectory),
+            ("LMS_SERVICE_USER", Environment.UserName),
+            ("LMS_SERVICE_PORT", servicePort)
+        };
+
+        return string.Join(
+            ' ',
+            values
+                .Where(item => !string.IsNullOrWhiteSpace(item.Value))
+                .Select(item => $"{item.Name}={ShellQuote(item.Value!)}"));
+    }
+
+    private static string ResolveInstallRoot()
+    {
+        var baseDirectory = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar));
+        if (baseDirectory.Name.Equals("current", StringComparison.Ordinal) && baseDirectory.Parent is not null)
+        {
+            return baseDirectory.Parent.FullName;
+        }
+
+        if (baseDirectory.Parent?.Name.Equals("releases", StringComparison.Ordinal) == true &&
+            baseDirectory.Parent.Parent is not null)
+        {
+            return baseDirectory.Parent.Parent.FullName;
+        }
+
+        return "/opt/linuxmadesane/ce";
+    }
+
+    private static string? ResolveDataRoot(string? connectionString, string? keyDirectory)
+    {
+        if (!string.IsNullOrWhiteSpace(connectionString))
+        {
+            foreach (var segment in connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var separator = segment.IndexOf('=');
+                if (separator <= 0)
+                {
+                    continue;
+                }
+
+                var key = segment[..separator].Replace(" ", string.Empty, StringComparison.Ordinal).Trim();
+                var value = segment[(separator + 1)..].Trim().Trim('"', '\'');
+                if ((key.Equals("DataSource", StringComparison.OrdinalIgnoreCase) ||
+                     key.Equals("Filename", StringComparison.OrdinalIgnoreCase)) &&
+                    Path.IsPathRooted(value))
+                {
+                    return Path.GetDirectoryName(value);
+                }
+            }
+        }
+
+        return !string.IsNullOrWhiteSpace(keyDirectory) && Path.IsPathRooted(keyDirectory)
+            ? Directory.GetParent(keyDirectory)?.FullName
+            : null;
+    }
+
+    private static string? ResolveConfigRoot(string? privateKeyPath)
+    {
+        if (string.IsNullOrWhiteSpace(privateKeyPath) || !Path.IsPathRooted(privateKeyPath))
+        {
+            return null;
+        }
+
+        return Directory.GetParent(privateKeyPath)?.Parent?.FullName;
+    }
+
+    private static string? ResolveServicePort(string? urls)
+    {
+        foreach (var value in (urls ?? string.Empty).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Port is > 0 and <= 65535)
+            {
+                return uri.Port.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        return null;
     }
 
     private void SetStatus(Func<ApplicationUpdateStatus, ApplicationUpdateStatus> update)

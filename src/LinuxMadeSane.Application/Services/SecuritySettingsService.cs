@@ -20,11 +20,16 @@ public sealed class SecuritySettingsService(
     IRemoteAccessSystemService remoteAccessSystemService,
     IMessagingEmailSettingsStore messagingEmailSettingsStore,
     IEmailDeliveryService emailDeliveryService,
-    IConfiguration? configuration = null) : ISecuritySettingsService
+    IConfiguration? configuration = null,
+    TrustedNetworkAccessTrialService? trustedNetworkAccessTrialService = null) : ISecuritySettingsService
 {
+    private readonly TrustedNetworkAccessTrialService trustedNetworkAccessTrialService =
+        trustedNetworkAccessTrialService ?? new TrustedNetworkAccessTrialService();
+
     public async Task<SecuritySettingsPageViewModel> GetPageAsync(CancellationToken cancellationToken = default)
     {
-        var trustedNetworks = await trustedNetworkStore.ListAsync(cancellationToken);
+        var trustedNetworks = this.trustedNetworkAccessTrialService.GetEffectiveEntries(
+            await trustedNetworkStore.ListAsync(cancellationToken));
         var users = await securityUserStore.ListAsync(cancellationToken);
 
         return new SecuritySettingsPageViewModel(
@@ -522,7 +527,8 @@ public sealed class SecuritySettingsService(
             editor.IsAuthenticationEnabled,
             existing?.IsBuiltIn ?? false,
             existing?.CreatedAtUtc ?? now,
-            now);
+            now,
+            NormalizeDeniedResponseMode(editor.DeniedResponseMode));
 
         await trustedNetworkStore.SaveAsync(entry, cancellationToken);
         return entry.Id;
@@ -562,6 +568,21 @@ public sealed class SecuritySettingsService(
         {
             IsAuthenticationEnabled = isEnabled,
             IsTrustedAccessEnabled = entry.IsEnabled && !isEnabled,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        }, cancellationToken);
+    }
+
+    public async Task SetTrustedNetworkDeniedResponseModeAsync(
+        Guid entryId,
+        NetworkAccessDeniedResponseMode mode,
+        CancellationToken cancellationToken = default)
+    {
+        var entry = await trustedNetworkStore.GetAsync(entryId, cancellationToken)
+            ?? throw new InvalidOperationException("Trusted network entry was not found.");
+
+        await trustedNetworkStore.SaveAsync(entry with
+        {
+            DeniedResponseMode = NormalizeDeniedResponseMode(mode),
             UpdatedAtUtc = DateTimeOffset.UtcNow
         }, cancellationToken);
     }
@@ -1104,7 +1125,8 @@ public sealed class SecuritySettingsService(
         var entries = await trustedNetworkStore.ListAsync(cancellationToken);
         var now = DateTimeOffset.UtcNow;
 
-        foreach (var entry in entries.Where(candidate => candidate.IsBuiltIn))
+        foreach (var entry in entries.Where(candidate =>
+                     candidate.IsBuiltIn && !IsPublicFallbackNetwork(candidate)))
         {
             await trustedNetworkStore.SaveAsync(entry with
             {
@@ -1116,6 +1138,9 @@ public sealed class SecuritySettingsService(
         }
     }
 
+    private static bool IsPublicFallbackNetwork(TrustedNetworkEntry entry) =>
+        entry.AddressOrCidr is "0.0.0.0/0" or "::/0";
+
     private static TrustedNetworkEntryViewModel MapTrustedNetwork(TrustedNetworkEntry entry) =>
         new(
             entry.Id,
@@ -1125,7 +1150,13 @@ public sealed class SecuritySettingsService(
             entry.IsEnabled,
             entry.IsEnabled && !entry.IsAuthenticationEnabled,
             entry.IsAuthenticationEnabled,
-            entry.IsBuiltIn);
+            entry.IsBuiltIn,
+            NormalizeDeniedResponseMode(entry.DeniedResponseMode));
+
+    private static NetworkAccessDeniedResponseMode NormalizeDeniedResponseMode(NetworkAccessDeniedResponseMode mode) =>
+        mode == NetworkAccessDeniedResponseMode.EmptyNotFound
+            ? NetworkAccessDeniedResponseMode.EmptyNotFound
+            : NetworkAccessDeniedResponseMode.AccessDeniedPage;
 
     private async Task<SecurityUser> GetRequiredUserAsync(Guid userId, CancellationToken cancellationToken) =>
         await securityUserStore.GetAsync(userId, cancellationToken)

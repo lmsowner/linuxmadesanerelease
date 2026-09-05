@@ -22,11 +22,18 @@ VERSION_REVISION="$(lms_resolve_version_revision)"
 PACKAGE_NAME="linux-made-sane-ce-${APP_VERSION}-${RUNTIME}"
 PACKAGE_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/artifacts/publish/$PACKAGE_NAME}"
 PACKAGE_TARBALL="${PACKAGE_TARBALL:-$REPO_ROOT/artifacts/packages/${PACKAGE_NAME}.tar.gz}"
-DESKTOP_HELPER_OUTPUT_DIR="$PACKAGE_ROOT/app/desktop-helper"
+DESKTOP_HELPER_OUTPUT_DIR="$(mktemp -d)"
+DESKTOP_HELPER_ARCHIVE_DIR="$PACKAGE_ROOT/app/optional"
+TOOLS_OUTPUT_DIR="$PACKAGE_ROOT/app/tools"
+
+cleanup() {
+  rm -rf -- "$DESKTOP_HELPER_OUTPUT_DIR"
+}
+trap cleanup EXIT
 
 lms_validate_version "$APP_VERSION"
 lms_reset_dir "$PACKAGE_ROOT"
-mkdir -p "$PACKAGE_ROOT/app" "$DESKTOP_HELPER_OUTPUT_DIR"
+mkdir -p "$PACKAGE_ROOT/app" "$DESKTOP_HELPER_ARCHIVE_DIR" "$TOOLS_OUTPUT_DIR"
 
 lms_log "Publishing CE package to $PACKAGE_ROOT/app"
 dotnet publish \
@@ -54,6 +61,15 @@ dotnet publish \
   /p:LinuxMadeSaneVersion="$APP_VERSION" \
   /p:LinuxMadeSaneVersionDate="$VERSION_DATE" \
   /p:LinuxMadeSaneVersionRevision="$VERSION_REVISION"
+
+tar -czf "$DESKTOP_HELPER_ARCHIVE_DIR/desktop-helper.tar.gz" -C "$DESKTOP_HELPER_OUTPUT_DIR" .
+
+install -m 0755 \
+  "$REPO_ROOT/scripts/linux-made-sane-desktop-helper-setup.sh" \
+  "$TOOLS_OUTPUT_DIR/linux-made-sane-desktop-helper-setup"
+install -m 0755 \
+  "$REPO_ROOT/scripts/linux-made-sane-desktop-helper-launcher.sh" \
+  "$TOOLS_OUTPUT_DIR/linux-made-sane-desktop-helper-launcher"
 
 printf 'ce\n' > "$PACKAGE_ROOT/edition.txt"
 printf '%s\n' "$APP_VERSION" > "$PACKAGE_ROOT/version.txt"

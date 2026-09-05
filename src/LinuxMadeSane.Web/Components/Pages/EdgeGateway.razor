@@ -335,16 +335,16 @@
                                 <h2>Connect Cloudflare to Edge Gateway</h2>
                                 <p class="meta-text">Validate a scoped token here before applying services. Edge Gateway will then list the Cloudflare zones that token can manage.</p>
                             </div>
-                            @if (dashboard.Cloudflare.HasSavedToken)
-                            {
-                                <div class="edge-token-header-actions">
+                            <div class="edge-token-header-actions">
+                                @if (dashboard.Cloudflare.HasSavedToken)
+                                {
                                     <UiPill Tone="UiPillTone.Success">Token saved</UiPill>
-                                    <UiCommandButton Label="Setup Guide"
-                                                     Glyph="UiIconGlyph.Info"
-                                                     Variant="UiButtonVariant.Ghost"
-                                                     OnClick="OpenCloudflareSetupGuide" />
-                                </div>
-                            }
+                                }
+                                <UiCommandButton Label="Setup Guide"
+                                                 Glyph="UiIconGlyph.Info"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 OnClick="OpenCloudflareSetupGuide" />
+                            </div>
                         </div>
 
                         @if (dashboard.Cloudflare.HasSavedToken)
@@ -408,8 +408,19 @@
                                         <strong>@dashboard.Runtime.Cloudflared.Label</strong>
                                         <span>@dashboard.Runtime.Cloudflared.Message</span>
                                     </div>
+                                    <div class="edge-runtime-actions">
+                                        <UiCommandButton Label="@(isInstallingCloudflared ? "Installing cloudflared..." : "Install cloudflared")"
+                                                         Glyph="UiIconGlyph.Download"
+                                                         Variant="UiButtonVariant.Primary"
+                                                         Disabled="@(isInstallingCloudflared || isProvisioningCloudflareDomain)"
+                                                         OnClick="InstallCloudflaredAsync" />
+                                    </div>
                                 </div>
                             </div>
+                            @if (!string.IsNullOrWhiteSpace(cloudflaredInstallMessage))
+                            {
+                                <p class="edge-token-message @(cloudflaredInstallIsError ? "error" : "success")">@cloudflaredInstallMessage</p>
+                            }
                             @if (!dashboard.Cloudflare.IsAvailable)
                             {
                                 <p class="callout warning edge-runtime-warning">@dashboard.Cloudflare.Message</p>
@@ -1081,6 +1092,8 @@
     private bool confirmWildcardDnsReplacement;
     private bool confirmRouteDnsReplacement;
     private bool isValidatingCloudflareToken;
+    private bool isInstallingCloudflared;
+    private bool cloudflaredInstallIsError;
     private bool cloudflareTokenIsError;
     private bool isResettingEdgeGatewaySetup;
     private bool isProvisioningCloudflareDomain;
@@ -1106,6 +1119,7 @@
     private string routeModalTitle = "New route";
     private string cloudflareTokenInput = string.Empty;
     private string cloudflareTokenMessage = string.Empty;
+    private string cloudflaredInstallMessage = string.Empty;
     private string resetSetupMessage = string.Empty;
     private string provisioningCloudflareDomainName = string.Empty;
     private string relayDeleteMessage = string.Empty;
@@ -1890,6 +1904,57 @@
         finally
         {
             isValidatingCloudflareToken = false;
+        }
+    }
+
+    private async Task InstallCloudflaredAsync()
+    {
+        if (isInstallingCloudflared)
+        {
+            return;
+        }
+
+        isInstallingCloudflared = true;
+        cloudflaredInstallIsError = false;
+        cloudflaredInstallMessage = "Installing cloudflared on this LMS host...";
+        userMessage = cloudflaredInstallMessage;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var installResult = await EdgeGatewayService.InstallCloudflaredAsync();
+            cloudflaredInstallMessage = installResult.Summary;
+            cloudflaredInstallIsError = !installResult.Success;
+
+            var repairRelay = installResult.Success && !installResult.ServiceRunning
+                ? ConfiguredCloudflareRelays.FirstOrDefault(static domain =>
+                    domain.RelayUsesCloudflareTunnel && domain.RelayOwnedByThisLms)
+                : null;
+            if (repairRelay is not null)
+            {
+                cloudflaredInstallMessage = $"{installResult.Summary} Attaching it to {repairRelay.RelayTunnelName} and starting the connector service...";
+                userMessage = cloudflaredInstallMessage;
+                await InvokeAsync(StateHasChanged);
+
+                cloudflareSetupResult = await EdgeGatewayService.ProvisionCloudflareDomainAsync(
+                    repairRelay.DomainName,
+                    replaceExistingDnsRecord: false);
+                cloudflaredInstallMessage = cloudflareSetupResult.ConnectorInstallSummary;
+                cloudflaredInstallIsError = !cloudflareSetupResult.ConnectorInstalled;
+            }
+
+            userMessage = cloudflaredInstallMessage;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            cloudflaredInstallIsError = true;
+            cloudflaredInstallMessage = exception.Message;
+            userMessage = exception.Message;
+        }
+        finally
+        {
+            isInstallingCloudflared = false;
         }
     }
 

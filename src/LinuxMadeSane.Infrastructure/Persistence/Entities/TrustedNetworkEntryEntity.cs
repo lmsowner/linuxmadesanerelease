@@ -1,6 +1,8 @@
 // Copyright (c) Richard D. Kiernan.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using LinuxMadeSane.Core.Enums;
+
 namespace LinuxMadeSane.Infrastructure.Persistence.Entities;
 
 public sealed class TrustedNetworkEntryEntity
@@ -13,6 +15,7 @@ public sealed class TrustedNetworkEntryEntity
     public bool IsTrustedAccessEnabled { get; set; }
     public bool IsAuthenticationEnabled { get; set; }
     public bool IsBuiltIn { get; set; }
+    public NetworkAccessDeniedResponseMode DeniedResponseMode { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }

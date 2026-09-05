@@ -21,6 +21,7 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
         var operationLabel = ResolveOperationLabel(request, commandText);
         var startedAt = DateTimeOffset.UtcNow;
         ProcessStartInfo? startInfo = null;
+        Process? process = null;
 
         LogCommandRequested(request, operationLabel, commandText);
 
@@ -45,16 +46,18 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
         try
         {
             startInfo = BuildStartInfo(request);
-            using var process = new Process { StartInfo = startInfo };
+            process = new Process { StartInfo = startInfo };
             process.Start();
 
+            var inputTask = WriteStandardInputAsync(process, request.StandardInputBytes, timeoutCts.Token);
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
 
             await process.WaitForExitAsync(timeoutCts.Token);
 
-            var stdout = await stdoutTask;
-            var stderr = await stderrTask;
+            await Task.WhenAll(inputTask, stdoutTask, stderrTask);
+            var stdout = stdoutTask.Result;
+            var stderr = stderrTask.Result;
 
             LogCommandCompleted(request, operationLabel, commandText, process.ExitCode);
 
@@ -69,6 +72,7 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
+            TryKillProcessTree(process);
             logger.LogWarning("Linux command timed out: {Operation}", operationLabel);
 
             return new LinuxCommandResult(
@@ -82,6 +86,7 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
         }
         catch (OperationCanceledException)
         {
+            TryKillProcessTree(process);
             logger.LogWarning("Linux command cancelled: {Operation}", operationLabel);
             throw;
         }
@@ -103,6 +108,7 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
         }
         catch (Exception exception)
         {
+            TryKillProcessTree(process);
             logger.LogError(exception, "Linux command failed before completion: {Operation}", operationLabel);
 
             return new LinuxCommandResult(
@@ -113,6 +119,29 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
                 startedAt,
                 DateTimeOffset.UtcNow,
                 false);
+        }
+        finally
+        {
+            process?.Dispose();
+        }
+    }
+
+    private static void TryKillProcessTree(Process? process)
+    {
+        try
+        {
+            if (process is not null && !process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // The process was never started or exited between checks.
+        }
+        catch (Win32Exception)
+        {
+            // Best effort only: preserve the original timeout or cancellation result.
         }
     }
 
@@ -158,6 +187,7 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
         var startInfo = new ProcessStartInfo
         {
             FileName = requiresSudo ? "sudo" : request.FileName,
+            RedirectStandardInput = request.StandardInputBytes is not null,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
@@ -180,6 +210,27 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
         }
 
         return startInfo;
+    }
+
+    private static async Task WriteStandardInputAsync(
+        Process process,
+        byte[]? inputBytes,
+        CancellationToken cancellationToken)
+    {
+        if (inputBytes is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await process.StandardInput.BaseStream.WriteAsync(inputBytes, cancellationToken);
+            await process.StandardInput.BaseStream.FlushAsync(cancellationToken);
+        }
+        finally
+        {
+            process.StandardInput.Close();
+        }
     }
 
     private static string RenderCommand(LinuxCommandRequest request)

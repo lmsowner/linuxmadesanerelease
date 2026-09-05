@@ -36,18 +36,10 @@ public sealed class CloudflareDnsService(
         CloudflareDnsRecord record,
         CancellationToken cancellationToken = default)
     {
-        var result = await client.PostAsync<object, CloudflareDnsRecordDto>(
+        var result = await client.PostAsync<IReadOnlyDictionary<string, object?>, CloudflareDnsRecordDto>(
             apiToken,
             $"zones/{zoneId}/dns_records",
-            new
-            {
-                type = record.Type,
-                name = record.Name,
-                content = record.Content,
-                proxied = record.Proxied,
-                ttl = record.Ttl,
-                comment = string.IsNullOrWhiteSpace(record.Comment) ? integrationOptions.ManagedRecordComment : record.Comment
-            },
+            BuildRecordRequest(record),
             cancellationToken);
 
         return result.ToModel(zoneId);
@@ -59,18 +51,10 @@ public sealed class CloudflareDnsService(
         CloudflareDnsRecord record,
         CancellationToken cancellationToken = default)
     {
-        var result = await client.PatchAsync<object, CloudflareDnsRecordDto>(
+        var result = await client.PatchAsync<IReadOnlyDictionary<string, object?>, CloudflareDnsRecordDto>(
             apiToken,
             $"zones/{zoneId}/dns_records/{record.Id}",
-            new
-            {
-                type = record.Type,
-                name = record.Name,
-                content = record.Content,
-                proxied = record.Proxied,
-                ttl = record.Ttl,
-                comment = string.IsNullOrWhiteSpace(record.Comment) ? integrationOptions.ManagedRecordComment : record.Comment
-            },
+            BuildRecordRequest(record),
             cancellationToken);
 
         return result.ToModel(zoneId);
@@ -82,4 +66,27 @@ public sealed class CloudflareDnsService(
         string recordId,
         CancellationToken cancellationToken = default) =>
         client.DeleteAsync(apiToken, $"zones/{zoneId}/dns_records/{recordId}", cancellationToken);
+
+    private IReadOnlyDictionary<string, object?> BuildRecordRequest(CloudflareDnsRecord record)
+    {
+        var request = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["type"] = record.Type,
+            ["name"] = record.Name,
+            ["content"] = record.Content,
+            ["ttl"] = record.Ttl,
+            ["comment"] = string.IsNullOrWhiteSpace(record.Comment) ? integrationOptions.ManagedRecordComment : record.Comment
+        };
+
+        // Cloudflare rejects the proxied field itself for record types such as TXT,
+        // even when its value is false. Only send it for record types Cloudflare can proxy.
+        if (record.Type.Equals("A", StringComparison.OrdinalIgnoreCase) ||
+            record.Type.Equals("AAAA", StringComparison.OrdinalIgnoreCase) ||
+            record.Type.Equals("CNAME", StringComparison.OrdinalIgnoreCase))
+        {
+            request["proxied"] = record.Proxied;
+        }
+
+        return request;
+    }
 }

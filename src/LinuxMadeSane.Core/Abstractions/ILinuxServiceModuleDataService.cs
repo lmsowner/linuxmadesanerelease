@@ -36,7 +36,4 @@ public interface ILinuxServiceModuleDataService
     Task<ServiceRepairPlan> GetRepairPlanAsync(
         Guid serviceId,
         CancellationToken cancellationToken = default);
-
-    Task<IReadOnlyList<ServiceDeploymentPattern>> ListDeploymentPatternsAsync(
-        CancellationToken cancellationToken = default);
 }

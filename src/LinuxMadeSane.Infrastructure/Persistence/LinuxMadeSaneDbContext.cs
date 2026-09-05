@@ -54,6 +54,10 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<TrustedNetworkEntryEntity> TrustedNetworkEntries => Set<TrustedNetworkEntryEntity>();
     public DbSet<CloudflareSettingsEntity> CloudflareSettings => Set<CloudflareSettingsEntity>();
     public DbSet<ExposedServiceConfigEntity> ExposedServiceConfigs => Set<ExposedServiceConfigEntity>();
+    public DbSet<MailRelayConfigurationEntity> MailRelayConfigurations => Set<MailRelayConfigurationEntity>();
+    public DbSet<MailRelayDomainEntity> MailRelayDomains => Set<MailRelayDomainEntity>();
+    public DbSet<MailRelayClientEntity> MailRelayClients => Set<MailRelayClientEntity>();
+    public DbSet<MailRelayDnsRecordEntity> MailRelayDnsRecords => Set<MailRelayDnsRecordEntity>();
     public DbSet<PortalConnectionSettingsEntity> PortalConnectionSettings => Set<PortalConnectionSettingsEntity>();
     public DbSet<LocalAiEngineSettingsEntity> LocalAiEngineSettings => Set<LocalAiEngineSettingsEntity>();
     public DbSet<LocalAiInstalledModelEntity> LocalAiInstalledModels => Set<LocalAiInstalledModelEntity>();
@@ -146,6 +150,69 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.HasOne<ManagedHostEntity>()
                 .WithMany()
                 .HasForeignKey(item => item.ManagedHostId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<MailRelayConfigurationEntity>(entity =>
+        {
+            entity.ToTable("mail_relay_configurations");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.RelayHostname).HasMaxLength(255);
+            entity.Property(item => item.PublicIpAddress).HasMaxLength(64);
+            entity.Property(item => item.LegacyListenAddressesJson).HasColumnType("TEXT");
+            entity.Property(item => item.LegacyAllowedNetworksJson).HasColumnType("TEXT");
+        });
+
+        modelBuilder.Entity<MailRelayDomainEntity>(entity =>
+        {
+            entity.ToTable("mail_relay_domains");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.CloudflareZoneId).HasMaxLength(64);
+            entity.Property(item => item.DomainName).HasMaxLength(255);
+            entity.Property(item => item.CurrentDkimSelector).HasMaxLength(63);
+            entity.Property(item => item.CurrentDkimPrivateKeySecretReference).HasMaxLength(255);
+            entity.Property(item => item.PreviousDkimSelector).HasMaxLength(63);
+            entity.Property(item => item.PreviousDkimPrivateKeySecretReference).HasMaxLength(255);
+            entity.Property(item => item.DkimCloudflareRecordId).HasMaxLength(64);
+            entity.Property(item => item.SpfCloudflareRecordId).HasMaxLength(64);
+            entity.Property(item => item.DmarcCloudflareRecordId).HasMaxLength(64);
+            entity.Property(item => item.DmarcReportingAddress).HasMaxLength(320);
+            entity.HasIndex(item => new { item.MailRelayConfigurationId, item.DomainName }).IsUnique();
+            entity.HasOne<MailRelayConfigurationEntity>()
+                .WithMany()
+                .HasForeignKey(item => item.MailRelayConfigurationId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<MailRelayClientEntity>(entity =>
+        {
+            entity.ToTable("mail_relay_clients");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Name).HasMaxLength(160);
+            entity.Property(item => item.Username).HasMaxLength(128);
+            entity.Property(item => item.PasswordHash).HasMaxLength(512);
+            entity.Property(item => item.AllowedSenderDomainsJson).HasColumnType("TEXT");
+            entity.Property(item => item.AllowedNetworksJson).HasColumnType("TEXT");
+            entity.Property(item => item.Notes).HasColumnType("TEXT");
+            entity.HasIndex(item => new { item.MailRelayConfigurationId, item.Username }).IsUnique();
+            entity.HasOne<MailRelayConfigurationEntity>()
+                .WithMany()
+                .HasForeignKey(item => item.MailRelayConfigurationId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<MailRelayDnsRecordEntity>(entity =>
+        {
+            entity.ToTable("mail_relay_dns_records");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.CloudflareRecordId).HasMaxLength(64);
+            entity.Property(item => item.Type).HasMaxLength(16);
+            entity.Property(item => item.Name).HasMaxLength(255);
+            entity.Property(item => item.Purpose).HasMaxLength(80);
+            entity.HasIndex(item => item.CloudflareRecordId);
+            entity.HasOne<MailRelayDomainEntity>()
+                .WithMany()
+                .HasForeignKey(item => item.MailRelayDomainId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

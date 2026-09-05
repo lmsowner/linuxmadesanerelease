@@ -434,6 +434,125 @@ lms_detect_installer_identity() {
   fi
 }
 
+lms_resolve_desktop_helper_choice() {
+  local requested="${1:-auto}"
+  local preference_file="$2"
+  local legacy_unit_file="$3"
+  local legacy_autostart_file="$4"
+  local unit_name="$5"
+  local saved_choice=""
+
+  case "$requested" in
+    true|True|TRUE|1|yes|Yes|YES|on|On|ON)
+      printf 'true\n'
+      return
+      ;;
+    false|False|FALSE|0|no|No|NO|off|Off|OFF)
+      printf 'false\n'
+      return
+      ;;
+    auto|Auto|AUTO|"")
+      ;;
+    *)
+      lms_die "INSTALL_DESKTOP_HELPER must be true, false, or auto"
+      ;;
+  esac
+
+  if [[ -f "$preference_file" ]]; then
+    saved_choice="$(sed -n '1p' "$preference_file" 2>/dev/null | tr -d '\r\n')"
+    if lms_is_truthy "$saved_choice"; then
+      printf 'true\n'
+    else
+      printf 'false\n'
+    fi
+    return
+  fi
+
+  # Old releases wrote helper files on every host. Their presence is not opt-in consent.
+  printf 'false\n'
+}
+
+lms_install_desktop_helper_manager() {
+  local source_path="$1"
+  local manager_destination="$2"
+  local manager_runtime_path="$3"
+  local config_destination="$4"
+  local config_runtime_path="$5"
+  local preference_runtime_path="$6"
+  local sudoers_destination="$7"
+  local service_user="$8"
+  local unit_name="$9"
+  local unit_runtime_path="${10}"
+  local autostart_runtime_path="${11}"
+  local launcher_runtime_path="${12}"
+  local executable_runtime_path="${13}"
+  local socket_path="${14}"
+  local local_lms_url="${15}"
+  local tray_icon_runtime_path="${16}"
+  local service_group="${17}"
+  local installer_username="${18:-}"
+  local launcher_source_path="${19}"
+  local launcher_destination="${20}"
+  local helper_directory_runtime_path="${21}"
+  local payload_archive_runtime_path="${22}"
+  local install_root_runtime_path="${23}"
+  local sudoers_temp_file
+
+  [[ -f "$source_path" ]] || {
+    lms_log "Desktop Helper setup command was not found at $source_path"
+    return 1
+  }
+
+  [[ -f "$launcher_source_path" ]] || {
+    lms_log "Desktop Helper launcher was not found at $launcher_source_path"
+    return 1
+  }
+
+  mkdir -p \
+    "$(dirname "$manager_destination")" \
+    "$(dirname "$launcher_destination")" \
+    "$(dirname "$config_destination")" \
+    "$(dirname "$sudoers_destination")"
+  install -m 0755 "$source_path" "$manager_destination" || return 1
+  install -m 0755 "$launcher_source_path" "$launcher_destination" || return 1
+  {
+    printf 'LMS_DESKTOP_HELPER_PREFERENCE_FILE=%q\n' "$preference_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_UNIT=%q\n' "$unit_name"
+    printf 'LMS_DESKTOP_HELPER_UNIT_FILE=%q\n' "$unit_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_AUTOSTART_FILE=%q\n' "$autostart_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_LAUNCHER_PATH=%q\n' "$launcher_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_EXECUTABLE_PATH=%q\n' "$executable_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_DIRECTORY=%q\n' "$helper_directory_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_PAYLOAD_ARCHIVE=%q\n' "$payload_archive_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_INSTALL_ROOT=%q\n' "$install_root_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_SOCKET_PATH=%q\n' "$socket_path"
+    printf 'LMS_DESKTOP_HELPER_LOCAL_LMS_URL=%q\n' "$local_lms_url"
+    printf 'LMS_DESKTOP_HELPER_TRAY_ICON_PATH=%q\n' "$tray_icon_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_SERVICE_GROUP=%q\n' "$service_group"
+    printf 'LMS_DESKTOP_HELPER_INSTALLER_USERNAME=%q\n' "$installer_username"
+  } > "$config_destination" || return 1
+  chmod 0644 "$config_destination" || return 1
+
+  sudoers_temp_file="$(mktemp "$(dirname "$sudoers_destination")/.linux-made-sane-desktop-helper.XXXXXX")" || return 1
+  cat > "$sudoers_temp_file" <<SUDOERS
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path status
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path enable
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path disable
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path desktop-status
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path desktop-disable
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path desktop-enable
+SUDOERS
+  chmod 0440 "$sudoers_temp_file" || return 1
+  mv -f "$sudoers_temp_file" "$sudoers_destination" || return 1
+
+  if [[ "${LMS_DEST_ROOT:-}" == "" ]]; then
+    chown root:root "$manager_destination" "$launcher_destination" "$config_destination" "$sudoers_destination" 2>/dev/null || true
+    if command -v visudo >/dev/null 2>&1; then
+      visudo -cf "$sudoers_destination" >/dev/null
+    fi
+  fi
+}
+
 lms_prepare_desktop_helper_access() {
   local service_group="$1"
 
@@ -709,6 +828,14 @@ lms_write_update_helper() {
   local service_user="$1"
   local base_url="${2:-https://www.linuxmadesane.com}"
   local helper_path="${3:-/usr/local/sbin/linux-made-sane-update}"
+  local install_root="${4:-/opt/linuxmadesane/ce}"
+  local data_root="${5:-/var/lib/linuxmadesane/ce}"
+  local config_root="${6:-/etc/linuxmadesane/ce}"
+  local service_group="${7:-linuxmadesane}"
+  local service_unit="${8:-linux-made-sane.service}"
+  local service_port="${9:-5080}"
+  local database_connection_string="${10:-Data Source=${data_root}/linuxmadesane.db}"
+  local data_protection_key_directory="${11:-${data_root}/protection-keys}"
 
   if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
     lms_log "Skipping update helper while staging under LMS_DEST_ROOT"
@@ -730,8 +857,17 @@ set -euo pipefail
 
 INSTALL_URL="\${LMS_INSTALL_URL:-$base_url/install.sh}"
 SOURCE="\${LMS_SOURCE:-lms-auto-update}"
-SERVICE_UNIT="\${LMS_SERVICE_UNIT:-linux-made-sane.service}"
-CURRENT_DIR="\${LMS_CURRENT_DIR:-/opt/linuxmadesane/ce/current}"
+PRESERVES_LMS_STATE_PATHS=true
+INSTALL_ROOT="\${LMS_INSTALL_ROOT:-$install_root}"
+DATA_ROOT="\${LMS_DATA_ROOT:-$data_root}"
+CONFIG_ROOT="\${LMS_CONFIG_ROOT:-$config_root}"
+DATABASE_CONNECTION_STRING="\${LMS_DATABASE_CONNECTION_STRING:-$database_connection_string}"
+DATA_PROTECTION_KEY_DIRECTORY="\${LMS_DATA_PROTECTION_KEY_DIRECTORY:-$data_protection_key_directory}"
+SERVICE_USER="\${LMS_SERVICE_USER:-$service_user}"
+SERVICE_GROUP="\${LMS_SERVICE_GROUP:-$service_group}"
+SERVICE_UNIT="\${LMS_SERVICE_UNIT:-$service_unit}"
+SERVICE_PORT="\${LMS_SERVICE_PORT:-$service_port}"
+CURRENT_DIR="\${LMS_CURRENT_DIR:-\$INSTALL_ROOT/current}"
 EXPECT_SERVICE_ACTIVE=true
 
 if ! command -v curl >/dev/null 2>&1; then
@@ -772,7 +908,21 @@ if [[ -z "\${LMS_UPDATE_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&
   fi
 
   exec systemd-run "\${SYSTEMD_RUN_ARGS[@]}" \
-    env LMS_UPDATE_DETACHED=1 LMS_INSTALL_URL="\$INSTALL_URL" LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" "\$0" "\${INSTALL_ARGS[@]}"
+    env \
+      LMS_UPDATE_DETACHED=1 \
+      LMS_INSTALL_URL="\$INSTALL_URL" \
+      LMS_SOURCE="\$SOURCE" \
+      LMS_BASE_URL="$base_url" \
+      LMS_INSTALL_ROOT="\$INSTALL_ROOT" \
+      LMS_DATA_ROOT="\$DATA_ROOT" \
+      LMS_CONFIG_ROOT="\$CONFIG_ROOT" \
+      LMS_DATABASE_CONNECTION_STRING="\$DATABASE_CONNECTION_STRING" \
+      LMS_DATA_PROTECTION_KEY_DIRECTORY="\$DATA_PROTECTION_KEY_DIRECTORY" \
+      LMS_SERVICE_USER="\$SERVICE_USER" \
+      LMS_SERVICE_GROUP="\$SERVICE_GROUP" \
+      LMS_SERVICE_UNIT="\$SERVICE_UNIT" \
+      LMS_SERVICE_PORT="\$SERVICE_PORT" \
+      "\$0" "\${INSTALL_ARGS[@]}"
 fi
 
 PREVIOUS_CURRENT_TARGET=""
@@ -814,7 +964,20 @@ verify_self_update_active() {
   return 1
 }
 
-if ! curl -fsSL "\$INSTALL_URL" | env LMS_SOURCE="\$SOURCE" LMS_BASE_URL="$base_url" bash -s -- --install "\${INSTALL_ARGS[@]}"; then
+if ! curl -fsSL "\$INSTALL_URL" | env \
+  LMS_INSTALL_SECOND_STAGE=1 \
+  LMS_SOURCE="\$SOURCE" \
+  LMS_BASE_URL="$base_url" \
+  LMS_INSTALL_ROOT="\$INSTALL_ROOT" \
+  LMS_DATA_ROOT="\$DATA_ROOT" \
+  LMS_CONFIG_ROOT="\$CONFIG_ROOT" \
+  LMS_DATABASE_CONNECTION_STRING="\$DATABASE_CONNECTION_STRING" \
+  LMS_DATA_PROTECTION_KEY_DIRECTORY="\$DATA_PROTECTION_KEY_DIRECTORY" \
+  LMS_SERVICE_USER="\$SERVICE_USER" \
+  LMS_SERVICE_GROUP="\$SERVICE_GROUP" \
+  LMS_SERVICE_UNIT="\$SERVICE_UNIT" \
+  LMS_SERVICE_PORT="\$SERVICE_PORT" \
+  bash -s -- --install "\${INSTALL_ARGS[@]}"; then
   rollback_self_update "installer returned a non-zero exit code"
   exit 1
 fi
@@ -1187,6 +1350,24 @@ lms_render_desktop_helper_file() {
     -e "s|__TRAY_ICON_PATH__|$(printf '%s' "$tray_icon_path" | sed 's/[&|]/\\&/g')|g" \
     -e "s|__EXEC_START__|$(printf '%s' "$exec_start" | sed 's/[&|]/\\&/g')|g" \
     "$template_path" > "$destination_path"
+}
+
+lms_read_env_value() {
+  local env_file="$1"
+  local key="$2"
+  local line
+
+  [[ -f "$env_file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "$key="*)
+        printf '%s' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done < "$env_file"
+
+  return 1
 }
 
 lms_write_env_file() {

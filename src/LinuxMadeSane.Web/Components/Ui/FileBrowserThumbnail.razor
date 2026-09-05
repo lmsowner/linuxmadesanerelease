@@ -1,0 +1,98 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using LinuxMadeSane.Core.Abstractions
+@implements IDisposable
+@inject IManagedHostFileAccessService FileAccessService
+@inject FileThumbnailCacheService ThumbnailCacheService
+@inject ILogger<FileBrowserThumbnail> Logger
+
+<div class="file-browser-thumbnail-result">
+    @if (!string.IsNullOrWhiteSpace(thumbnailDataUri))
+    {
+        <img src="@thumbnailDataUri" alt="" draggable="false" />
+    }
+    else if (isLoading)
+    {
+        <span class="file-browser-thumbnail-spinner" aria-hidden="true"></span>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ManagedHost Host { get; set; } = default!;
+    [Parameter, EditorRequired] public ManagedHostConnectionProfile ConnectionProfile { get; set; } = default!;
+    [Parameter, EditorRequired] public SftpItem Item { get; set; } = default!;
+
+    private CancellationTokenSource? loadCancellationTokenSource;
+    private string loadedRequestKey = string.Empty;
+    private string thumbnailDataUri = string.Empty;
+    private bool isLoading;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var requestKey = BuildRequestKey();
+        if (string.Equals(requestKey, loadedRequestKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        loadedRequestKey = requestKey;
+        thumbnailDataUri = string.Empty;
+        loadCancellationTokenSource?.Cancel();
+        loadCancellationTokenSource?.Dispose();
+        loadCancellationTokenSource = new CancellationTokenSource();
+        var cancellationToken = loadCancellationTokenSource.Token;
+
+        if (!FileThumbnailFormatSupport.IsSupportedFileName(Item.Name) ||
+            Item.SizeBytes > ThumbnailCacheService.MaxSourceBytes)
+        {
+            isLoading = false;
+            return;
+        }
+
+        isLoading = true;
+        try
+        {
+            var thumbnail = await ThumbnailCacheService.GetOrCreateAsync(
+                Host.Id,
+                Item,
+                (maxBytes, token) => FileAccessService.ReadBinaryFileAsync(
+                    Host,
+                    Item.FullPath,
+                    ConnectionProfile,
+                    maxBytes,
+                    token),
+                cancellationToken);
+            if (!cancellationToken.IsCancellationRequested && thumbnail is not null)
+            {
+                thumbnailDataUri = $"data:{thumbnail.ContentType};base64,{Convert.ToBase64String(thumbnail.ContentBytes)}";
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            Logger.LogDebug(exception, "Could not load a file-browser thumbnail for host {HostId}.", Host.Id);
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                isLoading = false;
+            }
+        }
+    }
+
+    private string BuildRequestKey() =>
+        $"{Host.Id:N}|{Item.FullPath}|{Item.SizeBytes}|{Item.LastModifiedUtc?.UtcTicks ?? 0}|" +
+        $"{ConnectionProfile.Username}|{ConnectionProfile.SecretHandle}|{ConnectionProfile.PreferStoredCredentials}|" +
+        $"{ConnectionProfile.UseSshTransport}|{ConnectionProfile.UseSudo}";
+
+    public void Dispose()
+    {
+        loadCancellationTokenSource?.Cancel();
+        loadCancellationTokenSource?.Dispose();
+        loadCancellationTokenSource = null;
+    }
+}

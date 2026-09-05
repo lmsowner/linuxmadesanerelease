@@ -4,6 +4,17 @@ This repository is the public Community Edition release and documentation surfac
 
 Linux Made Sane is a local-first Linux administration web app for managing hosts, terminals, files, services, shares, remote access, local Caddy reverse proxy routes, AI-assisted operations, media-library workflows, and local Linux desktop assistance.
 
+## Current Highlights
+
+- guided SSH hardening, key setup and authenticator-based two-factor configuration
+- editable UFW firewall rules with source controls and rollback safeguards
+- attack-surface analysis that distinguishes real exposure from harmless local listeners
+- outbound Mail Relay for applications and legacy devices, including DKIM, SPF, DMARC, Cloudflare DNS, queues, logs and test delivery
+- Edge Gateway publishing through Cloudflare Tunnel and Caddy with passkey, authenticator and email access choices
+- local server configuration summaries across networking, containers, firewall, shares, SFTP and LMS modules
+- terminals, runbooks, scheduled work, file previews, shares and SFTP administration
+- optional operator-reviewed AI assistance with cloud or local providers
+
 Current Community downloads are served by the public website:
 
 ```text

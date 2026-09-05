@@ -3,10 +3,11 @@
 
 @page "/auth/setup-passkey"
 @layout AuthLayout
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Web.Services
+@inject PasskeyAuthenticationService PasskeyAuthenticationService
 
-<script type="module" src="@Assets["Components/Pages/PasskeySetupPrompt.razor.js"]"></script>
-
-<PageTitle>Set Up MFA | Linux Made Sane</PageTitle>
+<PageTitle>Passkeys | Linux Made Sane</PageTitle>
 
 <div class="auth-passkey-shell">
     <section class="auth-passkey-showcase">
@@ -16,35 +17,102 @@
     <section class="auth-passkey-panel">
         <div class="auth-passkey-heading">
             <p class="eyebrow">Linux Made Sane</p>
-            <h1>Make MFA easier.</h1>
-            <p>Set up a passkey for this hostname so future sign-ins can use your device unlock instead of typing a code.</p>
+            <h1>Your passkeys.</h1>
+            <p>Use your device unlock for phishing-resistant LMS sign-in instead of typing an authenticator code.</p>
         </div>
 
-        <div class="auth-passkey-card" data-passkey-enrollment>
-            <input type="hidden" value="@NormalizedReturnUrl" data-return-url />
+        @if (!string.IsNullOrWhiteSpace(Error))
+        {
+            <p class="callout auth-passkey-status error">@Error</p>
+        }
 
-            <label class="auth-passkey-field">
-                <span>Device name</span>
-                <input type="text"
-                       value="This device"
-                       autocomplete="off"
-                       maxlength="80"
-                       data-passkey-friendly-name />
-            </label>
+        @if (IsAuthenticated)
+        {
+            <section class="auth-passkey-overview @(passkeys.Count == 0 ? "missing" : "configured")">
+                <span class="auth-passkey-overview-icon" aria-hidden="true">
+                    <UiGlyphIcon Glyph="UiIconGlyph.Key" />
+                </span>
+                <span>
+                    <strong>@PasskeyOverviewTitle</strong>
+                    <small>@PasskeyOverviewDetail</small>
+                </span>
+            </section>
 
-            <p class="callout auth-passkey-status" data-passkey-status hidden></p>
+            @if (passkeys.Count > 0)
+            {
+                <div class="auth-passkey-list" aria-label="Configured passkeys">
+                    @foreach (var passkey in passkeys)
+                    {
+                        <div class="auth-passkey-list-item">
+                            <strong>@passkey.FriendlyName</strong>
+                            <span>@FormatPasskeyUsage(passkey)</span>
+                        </div>
+                    }
+                </div>
+            }
 
-            <div class="auth-passkey-actions">
-                <button class="auth-passkey-primary" type="button" data-passkey-enroll>
-                    Set up MFA passkey
-                </button>
-                <a class="auth-passkey-secondary" href="@NormalizedReturnUrl">
-                    Not now
-                </a>
+            @if (CanEnroll)
+            {
+                <div class="auth-passkey-card" data-passkey-enrollment>
+                    <input type="hidden" value="@NormalizedReturnUrl" data-return-url />
+
+                    <h2>@(passkeys.Count == 0 ? "Set up your first passkey" : "Add another passkey")</h2>
+                    <label class="auth-passkey-field">
+                        <span>Device name</span>
+                        <input type="text"
+                               value="This device"
+                               autocomplete="off"
+                               maxlength="80"
+                               data-passkey-friendly-name />
+                    </label>
+
+                    <p class="callout auth-passkey-status" data-passkey-status hidden></p>
+
+                    <div class="auth-passkey-actions">
+                        <button class="auth-passkey-primary" type="button" data-passkey-enroll>
+                            @(passkeys.Count == 0 ? "Set up passkey" : "Add passkey")
+                        </button>
+                        <a class="auth-passkey-secondary" href="@NormalizedReturnUrl">Back to LMS</a>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <form method="post" action="/auth/passkeys/verify" class="auth-passkey-card auth-passkey-verify-card">
+                    <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+                    <h2>Verify before adding a passkey</h2>
+                    <p>Enter the current authenticator code for <strong>@AuthenticatedEmail</strong>. This prevents a stolen signed-in session from adding its own passkey.</p>
+                    <label class="auth-passkey-field">
+                        <span>6-digit authenticator code</span>
+                        <input type="text"
+                               name="otpCode"
+                               inputmode="numeric"
+                               autocomplete="one-time-code"
+                               pattern="[0-9]{6}"
+                               minlength="6"
+                               maxlength="6"
+                               required />
+                    </label>
+                    <div class="auth-passkey-actions">
+                        <button class="auth-passkey-primary" type="submit">Verify and continue</button>
+                        <a class="auth-passkey-secondary" href="@NormalizedReturnUrl">Back to LMS</a>
+                    </div>
+                </form>
+            }
+        }
+        else
+        {
+            <div class="auth-passkey-card">
+                <h2>Sign in first</h2>
+                <p>Passkeys belong to an LMS account. Sign in with MFA, then return here to add one.</p>
+                <div class="auth-passkey-actions">
+                    <a class="auth-passkey-primary" href="@LoginHref">Sign in to set up a passkey</a>
+                    <a class="auth-passkey-secondary" href="@NormalizedReturnUrl">Back to LMS</a>
+                </div>
             </div>
-        </div>
+        }
 
-        <p class="auth-passkey-footnote">Passkeys are bound to the current hostname. If you use another Edge Gateway domain, add a passkey there as well.</p>
+        <p class="auth-passkey-footnote">Passkeys are bound to <strong>@CurrentHostname</strong>. If you use another LMS or Edge Gateway hostname, set up a passkey there as well.</p>
     </section>
 </div>
 
@@ -52,7 +120,62 @@
     [SupplyParameterFromQuery]
     public string? ReturnUrl { get; set; }
 
+    [SupplyParameterFromQuery]
+    public string? Error { get; set; }
+
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private IReadOnlyList<SecurityPasskeyCredential> passkeys = [];
+    private bool CanEnroll { get; set; }
+
+    private bool IsAuthenticated => HttpContext?.User?.Identity?.IsAuthenticated == true;
+
+    private bool IsSignedInWithPasskey => HttpContext?.User?.HasClaim("amr", "passkey") == true;
+
+    private string AuthenticatedEmail =>
+        HttpContext?.User?.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value ??
+        HttpContext?.User?.Identity?.Name ??
+        "this LMS account";
+
+    private string CurrentHostname => HttpContext?.Request.Host.Host ?? "this hostname";
+
+    private string PasskeyOverviewTitle => IsSignedInWithPasskey
+        ? "This session is using a passkey"
+        : passkeys.Count == 0
+            ? "No passkey is configured"
+            : passkeys.Count == 1
+                ? "1 passkey is configured"
+                : $"{passkeys.Count} passkeys are configured";
+
+    private string PasskeyOverviewDetail => IsSignedInWithPasskey
+        ? "Your current sign-in was verified by your device."
+        : passkeys.Count == 0
+            ? "Add one now for safer, easier sign-in."
+            : "You can use a configured device on the LMS login page.";
+
     private string NormalizedReturnUrl => NormalizeReturnUrl(ReturnUrl);
+
+    private string LoginHref =>
+        $"/login?returnUrl={Uri.EscapeDataString($"/auth/setup-passkey?returnUrl={Uri.EscapeDataString(NormalizedReturnUrl)}")}";
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (HttpContext?.User?.Identity?.IsAuthenticated != true)
+        {
+            return;
+        }
+
+        passkeys = await PasskeyAuthenticationService.ListForPrincipalAsync(
+            HttpContext.User,
+            HttpContext.RequestAborted);
+        CanEnroll = PasskeyAuthenticationService.HasFreshStrongMfaSession(HttpContext.User);
+    }
+
+    private static string FormatPasskeyUsage(SecurityPasskeyCredential passkey) =>
+        passkey.LastUsedAtUtc.HasValue
+            ? $"Last used {passkey.LastUsedAtUtc.Value.ToLocalTime():yyyy-MM-dd HH:mm}"
+            : $"Added {passkey.CreatedAtUtc.ToLocalTime():yyyy-MM-dd}";
 
     private static string NormalizeReturnUrl(string? returnUrl)
     {

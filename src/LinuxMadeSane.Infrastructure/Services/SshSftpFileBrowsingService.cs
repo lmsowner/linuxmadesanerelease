@@ -181,8 +181,8 @@ public sealed class SshSftpFileBrowsingService(
         }
 
         using var stream = client.OpenRead(normalizedPath);
-        var buffer = new byte[safeMaxBytes];
-        var bytesRead = stream.Read(buffer, 0, buffer.Length);
+        var buffer = new byte[(int)Math.Min(attributes.Size, safeMaxBytes)];
+        var bytesRead = StreamReadSupport.ReadUpTo(stream, buffer, cancellationToken);
         var isTruncated = attributes.Size > bytesRead;
         var decoded = TextFileEncoding.Decode(buffer.AsSpan(0, bytesRead));
 
@@ -222,8 +222,8 @@ public sealed class SshSftpFileBrowsingService(
         }
 
         using var stream = client.OpenRead(normalizedPath);
-        var buffer = new byte[safeMaxBytes];
-        var bytesRead = stream.Read(buffer, 0, buffer.Length);
+        var buffer = new byte[(int)Math.Min(attributes.Size, safeMaxBytes)];
+        var bytesRead = StreamReadSupport.ReadUpTo(stream, buffer, cancellationToken);
         var contentBytes = new byte[bytesRead];
         Buffer.BlockCopy(buffer, 0, contentBytes, 0, bytesRead);
 

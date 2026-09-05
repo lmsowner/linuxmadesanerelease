@@ -97,18 +97,71 @@
                                         @ToolbarContent
                                     </div>
                                     <div class="file-browser-column-toggles-row">
-                                        <div class="file-browser-column-toggles" aria-label="Visible file columns">
-                                            <UiSwitchField @bind-Value="showOwnerColumn" Label="Owner" Title="Show owner column" Compact="true" />
-                                            <UiSwitchField @bind-Value="showGroupColumn" Label="Group" Title="Show group column" Compact="true" />
-                                            <UiSwitchField @bind-Value="showPermissionsColumn" Label="Permissions" Title="Show permissions column" Compact="true" />
+                                        @if (IsThumbnailView)
+                                        {
+                                            <div class="file-browser-thumbnail-filter">
+                                                <UiCompactCheckbox Label="Select all"
+                                                                   Title="Select all visible items"
+                                                                   Value="@AllItemsSelected"
+                                                                   ValueChanged="ToggleSelectAllAsync"
+                                                                   Disabled="@(VisibleItems.Count == 0 || IsBusy)" />
+                                                <UiFilterInput Value="@itemFilter"
+                                                               ValueChanged="OnItemFilterChangedAsync"
+                                                               Placeholder="Filter"
+                                                               Title="Filter files and folders in this folder"
+                                                               AriaLabel="Filter files and folders in this folder"
+                                                               Disabled="@(!CanBrowse || IsBusy)" />
+                                            </div>
+                                        }
+
+                                        @if (!IsThumbnailView)
+                                        {
+                                            <div class="file-browser-column-toggles" aria-label="Visible file columns">
+                                                <UiSwitchField @bind-Value="showOwnerColumn" Label="Owner" Title="Show owner column" Compact="true" />
+                                                <UiSwitchField @bind-Value="showGroupColumn" Label="Group" Title="Show group column" Compact="true" />
+                                                <UiSwitchField @bind-Value="showPermissionsColumn" Label="Permissions" Title="Show permissions column" Compact="true" />
+                                            </div>
+                                        }
+
+                                        <div class="file-browser-display-tools">
+                                            <div class="file-browser-view-toggle" role="group" aria-label="File view">
+                                                <UiIconButton Label="List view"
+                                                              Title="List view"
+                                                              Glyph="UiIconGlyph.ListView"
+                                                              Variant="UiButtonVariant.Toolbar"
+                                                              Class="@(!IsThumbnailView ? "active" : null)"
+                                                              aria-pressed="@(!IsThumbnailView)"
+                                                              OnClick="ShowListViewAsync" />
+                                                <UiIconButton Label="Thumbnail view"
+                                                              Title="Thumbnail view"
+                                                              Glyph="UiIconGlyph.ThumbnailView"
+                                                              Variant="UiButtonVariant.Toolbar"
+                                                              Class="@(IsThumbnailView ? "active" : null)"
+                                                              aria-pressed="@IsThumbnailView"
+                                                              OnClick="ShowThumbnailViewAsync" />
+                                                @if (IsThumbnailView)
+                                                {
+                                                    <label class="file-browser-thumbnail-size" title="@($"Thumbnail size: {thumbnailSizePx}px")">
+                                                        <input type="range"
+                                                               min="84"
+                                                               max="480"
+                                                               step="12"
+                                                               value="@thumbnailSizePx"
+                                                               aria-label="Thumbnail size from small to huge"
+                                                               @oninput="OnThumbnailSizeChanged" />
+                                                    </label>
+                                                }
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
-                                <div class="table-shell file-browser-table-shell"
-                                     @oncontextmenu="RequestCurrentDirectoryContextMenuAsync"
-                                     @oncontextmenu:preventDefault="true"
-                                     @oncontextmenu:stopPropagation="true">
-                                    <table>
+                                @if (!IsThumbnailView)
+                                {
+                                    <div class="table-shell file-browser-table-shell"
+                                         @oncontextmenu="RequestCurrentDirectoryContextMenuAsync"
+                                         @oncontextmenu:preventDefault="true"
+                                         @oncontextmenu:stopPropagation="true">
+                                        <table>
                                         <thead>
                                             <tr>
                                                 <th class="file-browser-select-column" title="Select all visible items">
@@ -258,8 +311,91 @@
                                                 </tr>
                                             }
                                         </tbody>
-                                    </table>
-                                </div>
+                                        </table>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="file-browser-thumbnail-shell"
+                                         style="@GetThumbnailGridStyle()"
+                                         @oncontextmenu="RequestCurrentDirectoryContextMenuAsync"
+                                         @oncontextmenu:preventDefault="true"
+                                         @oncontextmenu:stopPropagation="true">
+                                        <div class="file-browser-thumbnail-grid">
+                                            @if (CanNavigateUp)
+                                            {
+                                                <div class="file-browser-thumbnail-card file-browser-thumbnail-parent"
+                                                     role="button"
+                                                     tabindex="0"
+                                                     title="Open parent folder"
+                                                     @onclick="GoUpAsync"
+                                                     @onkeydown="@((KeyboardEventArgs args) => HandleThumbnailKeyDownAsync(args, null))"
+                                                     @oncontextmenu="RequestParentDirectoryContextMenuAsync"
+                                                     @oncontextmenu:preventDefault="true"
+                                                     @oncontextmenu:stopPropagation="true">
+                                                    <div class="file-browser-thumbnail-media">
+                                                        <span class="file-browser-thumbnail-fallback file-browser-item-icon-folder" aria-hidden="true">@RenderFolderIcon(false)</span>
+                                                    </div>
+                                                    <span class="file-browser-thumbnail-name">..</span>
+                                                    <span class="file-browser-thumbnail-meta">Parent folder</span>
+                                                </div>
+                                            }
+
+                                            @if (VisibleItems.Count == 0)
+                                            {
+                                                <div class="file-browser-thumbnail-empty">
+                                                    @if (HasActiveItemFilter)
+                                                    {
+                                                        <span>No files or folders in this folder match "@itemFilter.Trim()".</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span>No files or folders are available in this folder.</span>
+                                                    }
+                                                </div>
+                                            }
+
+                                            @foreach (var item in VisibleItems)
+                                            {
+                                                var isBlockedFolder = IsBlockedFolder(item);
+                                                var isSelected = IsItemSelected(item);
+
+                                                <div @key="item.FullPath"
+                                                     class="file-browser-thumbnail-card @(SelectedItem == item || isSelected ? "selected" : null) @(isBlockedFolder ? "blocked" : null)"
+                                                     role="button"
+                                                     tabindex="0"
+                                                     title="@item.FullPath"
+                                                     aria-label="@item.Name"
+                                                     @onclick="@(() => ActivateItemAsync(item))"
+                                                     @onkeydown="@((KeyboardEventArgs args) => HandleThumbnailKeyDownAsync(args, item))"
+                                                     @oncontextmenu="@((MouseEventArgs args) => RequestItemContextMenuAsync(args, item))"
+                                                     @oncontextmenu:preventDefault="true"
+                                                     @oncontextmenu:stopPropagation="true">
+                                                    <span class="file-browser-thumbnail-select">
+                                                        <UiCompactCheckbox Label="@($"Select {item.Name}")"
+                                                                           Title="@($"Select {item.Name}")"
+                                                                           Value="@isSelected"
+                                                                           ValueChanged="@((bool selected) => ToggleItemSelectionAsync(item, selected))"
+                                                                           Disabled="@IsBusy" />
+                                                    </span>
+                                                    <div class="file-browser-thumbnail-media">
+                                                        <span class="file-browser-thumbnail-fallback @GetItemIconClass(item.ItemType)" aria-hidden="true">@RenderItemIcon(item.ItemType, isExpandedFolder: false)</span>
+                                                        @if (ThumbnailContent is not null && item.ItemType is SftpItemType.File or SftpItemType.Link)
+                                                        {
+                                                            @ThumbnailContent(item)
+                                                        }
+                                                        @if (isBlockedFolder)
+                                                        {
+                                                            <span class="file-browser-thumbnail-warning" aria-hidden="true" title="Not accessible">@RenderBlockedIcon()</span>
+                                                        }
+                                                    </div>
+                                                    <span class="file-browser-thumbnail-name">@item.Name</span>
+                                                    <span class="file-browser-thumbnail-meta">@GetThumbnailItemMeta(item, isBlockedFolder)</span>
+                                                </div>
+                                            }
+                                        </div>
+                                    </div>
+                                }
                             </div>
                         }
 
@@ -396,6 +532,7 @@
     [Parameter] public EventCallback<bool> DetailPanelFocusedChanged { get; set; }
     [Parameter] public RenderFragment? HeaderContent { get; set; }
     [Parameter] public RenderFragment? ToolbarContent { get; set; }
+    [Parameter] public RenderFragment<SftpItem>? ThumbnailContent { get; set; }
     [Parameter] public RenderFragment<SftpItem>? DetailsContent { get; set; }
     [Parameter] public RenderFragment<SftpItem?>? DetailActions { get; set; }
 
@@ -410,11 +547,14 @@
     private bool AllItemsSelected => VisibleItems.Count > 0 && VisibleItems.All(IsItemSelected);
     private bool IsDetailPanelFocused => ShowDetailPanel && DetailPanelFocused;
     private bool HasActiveItemFilter => !string.IsNullOrWhiteSpace(itemFilter);
+    private bool IsThumbnailView => displayMode == FileBrowserDisplayMode.Thumbnails;
     private int CurrentTableColumnCount => 4 + (showOwnerColumn ? 1 : 0) + (showGroupColumn ? 1 : 0) + (showPermissionsColumn ? 1 : 0);
     private string itemFilter = string.Empty;
     private bool showOwnerColumn;
     private bool showGroupColumn;
     private bool showPermissionsColumn;
+    private FileBrowserDisplayMode displayMode = FileBrowserDisplayMode.List;
+    private int thumbnailSizePx = 156;
     private ElementReference detailLayoutElement;
     private DotNetObjectReference<FileBrowserExplorer>? detailPanelInteropReference;
 
@@ -453,6 +593,48 @@
         itemFilter = value ?? string.Empty;
         return Task.CompletedTask;
     }
+
+    private Task ShowListViewAsync()
+    {
+        displayMode = FileBrowserDisplayMode.List;
+        return Task.CompletedTask;
+    }
+
+    private Task ShowThumbnailViewAsync()
+    {
+        displayMode = FileBrowserDisplayMode.Thumbnails;
+        return Task.CompletedTask;
+    }
+
+    private void OnThumbnailSizeChanged(ChangeEventArgs args)
+    {
+        if (int.TryParse(args.Value?.ToString(), out var value))
+        {
+            thumbnailSizePx = Math.Clamp(value, 84, 480);
+        }
+    }
+
+    private string GetThumbnailGridStyle() =>
+        $"--file-browser-thumbnail-size:{Math.Clamp(thumbnailSizePx, 84, 480)}px;";
+
+    private Task HandleThumbnailKeyDownAsync(KeyboardEventArgs args, SftpItem? item)
+    {
+        if (args.Key is not ("Enter" or " "))
+        {
+            return Task.CompletedTask;
+        }
+
+        return item is null ? GoUpAsync() : ActivateItemAsync(item);
+    }
+
+    private static string GetThumbnailItemMeta(SftpItem item, bool isBlockedFolder) =>
+        isBlockedFolder
+            ? "Not accessible"
+            : item.ItemType == SftpItemType.Folder
+                ? "Folder"
+                : item.ItemType == SftpItemType.Link
+                    ? "Link"
+                    : FormatBytes(item.SizeBytes);
 
     private Task ToggleSidebarCollapsedAsync() =>
         SidebarCollapsedChanged.HasDelegate
@@ -905,5 +1087,11 @@
     {
         detailPanelInteropReference?.Dispose();
         detailPanelInteropReference = null;
+    }
+
+    private enum FileBrowserDisplayMode
+    {
+        List = 0,
+        Thumbnails = 1
     }
 }

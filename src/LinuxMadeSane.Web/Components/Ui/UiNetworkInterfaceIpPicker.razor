@@ -1,0 +1,235 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using System.Linq.Expressions
+@inject IJSRuntime JSRuntime
+@implements IAsyncDisposable
+
+<div class="@ShellClass" @ref="rootElement" @onfocusin="CancelPendingClose" @onfocusout="ScheduleClose">
+    <div class="ui-field-copy">
+        <span class="ui-field-label">@Label</span>
+        @if (!string.IsNullOrWhiteSpace(Helper))
+        {
+            <span class="ui-field-helper">@Helper</span>
+        }
+    </div>
+
+    <div class="ui-field-input-region">
+        <div class="ui-network-ip-picker @(isOpen ? "open" : null)">
+            <button class="ui-network-ip-button"
+                    type="button"
+                    role="combobox"
+                    aria-label="@Label"
+                    aria-expanded="@isOpen"
+                    disabled="@Disabled"
+                    @onclick="ToggleOpen">
+                <span class="ui-network-ip-selected">
+                    @if (SelectedValues.Count == 0)
+                    {
+                        <span class="ui-network-ip-placeholder">@Placeholder</span>
+                    }
+                    else
+                    {
+                        @foreach (var selected in SelectedValues)
+                        {
+                            <span class="ui-network-ip-pill">@selected</span>
+                        }
+                    }
+                </span>
+                <span class="ui-network-ip-summary">@SelectionSummary</span>
+            </button>
+
+            @if (isOpen && !Disabled)
+            {
+                <div class="ui-network-ip-menu" role="listbox" aria-label="@Label" aria-multiselectable="true">
+                    @foreach (var option in Options)
+                    {
+                        var selected = IsSelected(option.Address);
+                        <button class="ui-network-ip-option @(selected ? "selected" : null) @(option.Scope == UiNetworkInterfaceIpScope.Public ? "public" : null)"
+                                type="button"
+                                role="option"
+                                aria-selected="@selected"
+                                @onclick="@(() => ToggleValueAsync(option.Address))">
+                            <span class="ui-network-ip-check" aria-hidden="true"></span>
+                            <span class="ui-network-ip-option-copy">
+                                <strong>@option.Address</strong>
+                                <span>@option.InterfaceName · @option.Detail</span>
+                            </span>
+                            <span class="ui-network-ip-scope">@option.ScopeLabel</span>
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+
+        @if (ValueExpression is not null)
+        {
+            <div class="ui-field-validation">
+                <ValidationMessage For="@ValueExpression" />
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private bool isOpen;
+    private ElementReference rootElement;
+    private DotNetObjectReference<UiNetworkInterfaceIpPicker>? outsideClickReference;
+    private int closeRequestVersion;
+    private bool disposed;
+
+    [Parameter] public string Label { get; set; } = "Network interfaces";
+    [Parameter] public string? Helper { get; set; }
+    [Parameter] public string Placeholder { get; set; } = "Select interfaces";
+    [Parameter] public string Value { get; set; } = string.Empty;
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    [Parameter] public Expression<Func<string>>? ValueExpression { get; set; }
+    [Parameter] public bool Ipv4Only { get; set; }
+    [Parameter] public bool IncludeAllIpv4 { get; set; } = true;
+    [Parameter] public bool IncludeLoopback { get; set; } = true;
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public string? FallbackValue { get; set; }
+    [Parameter] public string? Class { get; set; }
+
+    private string ShellClass => string.IsNullOrWhiteSpace(Class)
+        ? "ui-field-shell ui-field-shell-compact ui-network-ip-field"
+        : $"ui-field-shell ui-field-shell-compact ui-network-ip-field {Class}";
+
+    private IReadOnlyList<string> SelectedValues => SplitValues(Value);
+
+    private IReadOnlyList<UiNetworkInterfaceIpOption> Options
+    {
+        get
+        {
+            var options = UiNetworkInterfaceIpCatalog.GetOptions(Ipv4Only, IncludeAllIpv4, IncludeLoopback).ToList();
+            var seen = options.Select(static option => option.Address).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var selected in SelectedValues)
+            {
+                if (seen.Add(selected))
+                {
+                    options.Add(new(selected, "Saved interface", "Currently unavailable or no longer detected", UiNetworkInterfaceIpScope.Saved));
+                }
+            }
+
+            return options;
+        }
+    }
+
+    private string SelectionSummary => SelectedValues.Count switch
+    {
+        0 => "None",
+        1 => "1 selected",
+        _ => $"{SelectedValues.Count} selected"
+    };
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        outsideClickReference = DotNetObjectReference.Create(this);
+        await JSRuntime.InvokeVoidAsync("lmsMultiSelect.registerOutsideClick", rootElement, outsideClickReference);
+    }
+
+    private void ToggleOpen()
+    {
+        if (Disabled)
+        {
+            return;
+        }
+
+        CancelPendingClose();
+        isOpen = !isOpen;
+    }
+
+    private async Task ToggleValueAsync(string value)
+    {
+        CancelPendingClose();
+        var selected = SelectedValues.ToList();
+        var existingIndex = selected.FindIndex(item => item.Equals(value, StringComparison.OrdinalIgnoreCase));
+        if (existingIndex >= 0)
+        {
+            selected.RemoveAt(existingIndex);
+        }
+        else
+        {
+            if (value == "0.0.0.0")
+            {
+                selected.Clear();
+            }
+            else
+            {
+                selected.RemoveAll(static item => item == "0.0.0.0");
+            }
+            selected.Add(value);
+        }
+
+        if (selected.Count == 0 && !string.IsNullOrWhiteSpace(FallbackValue))
+        {
+            selected.Add(FallbackValue.Trim());
+        }
+
+        await ValueChanged.InvokeAsync(string.Join(", ", selected));
+    }
+
+    private bool IsSelected(string value) =>
+        SelectedValues.Contains(value, StringComparer.OrdinalIgnoreCase);
+
+    private static IReadOnlyList<string> SplitValues(string? value) =>
+        (value ?? string.Empty)
+        .Split([',', '\r', '\n', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    private void CancelPendingClose() => closeRequestVersion++;
+
+    private void ScheduleClose()
+    {
+        var requestVersion = ++closeRequestVersion;
+        _ = CloseAfterFocusLeavesAsync(requestVersion);
+    }
+
+    private async Task CloseAfterFocusLeavesAsync(int requestVersion)
+    {
+        await Task.Delay(120);
+        if (disposed || requestVersion != closeRequestVersion)
+        {
+            return;
+        }
+
+        await CloseAsync();
+    }
+
+    [JSInvokable]
+    public Task CloseFromOutsideAsync() => CloseAsync();
+
+    private Task CloseAsync()
+    {
+        CancelPendingClose();
+        return InvokeAsync(() =>
+        {
+            isOpen = false;
+            StateHasChanged();
+        });
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+        CancelPendingClose();
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsMultiSelect.unregisterOutsideClick", rootElement);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        outsideClickReference?.Dispose();
+    }
+}

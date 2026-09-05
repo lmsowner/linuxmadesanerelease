@@ -7,6 +7,8 @@ public sealed class TerminalAiPromptRequest
 {
     public TerminalAiPromptMode Mode { get; set; } = TerminalAiPromptMode.Custom;
 
+    public TerminalAiAccessMode AccessMode { get; set; } = TerminalAiAccessMode.Agent;
+
     public Guid HostId { get; set; }
 
     public string HostName { get; set; } = string.Empty;
@@ -16,6 +18,8 @@ public sealed class TerminalAiPromptRequest
     public string WorkingDirectory { get; set; } = string.Empty;
 
     public string TerminalOutput { get; set; } = string.Empty;
+
+    public string StructuredCommandOutput { get; set; } = string.Empty;
 
     public string Request { get; set; } = string.Empty;
 

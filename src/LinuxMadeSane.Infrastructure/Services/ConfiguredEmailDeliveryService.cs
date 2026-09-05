@@ -4,6 +4,9 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Mail;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Text.Json;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
@@ -13,6 +16,7 @@ namespace LinuxMadeSane.Infrastructure.Services;
 
 public sealed class ConfiguredEmailDeliveryService(
     IMessagingEmailSettingsStore settingsStore,
+    IMailRelayStore mailRelayStore,
     ISecretStore secretStore,
     IHttpClientFactory httpClientFactory) : IEmailDeliveryService
 {
@@ -58,11 +62,6 @@ public sealed class ConfiguredEmailDeliveryService(
         string htmlBody,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(settings.SmtpHost))
-        {
-            return new EmailDeliveryResult(false, false, "SMTP host is required.");
-        }
-
         using var message = new MailMessage
         {
             From = new MailAddress(sender.Address, settings.SenderDisplayName.Trim()),
@@ -72,19 +71,39 @@ public sealed class ConfiguredEmailDeliveryService(
         };
         message.To.Add(recipient);
 
+        var password = string.Empty;
+        if (!string.IsNullOrWhiteSpace(settings.SmtpUsername))
+        {
+            password = string.IsNullOrWhiteSpace(settings.SmtpPasswordSecretReference)
+                ? string.Empty
+                : await secretStore.ResolveSecretAsync(settings.SmtpPasswordSecretReference, cancellationToken) ?? string.Empty;
+            var managedResult = await TrySendThroughManagedRelayAsync(
+                settings,
+                message.From!,
+                recipient,
+                password,
+                subject,
+                htmlBody,
+                cancellationToken);
+            if (managedResult is not null)
+            {
+                return managedResult;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(settings.SmtpHost))
+        {
+            return new EmailDeliveryResult(false, false, "SMTP host is required.");
+        }
+
         using var client = new SmtpClient(settings.SmtpHost.Trim(), Math.Clamp(settings.SmtpPort, 1, 65535))
         {
             EnableSsl = settings.SmtpUseStartTls,
-            DeliveryMethod = SmtpDeliveryMethod.Network
+            DeliveryMethod = SmtpDeliveryMethod.Network,
+            Credentials = string.IsNullOrWhiteSpace(settings.SmtpUsername)
+                ? null
+                : new NetworkCredential(settings.SmtpUsername.Trim(), password)
         };
-
-        if (!string.IsNullOrWhiteSpace(settings.SmtpUsername))
-        {
-            var password = string.IsNullOrWhiteSpace(settings.SmtpPasswordSecretReference)
-                ? string.Empty
-                : await secretStore.ResolveSecretAsync(settings.SmtpPasswordSecretReference, cancellationToken) ?? string.Empty;
-            client.Credentials = new NetworkCredential(settings.SmtpUsername.Trim(), password);
-        }
 
         try
         {
@@ -94,6 +113,95 @@ public sealed class ConfiguredEmailDeliveryService(
         catch (Exception exception)
         {
             return new EmailDeliveryResult(false, true, $"SMTP send failed: {exception.Message}");
+        }
+    }
+
+    private async Task<EmailDeliveryResult?> TrySendThroughManagedRelayAsync(
+        MessagingEmailSettings settings,
+        MailAddress sender,
+        MailAddress recipient,
+        string password,
+        string subject,
+        string htmlBody,
+        CancellationToken cancellationToken)
+    {
+        var configuration = await mailRelayStore.GetConfigurationAsync(cancellationToken);
+        if (configuration?.Enabled != true)
+        {
+            return null;
+        }
+
+        var clients = await mailRelayStore.ListClientsAsync(cancellationToken);
+        var relayClient = clients.FirstOrDefault(item =>
+            item.Enabled && item.Username.Equals(settings.SmtpUsername, StringComparison.OrdinalIgnoreCase));
+        if (relayClient is null)
+        {
+            return null;
+        }
+
+        if (!relayClient.AllowedSenderDomains.Contains(sender.Host, StringComparer.OrdinalIgnoreCase))
+        {
+            return new EmailDeliveryResult(
+                false,
+                true,
+                $"LMS Mail Relay user {relayClient.Username} is not allowed to send from {sender.Host}.");
+        }
+
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            return new EmailDeliveryResult(false, false, "Enter the password for the selected LMS Mail Relay user.");
+        }
+
+        if (string.IsNullOrWhiteSpace(configuration.TlsCertificateSecretReference))
+        {
+            return new EmailDeliveryResult(false, false, "The LMS Mail Relay TLS certificate is missing. Update the relay to repair it.");
+        }
+
+        var certificatePem = await secretStore.ResolveSecretAsync(configuration.TlsCertificateSecretReference, cancellationToken);
+        if (string.IsNullOrWhiteSpace(certificatePem))
+        {
+            return new EmailDeliveryResult(false, false, "The LMS Mail Relay TLS certificate could not be read. Update the relay to repair it.");
+        }
+
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            var submission = await ManagedMailRelaySmtpClient.SendAsync(
+                configuration,
+                relayClient.Username,
+                password,
+                sender,
+                recipient,
+                subject,
+                htmlBody,
+                "text/html",
+                certificatePem,
+                timeout.Token);
+            if (!submission.Authenticated)
+            {
+                return new EmailDeliveryResult(false, true, "LMS Mail Relay rejected the SMTP username or password.");
+            }
+
+            if (!submission.Accepted)
+            {
+                return new EmailDeliveryResult(false, true, $"LMS Mail Relay rejected the message: {submission.Response}");
+            }
+
+            var usedAt = DateTimeOffset.UtcNow;
+            await mailRelayStore.SaveClientAsync(
+                relayClient with { LastUsedUtc = usedAt, UpdatedUtc = usedAt },
+                cancellationToken);
+            var queueDetail = string.IsNullOrWhiteSpace(submission.QueueId) ? string.Empty : $" Queue ID: {submission.QueueId}.";
+            return new EmailDeliveryResult(true, true, $"Email accepted by LMS Mail Relay for {recipient.Address}.{queueDetail}");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new EmailDeliveryResult(false, true, "LMS Mail Relay did not complete SMTP submission within 30 seconds.");
+        }
+        catch (Exception exception) when (exception is IOException or SocketException or AuthenticationException or CryptographicException or InvalidOperationException)
+        {
+            return new EmailDeliveryResult(false, true, $"LMS Mail Relay send failed: {exception.Message}");
         }
     }
 

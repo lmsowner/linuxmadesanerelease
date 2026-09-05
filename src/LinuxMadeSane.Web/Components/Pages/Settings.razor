@@ -2,7 +2,9 @@
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/settings"
+@page "/attack-surface"
 @rendermode InteractiveServer
+@using System.Security.Claims
 @using System.Net
 @using System.Net.NetworkInformation
 @using System.Net.Sockets
@@ -11,16 +13,39 @@
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Models
 @using LinuxMadeSane.Core.Models.Shares
+@using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.AspNetCore.Components.Forms
 @inject ISecuritySettingsService SecuritySettingsService
 @inject IShareManagementService ShareService
 @inject ITrustedNetworkAccessService TrustedNetworkAccessService
+@inject TrustedNetworkAccessTrialService NetworkAccessTrialService
+@inject IFirewallManagementService FirewallService
 @inject NavigationManager Navigation
 
 <PageTitle>LMS Security | Linux Made Sane</PageTitle>
 
 <div class="page-shell">
     <UiHeroPanel Title="LMS Security" Compact="true" />
+
+    @if (HasAuthenticatedLmsUser)
+    {
+        <section class="surface-card security-current-passkey-panel" data-current-user-passkey-action>
+            <div class="security-current-passkey-copy">
+                <span class="security-current-passkey-icon" aria-hidden="true">
+                    <UiGlyphIcon Glyph="UiIconGlyph.Key" />
+                </span>
+                <div>
+                    <p class="eyebrow">Your sign-in security</p>
+                    <h2>Set up a passkey</h2>
+                    <p>Add a passkey only for the currently signed-in LMS account, <strong>@CurrentAccountEmail</strong>. Other accounts cannot be selected from this workflow.</p>
+                </div>
+            </div>
+            <UiCommandButton Label="Set up passkey"
+                             Glyph="UiIconGlyph.Key"
+                             Href="@CurrentAccountPasskeySetupHref"
+                             data-enhance-nav="false" />
+        </section>
+    }
 
     @if (!isLoaded)
     {
@@ -57,6 +82,93 @@
                                 <p class="callout @(networkMessageIsError ? "error" : "success")">@networkMessage</p>
                             }
 
+                            @if (IsNetworkTrialActive)
+                            {
+                                <section class="surface-subcard security-network-trial" role="status" aria-live="polite">
+                                    <div class="security-network-trial-copy">
+                                        <div class="security-network-trial-heading">
+                                            <span class="status-pill warning">Testing · @networkTrialRemainingSeconds s</span>
+                                            <strong>@networkTrialTitle</strong>
+                                        </div>
+                                        <p>@networkTrialDetail</p>
+                                        <small>The previous access policy is still saved. This test automatically reverts unless you keep it.</small>
+                                    </div>
+                                    <div class="security-network-trial-actions">
+                                        <UiCommandButton Label="Keep change"
+                                                         Glyph="UiIconGlyph.Save"
+                                                         OnClick="KeepNetworkTrialAsync" />
+                                        <UiCommandButton Label="Revert now"
+                                                         Glyph="UiIconGlyph.Refresh"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         OnClick="RevertNetworkTrialAsync" />
+                                    </div>
+                                </section>
+                            }
+
+                            @if (PublicFallbackNetworks.Count > 0)
+                            {
+                                <section class="surface-subcard security-public-access-panel">
+                                    <div class="security-public-access-heading">
+                                        <div>
+                                            <p class="eyebrow">Internet fallback</p>
+                                            <h3>Public IPv4 and IPv6</h3>
+                                            <p>These rules control direct public-source access not covered by a more specific LAN, VPN, or Tailscale rule. A correctly configured Edge Gateway using the LMS loopback origin remains separate.</p>
+                                        </div>
+                                        <span class="status-pill neutral">Default deny</span>
+                                    </div>
+                                    <div class="trusted-range-list">
+                                        @foreach (var entry in PublicFallbackNetworks)
+                                        {
+                                            <div class="trusted-range-row @(!entry.IsEnabled ? "trusted-range-row-disabled" : string.Empty)">
+                                                <div class="trusted-range-main">
+                                                    <strong>@entry.Label</strong>
+                                                    <code>@entry.AddressOrCidr</code>
+                                                    <span class="meta-text">@entry.Description</span>
+                                                </div>
+                                                <div class="trusted-range-access">
+                                                    @if (entry.IsEnabled)
+                                                    {
+                                                        <div class="trusted-range-pill-row">
+                                                            <span class="status-pill @GetTrustedNetworkAccessPillClass(entry)">@GetTrustedNetworkAccessSummary(entry)</span>
+                                                            <span class="status-pill success">@GetTrustedNetworkAuthPillText(entry)</span>
+                                                        </div>
+                                                        <span class="meta-text">@GetTrustedNetworkAccessMeta(entry)</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span class="status-pill neutral">Direct access blocked</span>
+                                                        <span class="meta-text">@GetDeniedResponseSummary(entry)</span>
+                                                    }
+                                                </div>
+                                                <div class="trusted-range-meta">
+                                                    <span class="status-pill neutral">Built-in</span>
+                                                </div>
+                                                <div class="trusted-range-actions">
+                                                    <UiCommandButton Label="@(UsesEmptyNotFoundResponse(entry) ? "404 on" : "404 off")"
+                                                                     Glyph="UiIconGlyph.Lock"
+                                                                     Variant="UiButtonVariant.Action"
+                                                                     OnClick="@(() => ToggleDeniedResponseModeAsync(entry))"
+                                                                     Disabled="@IsAnySecurityTrialActive" />
+                                                    @if (entry.IsEnabled)
+                                                    {
+                                                        <UiCommandButton Label="@(entry.IsAuthenticationEnabled ? "Auth off" : "Auth on")"
+                                                                         Glyph="@(entry.IsAuthenticationEnabled ? UiIconGlyph.Disconnect : UiIconGlyph.Connect)"
+                                                                         Variant="UiButtonVariant.Action"
+                                                                         OnClick="@(() => ToggleAuthenticationAccessAsync(entry))"
+                                                                         Disabled="@IsAnySecurityTrialActive" />
+                                                    }
+                                                    <UiCommandButton Label="@(entry.IsEnabled ? "Disable" : "Enable")"
+                                                                     Glyph="@(entry.IsEnabled ? UiIconGlyph.Disconnect : UiIconGlyph.Connect)"
+                                                                     Variant="UiButtonVariant.Action"
+                                                                     OnClick="@(() => ToggleTrustedNetworkAsync(entry))"
+                                                                     Disabled="@IsAnySecurityTrialActive" />
+                                                </div>
+                                            </div>
+                                        }
+                                    </div>
+                                </section>
+                            }
+
                             <details class="surface-subcard security-network-editor" open="@IsNetworkEditorOpen">
                                 <summary>
                                     <span>
@@ -81,11 +193,19 @@
                                         <UiCheckboxField @bind-Value="networkEditor.IsAuthenticationEnabled" Label="Authentication enabled" Helper="Require email plus OTP before allowing access." />
                                     </div>
 
+                                    <UiSelectField TValue="NetworkAccessDeniedResponseMode"
+                                                   @bind-Value="networkEditor.DeniedResponseMode"
+                                                   Label="Blocked response"
+                                                   Helper="Empty 404 returns only the HTTP status with a zero-length body; it does not show an LMS page.">
+                                        <option value="@NetworkAccessDeniedResponseMode.AccessDeniedPage">Access denied page</option>
+                                        <option value="@NetworkAccessDeniedResponseMode.EmptyNotFound">Empty HTTP 404</option>
+                                    </UiSelectField>
+
                                     <div class="toolbar-row">
                                         <UiCommandButton Label="@(isSavingNetwork ? "Saving..." : networkEditor.Id.HasValue ? "Save rule" : "Add rule")"
                                                          Glyph="@(networkEditor.Id.HasValue ? UiIconGlyph.Connect : UiIconGlyph.Plus)"
                                                          Type="submit"
-                                                         Disabled="@isSavingNetwork" />
+                                                         Disabled="@(isSavingNetwork || IsAnySecurityTrialActive)" />
                                         @if (networkEditor.Id.HasValue)
                                         {
                                             <UiCommandButton Label="Cancel edit" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="CancelNetworkEditAsync" />
@@ -161,6 +281,7 @@
                                                                 else
                                                                 {
                                                                     <span class="status-pill @GetTrustedNetworkAccessPillClass(entry)">@GetTrustedNetworkAccessSummary(entry)</span>
+                                                                    <span class="meta-text">@GetDeniedResponseSummary(entry)</span>
                                                                 }
                                                                 @if (!string.IsNullOrWhiteSpace(GetTrustedNetworkAccessMeta(entry)))
                                                                 {
@@ -174,13 +295,21 @@
                                                                 </div>
                                                             }
                                                             <div class="trusted-range-actions">
+                                                                @if (!entry.IsEnabled)
+                                                                {
+                                                                    <UiCommandButton Label="@(UsesEmptyNotFoundResponse(entry) ? "404 on" : "404 off")"
+                                                                                     Glyph="UiIconGlyph.Lock"
+                                                                                     Variant="UiButtonVariant.Action"
+                                                                                     OnClick="@(() => ToggleDeniedResponseModeAsync(entry))"
+                                                                                     Disabled="@IsAnySecurityTrialActive" />
+                                                                }
                                                                 @if (!entry.IsBuiltIn && entry.IsEnabled)
                                                                 {
                                                                     <UiCommandButton Label="Edit"
                                                                                      Glyph="UiIconGlyph.Edit"
                                                                                      Variant="UiButtonVariant.Action"
                                                                                      OnClick="@(() => BeginNetworkEdit(entry))"
-                                                                                     Disabled="@(!entry.IsEnabled)" />
+                                                                                     Disabled="@(!entry.IsEnabled || IsAnySecurityTrialActive)" />
                                                                 }
                                                                 @if (entry.IsEnabled)
                                                                 {
@@ -188,19 +317,20 @@
                                                                                      Glyph="@(entry.IsAuthenticationEnabled ? UiIconGlyph.Disconnect : UiIconGlyph.Connect)"
                                                                                      Variant="UiButtonVariant.Action"
                                                                                      OnClick="@(() => ToggleAuthenticationAccessAsync(entry))"
-                                                                                     Disabled="@(!entry.IsEnabled)" />
+                                                                                     Disabled="@(!entry.IsEnabled || IsAnySecurityTrialActive)" />
                                                                 }
                                                                 <UiCommandButton Label="@(entry.IsEnabled ? "Disable" : "Enable")"
                                                                                  Glyph="@(entry.IsEnabled ? UiIconGlyph.Disconnect : UiIconGlyph.Connect)"
                                                                                  Variant="UiButtonVariant.Action"
-                                                                                 OnClick="@(() => ToggleTrustedNetworkAsync(entry))" />
+                                                                                 OnClick="@(() => ToggleTrustedNetworkAsync(entry))"
+                                                                                 Disabled="@IsAnySecurityTrialActive" />
                                                                 @if (!entry.IsBuiltIn && entry.IsEnabled)
                                                                 {
                                                                     <UiCommandButton Label="Delete"
                                                                                      Glyph="UiIconGlyph.Delete"
                                                                                      Variant="UiButtonVariant.Danger"
                                                                                      OnClick="@(() => DeleteTrustedNetworkAsync(entry))"
-                                                                                     Disabled="@(!entry.IsEnabled)" />
+                                                                                     Disabled="@(!entry.IsEnabled || IsAnySecurityTrialActive)" />
                                                                 }
                                                             </div>
                                                         </div>
@@ -246,6 +376,318 @@
                                 </div>
                             }
 
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@AttackSurfaceTabValue" Title="Attack Surface">
+                    <Header>
+                        <div class="security-tab-header">
+                            <span class="security-tab-title">Attack Surface</span>
+                            <span class="security-tab-count">Audit</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="security-tab-content">
+                            <AttackSurfaceAudit />
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@FirewallTabValue" Title="Firewall">
+                    <Header>
+                        <div class="security-tab-header">
+                            <span class="security-tab-title">Firewall</span>
+                            <span class="security-tab-count">@GetFirewallTabStatus()</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="security-tab-content firewall-content">
+                            <div class="section-heading">
+                                <div>
+                                    <p class="eyebrow">Host firewall</p>
+                                    <h2>UFW inbound access</h2>
+                                    <p class="meta-text">A small host-firewall UI for incoming allow rules. This does not replace a router, pfSense, or advanced nftables policy.</p>
+                                </div>
+                                <UiCommandButton Label="@(isLoadingFirewall ? "Refreshing..." : "Refresh")"
+                                                 Glyph="UiIconGlyph.Refresh"
+                                                 Variant="UiButtonVariant.Action"
+                                                 Disabled="@(isLoadingFirewall || isChangingFirewall)"
+                                                 OnClick="LoadFirewallAsync" />
+                            </div>
+
+                            @if (isLoadingFirewall && firewallStatus is null)
+                            {
+                                <section class="surface-subcard"><p class="meta-text">Reading UFW status and current listening ports...</p></section>
+                            }
+                            else if (firewallStatus is null)
+                            {
+                                <section class="surface-subcard firewall-status-unavailable">
+                                    <div>
+                                        <h3>Firewall status has not been loaded</h3>
+                                        <p>Refresh to inspect UFW without changing the server.</p>
+                                    </div>
+                                    <UiCommandButton Label="Load firewall"
+                                                     Glyph="UiIconGlyph.Refresh"
+                                                     OnClick="LoadFirewallAsync" />
+                                </section>
+                            }
+                            else
+                            {
+                                @if (!string.IsNullOrWhiteSpace(firewallMessage))
+                                {
+                                    <p class="callout @(firewallMessageIsError ? "error" : "success")">@firewallMessage</p>
+                                }
+
+                                @if (!string.IsNullOrWhiteSpace(firewallStatus.Warning))
+                                {
+                                    <p class="callout warning">@firewallStatus.Warning</p>
+                                }
+
+                                <section class="surface-subcard firewall-auto-rollback-panel @(firewallAutoRollbackEnabled ? "is-enabled" : "is-disabled")">
+                                    <div>
+                                        <strong>Auto Rollback</strong>
+                                        <p>@(firewallAutoRollbackEnabled
+                                               ? "Firewall changes get a 30-second Keep/Revert window. They revert automatically unless you keep them."
+                                               : "Firewall changes are permanent immediately. You could lock yourself out of this host.")</p>
+                                    </div>
+                                    <div class="firewall-auto-rollback-control">
+                                        <span class="status-pill @(firewallAutoRollbackEnabled ? "success" : "warning")">@(firewallAutoRollbackEnabled ? "On" : "Off · At your own risk")</span>
+                                        <UiSwitchField Label="Auto Rollback"
+                                                       @bind-Value="firewallAutoRollbackEnabled"
+                                                       Title="@(firewallAutoRollbackEnabled ? "Turn off to apply UFW changes immediately" : "Turn on the 30-second Keep/Revert safety window")"
+                                                       Disabled="@(isChangingFirewall || IsAnySecurityTrialActive)" />
+                                    </div>
+                                </section>
+
+                                @if (ActiveFirewallTrial is not null)
+                                {
+                                    <section class="surface-subcard security-network-trial firewall-trial" role="status" aria-live="polite">
+                                        <div class="security-network-trial-copy">
+                                            <div class="security-network-trial-heading">
+                                                <span class="status-pill warning">Auto rollback · @firewallTrialRemainingSeconds s</span>
+                                                <strong>@ActiveFirewallTrial.Title</strong>
+                                            </div>
+                                            <p>@ActiveFirewallTrial.Detail</p>
+                                            <small>The exact pre-change UFW configuration is saved. This change automatically reverts unless you keep it.</small>
+                                        </div>
+                                        <div class="security-network-trial-actions">
+                                            <UiCommandButton Label="Keep change"
+                                                             Glyph="UiIconGlyph.Save"
+                                                             Disabled="@isChangingFirewall"
+                                                             OnClick="KeepFirewallTrialAsync" />
+                                            <UiCommandButton Label="Revert now"
+                                                             Glyph="UiIconGlyph.Refresh"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@isChangingFirewall"
+                                                             OnClick="RevertFirewallTrialAsync" />
+                                        </div>
+                                    </section>
+                                }
+
+                                <section class="surface-subcard firewall-status-panel">
+                                    <div class="firewall-status-heading">
+                                        <div>
+                                            <p class="eyebrow">UFW state</p>
+                                            <h3>@(firewallStatus.IsActive ? "Firewall active" : firewallStatus.IsInstalled ? "Firewall inactive" : "UFW unavailable")</h3>
+                                            <p>@GetFirewallStateSummary()</p>
+                                        </div>
+                                        <span class="status-pill @(firewallStatus.IsActive ? "success" : "warning")">
+                                            @(firewallStatus.IsActive ? "Protected" : "Not filtering")
+                                        </span>
+                                    </div>
+
+                                    <div class="firewall-policy-grid">
+                                        <ServiceMetricComponent TagName="div" Label="Incoming" Value="@firewallStatus.IncomingPolicy" />
+                                        <ServiceMetricComponent TagName="div" Label="Outgoing" Value="@firewallStatus.OutgoingPolicy" />
+                                        <ServiceMetricComponent TagName="div" Label="Routed" Value="@firewallStatus.RoutedPolicy" />
+                                        <ServiceMetricComponent TagName="div" Label="Logging" Value="@firewallStatus.Logging" />
+                                    </div>
+
+                                    @if (firewallStatus.IsInstalled && firewallStatus.CanManage)
+                                    {
+                                        <div class="toolbar-row">
+                                            <UiCommandButton Label="@(firewallStatus.IsActive ? "Disable firewall" : "Enable firewall")"
+                                                             Glyph="@(firewallStatus.IsActive ? UiIconGlyph.Unlock : UiIconGlyph.Lock)"
+                                                             Variant="@(firewallStatus.IsActive ? UiButtonVariant.Danger : UiButtonVariant.Primary)"
+                                                             Disabled="@(isChangingFirewall || IsAnySecurityTrialActive || (!firewallStatus.IsActive && firewallStatus.Rules.Count == 0 && firewallStatus.ListeningPorts.Count == 0))"
+                                                             OnClick="ToggleFirewallAsync" />
+                                            @if (firewallStatus.IsActive && firewallStatus.Rules.Any(static rule => rule.IsEnabled && rule.Number.HasValue))
+                                            {
+                                                <UiCommandButton Label="Remove all rules"
+                                                                 Glyph="UiIconGlyph.Lock"
+                                                                 Variant="UiButtonVariant.Danger"
+                                                                 Disabled="@(isChangingFirewall || IsAnySecurityTrialActive)"
+                                                                 OnClick="RemoveAllFirewallRulesAsync" />
+                                            }
+                                        </div>
+                                    }
+                                    else if (!firewallStatus.IsInstalled)
+                                    {
+                                        <div class="toolbar-row">
+                                            <UiCommandButton Label="@(isChangingFirewall ? "Installing..." : "Install UFW")"
+                                                             Glyph="UiIconGlyph.Download"
+                                                             Disabled="@(isChangingFirewall || IsAnySecurityTrialActive)"
+                                                             OnClick="InstallFirewallAsync" />
+                                        </div>
+                                    }
+                                </section>
+
+                                @if (firewallStatus.IsInstalled && firewallStatus.CanManage && firewallStatus.IsActive)
+                                {
+                                    <details class="surface-subcard firewall-rule-editor" open>
+                                        <summary>
+                                            <span>
+                                                <strong>Add incoming allow rule</strong>
+                                                <span class="meta-text">Source and destination default to any. @GetFirewallChangeModeSummary()</span>
+                                            </span>
+                                            <span class="status-pill neutral">Allow only</span>
+                                        </summary>
+
+                                        <EditForm Model="@firewallEditor" OnValidSubmit="AddFirewallRuleAsync" class="stack-form firewall-rule-editor-form">
+                                            <DataAnnotationsValidator />
+                                            <div class="field-row firewall-rule-primary-fields">
+                                                <UiTextField @bind-Value="firewallEditor.Port"
+                                                             Label="Port or range"
+                                                             Placeholder="443 or 8000:8010" />
+                                                <UiSelectField TValue="FirewallProtocol"
+                                                               @bind-Value="firewallEditor.Protocol"
+                                                               Label="Protocol">
+                                                    <option value="@FirewallProtocol.Tcp">TCP</option>
+                                                    <option value="@FirewallProtocol.Udp">UDP</option>
+                                                    <option value="@FirewallProtocol.Any">TCP + UDP</option>
+                                                </UiSelectField>
+                                            </div>
+                                            <div class="field-row">
+                                                <UiTextField @bind-Value="firewallEditor.Source"
+                                                             Label="Allow from"
+                                                             Placeholder="any"
+                                                             Helper="Client IP or CIDR. Blank means any source." />
+                                                <UiTextField @bind-Value="firewallEditor.Destination"
+                                                             Label="Allow to"
+                                                             Placeholder="any"
+                                                             Helper="Local server IP. Blank means every local destination." />
+                                            </div>
+                                            <UiTextField @bind-Value="firewallEditor.Comment"
+                                                         Label="Comment"
+                                                         Placeholder="Optional description" />
+                                            <div class="toolbar-row">
+                                                <UiCommandButton Label="Add allow rule"
+                                                                 Glyph="UiIconGlyph.Plus"
+                                                                 Type="submit"
+                                                                 Disabled="@(isChangingFirewall || IsAnySecurityTrialActive)" />
+                                            </div>
+                                        </EditForm>
+                                    </details>
+                                }
+
+                                <section class="surface-subcard firewall-rules-panel">
+                                    <div class="firewall-panel-heading">
+                                        <div>
+                                            <p class="eyebrow">Existing policy</p>
+                                            <h3>UFW rules</h3>
+                                            <p>@(firewallStatus.IsActive ? $"Toggle, edit, or remove supported incoming allow rules. {GetFirewallChangeModeSummary()}" : "Configured rules are preserved and will load when UFW is enabled.")</p>
+                                        </div>
+                                        <span class="status-pill neutral">@GetFirewallRuleCountSummary()</span>
+                                    </div>
+
+                                    @if (firewallStatus.Rules.Count == 0)
+                                    {
+                                        <div class="empty-state compact-empty-state">
+                                            <h3>No UFW rules configured</h3>
+                                            <p>Enabling the firewall first imports the server's current non-loopback listeners so access is not removed all at once.</p>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="firewall-rule-list">
+                                            @foreach (var rule in firewallStatus.Rules)
+                                            {
+                                                <div class="firewall-rule-row @(!rule.IsEnabled ? "is-disabled" : string.Empty)">
+                                                    <span class="firewall-rule-number">@(rule.IsEnabled ? rule.Number?.ToString() ?? "·" : "Off")</span>
+                                                    <div class="firewall-rule-destination">
+                                                        <strong>@rule.Destination</strong>
+                                                        @if (!string.IsNullOrWhiteSpace(rule.Comment))
+                                                        {
+                                                            <span>@rule.Comment</span>
+                                                        }
+                                                    </div>
+                                                    <span class="status-pill @(!rule.IsEnabled ? "neutral" : rule.Action.StartsWith("ALLOW", StringComparison.OrdinalIgnoreCase) ? "success" : "warning")">@(rule.IsEnabled ? rule.Action : "Disabled")</span>
+                                                    <div class="firewall-rule-source">
+                                                        <span>from @rule.Source</span>
+                                                        @if (rule.IsIpv6)
+                                                        {
+                                                            <small>IPv6</small>
+                                                        }
+                                                    </div>
+                                                    <div class="firewall-rule-actions">
+                                                        <UiSwitchField Label="@(rule.IsEnabled ? "On" : "Off")"
+                                                                       Value="@rule.IsEnabled"
+                                                                       ValueChanged="@((bool enabled) => ToggleFirewallRuleAsync(rule, enabled))"
+                                                                       Compact="true"
+                                                                       Class="firewall-rule-toggle"
+                                                                       Title="@GetFirewallRuleToggleTitle(rule)"
+                                                                       Disabled="@(!firewallStatus.IsActive || !rule.CanToggle || isChangingFirewall || IsAnySecurityTrialActive)" />
+                                                        @if (rule.Number.HasValue || rule.DisabledRuleId.HasValue)
+                                                        {
+                                                            @if (rule.EditableAllowRule is not null)
+                                                            {
+                                                                <UiCommandButton Label="Edit"
+                                                                                 Glyph="UiIconGlyph.Edit"
+                                                                                 Variant="UiButtonVariant.Ghost"
+                                                                                 Disabled="@(isChangingFirewall || IsAnySecurityTrialActive)"
+                                                                                 OnClick="@(() => OpenFirewallRuleEditorAsync(rule))" />
+                                                            }
+                                                            <UiCommandButton Label="Delete"
+                                                                             Glyph="UiIconGlyph.Delete"
+                                                                             Variant="UiButtonVariant.Danger"
+                                                                             Disabled="@(isChangingFirewall || IsAnySecurityTrialActive)"
+                                                                             OnClick="@(() => RemoveFirewallRuleAsync(rule))" />
+                                                        }
+                                                    </div>
+                                                </div>
+                                            }
+                                        </div>
+                                    }
+                                </section>
+
+                                <details class="surface-subcard firewall-listeners-panel">
+                                    <summary>
+                                        <span>
+                                            <strong>Detected listening ports</strong>
+                                            <span class="meta-text">Non-loopback TCP and UDP listeners that will be imported before first enablement.</span>
+                                        </span>
+                                        <span class="status-pill neutral">@firewallStatus.ListeningPorts.Count</span>
+                                    </summary>
+                                    @if (firewallStatus.ListeningPorts.Count == 0)
+                                    {
+                                        <p class="callout warning">No safe listener inventory is available. LMS will not enable UFW automatically because that could cut off access.</p>
+                                    }
+                                    else
+                                    {
+                                        <div class="firewall-listener-list">
+                                            @foreach (var listener in firewallStatus.ListeningPorts)
+                                            {
+                                                <span><strong>@listener.Port</strong>/@listener.Protocol <small>to @listener.Destination</small></span>
+                                            }
+                                        </div>
+                                    }
+                                </details>
+                            }
+                        </div>
+                    </ChildContent>
+                </TabPage>
+
+                <TabPage Value="@SshAdminTabValue" Title="SSH Server">
+                    <Header>
+                        <div class="security-tab-header">
+                            <span class="security-tab-title">SSH Server</span>
+                            <span class="security-tab-count">Admin</span>
+                        </div>
+                    </Header>
+                    <ChildContent>
+                        <div class="security-tab-content">
+                            <SshAdminPanel CanAdminister="@HasAdministratorAccess" />
                         </div>
                     </ChildContent>
                 </TabPage>
@@ -637,6 +1079,7 @@
                                                              Helper="Most SMTP providers expect this on port 587." />
                                             <span class="meta-text">Stored password: @(messagingEditor.HasSmtpPassword ? "yes" : "no")</span>
                                         </div>
+                                        <p class="meta-text">If the SMTP username belongs to an LMS Mail Relay user, LMS automatically uses the protected local relay connection and its pinned certificate. The host field is then only retained for compatibility.</p>
                                     }
                                     else if (messagingEditor.Provider == MessagingEmailProvider.MicrosoftGraph)
                                     {
@@ -715,40 +1158,53 @@
     }
 </div>
 
-<UiModal IsOpen="@showNetworkRiskModal"
-         Title="@networkRiskModalTitle"
+<UiModal IsOpen="@IsEditingFirewallRule"
+         Title="@FirewallRuleEditorTitle"
+         Subtitle="@GetFirewallEditSubtitle()"
+         Class="firewall-rule-edit-modal"
          CloseOnBackdrop="false"
-         OnClose="CancelNetworkRiskAsync">
+         OnClose="CloseFirewallRuleEditorAsync">
     <ChildContent>
-        <div class="stack-form">
-            <p class="callout warning">@networkRiskModalMessage</p>
-            @if (!string.IsNullOrWhiteSpace(networkRiskCurrentAccessWarning))
-            {
-                <p class="callout warning">@networkRiskCurrentAccessWarning</p>
-            }
-            @if (!string.IsNullOrWhiteSpace(networkRiskRecoveryWarning))
-            {
-                <p class="callout error">@networkRiskRecoveryWarning</p>
-            }
-            @if (networkRiskRequiresTypedConfirmation)
-            {
-                <UiCheckboxField @bind-Value="networkRiskAcknowledged"
-                                 Label="I understand this can strand the current session or remove direct localhost access." />
-                <UiTextField @bind-Value="networkRiskConfirmationInput"
-                             Label="Type UNLOCK to continue"
-                             Helper="If you lose access, log into the server and run Linux Made Sane with unlock-security from the server console." />
-            }
+        <EditForm Model="@firewallEditEditor" OnValidSubmit="EditFirewallRuleAsync" class="stack-form firewall-rule-editor-form">
+            <DataAnnotationsValidator />
+            <div class="field-row firewall-rule-primary-fields">
+                <UiTextField @bind-Value="firewallEditEditor.Port"
+                             Label="Port or range"
+                             Placeholder="443 or 8000:8010" />
+                <UiSelectField TValue="FirewallProtocol"
+                               @bind-Value="firewallEditEditor.Protocol"
+                               Label="Protocol">
+                    <option value="@FirewallProtocol.Tcp">TCP</option>
+                    <option value="@FirewallProtocol.Udp">UDP</option>
+                    <option value="@FirewallProtocol.Any">TCP + UDP</option>
+                </UiSelectField>
+            </div>
+            <div class="field-row">
+                <UiTextField @bind-Value="firewallEditEditor.Source"
+                             Label="Allow from"
+                             Placeholder="any"
+                             Helper="Client IP or CIDR. Blank means any source." />
+                <UiTextField @bind-Value="firewallEditEditor.Destination"
+                             Label="Allow to"
+                             Placeholder="any"
+                             Helper="Local server IP or CIDR. Blank means every local destination." />
+            </div>
+            <UiTextField @bind-Value="firewallEditEditor.Comment"
+                         Label="Comment"
+                         Placeholder="Optional description" />
+            <p class="callout warning">Verify access from a new connection. Existing connections can remain open because UFW tracks connection state.</p>
             <div class="toolbar-row">
-                <UiCommandButton Label="Apply risky change"
-                                 Glyph="UiIconGlyph.Connect"
-                                 OnClick="ConfirmNetworkRiskAsync"
-                                 Disabled="@(!IsNetworkRiskConfirmationSatisfied)" />
+                <UiCommandButton Label="Save rule"
+                                 Glyph="UiIconGlyph.Edit"
+                                 Type="submit"
+                                 Disabled="@(isChangingFirewall || IsAnySecurityTrialActive)" />
                 <UiCommandButton Label="Cancel"
                                  Glyph="UiIconGlyph.Clear"
                                  Variant="UiButtonVariant.Ghost"
-                                 OnClick="CancelNetworkRiskAsync" />
+                                 Disabled="@isChangingFirewall"
+                                 OnClick="CloseFirewallRuleEditorAsync" />
             </div>
-        </div>
+        </EditForm>
     </ChildContent>
 </UiModal>
 
@@ -868,8 +1324,15 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
 </UiModal>
 
 @code {
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "tab")]
+    public string? RequestedTab { get; set; }
+
     [CascadingParameter]
     private HttpContext? HttpContext { get; set; }
+
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
 
     private SecuritySettingsPageViewModel page = new([], [], BuildDefaultMessagingViewModel());
     private IReadOnlyList<LocalNetworkInterfaceView> networkInterfaces = [];
@@ -878,55 +1341,114 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private TrustedNetworkEntryEditor networkEditor = new();
     private SecurityUserEditor userEditor = new();
     private SecurityMessagingSettingsEditor messagingEditor = new();
+    private FirewallAllowRuleEditor firewallEditor = new();
+    private FirewallAllowRuleEditor firewallEditEditor = new();
+    private FirewallStatusViewModel? firewallStatus;
     private SecurityUserProvisioningViewModel? provisioningResult;
     private bool isLoaded;
     private bool isSavingNetwork;
     private bool isSavingUser;
     private bool isSavingMessaging;
     private bool isSendingMessagingTest;
+    private bool isLoadingFirewall;
+    private bool isChangingFirewall;
+    private bool firewallAutoRollbackEnabled = true;
     private string? networkMessage;
     private bool networkMessageIsError;
     private string? userMessage;
     private bool userMessageIsError;
     private string? messagingMessage;
     private bool messagingMessageIsError;
+    private string? firewallMessage;
+    private bool firewallMessageIsError;
+    private int firewallTrialRemainingSeconds;
+    private int? editingFirewallRuleNumber;
+    private Guid? editingDisabledFirewallRuleId;
+    private ClaimsPrincipal? currentPrincipal;
     private string messagingTestRecipient = string.Empty;
     private readonly Dictionary<Guid, int> sessionLifetimeEditors = new();
     private readonly Dictionary<Guid, string> linuxUsernameEditors = new();
     private readonly HashSet<Guid> savingSessionLifetimes = [];
     private readonly HashSet<Guid> savingLinuxUsernames = [];
     private string activeTab = TrustedNetworksTabValue;
-    private bool showNetworkRiskModal;
     private bool showGraphHelpModal;
-    private string networkRiskModalTitle = "Confirm security change";
-    private string networkRiskModalMessage = string.Empty;
-    private string networkRiskCurrentAccessWarning = string.Empty;
-    private string networkRiskRecoveryWarning = string.Empty;
-    private Func<Task>? pendingNetworkRiskAction;
-    private bool networkRiskRequiresTypedConfirmation;
-    private bool networkRiskAcknowledged;
-    private string networkRiskConfirmationInput = string.Empty;
+    private Guid? activeNetworkTrialId;
+    private int networkTrialRemainingSeconds;
+    private string networkTrialTitle = string.Empty;
+    private string networkTrialDetail = string.Empty;
+    private Func<Task>? pendingNetworkTrialCommit;
 
     private const string TrustedNetworksTabValue = "trusted-networks";
+    private const string AttackSurfaceTabValue = "attack-surface";
+    private const string FirewallTabValue = "firewall";
+    private const string SshAdminTabValue = "ssh-admin";
     private const string RemoteAccessUsersTabValue = "remote-access-users";
     private const string MessagingTabValue = "messaging";
+    private const int NetworkTrialDurationSeconds = 30;
     private const int MinutesPerHour = 60;
     private const int MinutesPerDay = 24 * MinutesPerHour;
     private const int MaxSessionLifetimeDays = SecuritySessionPolicy.MaximumSessionLifetimeMinutes / MinutesPerDay;
 
-    private bool IsNetworkRiskConfirmationSatisfied =>
-        !networkRiskRequiresTypedConfirmation ||
-        (networkRiskAcknowledged &&
-         string.Equals(networkRiskConfirmationInput?.Trim(), "UNLOCK", StringComparison.Ordinal));
+    private bool HasAuthenticatedLmsUser =>
+        currentPrincipal?.Identity?.IsAuthenticated == true &&
+        Guid.TryParse(currentPrincipal.FindFirstValue(ClaimTypes.NameIdentifier), out _);
+
+    private bool HasAdministratorAccess =>
+        HasAuthenticatedLmsUser || currentAccess.IsTrusted;
+
+    private string CurrentAccountEmail =>
+        currentPrincipal?.FindFirstValue(ClaimTypes.Email) ??
+        currentPrincipal?.Identity?.Name ??
+        "the current account";
+
+    private static string CurrentAccountPasskeySetupHref =>
+        $"/auth/setup-passkey?returnUrl={Uri.EscapeDataString("/settings")}";
+
+    private bool IsNetworkTrialActive => activeNetworkTrialId.HasValue;
+
+    private FirewallTrialViewModel? ActiveFirewallTrial => firewallStatus?.ActiveTrial;
+
+    private bool IsAnySecurityTrialActive => IsNetworkTrialActive || ActiveFirewallTrial is not null;
+
+    private IReadOnlyList<TrustedNetworkEntryViewModel> PublicFallbackNetworks =>
+        page.TrustedNetworks
+            .Where(IsPublicFallbackNetwork)
+            .OrderBy(entry => entry.AddressOrCidr, StringComparer.Ordinal)
+            .ToArray();
 
     private bool IsNetworkEditorOpen =>
         networkEditor.Id.HasValue || page.TrustedNetworks.Count == 0;
 
     protected override async Task OnInitializedAsync()
     {
+        if (new Uri(Navigation.Uri).AbsolutePath.EndsWith("/attack-surface", StringComparison.OrdinalIgnoreCase))
+        {
+            activeTab = AttackSurfaceTabValue;
+        }
+        else if (IsKnownSecurityTab(RequestedTab))
+        {
+            activeTab = RequestedTab!;
+        }
+
+        var authenticationState = AuthenticationStateTask is null
+            ? null
+            : await AuthenticationStateTask;
+        currentPrincipal = authenticationState?.User ?? HttpContext?.User;
         await LoadAsync();
+        if (activeTab == FirewallTabValue && HasAdministratorAccess)
+        {
+            await LoadFirewallAsync();
+        }
         isLoaded = true;
     }
+
+    private static bool IsKnownSecurityTab(string? value) => value is
+        TrustedNetworksTabValue or
+        AttackSurfaceTabValue or
+        FirewallTabValue or
+        SshAdminTabValue or
+        RemoteAccessUsersTabValue or
+        MessagingTabValue;
 
     private async Task LoadAsync()
     {
@@ -936,9 +1458,17 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         SyncSessionLifetimeEditors();
         SyncLinuxUsernameEditors();
         networkInterfaces = LoadNetworkInterfaces();
-        currentAccess = await TrustedNetworkAccessService.EvaluateAsync(
-            HttpContext?.Connection.RemoteIpAddress,
-            HttpContext?.Request.Host.Host);
+        if (HttpContext?.Items.TryGetValue("LmsTrustedNetworkAccess", out var cachedAccess) == true &&
+            cachedAccess is TrustedNetworkAccessResult authorizedAccess)
+        {
+            currentAccess = authorizedAccess;
+        }
+        else
+        {
+            currentAccess = await TrustedNetworkAccessService.EvaluateAsync(
+                HttpContext?.Connection.RemoteIpAddress,
+                HttpContext?.Request.Host.Host);
+        }
     }
 
     private async Task<IReadOnlyList<LinuxShareUser>> LoadLocalLinuxUsersAsync()
@@ -982,11 +1512,442 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         }
     }
 
-    private Task HandleTabChangedAsync(string? value)
+    private async Task HandleTabChangedAsync(string? value)
     {
         activeTab = string.IsNullOrWhiteSpace(value) ? TrustedNetworksTabValue : value;
+        if (activeTab == FirewallTabValue && HasAdministratorAccess && firewallStatus is null)
+        {
+            await LoadFirewallAsync();
+        }
+    }
+
+    private async Task LoadFirewallAsync()
+    {
+        if (!HasAdministratorAccess)
+        {
+            firewallMessage = "This request has not passed the LMS administrator access boundary.";
+            firewallMessageIsError = true;
+            return;
+        }
+
+        isLoadingFirewall = true;
+        try
+        {
+            firewallStatus = await FirewallService.GetStatusAsync();
+            if (firewallStatus.ActiveTrial is { } trial)
+            {
+                UpdateFirewallTrialCountdown(trial);
+                _ = MonitorFirewallTrialAsync(trial.Id);
+            }
+            else
+            {
+                firewallTrialRemainingSeconds = 0;
+            }
+        }
+        catch (Exception exception)
+        {
+            firewallMessage = exception.Message;
+            firewallMessageIsError = true;
+        }
+        finally
+        {
+            isLoadingFirewall = false;
+        }
+    }
+
+    private async Task ToggleFirewallAsync()
+    {
+        if (firewallStatus is null)
+        {
+            return;
+        }
+
+        await StartFirewallChangeAsync(async () =>
+            firewallStatus.IsActive
+                ? await FirewallService.StartDisableTrialAsync()
+                : await FirewallService.StartEnableTrialAsync());
+    }
+
+    private async Task InstallFirewallAsync()
+    {
+        if (!HasAdministratorAccess || isChangingFirewall || IsAnySecurityTrialActive)
+        {
+            return;
+        }
+
+        isChangingFirewall = true;
+        firewallMessage = null;
+        firewallMessageIsError = false;
+        try
+        {
+            await FirewallService.InstallAsync();
+            firewallMessage = "UFW installed. It remains inactive until you enable the firewall.";
+        }
+        catch (Exception exception)
+        {
+            firewallMessage = exception.Message;
+            firewallMessageIsError = true;
+        }
+        finally
+        {
+            await RefreshFirewallAfterChangeAsync();
+            isChangingFirewall = false;
+        }
+    }
+
+    private async Task AddFirewallRuleAsync()
+    {
+        await StartFirewallChangeAsync(() => FirewallService.StartAllowRuleTrialAsync(firewallEditor));
+        if (!firewallMessageIsError)
+        {
+            firewallEditor = new FirewallAllowRuleEditor();
+        }
+    }
+
+    private Task RemoveFirewallRuleAsync(FirewallRuleViewModel rule)
+    {
+        if (rule.DisabledRuleId is { } disabledRuleId)
+        {
+            return StartFirewallChangeAsync(() => FirewallService.StartRemoveDisabledRuleTrialAsync(disabledRuleId));
+        }
+
+        return rule.Number is { } ruleNumber
+            ? StartFirewallChangeAsync(() => FirewallService.StartRemoveRuleTrialAsync(ruleNumber))
+            : Task.CompletedTask;
+    }
+
+    private Task RemoveAllFirewallRulesAsync() =>
+        StartFirewallChangeAsync(() => FirewallService.StartRemoveAllRulesTrialAsync());
+
+    private Task ToggleFirewallRuleAsync(FirewallRuleViewModel rule, bool enabled)
+    {
+        if (enabled == rule.IsEnabled)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (enabled && rule.DisabledRuleId is { } disabledRuleId)
+        {
+            return StartFirewallChangeAsync(() => FirewallService.StartEnableAllowRuleTrialAsync(disabledRuleId));
+        }
+
+        if (!enabled && rule.Number is { } ruleNumber)
+        {
+            return StartFirewallChangeAsync(() => FirewallService.StartDisableAllowRuleTrialAsync(ruleNumber));
+        }
+
         return Task.CompletedTask;
     }
+
+    private Task OpenFirewallRuleEditorAsync(FirewallRuleViewModel rule)
+    {
+        if ((rule.Number is null && rule.DisabledRuleId is null) ||
+            rule.EditableAllowRule is null ||
+            isChangingFirewall ||
+            IsAnySecurityTrialActive)
+        {
+            return Task.CompletedTask;
+        }
+
+        editingFirewallRuleNumber = rule.Number;
+        editingDisabledFirewallRuleId = rule.DisabledRuleId;
+        firewallEditEditor = CloneFirewallEditor(rule.EditableAllowRule);
+        return Task.CompletedTask;
+    }
+
+    private async Task EditFirewallRuleAsync()
+    {
+        Func<Task<FirewallTrialViewModel>> startAction;
+        if (editingDisabledFirewallRuleId is { } disabledRuleId)
+        {
+            startAction = () => FirewallService.StartEditDisabledAllowRuleTrialAsync(disabledRuleId, firewallEditEditor);
+        }
+        else if (editingFirewallRuleNumber is { } ruleNumber)
+        {
+            startAction = () => FirewallService.StartEditAllowRuleTrialAsync(ruleNumber, firewallEditEditor);
+        }
+        else
+        {
+            return;
+        }
+
+        await StartFirewallChangeAsync(startAction);
+        if (!firewallMessageIsError)
+        {
+            await CloseFirewallRuleEditorAsync();
+        }
+    }
+
+    private Task CloseFirewallRuleEditorAsync()
+    {
+        if (isChangingFirewall)
+        {
+            return Task.CompletedTask;
+        }
+
+        editingFirewallRuleNumber = null;
+        editingDisabledFirewallRuleId = null;
+        firewallEditEditor = new FirewallAllowRuleEditor();
+        return Task.CompletedTask;
+    }
+
+    private bool IsEditingFirewallRule =>
+        editingFirewallRuleNumber.HasValue || editingDisabledFirewallRuleId.HasValue;
+
+    private string FirewallRuleEditorTitle => editingFirewallRuleNumber is { } ruleNumber
+        ? $"Edit UFW rule {ruleNumber}"
+        : "Edit disabled UFW rule";
+
+    private static FirewallAllowRuleEditor CloneFirewallEditor(FirewallAllowRuleEditor editor) =>
+        new()
+        {
+            Port = editor.Port,
+            Protocol = editor.Protocol,
+            Source = editor.Source,
+            Destination = editor.Destination,
+            Comment = editor.Comment
+        };
+
+    private async Task StartFirewallChangeAsync(Func<Task<FirewallTrialViewModel>> startAction)
+    {
+        if (!HasAdministratorAccess || isChangingFirewall || IsAnySecurityTrialActive)
+        {
+            return;
+        }
+
+        isChangingFirewall = true;
+        firewallMessage = null;
+        firewallMessageIsError = false;
+        var useAutoRollback = firewallAutoRollbackEnabled;
+        try
+        {
+            var trial = await startAction();
+            if (useAutoRollback)
+            {
+                firewallMessage = "Firewall change applied with Auto Rollback. Confirm that you can still reach this LMS host before keeping it.";
+                await RefreshFirewallAfterChangeAsync();
+                UpdateFirewallTrialCountdown(trial);
+                _ = MonitorFirewallTrialAsync(trial.Id);
+            }
+            else
+            {
+                await FirewallService.ConfirmTrialAsync(trial.Id);
+                firewallMessage = "Firewall change applied immediately. Auto Rollback is off.";
+                await RefreshFirewallAfterChangeAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            firewallMessage = exception.Message;
+            firewallMessageIsError = true;
+            await RefreshFirewallAfterChangeAsync();
+            if (ActiveFirewallTrial is { } activeTrial)
+            {
+                firewallMessage = $"{exception.Message} The change is still protected by Auto Rollback; keep it or let it revert.";
+                UpdateFirewallTrialCountdown(activeTrial);
+                _ = MonitorFirewallTrialAsync(activeTrial.Id);
+            }
+        }
+        finally
+        {
+            isChangingFirewall = false;
+        }
+    }
+
+    private async Task KeepFirewallTrialAsync()
+    {
+        if (ActiveFirewallTrial is not { } trial)
+        {
+            return;
+        }
+
+        isChangingFirewall = true;
+        try
+        {
+            await FirewallService.ConfirmTrialAsync(trial.Id);
+            firewallMessage = "Firewall change kept. The new UFW state is permanent.";
+            firewallMessageIsError = false;
+        }
+        catch (Exception exception)
+        {
+            firewallMessage = exception.Message;
+            firewallMessageIsError = true;
+        }
+        finally
+        {
+            await RefreshFirewallAfterChangeAsync();
+            isChangingFirewall = false;
+        }
+    }
+
+    private async Task RevertFirewallTrialAsync()
+    {
+        if (ActiveFirewallTrial is not { } trial)
+        {
+            return;
+        }
+
+        isChangingFirewall = true;
+        try
+        {
+            await FirewallService.RevertTrialAsync(trial.Id);
+            firewallMessage = "Firewall change reverted. The exact previous UFW state is active again.";
+            firewallMessageIsError = false;
+        }
+        catch (Exception exception)
+        {
+            firewallMessage = exception.Message;
+            firewallMessageIsError = true;
+        }
+        finally
+        {
+            await RefreshFirewallAfterChangeAsync();
+            isChangingFirewall = false;
+        }
+    }
+
+    private async Task MonitorFirewallTrialAsync(Guid trialId)
+    {
+        try
+        {
+            while (ActiveFirewallTrial?.Id == trialId)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1));
+                await InvokeAsync(async () =>
+                {
+                    if (ActiveFirewallTrial?.Id != trialId)
+                    {
+                        return;
+                    }
+
+                    if (ActiveFirewallTrial.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+                    {
+                        await RefreshFirewallAfterChangeAsync();
+                        firewallMessage = "Auto Rollback restored the exact previous UFW state after 30 seconds.";
+                        firewallMessageIsError = false;
+                        StateHasChanged();
+                        return;
+                    }
+
+                    UpdateFirewallTrialCountdown(ActiveFirewallTrial);
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // The circuit ended. The singleton firewall service still owns the rollback timer.
+        }
+        catch (InvalidOperationException)
+        {
+            // The circuit ended. The singleton firewall service still owns the rollback timer.
+        }
+    }
+
+    private async Task RefreshFirewallAfterChangeAsync()
+    {
+        try
+        {
+            firewallStatus = await FirewallService.GetStatusAsync();
+            if (firewallStatus.ActiveTrial is { } trial)
+            {
+                UpdateFirewallTrialCountdown(trial);
+            }
+            else
+            {
+                firewallTrialRemainingSeconds = 0;
+            }
+        }
+        catch (Exception exception)
+        {
+            firewallMessage = $"The firewall operation completed, but LMS could not refresh UFW status: {exception.Message}";
+            firewallMessageIsError = true;
+        }
+    }
+
+    private void UpdateFirewallTrialCountdown(FirewallTrialViewModel trial)
+    {
+        firewallTrialRemainingSeconds = Math.Max(
+            0,
+            (int)Math.Ceiling((trial.ExpiresAtUtc - DateTimeOffset.UtcNow).TotalSeconds));
+    }
+
+    private string GetFirewallTabStatus()
+    {
+        if (!HasAdministratorAccess)
+        {
+            return "Unavailable";
+        }
+
+        return firewallStatus is null
+            ? "UFW"
+            : firewallStatus.IsActive
+                ? "On"
+                : firewallStatus.IsInstalled
+                    ? "Off"
+                    : "Unavailable";
+    }
+
+    private string GetFirewallStateSummary()
+    {
+        if (firewallStatus is null)
+        {
+            return string.Empty;
+        }
+
+        if (!firewallStatus.IsInstalled)
+        {
+            return "Install the ufw package on this Linux host before configuring firewall rules.";
+        }
+
+        if (!firewallStatus.CanManage)
+        {
+            return "UFW is installed, but the LMS service account cannot use it through non-interactive sudo.";
+        }
+
+        return firewallStatus.IsActive
+            ? "UFW is filtering inbound host traffic using the rules below."
+            : firewallStatus.Rules.Count == 0
+                ? $"UFW is not filtering traffic. First-time enablement will import {firewallStatus.ListeningPorts.Count} current listener rule(s), then use deny incoming and allow outgoing defaults."
+                : "UFW is not filtering traffic. Enabling it will preserve the configured On/Off rule choices below.";
+    }
+
+    private string GetFirewallRuleCountSummary()
+    {
+        if (firewallStatus is null)
+        {
+            return "0 rules";
+        }
+
+        var enabledCount = firewallStatus.Rules.Count(static rule => rule.IsEnabled);
+        var disabledCount = firewallStatus.Rules.Count - enabledCount;
+        return disabledCount == 0
+            ? $"{enabledCount} rule(s) on"
+            : $"{enabledCount} on · {disabledCount} off";
+    }
+
+    private string GetFirewallRuleToggleTitle(FirewallRuleViewModel rule)
+    {
+        if (!rule.CanToggle)
+        {
+            return "This advanced UFW rule cannot be safely reconstructed by the simple rule editor.";
+        }
+
+        var action = rule.IsEnabled ? "Disable" : "Enable";
+        return firewallAutoRollbackEnabled
+            ? $"{action} this rule with a 30-second Auto Rollback window"
+            : $"{action} this rule immediately. Auto Rollback is off.";
+    }
+
+    private string GetFirewallChangeModeSummary() =>
+        firewallAutoRollbackEnabled
+            ? "Auto Rollback is on, so changes get a 30-second Keep/Revert window."
+            : "Auto Rollback is off, so changes are permanent immediately at your own risk.";
+
+    private string GetFirewallEditSubtitle() =>
+        firewallAutoRollbackEnabled
+            ? "The replacement gets a 30-second Keep/Revert window and restores the exact previous rule unless kept."
+            : "Auto Rollback is off. Saving replaces the rule permanently and immediately at your own risk.";
 
     private void OpenGraphHelpModal()
     {
@@ -1048,24 +2009,20 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
 
     private async Task SaveNetworkAsync()
     {
-        if (TryBuildRiskWarning(
+        if (TryBuildRiskTrial(
                 networkEditor.Id,
                 networkEditor.Label,
                 networkEditor.AddressOrCidr,
                 networkEditor.IsEnabled,
                 networkEditor.IsAuthenticationEnabled,
-                out var warningTitle,
-                out var warningMessage,
-                out var currentAccessWarning,
-                out var recoveryWarning,
-                out var requiresTypedConfirmation))
+                out var trialTitle,
+                out var trialDetail,
+                out var plannedEntries))
         {
-            ShowNetworkRiskModal(
-                warningTitle,
-                warningMessage,
-                currentAccessWarning,
-                recoveryWarning,
-                requiresTypedConfirmation,
+            await StartNetworkTrialAsync(
+                trialTitle,
+                trialDetail,
+                plannedEntries,
                 SaveNetworkCoreAsync);
             return;
         }
@@ -1113,31 +2070,49 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
             Description = entry.Description,
             IsEnabled = entry.IsEnabled,
             IsTrustedAccessEnabled = entry.IsTrustedAccessEnabled,
-            IsAuthenticationEnabled = entry.IsAuthenticationEnabled
+            IsAuthenticationEnabled = entry.IsAuthenticationEnabled,
+            DeniedResponseMode = entry.DeniedResponseMode
         };
+    }
+
+    private async Task ToggleDeniedResponseModeAsync(TrustedNetworkEntryViewModel entry)
+    {
+        try
+        {
+            var nextMode = UsesEmptyNotFoundResponse(entry)
+                ? NetworkAccessDeniedResponseMode.AccessDeniedPage
+                : NetworkAccessDeniedResponseMode.EmptyNotFound;
+            await SecuritySettingsService.SetTrustedNetworkDeniedResponseModeAsync(entry.Id, nextMode);
+            networkMessage = nextMode == NetworkAccessDeniedResponseMode.EmptyNotFound
+                ? $"{entry.Label} now returns an empty HTTP 404 when blocked."
+                : $"{entry.Label} now shows the LMS access denied page when blocked.";
+            networkMessageIsError = false;
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            networkMessage = exception.Message;
+            networkMessageIsError = true;
+        }
     }
 
     private async Task ToggleTrustedNetworkAsync(TrustedNetworkEntryViewModel entry)
     {
         var targetEnabled = !entry.IsEnabled;
-        if (TryBuildRiskWarning(
+        if (TryBuildRiskTrial(
                 entry.Id,
                 entry.Label,
                 entry.AddressOrCidr,
                 targetEnabled,
                 entry.IsAuthenticationEnabled,
-                out var warningTitle,
-                out var warningMessage,
-                out var currentAccessWarning,
-                out var recoveryWarning,
-                out var requiresTypedConfirmation))
+                out var trialTitle,
+                out var trialDetail,
+                out var plannedEntries))
         {
-            ShowNetworkRiskModal(
-                warningTitle,
-                warningMessage,
-                currentAccessWarning,
-                recoveryWarning,
-                requiresTypedConfirmation,
+            await StartNetworkTrialAsync(
+                trialTitle,
+                trialDetail,
+                plannedEntries,
                 () => ToggleTrustedNetworkCoreAsync(entry));
             return;
         }
@@ -1164,24 +2139,20 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private async Task ToggleAuthenticationAccessAsync(TrustedNetworkEntryViewModel entry)
     {
         var targetAuthenticationEnabled = !entry.IsAuthenticationEnabled;
-        if (TryBuildRiskWarning(
+        if (TryBuildRiskTrial(
                 entry.Id,
                 entry.Label,
                 entry.AddressOrCidr,
                 entry.IsEnabled,
                 targetAuthenticationEnabled,
-                out var warningTitle,
-                out var warningMessage,
-                out var currentAccessWarning,
-                out var recoveryWarning,
-                out var requiresTypedConfirmation))
+                out var trialTitle,
+                out var trialDetail,
+                out var plannedEntries))
         {
-            ShowNetworkRiskModal(
-                warningTitle,
-                warningMessage,
-                currentAccessWarning,
-                recoveryWarning,
-                requiresTypedConfirmation,
+            await StartNetworkTrialAsync(
+                trialTitle,
+                trialDetail,
+                plannedEntries,
                 () => ToggleAuthenticationAccessCoreAsync(entry));
             return;
         }
@@ -1228,8 +2199,12 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
 
     private IReadOnlyList<TrustedNetworkEntryViewModel> GetTrustedNetworksForInterface(LocalNetworkInterfaceView networkInterface) =>
         page.TrustedNetworks
+            .Where(entry => !IsPublicFallbackNetwork(entry))
             .Where(entry => NetworkEntryMatchesInterface(entry, networkInterface))
             .ToArray();
+
+    private static bool IsPublicFallbackNetwork(TrustedNetworkEntryViewModel entry) =>
+        entry.IsBuiltIn && entry.AddressOrCidr is "0.0.0.0/0" or "::/0";
 
     private static bool NetworkEntryMatchesInterface(TrustedNetworkEntryViewModel entry, LocalNetworkInterfaceView networkInterface) =>
         networkInterface.Addresses.Any(address => TrustedNetworkContainsAddress(entry.AddressOrCidr, address.Address));
@@ -1457,88 +2432,109 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private static string GetTrustedNetworkAuthPillText(TrustedNetworkEntryViewModel entry) =>
         entry.IsAuthenticationEnabled ? "Auth on" : "Auth off";
 
-    private bool TryBuildRiskWarning(
+    private static bool UsesEmptyNotFoundResponse(TrustedNetworkEntryViewModel entry) =>
+        entry.DeniedResponseMode == NetworkAccessDeniedResponseMode.EmptyNotFound;
+
+    private static string GetDeniedResponseSummary(TrustedNetworkEntryViewModel entry) =>
+        UsesEmptyNotFoundResponse(entry)
+            ? "Blocked requests receive HTTP 404 with an empty body."
+            : "Blocked browser requests show the LMS access denied page.";
+
+    private bool TryBuildRiskTrial(
         Guid? entryId,
         string label,
         string addressOrCidr,
         bool targetEnabled,
         bool targetAuthenticationEnabled,
         out string title,
-        out string message,
-        out string currentAccessWarning,
-        out string recoveryWarning,
-        out bool requiresTypedConfirmation)
+        out string detail,
+        out IReadOnlyList<TrustedNetworkEntry> plannedEntries)
     {
-        if (targetEnabled && !targetAuthenticationEnabled)
-        {
-            title = string.Empty;
-            message = string.Empty;
-            currentAccessWarning = string.Empty;
-            recoveryWarning = string.Empty;
-            requiresTypedConfirmation = false;
-            return false;
-        }
-
-        var plannedEntries = BuildPlannedTrustedNetworkEntries(
+        var currentEntries = BuildCurrentTrustedNetworkEntries();
+        plannedEntries = BuildPlannedTrustedNetworkEntries(
             entryId,
             label,
             addressOrCidr,
             targetEnabled,
             targetAuthenticationEnabled);
+        var currentRule = entryId.HasValue
+            ? currentEntries.FirstOrDefault(entry => entry.Id == entryId.Value)
+            : null;
+        var plannedRule = entryId.HasValue
+            ? plannedEntries.FirstOrDefault(entry => entry.Id == entryId.Value)
+            : null;
+        var configuredRuleAccessReduced = plannedRule is not null &&
+                                          TrustedNetworkAccessTrialService.RequiresTrialForRuleChange(
+                                              currentRule,
+                                              plannedRule);
 
+        PlannedAccessOutcome? currentSessionBefore = null;
         PlannedAccessOutcome? currentSessionOutcome = null;
         if (IPAddress.TryParse(currentAccess.RemoteAddress, out var remoteAddress))
         {
+            currentSessionBefore = EvaluatePlannedAccess(currentEntries, remoteAddress);
             currentSessionOutcome = EvaluatePlannedAccess(plannedEntries, remoteAddress);
         }
 
+        var loopbackIpv4Before = EvaluatePlannedAccess(currentEntries, IPAddress.Loopback);
+        var loopbackIpv6Before = EvaluatePlannedAccess(currentEntries, IPAddress.IPv6Loopback);
         var loopbackIpv4Outcome = EvaluatePlannedAccess(plannedEntries, IPAddress.Loopback);
         var loopbackIpv6Outcome = EvaluatePlannedAccess(plannedEntries, IPAddress.IPv6Loopback);
+        var hadDirectConsoleRecovery =
+            loopbackIpv4Before == PlannedAccessOutcome.FullAccess ||
+            loopbackIpv6Before == PlannedAccessOutcome.FullAccess;
         var hasDirectConsoleRecovery =
             loopbackIpv4Outcome == PlannedAccessOutcome.FullAccess ||
             loopbackIpv6Outcome == PlannedAccessOutcome.FullAccess;
 
         var currentSessionAffected =
+            currentSessionBefore.HasValue &&
             currentSessionOutcome.HasValue &&
-            currentSessionOutcome.Value != PlannedAccessOutcome.FullAccess;
-        var consoleRecoveryAffected = !hasDirectConsoleRecovery;
+            AccessRank(currentSessionOutcome.Value) < AccessRank(currentSessionBefore.Value);
+        var consoleRecoveryAffected = hadDirectConsoleRecovery && !hasDirectConsoleRecovery;
 
-        if (!currentSessionAffected && !consoleRecoveryAffected)
+        if (!configuredRuleAccessReduced && !currentSessionAffected && !consoleRecoveryAffected)
         {
             title = string.Empty;
-            message = string.Empty;
-            currentAccessWarning = string.Empty;
-            recoveryWarning = string.Empty;
-            requiresTypedConfirmation = false;
+            detail = string.Empty;
             return false;
         }
 
-        title = !targetEnabled ? "Disable access rule?" : "Enable authentication on this interface?";
-        message = !targetEnabled
-            ? "This change reduces access on a rule that Linux Made Sane is actively using."
-            : "This change stops direct access and forces sign-in on a rule that Linux Made Sane is actively using.";
+        title = !targetEnabled
+            ? $"Testing {label} disabled"
+            : targetAuthenticationEnabled
+                ? $"Testing authentication on {label}"
+                : $"Testing changes to {label}";
 
-        currentAccessWarning = currentSessionAffected
-            ? $"Current session after this change: {DescribePlannedAccess(currentSessionOutcome!.Value)} from {currentAccess.RemoteAddress}."
-            : string.Empty;
+        var detailParts = new List<string>();
+        if (configuredRuleAccessReduced)
+        {
+            detailParts.Add(!targetEnabled
+                ? "This enabled access rule is disabled temporarily while you test the result."
+                : targetAuthenticationEnabled && currentRule?.IsAuthenticationEnabled == false
+                    ? "Sign-in is required temporarily on this access rule while you test the result."
+                    : "The changed address coverage is temporary while you test the result.");
+        }
 
-        recoveryWarning = consoleRecoveryAffected
-            ? $"Direct localhost recovery would no longer be available. Planned localhost state: 127.0.0.1 = {DescribePlannedAccess(loopbackIpv4Outcome)}, ::1 = {DescribePlannedAccess(loopbackIpv6Outcome)}. If this locks you out, log into the server console and run Linux Made Sane with unlock-security, then reopen http://127.0.0.1:5080 to fix LMS Accounts."
-            : "If this browser session gets stranded, recover from the server console over localhost. If localhost access also fails, run Linux Made Sane with unlock-security.";
+        if (currentSessionAffected)
+        {
+            detailParts.Add(
+                $"This browser changes from {DescribePlannedAccess(currentSessionBefore!.Value)} to {DescribePlannedAccess(currentSessionOutcome!.Value)}.");
+        }
 
-        requiresTypedConfirmation = true;
+        if (consoleRecoveryAffected)
+        {
+            detailParts.Add("Direct localhost recovery is unavailable during the test.");
+        }
+
+        detail = string.Join(' ', detailParts);
         return true;
     }
 
-    private IReadOnlyList<TrustedNetworkEntry> BuildPlannedTrustedNetworkEntries(
-        Guid? entryId,
-        string label,
-        string addressOrCidr,
-        bool targetEnabled,
-        bool targetAuthenticationEnabled)
+    private IReadOnlyList<TrustedNetworkEntry> BuildCurrentTrustedNetworkEntries()
     {
         var now = DateTimeOffset.UtcNow;
-        var plannedEntries = page.TrustedNetworks
+        return page.TrustedNetworks
             .Select(entry => new TrustedNetworkEntry(
                 entry.Id,
                 entry.Label,
@@ -1549,8 +2545,20 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
                 entry.IsAuthenticationEnabled,
                 entry.IsBuiltIn,
                 now,
-                now))
-            .ToList();
+                now,
+                entry.DeniedResponseMode))
+            .ToArray();
+    }
+
+    private IReadOnlyList<TrustedNetworkEntry> BuildPlannedTrustedNetworkEntries(
+        Guid? entryId,
+        string label,
+        string addressOrCidr,
+        bool targetEnabled,
+        bool targetAuthenticationEnabled)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var plannedEntries = BuildCurrentTrustedNetworkEntries().ToList();
 
         var plannedRule = new TrustedNetworkEntry(
             entryId ?? Guid.NewGuid(),
@@ -1562,7 +2570,8 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
             targetAuthenticationEnabled,
             false,
             now,
-            now);
+            now,
+            networkEditor.DeniedResponseMode);
 
         var existingIndex = entryId.HasValue
             ? plannedEntries.FindIndex(entry => entry.Id == entryId.Value)
@@ -1575,7 +2584,8 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
             {
                 Description = existing.Description,
                 IsBuiltIn = existing.IsBuiltIn,
-                CreatedAtUtc = existing.CreatedAtUtc
+                CreatedAtUtc = existing.CreatedAtUtc,
+                DeniedResponseMode = existing.DeniedResponseMode
             };
         }
         else
@@ -1609,53 +2619,144 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
             _ => "No access"
         };
 
-    private void ShowNetworkRiskModal(
+    private static int AccessRank(PlannedAccessOutcome outcome) => outcome switch
+    {
+        PlannedAccessOutcome.FullAccess => 2,
+        PlannedAccessOutcome.LoginRequired => 1,
+        _ => 0
+    };
+
+    private async Task StartNetworkTrialAsync(
         string title,
-        string message,
-        string currentAccessWarning,
-        string recoveryWarning,
-        bool requiresTypedConfirmation,
-        Func<Task> action)
+        string detail,
+        IReadOnlyList<TrustedNetworkEntry> plannedEntries,
+        Func<Task> commitAction)
     {
-        networkRiskModalTitle = title;
-        networkRiskModalMessage = message;
-        networkRiskCurrentAccessWarning = currentAccessWarning;
-        networkRiskRecoveryWarning = recoveryWarning;
-        networkRiskRequiresTypedConfirmation = requiresTypedConfirmation;
-        networkRiskAcknowledged = false;
-        networkRiskConfirmationInput = string.Empty;
-        pendingNetworkRiskAction = action;
-        showNetworkRiskModal = true;
-    }
-
-    private Task CancelNetworkRiskAsync()
-    {
-        showNetworkRiskModal = false;
-        pendingNetworkRiskAction = null;
-        networkRiskModalMessage = string.Empty;
-        networkRiskCurrentAccessWarning = string.Empty;
-        networkRiskRecoveryWarning = string.Empty;
-        networkRiskRequiresTypedConfirmation = false;
-        networkRiskAcknowledged = false;
-        networkRiskConfirmationInput = string.Empty;
-        return Task.CompletedTask;
-    }
-
-    private async Task ConfirmNetworkRiskAsync()
-    {
-        var action = pendingNetworkRiskAction;
-        showNetworkRiskModal = false;
-        pendingNetworkRiskAction = null;
-        networkRiskModalMessage = string.Empty;
-        networkRiskCurrentAccessWarning = string.Empty;
-        networkRiskRecoveryWarning = string.Empty;
-        networkRiskRequiresTypedConfirmation = false;
-        networkRiskAcknowledged = false;
-        networkRiskConfirmationInput = string.Empty;
-        if (action is not null)
+        if (ActiveFirewallTrial is not null)
         {
-            await action();
+            networkMessage = "Keep or revert the current Auto Rollback firewall change before changing network-interface access.";
+            networkMessageIsError = true;
+            return;
         }
+
+        try
+        {
+            var trial = NetworkAccessTrialService.Begin(
+                plannedEntries,
+                title,
+                TimeSpan.FromSeconds(NetworkTrialDurationSeconds));
+            activeNetworkTrialId = trial.Id;
+            networkTrialRemainingSeconds = NetworkTrialDurationSeconds;
+            networkTrialTitle = title;
+            networkTrialDetail = detail;
+            pendingNetworkTrialCommit = commitAction;
+            networkMessage = null;
+            networkMessageIsError = false;
+            await LoadAsync();
+            _ = MonitorNetworkTrialAsync(trial.Id);
+        }
+        catch (Exception exception)
+        {
+            networkMessage = exception.Message;
+            networkMessageIsError = true;
+        }
+    }
+
+    private async Task MonitorNetworkTrialAsync(Guid trialId)
+    {
+        try
+        {
+            while (activeNetworkTrialId == trialId)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1));
+                await InvokeAsync(async () =>
+                {
+                    if (activeNetworkTrialId != trialId)
+                    {
+                        return;
+                    }
+
+                    var activeTrial = NetworkAccessTrialService.GetActive();
+                    if (activeTrial?.Id != trialId)
+                    {
+                        await FinishRevertedNetworkTrialAsync("The 30-second test ended and the previous access policy was restored.");
+                        return;
+                    }
+
+                    networkTrialRemainingSeconds = Math.Max(
+                        1,
+                        (int)Math.Ceiling((activeTrial.ExpiresAtUtc - DateTimeOffset.UtcNow).TotalSeconds));
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // The circuit ended. The server-side trial still expires automatically.
+        }
+        catch (InvalidOperationException)
+        {
+            // The circuit ended. The server-side trial still expires automatically.
+        }
+    }
+
+    private async Task KeepNetworkTrialAsync()
+    {
+        if (activeNetworkTrialId is not { } trialId ||
+            pendingNetworkTrialCommit is not { } commitAction ||
+            NetworkAccessTrialService.GetActive()?.Id != trialId)
+        {
+            await FinishRevertedNetworkTrialAsync("The test had already expired; the previous access policy is active.");
+            return;
+        }
+
+        networkMessage = null;
+        networkMessageIsError = false;
+        await commitAction();
+        if (networkMessageIsError)
+        {
+            NetworkAccessTrialService.End(trialId);
+            ClearNetworkTrialState();
+            await LoadAsync();
+            return;
+        }
+
+        var successMessage = networkMessage;
+        NetworkAccessTrialService.End(trialId);
+        ClearNetworkTrialState();
+        await LoadAsync();
+        networkMessage = string.IsNullOrWhiteSpace(successMessage)
+            ? "Network access change kept."
+            : $"{successMessage} The change is now permanent.";
+        networkMessageIsError = false;
+    }
+
+    private async Task RevertNetworkTrialAsync()
+    {
+        if (activeNetworkTrialId is { } trialId)
+        {
+            NetworkAccessTrialService.End(trialId);
+        }
+
+        await FinishRevertedNetworkTrialAsync("Test reverted. The previous access policy is active.");
+    }
+
+    private async Task FinishRevertedNetworkTrialAsync(string message)
+    {
+        ClearNetworkTrialState();
+        await LoadAsync();
+        networkMessage = message;
+        networkMessageIsError = false;
+        StateHasChanged();
+    }
+
+    private void ClearNetworkTrialState()
+    {
+        activeNetworkTrialId = null;
+        networkTrialRemainingSeconds = 0;
+        networkTrialTitle = string.Empty;
+        networkTrialDetail = string.Empty;
+        pendingNetworkTrialCommit = null;
     }
 
     private async Task CreateUserAsync()

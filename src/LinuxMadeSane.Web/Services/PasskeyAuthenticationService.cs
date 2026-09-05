@@ -80,9 +80,9 @@ public sealed class PasskeyAuthenticationService(
             return PasskeyOptionsResult.Fail("Sign in with MFA before setting up a passkey.");
         }
 
-        if (!IsFreshOtpMfaSession(principal))
+        if (!HasFreshStrongMfaSession(principal))
         {
-            return PasskeyOptionsResult.Fail("Sign in with your authenticator code again before setting up a passkey.");
+            return PasskeyOptionsResult.Fail("Verify with your authenticator code, or sign in with a passkey again, before adding a passkey.");
         }
 
         return await BuildRegistrationOptionsForUserAsync(user, friendlyName, request, cancellationToken);
@@ -111,7 +111,7 @@ public sealed class PasskeyAuthenticationService(
                 .ToArray(),
             AuthenticatorSelection = new AuthenticatorSelection
             {
-                ResidentKey = ResidentKeyRequirement.Preferred,
+                ResidentKey = ResidentKeyRequirement.Required,
                 UserVerification = UserVerificationRequirement.Required
             },
             AttestationPreference = AttestationConveyancePreference.None
@@ -145,10 +145,23 @@ public sealed class PasskeyAuthenticationService(
             return new PasskeyOperationResult(false, "The passkey setup request has expired.");
         }
 
-        var targetUser = await userStore.GetAsync(state.UserId, cancellationToken);
+        var targetUser = await ResolvePrincipalUserAsync(principal, cancellationToken);
         if (targetUser is null || !targetUser.IsEnabled)
         {
-            return new PasskeyOperationResult(false, "The selected LMS account is not available.");
+            memoryCache.Remove($"{RegistrationStatePrefix}{stateId}");
+            return new PasskeyOperationResult(false, "Sign in before completing passkey setup.");
+        }
+
+        if (targetUser.Id != state.UserId)
+        {
+            memoryCache.Remove($"{RegistrationStatePrefix}{stateId}");
+            logger.LogWarning(
+                "Passkey registration account changed between setup and completion. Expected {ExpectedUserId}; received {CurrentUserId}.",
+                state.UserId,
+                targetUser.Id);
+            return new PasskeyOperationResult(
+                false,
+                "The signed-in LMS account changed. Start passkey setup again for this account.");
         }
 
         var attestationResponse = JsonSerializer.Deserialize<AuthenticatorAttestationRawResponse>(
@@ -197,39 +210,26 @@ public sealed class PasskeyAuthenticationService(
         }
     }
 
-    public async Task<PasskeyOptionsResult> BuildLoginOptionsAsync(
-        string email,
+    public Task<PasskeyOptionsResult> BuildLoginOptionsAsync(
         HttpRequest request,
         CancellationToken cancellationToken)
     {
-        var user = await userStore.FindByEmailAsync(email, cancellationToken);
-        if (user is null || !user.IsEnabled)
-        {
-            return PasskeyOptionsResult.Fail("No passkey is available for this email.");
-        }
-
-        var passkeys = await passkeyStore.ListByUserAsync(user.Id, cancellationToken);
-        if (passkeys.Count == 0)
-        {
-            return PasskeyOptionsResult.Fail("No passkey is available for this email.");
-        }
-
+        cancellationToken.ThrowIfCancellationRequested();
+        IReadOnlyList<PublicKeyCredentialDescriptor> allowedCredentials = [];
         var fido = BuildFido(request);
         var assertionOptions = fido.GetAssertionOptions(new GetAssertionOptionsParams
         {
-            AllowedCredentials = passkeys
-                .Select(passkey => new PublicKeyCredentialDescriptor(PasskeyBase64Url.Decode(passkey.CredentialId)))
-                .ToArray(),
+            AllowedCredentials = allowedCredentials,
             UserVerification = UserVerificationRequirement.Required
         });
 
         var stateId = Guid.NewGuid().ToString("N");
         memoryCache.Set(
             $"{AssertionStatePrefix}{stateId}",
-            new PasskeyAssertionState(user.Id, assertionOptions),
+            new PasskeyAssertionState(assertionOptions),
             TimeSpan.FromMinutes(5));
 
-        return new PasskeyOptionsResult(true, null, stateId, SerializeAssertionOptions(assertionOptions));
+        return Task.FromResult(new PasskeyOptionsResult(true, null, stateId, SerializeAssertionOptions(assertionOptions)));
     }
 
     public async Task<PasskeyLoginResult> CompleteLoginAsync(
@@ -255,7 +255,7 @@ public sealed class PasskeyAuthenticationService(
         }
 
         var credential = await passkeyStore.GetByCredentialIdAsync(assertionResponse.Id, cancellationToken);
-        if (credential is null || credential.UserId != state.UserId)
+        if (credential is null)
         {
             return PasskeyLoginResult.Fail("The passkey was not recognised.");
         }
@@ -317,9 +317,10 @@ public sealed class PasskeyAuthenticationService(
             : null;
     }
 
-    private static bool IsFreshOtpMfaSession(ClaimsPrincipal principal)
+    internal static bool HasFreshStrongMfaSession(ClaimsPrincipal principal)
     {
-        if (!principal.HasClaim("amr", "otp"))
+        if (!principal.HasClaim("amr", "otp") &&
+            !principal.HasClaim("amr", "passkey"))
         {
             return false;
         }
@@ -364,7 +365,7 @@ public sealed class PasskeyAuthenticationService(
         string FriendlyName,
         CredentialCreateOptions Options);
 
-    private sealed record PasskeyAssertionState(Guid UserId, AssertionOptions Options);
+    private sealed record PasskeyAssertionState(AssertionOptions Options);
 }
 
 public sealed record PasskeyOperationResult(bool Succeeded, string Message);

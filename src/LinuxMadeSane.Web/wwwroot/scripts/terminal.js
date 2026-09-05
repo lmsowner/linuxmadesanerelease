@@ -5,6 +5,18 @@ window.lmsTerminal = (() => {
     const terminals = new Map();
     const baseTerminalFontSize = 14;
 
+    function invokeDotNetSafely(dotNetRef, methodName, ...args) {
+        if (!dotNetRef) {
+            return Promise.resolve();
+        }
+
+        try {
+            return Promise.resolve(dotNetRef.invokeMethodAsync(methodName, ...args)).catch(() => undefined);
+        } catch {
+            return Promise.resolve();
+        }
+    }
+
     function getState(id) {
         return terminals.get(id);
     }
@@ -88,10 +100,26 @@ window.lmsTerminal = (() => {
             state.fitFrame = 0;
             try {
                 state.fitAddon.fit();
-                state.dotNetRef?.invokeMethodAsync("OnTerminalResize", state.terminal.cols, state.terminal.rows);
+                reportTerminalSize(state);
             } catch {
             }
         });
+    }
+
+    function reportTerminalSize(state) {
+        if (!state?.terminal) {
+            return;
+        }
+
+        const columns = state.terminal.cols;
+        const rows = state.terminal.rows;
+        if (state.lastReportedColumns === columns && state.lastReportedRows === rows) {
+            return;
+        }
+
+        state.lastReportedColumns = columns;
+        state.lastReportedRows = rows;
+        void invokeDotNetSafely(state.dotNetRef, "OnTerminalResize", columns, rows);
     }
 
     function createTerminal(id, elementId, dotNetRef) {
@@ -120,10 +148,9 @@ window.lmsTerminal = (() => {
         terminal.focus();
 
         const resizeObserver = new ResizeObserver(() => {
-            try {
-                fitAddon.fit();
-                dotNetRef.invokeMethodAsync("OnTerminalResize", terminal.cols, terminal.rows);
-            } catch {
+            const state = terminals.get(id);
+            if (state) {
+                scheduleTerminalFit(state);
             }
         });
 
@@ -131,29 +158,13 @@ window.lmsTerminal = (() => {
 
         const dataSubscription = terminal.onData(data => {
             const state = terminals.get(id);
-            if (!state) {
+            if (!state || !data) {
                 return;
             }
 
-            state.pendingInput = (state.pendingInput || "") + data;
-            if (state.inputFlushHandle) {
-                return;
-            }
-
-            state.inputFlushHandle = window.setTimeout(() => {
-                const latestState = terminals.get(id);
-                if (!latestState) {
-                    return;
-                }
-
-                const payload = latestState.pendingInput || "";
-                latestState.pendingInput = "";
-                latestState.inputFlushHandle = 0;
-
-                if (payload) {
-                    dotNetRef.invokeMethodAsync("OnTerminalData", payload);
-                }
-            }, 12);
+            // xterm owns keyboard and paste semantics. Forward exactly the data it
+            // emits to the PTY, including Ctrl+C and bracketed-paste sequences.
+            void invokeDotNetSafely(state.dotNetRef, "OnTerminalData", data);
         });
 
         const selectionSubscription = terminal.onSelectionChange?.(() => {
@@ -207,15 +218,15 @@ window.lmsTerminal = (() => {
             dotNetRef,
             lastOutput: "",
             lastRevision: -1,
-            pendingInput: "",
-            inputFlushHandle: 0,
+            lastReportedColumns: 0,
+            lastReportedRows: 0,
             fitFrame: 0,
             copyOnSelect: false,
             pendingSelectionText: "",
             lastAutoCopiedSelection: ""
         });
 
-        dotNetRef.invokeMethodAsync("OnTerminalResize", terminal.cols, terminal.rows);
+        reportTerminalSize(terminals.get(id));
         return true;
     }
 
@@ -238,7 +249,6 @@ window.lmsTerminal = (() => {
         }
 
         state.lastOutput = output;
-        state.terminal.scrollToBottom();
     }
 
     function appendChunk(id, chunk, outputRevision) {
@@ -253,12 +263,22 @@ window.lmsTerminal = (() => {
 
         state.terminal.write(chunk);
         state.lastRevision = outputRevision;
-        state.terminal.scrollToBottom();
     }
 
     function focus(id) {
         const state = getState(id);
         state?.terminal.focus();
+    }
+
+    function paste(id, text) {
+        const state = getState(id);
+        if (!state?.terminal || !text) {
+            return false;
+        }
+
+        state.terminal.paste(text);
+        state.terminal.focus();
+        return true;
     }
 
     async function copySelection(id) {
@@ -460,7 +480,7 @@ window.lmsTerminal = (() => {
             }
 
             event.preventDefault();
-            dotNetRef.invokeMethodAsync("SubmitPromptFromKeyboardAsync");
+            void invokeDotNetSafely(dotNetRef, "SubmitPromptFromKeyboardAsync");
         };
 
         element._lmsAiPromptKeydownHandler = handler;
@@ -482,9 +502,6 @@ window.lmsTerminal = (() => {
         if (state.terminalPointerUpHandler) {
             state.terminalHostElement?.removeEventListener("pointerup", state.terminalPointerUpHandler);
             state.terminalHostElement?.removeEventListener("mouseup", state.terminalPointerUpHandler);
-        }
-        if (state.inputFlushHandle) {
-            window.clearTimeout(state.inputFlushHandle);
         }
         if (state.fitFrame) {
             window.cancelAnimationFrame(state.fitFrame);
@@ -550,6 +567,7 @@ window.lmsTerminal = (() => {
         writeDelta,
         appendChunk,
         focus,
+        paste,
         copySelection,
         setCopyOnSelect,
         getSelection,

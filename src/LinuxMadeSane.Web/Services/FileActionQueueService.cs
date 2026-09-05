@@ -44,7 +44,11 @@ public sealed class FileActionQueueService(
 
         lock (session.SyncRoot)
         {
-            var sameHost = request.SourceHost.Id == request.DestinationHost.Id;
+            var sameHost = CanUseDirectSameHostOperation(
+                request.SourceHost,
+                request.SourceExecution,
+                request.DestinationHost,
+                request.DestinationExecution);
             var offsetBytes = 0L;
             var items = new List<FileActionJobItem>(request.Items.Count);
             foreach (var sourceItem in request.Items)
@@ -738,7 +742,11 @@ public sealed class FileActionQueueService(
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var fileAccessService = scope.ServiceProvider.GetRequiredService<IManagedHostFileAccessService>();
-        var sameHost = job.SourceHost.Id == job.DestinationHost.Id;
+        var sameHost = CanUseDirectSameHostOperation(
+            job.SourceHost,
+            job.SourceExecution,
+            job.DestinationHost,
+            job.DestinationExecution);
         var sourceProfile = BuildConnectionProfile(job.SourceExecution);
         var destinationProfile = BuildConnectionProfile(job.DestinationExecution);
 
@@ -1673,7 +1681,27 @@ public sealed class FileActionQueueService(
             executionContext.Username,
             executionContext.SecretHandle,
             executionContext.PreferStoredCredentials,
-            executionContext.UseSshTransport);
+            executionContext.UseSshTransport,
+            executionContext.UseSudo);
+
+    private static bool CanUseDirectSameHostOperation(
+        ManagedHost sourceHost,
+        FileActionExecutionContext sourceExecution,
+        ManagedHost destinationHost,
+        FileActionExecutionContext destinationExecution)
+    {
+        if (sourceHost.Id != destinationHost.Id ||
+            sourceExecution.UseSudo != destinationExecution.UseSudo)
+        {
+            return false;
+        }
+
+        return sourceExecution.UseSudo ||
+               string.Equals(
+                   sourceExecution.Username.Trim(),
+                   destinationExecution.Username.Trim(),
+                   StringComparison.Ordinal);
+    }
 
     private static IReadOnlyList<FileActionAffectedLocation> BuildAffectedLocations(FileActionJob job)
     {
@@ -1809,7 +1837,8 @@ public sealed record FileActionExecutionContext(
     string Username,
     Guid? SecretHandle,
     bool PreferStoredCredentials,
-    bool UseSshTransport);
+    bool UseSshTransport,
+    bool UseSudo = false);
 
 public sealed record FileActionSourceItem(
     string SourcePath,

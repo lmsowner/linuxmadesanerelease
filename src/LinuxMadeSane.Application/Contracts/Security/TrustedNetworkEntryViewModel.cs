@@ -1,6 +1,8 @@
 // Copyright (c) Richard D. Kiernan.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using LinuxMadeSane.Core.Enums;
+
 namespace LinuxMadeSane.Application.Contracts.Security;
 
 public sealed record TrustedNetworkEntryViewModel(
@@ -11,4 +13,5 @@ public sealed record TrustedNetworkEntryViewModel(
     bool IsEnabled,
     bool IsTrustedAccessEnabled,
     bool IsAuthenticationEnabled,
-    bool IsBuiltIn);
+    bool IsBuiltIn,
+    NetworkAccessDeniedResponseMode DeniedResponseMode);

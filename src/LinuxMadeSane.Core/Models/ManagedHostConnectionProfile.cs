@@ -7,7 +7,8 @@ public sealed record ManagedHostConnectionProfile(
     string Username,
     Guid? SecretHandle,
     bool PreferStoredCredentials,
-    bool UseSshTransport = false);
+    bool UseSshTransport = false,
+    bool UseSudo = false);
 
 public sealed record ManagedHostConnectionSecrets(
     string Password,

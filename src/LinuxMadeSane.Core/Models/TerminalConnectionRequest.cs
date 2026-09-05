@@ -11,4 +11,5 @@ public sealed record TerminalConnectionRequest(
     bool PreferStoredCredentials,
     int Columns,
     int Rows,
-    string? WorkingDirectory = null);
+    string? WorkingDirectory = null,
+    Guid? OwnerId = null);

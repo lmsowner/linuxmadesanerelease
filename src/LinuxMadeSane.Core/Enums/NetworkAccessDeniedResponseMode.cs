@@ -3,11 +3,8 @@
 
 namespace LinuxMadeSane.Core.Enums;
 
-public enum DeploymentPatternType
+public enum NetworkAccessDeniedResponseMode
 {
-    AspNetKestrel = 0,
-    NodeService = 1,
-    PythonApp = 2,
-    DockerBackedService = 3,
-    WorkerService = 4
+    AccessDeniedPage = 0,
+    EmptyNotFound = 1
 }

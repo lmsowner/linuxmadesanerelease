@@ -45,6 +45,7 @@ public sealed class SqliteTrustedNetworkStore(LinuxMadeSaneDbContext dbContext) 
                 IsTrustedAccessEnabled = entry.IsTrustedAccessEnabled,
                 IsAuthenticationEnabled = entry.IsAuthenticationEnabled,
                 IsBuiltIn = entry.IsBuiltIn,
+                DeniedResponseMode = entry.DeniedResponseMode,
                 CreatedAtUtc = entry.CreatedAtUtc,
                 UpdatedAtUtc = entry.UpdatedAtUtc
             });
@@ -58,6 +59,7 @@ public sealed class SqliteTrustedNetworkStore(LinuxMadeSaneDbContext dbContext) 
             entity.IsTrustedAccessEnabled = entry.IsTrustedAccessEnabled;
             entity.IsAuthenticationEnabled = entry.IsAuthenticationEnabled;
             entity.IsBuiltIn = entry.IsBuiltIn;
+            entity.DeniedResponseMode = entry.DeniedResponseMode;
             entity.CreatedAtUtc = entry.CreatedAtUtc;
             entity.UpdatedAtUtc = entry.UpdatedAtUtc;
         }
@@ -90,5 +92,6 @@ public sealed class SqliteTrustedNetworkStore(LinuxMadeSaneDbContext dbContext) 
             entity.IsAuthenticationEnabled,
             entity.IsBuiltIn,
             entity.CreatedAtUtc,
-            entity.UpdatedAtUtc);
+            entity.UpdatedAtUtc,
+            entity.DeniedResponseMode);
 }

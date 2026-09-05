@@ -1,0 +1,1471 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@page "/system-info"
+@page "/system-analysis"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Contracts.SystemInfo
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models.Monitoring
+@inject ILocalSystemMonitorService SystemMonitor
+@inject ILocalDriveUsageService DriveUsageService
+@inject ILocalSystemMaintenanceService SystemMaintenance
+@inject IConfigurationSummaryService ConfigurationSummaryService
+@inject IJSRuntime JSRuntime
+
+<PageTitle>System Info | Linux Made Sane</PageTitle>
+
+<div class="page-shell system-analysis-page">
+    <UiHeroPanel Eyebrow="Current LMS host"
+                 Title="System Info"
+                 Description="Live host information plus a concise view of the local services and LMS modules configured on this server."
+                 Compact="true">
+        <Actions>
+            <UiCommandButton Label="Clean disk"
+                             Glyph="UiIconGlyph.Delete"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isMaintenanceBusy"
+                             OnClick="OpenDiskCleanupDialog" />
+            <UiCommandButton Label="Reboot server"
+                             Glyph="UiIconGlyph.Restart"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@isMaintenanceBusy"
+                             OnClick="OpenRebootDialog" />
+            <UiCommandButton Label="Refresh now"
+                             Glyph="UiIconGlyph.Refresh"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@(isRefreshing || isConfigurationLoading || isMaintenanceBusy)"
+                             OnClick="RefreshNowAsync" />
+        </Actions>
+    </UiHeroPanel>
+
+    @if (activeTab != "configuration")
+    {
+        <section class="surface-card system-analysis-controls" aria-label="Refresh schedule">
+            <div class="system-analysis-host-copy">
+                <strong>@(snapshot?.HostName ?? "Current LMS host")</strong>
+                <span class="meta-text">@(snapshot is null ? "Waiting for first sample" : $"{snapshot.OperatingSystem} · kernel {snapshot.KernelVersion}")</span>
+            </div>
+
+            <UiSelectField TValue="string"
+                           Label="Update schedule"
+                           Value="@pollPreset"
+                           ValueChanged="ChangePollPresetAsync"
+                           ValueExpression="@(() => pollPreset)"
+                           Compact="true"
+                           Class="system-analysis-schedule-select">
+                <option value="1">Live · 1 second</option>
+                <option value="2">Every 2 seconds</option>
+                <option value="5">Every 5 seconds</option>
+                <option value="10">Every 10 seconds</option>
+                <option value="30">Every 30 seconds</option>
+                <option value="custom">Custom</option>
+                <option value="manual">Manual only</option>
+            </UiSelectField>
+
+            @if (pollPreset == "custom")
+            {
+                <div class="system-analysis-custom-interval">
+                    <UiNumberField TValue="int"
+                                   Label="Seconds"
+                                   Value="@customPollSeconds"
+                                   ValueChanged="ChangeCustomIntervalAsync"
+                                   ValueExpression="@(() => customPollSeconds)"
+                                   Min="1"
+                                   Max="300"
+                                   Compact="true" />
+                </div>
+            }
+
+            <div class="system-analysis-sample-status">
+                <UiPill Tone="@(isRefreshing ? UiPillTone.Warning : UiPillTone.Success)">
+                    @(isRefreshing ? "Sampling" : GetScheduleLabel())
+                </UiPill>
+                @if (snapshot is not null)
+                {
+                    <span class="meta-text">Updated @snapshot.CapturedAtUtc.ToLocalTime().ToString("HH:mm:ss") · interval @FormatInterval(snapshot.SampleDurationSeconds)</span>
+                }
+            </div>
+        </section>
+    }
+
+        @if (!string.IsNullOrWhiteSpace(errorMessage))
+        {
+            <p class="callout error">@errorMessage</p>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(maintenanceMessage))
+        {
+            <p class="callout @(maintenanceMessageIsError ? "warning" : "success")">@maintenanceMessage</p>
+        }
+
+        @if (lastDiskCleanupResult is not null)
+        {
+            <details class="surface-card system-analysis-maintenance-result">
+                <summary>
+                    <strong>Last disk cleanup</strong>
+                    <span class="status-pill @(lastDiskCleanupResult.HasFailures ? "warning" : "success")">@(lastDiskCleanupResult.HasFailures ? "Completed with warnings" : "Completed")</span>
+                </summary>
+                <div class="system-analysis-maintenance-steps">
+                    @foreach (var step in lastDiskCleanupResult.Steps)
+                    {
+                        <div>
+                            <span class="status-pill @(step.Succeeded ? "success" : "warning")">@(step.Succeeded ? "Done" : "Failed")</span>
+                            <strong>@step.Name</strong>
+                            <small>@step.Detail</small>
+                        </div>
+                    }
+                </div>
+            </details>
+        }
+
+        @if (snapshot is null)
+        {
+            <UiPanel>
+                <p class="meta-text">Collecting the first kernel counters. Rate values appear after the next poll.</p>
+            </UiPanel>
+        }
+        else
+        {
+            <TabControl ActiveValue="@activeTab"
+                        ActiveValueChanged="SetActiveTabAsync"
+                        Class="page-tab-control system-analysis-tabs"
+                        PanelClass="page-tab-panel system-analysis-tab-panel">
+                <ChildContent>
+                    <TabPage Value="overview" Title="Overview">
+                        <ChildContent>
+                            <div class="system-analysis-tab-content">
+                                <div class="system-analysis-metric-grid">
+                                    <article class="system-analysis-metric-card">
+                                        <span>CPU</span>
+                                        <strong>@FormatPercent(snapshot.Cpu.UsagePercent)</strong>
+                                        <div class="system-analysis-meter"><i style="@MeterStyle(snapshot.Cpu.UsagePercent)"></i></div>
+                                        <small>@snapshot.LogicalProcessorCount logical processor(s)</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>Load average</span>
+                                        <strong>@snapshot.Load.OneMinute.ToString("0.00")</strong>
+                                        <small>@snapshot.Load.FiveMinutes.ToString("0.00") · @snapshot.Load.FifteenMinutes.ToString("0.00")</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>Memory used</span>
+                                        <strong>@FormatBytes(snapshot.Memory.UsedBytes)</strong>
+                                        <div class="system-analysis-meter"><i style="@MeterStyle(Percent(snapshot.Memory.UsedBytes, snapshot.Memory.TotalBytes))"></i></div>
+                                        <small>@FormatBytes(snapshot.Memory.AvailableBytes) available</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>Network</span>
+                                        <strong>↓ @FormatRate(TotalNetworkReceiveRate)</strong>
+                                        <small>↑ @FormatRate(TotalNetworkTransmitRate)</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>Disk I/O</span>
+                                        <strong>R @FormatRate(TotalDiskReadRate)</strong>
+                                        <small>W @FormatRate(TotalDiskWriteRate)</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>Processes</span>
+                                        <strong>@snapshot.ProcessCount</strong>
+                                        <small>@snapshot.RunningProcessCount running · @snapshot.ZombieProcessCount zombie</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>Root filesystem</span>
+                                        <strong>@FormatBytes(snapshot.RootFileSystem.AvailableBytes) free</strong>
+                                        <div class="system-analysis-meter"><i style="@MeterStyle(Percent(snapshot.RootFileSystem.UsedBytes, snapshot.RootFileSystem.TotalBytes))"></i></div>
+                                        <small>@FormatBytes(snapshot.RootFileSystem.TotalBytes) total</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>TCP sessions</span>
+                                        <strong>@snapshot.TcpEstablishedConnectionCount</strong>
+                                        <small>Established IPv4 and IPv6 connections</small>
+                                    </article>
+                                </div>
+
+                                <section class="surface-card system-analysis-table-card">
+                                    <div class="table-header">
+                                        <h2>Top CPU processes</h2>
+                                        <span>Measured across the polling interval</span>
+                                    </div>
+                                    @ProcessTable(GetCpuProcesses(10), showIo: false, showActions: false)
+                                </section>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="cpu" Title="CPU">
+                        <ChildContent>
+                            <div class="system-analysis-tab-content">
+                                <div class="system-analysis-breakdown-grid">
+                                    @CpuBreakdown("Total active", snapshot.Cpu.UsagePercent)
+                                    @CpuBreakdown("User", snapshot.Cpu.UserPercent)
+                                    @CpuBreakdown("Kernel", snapshot.Cpu.SystemPercent)
+                                    @CpuBreakdown("I/O wait", snapshot.Cpu.IoWaitPercent)
+                                    @CpuBreakdown("Steal", snapshot.Cpu.StealPercent)
+                                </div>
+                                <section class="surface-card system-analysis-table-card">
+                                    <div class="table-header">
+                                        <h2>CPU by process</h2>
+                                        <span>100% equals one fully occupied logical CPU</span>
+                                    </div>
+                                    @ProcessTable(GetCpuProcesses(75), showIo: false, showActions: false)
+                                </section>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="memory" Title="Memory">
+                        <ChildContent>
+                            <div class="system-analysis-tab-content">
+                                <div class="system-analysis-metric-grid compact">
+                                    @MemoryCard("Total", snapshot.Memory.TotalBytes)
+                                    @MemoryCard("Used", snapshot.Memory.UsedBytes)
+                                    @MemoryCard("Available", snapshot.Memory.AvailableBytes)
+                                    @MemoryCard("Cache", snapshot.Memory.CacheBytes)
+                                    @MemoryCard("Swap used", snapshot.Memory.SwapUsedBytes)
+                                    @MemoryCard("Swap total", snapshot.Memory.SwapTotalBytes)
+                                </div>
+                                <section class="surface-card system-analysis-table-card">
+                                    <div class="table-header">
+                                        <h2>Memory by process</h2>
+                                        <span>Resident memory, highest first</span>
+                                    </div>
+                                    @ProcessTable(GetMemoryProcesses(75), showIo: false, showActions: false)
+                                </section>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="network" Title="Network">
+                        <ChildContent>
+                            <div class="system-analysis-tab-content">
+                                <div class="system-analysis-metric-grid compact">
+                                    <article class="system-analysis-metric-card">
+                                        <span>Total receive</span>
+                                        <strong>@FormatRate(TotalNetworkReceiveRate)</strong>
+                                        <small>Non-loopback interfaces</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>Total transmit</span>
+                                        <strong>@FormatRate(TotalNetworkTransmitRate)</strong>
+                                        <small>Non-loopback interfaces</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>Established TCP</span>
+                                        <strong>@snapshot.TcpEstablishedConnectionCount</strong>
+                                        <small>Current kernel socket table</small>
+                                    </article>
+                                    <article class="system-analysis-metric-card">
+                                        <span>Listening ports</span>
+                                        <strong>@ListeningPortCount</strong>
+                                        <small>@(snapshot.ListeningPortOwnershipIsPrivileged ? "All host process owners resolved" : "Showing currently readable process owners")</small>
+                                    </article>
+                                </div>
+                                <section class="surface-card system-analysis-table-card">
+                                    <div class="table-header">
+                                        <h2>Interfaces</h2>
+                                        <span>Rates are deltas between backend samples</span>
+                                    </div>
+                                    <div class="table-scroll">
+                                        <table class="system-analysis-table">
+                                            <thead><tr><th>Interface</th><th>Receive</th><th>Transmit</th><th>RX packets</th><th>TX packets</th><th>Errors</th><th>Drops</th></tr></thead>
+                                            <tbody>
+                                                @foreach (var item in snapshot.NetworkInterfaces)
+                                                {
+                                                    <tr>
+                                                        <td><strong>@item.Name</strong>@if (item.IsLoopback) { <span class="meta-text"> loopback</span> }</td>
+                                                        <td>@FormatRate(item.ReceiveBytesPerSecond)</td>
+                                                        <td>@FormatRate(item.TransmitBytesPerSecond)</td>
+                                                        <td>@FormatCountRate(item.ReceivePacketsPerSecond)</td>
+                                                        <td>@FormatCountRate(item.TransmitPacketsPerSecond)</td>
+                                                        <td>@(item.ReceiveErrors + item.TransmitErrors)</td>
+                                                        <td>@(item.ReceiveDrops + item.TransmitDrops)</td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </section>
+                                <section class="surface-card system-analysis-table-card">
+                                    <div class="table-header">
+                                        <h2>Listening ports by process</h2>
+                                        <span>Bound IP identifies loopback, all interfaces, or a specific NIC; Owner is the real Linux process account</span>
+                                    </div>
+                                    <div class="table-scroll">
+                                        <table class="system-analysis-table system-analysis-listener-table">
+                                            <thead><tr><th>Protocol</th><th>Listening IP / port</th><th>Interface</th><th>PID</th><th>Process</th><th>Owner</th></tr></thead>
+                                            <tbody>
+                                                @if (!ListeningPortRows.Any())
+                                                {
+                                                    <tr><td colspan="6" class="meta-text">No process-owned listening ports are visible to LMS.</td></tr>
+                                                }
+                                                @foreach (var row in ListeningPortRows)
+                                                {
+                                                    <tr>
+                                                        <td><strong>@row.Port.Protocol</strong></td>
+                                                        <td><code>@FormatListeningEndpoint(row.Port)</code></td>
+                                                        <td>@row.Port.InterfaceName</td>
+                                                        <td>@row.Process.ProcessId</td>
+                                                        <td><strong>@row.Process.Name</strong></td>
+                                                        <td>@row.Process.User</td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </section>
+                                <p class="meta-text system-analysis-note">LMS reads the kernel socket tables directly, then uses one non-interactive sudo scan of `/proc/&lt;pid&gt;/fd` to correlate every readable socket inode with its PID and Linux owner. The command uses a fixed argument list with no shell or pipe. If sudo was deliberately disabled at install time, LMS falls back to its own readable descriptors and marks the limitation clearly. This is listener ownership, not per-process traffic attribution.</p>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="configuration" Title="Configuration">
+                        <ChildContent>
+                            <div class="system-configuration-content">
+                                <section class="surface-card system-configuration-toolbar">
+                                    <div>
+                                        <p class="eyebrow">Server configuration</p>
+                                        <h2>What this server is configured to do</h2>
+                                        @if (configurationSnapshot is not null)
+                                        {
+                                            <p class="meta-text">Local LMS configuration · generated @configurationSnapshot.GeneratedAtUtc.ToLocalTime().ToString("dd MMM yyyy HH:mm")</p>
+                                        }
+                                    </div>
+                                    <div class="toolbar-row system-configuration-actions">
+                                        <UiCommandButton Label="@(isConfigurationLoading ? "Refreshing..." : "Refresh")"
+                                                         Glyph="UiIconGlyph.Refresh"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@isConfigurationLoading"
+                                                         OnClick="RefreshConfigurationAsync" />
+                                        <UiCommandButton Label="Copy summary"
+                                                         Glyph="UiIconGlyph.Copy"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@(configurationSnapshot is null || isConfigurationLoading)"
+                                                         OnClick="CopyConfigurationSummaryAsync" />
+                                        @if (!string.IsNullOrWhiteSpace(configurationCopyMessage))
+                                        {
+                                            <span class="system-configuration-copy-status @(configurationCopyFailed ? "warning" : "success")" role="status">@configurationCopyMessage</span>
+                                        }
+                                    </div>
+                                </section>
+
+                                @if (!string.IsNullOrWhiteSpace(configurationErrorMessage))
+                                {
+                                    <p class="callout error">@configurationErrorMessage</p>
+                                }
+                                @if (isConfigurationLoading && configurationSnapshot is null)
+                                {
+                                    <section class="surface-card system-configuration-loading">
+                                        <p class="meta-text">Reading local module configuration...</p>
+                                    </section>
+                                }
+                                else if (configurationSnapshot is not null)
+                                {
+                                    <div class="system-configuration-grid">
+                                        @foreach (var summary in VisibleConfigurationSummaries)
+                                        {
+                                            <article class="surface-card system-configuration-card">
+                                                <header>
+                                                    <div>
+                                                        <h3>@summary.ModuleName</h3>
+                                                        <p>@summary.Description</p>
+                                                    </div>
+                                                    <UiPill Tone="@GetConfigurationTone(summary.Status)">@GetConfigurationStatusLabel(summary.Status)</UiPill>
+                                                </header>
+
+                                                @if (summary.Items.Count > 0)
+                                                {
+                                                    <dl class="system-configuration-facts">
+                                                        @foreach (var item in summary.Items)
+                                                        {
+                                                            <div>
+                                                                <dt>@item.Label</dt>
+                                                                <dd class="@GetConfigurationItemClass(item.Status)">@item.Value</dd>
+                                                            </div>
+                                                        }
+                                                    </dl>
+                                                }
+
+                                                @if (summary.Warnings.Count > 0)
+                                                {
+                                                    <div class="system-configuration-warnings">
+                                                        @foreach (var warning in summary.Warnings)
+                                                        {
+                                                            <p>@warning</p>
+                                                        }
+                                                    </div>
+                                                }
+
+                                                @if (!string.IsNullOrWhiteSpace(summary.NavigationUrl))
+                                                {
+                                                    <footer>
+                                                        <UiCommandButton Label="@($"Open {summary.ModuleName}")"
+                                                                         Glyph="UiIconGlyph.FolderOpen"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         Href="@summary.NavigationUrl" />
+                                                    </footer>
+                                                }
+                                            </article>
+                                        }
+                                    </div>
+
+                                    @if (CompactConfigurationSummaries.Count > 0)
+                                    {
+                                        <details class="surface-card system-configuration-compact">
+                                            <summary>
+                                                <strong>Not currently configured</strong>
+                                                <span>@CompactConfigurationSummaries.Count module(s)</span>
+                                            </summary>
+                                            <div>
+                                                @foreach (var summary in CompactConfigurationSummaries)
+                                                {
+                                                    @if (!string.IsNullOrWhiteSpace(summary.NavigationUrl))
+                                                    {
+                                                        <a href="@summary.NavigationUrl">@summary.ModuleName</a>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span>@summary.ModuleName</span>
+                                                    }
+                                                }
+                                            </div>
+                                        </details>
+                                    }
+                                }
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="disk" Title="Disk I/O">
+                        <ChildContent>
+                            <div class="system-analysis-tab-content">
+                                <section class="surface-card system-analysis-table-card">
+                                    <div class="table-header">
+                                        <h2>Block devices</h2>
+                                        <span>Whole-device counters; partitions are excluded to avoid double counting</span>
+                                    </div>
+                                    <div class="table-scroll">
+                                        <table class="system-analysis-table">
+                                            <thead><tr><th>Device</th><th>Read</th><th>Write</th><th>Read ops</th><th>Write ops</th><th>Busy</th></tr></thead>
+                                            <tbody>
+                                                @foreach (var disk in snapshot.Disks)
+                                                {
+                                                    <tr>
+                                                        <td><strong>@disk.Name</strong></td>
+                                                        <td>@FormatRate(disk.ReadBytesPerSecond)</td>
+                                                        <td>@FormatRate(disk.WriteBytesPerSecond)</td>
+                                                        <td>@FormatCountRate(disk.ReadsPerSecond)</td>
+                                                        <td>@FormatCountRate(disk.WritesPerSecond)</td>
+                                                        <td>@FormatPercent(disk.BusyPercent)</td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </section>
+                                <section class="surface-card system-analysis-table-card">
+                                    <div class="table-header">
+                                        <h2>Process I/O</h2>
+                                        <span>Visible where Linux permits LMS to read /proc/&lt;pid&gt;/io</span>
+                                    </div>
+                                    @ProcessTable(GetIoProcesses(75), showIo: true, showActions: false)
+                                </section>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="drive-usage" Title="Drive Usage">
+                        <ChildContent>
+                            <div class="system-analysis-tab-content">
+                                <section class="surface-card system-analysis-drive-toolbar">
+                                    <nav class="system-analysis-drive-breadcrumbs" aria-label="Drive usage location">
+                                        @foreach (var breadcrumb in DriveBreadcrumbs)
+                                        {
+                                            <button type="button"
+                                                    disabled="@isDriveUsageBusy"
+                                                    class="system-analysis-drive-breadcrumb"
+                                                    @onclick="@(() => LoadDriveUsageAsync(breadcrumb.Path))">
+                                                @breadcrumb.Label
+                                            </button>
+                                            @if (!breadcrumb.IsLast)
+                                            {
+                                                <span aria-hidden="true">/</span>
+                                            }
+                                        }
+                                    </nav>
+                                    <div class="system-analysis-drive-actions">
+                                        <UiCommandButton Label="Refresh folder"
+                                                         Glyph="UiIconGlyph.Refresh"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@isDriveUsageBusy"
+                                                         OnClick="RefreshDriveUsageAsync" />
+                                        @if (isDriveUsageBusy)
+                                        {
+                                            <UiCommandButton Label="Cancel scan"
+                                                             Glyph="UiIconGlyph.Stop"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             OnClick="CancelDriveUsageScanAsync" />
+                                        }
+                                    </div>
+                                </section>
+
+                                @if (!string.IsNullOrWhiteSpace(driveUsageErrorMessage))
+                                {
+                                    <p class="callout error">@driveUsageErrorMessage</p>
+                                }
+
+                                @if (isDriveUsageBusy)
+                                {
+                                    <p class="callout info">Scanning <code>@driveUsageRequestedPath</code> and its real local contents… You can cancel without affecting the rest of System Info.</p>
+                                }
+
+                                @if (driveUsage is null && !isDriveUsageBusy)
+                                {
+                                    <UiPanel>
+                                        <p class="meta-text">No completed scan is available. Use <strong>Refresh folder</strong> to scan from <code>/</code>.</p>
+                                    </UiPanel>
+                                }
+                                else if (driveUsage is not null)
+                                {
+                                    <div class="system-analysis-metric-grid">
+                                        <article class="system-analysis-metric-card">
+                                            <span>Folder contents</span>
+                                            <strong>@FormatDriveSize(driveUsage.TotalBytes)</strong>
+                                            <small>@FormatCount(driveUsage.FileCount, "file") · @FormatCount(driveUsage.DirectoryCount, "folder")</small>
+                                        </article>
+                                        <article class="system-analysis-metric-card">
+                                            <span>Filesystem used</span>
+                                            <strong>@FormatDriveSize(driveUsage.FileSystem.UsedBytes)</strong>
+                                            <div class="system-analysis-meter"><i style="@MeterStyle(Percent(driveUsage.FileSystem.UsedBytes, driveUsage.FileSystem.TotalBytes))"></i></div>
+                                            <small>@FormatDrivePercent(Percent(driveUsage.FileSystem.UsedBytes, driveUsage.FileSystem.TotalBytes)) of @FormatDriveSize(driveUsage.FileSystem.TotalBytes)</small>
+                                        </article>
+                                        <article class="system-analysis-metric-card">
+                                            <span>Filesystem available</span>
+                                            <strong>@FormatDriveSize(driveUsage.FileSystem.AvailableBytes)</strong>
+                                            <small>@driveUsage.FileSystem.Name · @driveUsage.FileSystem.Format</small>
+                                        </article>
+                                        <article class="system-analysis-metric-card">
+                                            <span>Scan completed</span>
+                                            <strong>@driveUsage.ScannedAtUtc.ToLocalTime().ToString("HH:mm:ss")</strong>
+                                            <small>@(driveUsage.SkippedItemCount == 0 ? "All readable local entries included" : $"{driveUsage.SkippedItemCount:N0} inaccessible or excluded entries")</small>
+                                        </article>
+                                    </div>
+
+                                    @if (driveUsage.IsPartial)
+                                    {
+                                        <p class="callout warning">Some entries could not be read. The displayed totals are complete for the accessible local files and folders only.</p>
+                                    }
+                                    @if (!driveUsage.AccessWasPrivileged)
+                                    {
+                                        <p class="callout warning">@(driveUsage.AccessWarning ?? "This scan used the LMS service account, so protected folders may be missing.")</p>
+                                    }
+
+                                    <section class="surface-card system-analysis-table-card">
+                                        <div class="table-header">
+                                            <h2><code>@driveUsage.Path</code></h2>
+                                            <span>Folders first, ordered by space used</span>
+                                        </div>
+                                        <div class="table-scroll">
+                                            <table class="system-analysis-table system-analysis-drive-table">
+                                                <thead>
+                                                    <tr><th>Name</th><th>Type</th><th>Space used</th><th>Folder usage</th><th>Contents</th><th>Modified</th></tr>
+                                                </thead>
+                                                <tbody>
+                                                    @if (driveUsage.ParentPath is { } parentPath)
+                                                    {
+                                                        <tr class="system-analysis-drive-parent-row">
+                                                            <td>
+                                                                <button type="button"
+                                                                        class="system-analysis-drive-folder"
+                                                                        disabled="@isDriveUsageBusy"
+                                                                        title="@($"Open parent folder {parentPath}")"
+                                                                        @onclick="@(() => LoadDriveUsageAsync(parentPath))">
+                                                                    <UiGlyphIcon Glyph="UiIconGlyph.FolderOpen" />
+                                                                    <strong>..</strong>
+                                                                </button>
+                                                            </td>
+                                                            <td>Parent folder</td>
+                                                            <td>—</td>
+                                                            <td>—</td>
+                                                            <td>—</td>
+                                                            <td>—</td>
+                                                        </tr>
+                                                    }
+                                                    @if (driveUsage.Items.Count == 0)
+                                                    {
+                                                        <tr><td colspan="6" class="meta-text">No readable local files or folders were found here.</td></tr>
+                                                    }
+                                                    @foreach (var item in driveUsage.Items)
+                                                    {
+                                                        <tr>
+                                                            <td>
+                                                                @if (item.IsDirectory)
+                                                                {
+                                                                    <button type="button"
+                                                                            class="system-analysis-drive-folder"
+                                                                            disabled="@isDriveUsageBusy"
+                                                                            title="@($"Open {item.FullPath}")"
+                                                                            @onclick="@(() => LoadDriveUsageAsync(item.FullPath))">
+                                                                        <UiGlyphIcon Glyph="UiIconGlyph.FolderOpen" />
+                                                                        <strong>@item.Name</strong>
+                                                                    </button>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <span class="system-analysis-drive-file">@item.Name</span>
+                                                                }
+                                                                @if (item.IsPartial)
+                                                                {
+                                                                    <span class="meta-text"> partial</span>
+                                                                }
+                                                            </td>
+                                                            <td>@(item.IsDirectory ? "Folder" : "File")</td>
+                                                            <td><strong>@FormatDriveSize(item.UsedBytes)</strong></td>
+                                                            <td class="system-analysis-drive-usage-cell">
+                                                                <span>@FormatDrivePercent(item.UsagePercent)</span>
+                                                                <div class="system-analysis-meter"><i style="@MeterStyle(item.UsagePercent)"></i></div>
+                                                            </td>
+                                                            <td>@(item.IsDirectory ? $"{FormatCount(item.FileCount, "file")} · {FormatCount(item.DirectoryCount, "folder")}" : "1 file")</td>
+                                                            <td>@(item.ModifiedAtUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "Unavailable")</td>
+                                                        </tr>
+                                                    }
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </section>
+                                    <p class="meta-text system-analysis-note">Folder totals use file sizes and a fixed non-interactive sudo scan. Scans exclude symbolic links, network filesystems, and virtual kernel filesystems. Percentages show each entry's share of the folder currently open.</p>
+                                }
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+
+                    <TabPage Value="processes" Title="Processes">
+                        <ChildContent>
+                            <div class="system-analysis-tab-content">
+                                <section class="surface-card system-analysis-process-controls">
+                                    <label>
+                                        <span>Filter</span>
+                                        <input class="ui-control-input" @bind="processFilter" @bind:event="oninput" placeholder="Name, user, PID, command, IP, interface, or port" />
+                                    </label>
+                                    <label>
+                                        <span>Order by</span>
+                                        <select class="ui-control-input" @bind="processOrder">
+                                            <option value="cpu">CPU</option>
+                                            <option value="memory">Memory</option>
+                                            <option value="io">Disk I/O</option>
+                                            <option value="ports">Listening ports</option>
+                                            <option value="pid">PID</option>
+                                            <option value="name">Name</option>
+                                        </select>
+                                    </label>
+                                    <span class="meta-text">Showing @FilteredProcesses.Count() of @snapshot.ProcessCount processes</span>
+                                </section>
+                                <section class="surface-card system-analysis-table-card">
+                                    @ProcessTable(FilteredProcesses.Take(150), showIo: true, showActions: true)
+                                </section>
+                            </div>
+                        </ChildContent>
+                    </TabPage>
+                </ChildContent>
+            </TabControl>
+        }
+</div>
+
+<UiModal IsOpen="@(processPendingTermination is not null)"
+         Title="End process"
+         Subtitle="@(processPendingTermination is null ? string.Empty : $"{processPendingTermination.Name} · PID {processPendingTermination.ProcessId} · {processPendingTermination.User}")"
+         Class="system-analysis-maintenance-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseProcessTerminationDialog">
+    <div class="system-analysis-maintenance-dialog">
+        <p class="callout warning">This sends <strong>SIGTERM</strong> with sudo. Unsaved work can be lost, dependent services may fail, and Linux may automatically restart a managed service.</p>
+        <p>LMS verifies the process's kernel identity again before sending the signal, so a reused PID cannot end a different process.</p>
+        @if (!string.IsNullOrWhiteSpace(maintenanceDialogError))
+        {
+            <p class="callout error">@maintenanceDialogError</p>
+        }
+        <div class="toolbar-row">
+            <UiCommandButton Label="Cancel"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isMaintenanceBusy"
+                             OnClick="CloseProcessTerminationDialog" />
+            <UiCommandButton Label="@(isMaintenanceBusy ? "Ending..." : "End process")"
+                             Glyph="UiIconGlyph.Stop"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@isMaintenanceBusy"
+                             OnClick="ConfirmProcessTerminationAsync" />
+        </div>
+    </div>
+</UiModal>
+
+<UiModal IsOpen="@showDiskCleanupDialog"
+         Title="Clean disk space"
+         Subtitle="Remove standard Linux housekeeping data from the current LMS server."
+         Class="system-analysis-maintenance-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseDiskCleanupDialog">
+    <div class="system-analysis-maintenance-dialog">
+        <p class="callout warning">Cleanup uses sudo and cannot be rolled back. APT decides which packages and old kernels are unused; LMS never manually selects or deletes a kernel.</p>
+        <ul class="system-analysis-cleanup-list">
+            <li><strong>System logs:</strong> rotate the journal and remove archived entries older than 14 days.</li>
+            <li><strong>Package cache:</strong> remove downloaded APT package files.</li>
+            <li><strong>Unused software:</strong> purge packages and old kernels marked as automatically installed and no longer required.</li>
+        </ul>
+        <p>No personal files, configured application data, mounted drives, or arbitrary folders are touched.</p>
+        @if (!string.IsNullOrWhiteSpace(maintenanceDialogError))
+        {
+            <p class="callout error">@maintenanceDialogError</p>
+        }
+        <div class="toolbar-row">
+            <UiCommandButton Label="Cancel"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isMaintenanceBusy"
+                             OnClick="CloseDiskCleanupDialog" />
+            <UiCommandButton Label="@(isMaintenanceBusy ? "Cleaning..." : "Clean disk")"
+                             Glyph="UiIconGlyph.Delete"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@isMaintenanceBusy"
+                             OnClick="ConfirmDiskCleanupAsync" />
+        </div>
+    </div>
+</UiModal>
+
+<UiModal IsOpen="@showRebootDialog"
+         Title="Reboot server"
+         Subtitle="Restart the current LMS host immediately."
+         Class="system-analysis-maintenance-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseRebootDialog">
+    <div class="system-analysis-maintenance-dialog">
+        <p class="callout warning">This disconnects every LMS user, terminal, file operation, and running session on this server. There is no rollback. LMS will be unavailable until Linux finishes rebooting.</p>
+        @if (!string.IsNullOrWhiteSpace(maintenanceDialogError))
+        {
+            <p class="callout error">@maintenanceDialogError</p>
+        }
+        <div class="toolbar-row">
+            <UiCommandButton Label="Cancel"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isMaintenanceBusy"
+                             OnClick="CloseRebootDialog" />
+            <UiCommandButton Label="@(isMaintenanceBusy ? "Rebooting..." : "Reboot server")"
+                             Glyph="UiIconGlyph.Restart"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@isMaintenanceBusy"
+                             OnClick="ConfirmRebootAsync" />
+        </div>
+    </div>
+</UiModal>
+
+@code {
+    private LocalSystemMonitorSnapshot? snapshot;
+    private LmsConfigurationSummarySnapshot? configurationSnapshot;
+    private CancellationTokenSource? pollingCancellation;
+    private CancellationTokenSource? driveUsageCancellation;
+    private Task? pollingTask;
+    private readonly SemaphoreSlim refreshGate = new(1, 1);
+    private string activeTab = "overview";
+    private string pollPreset = "2";
+    private int customPollSeconds = 15;
+    private string processFilter = string.Empty;
+    private string processOrder = "cpu";
+    private string errorMessage = string.Empty;
+    private string configurationErrorMessage = string.Empty;
+    private string configurationCopyMessage = string.Empty;
+    private string driveUsageErrorMessage = string.Empty;
+    private string driveUsageRequestedPath = "/";
+    private string maintenanceMessage = string.Empty;
+    private string maintenanceDialogError = string.Empty;
+    private LocalDriveUsageSnapshot? driveUsage;
+    private LocalDiskCleanupResult? lastDiskCleanupResult;
+    private LocalProcessMetric? processPendingTermination;
+    private bool isRefreshing;
+    private bool isConfigurationLoading;
+    private bool configurationCopyFailed;
+    private bool isDriveUsageBusy;
+    private bool isMaintenanceBusy;
+    private bool maintenanceMessageIsError;
+    private bool showDiskCleanupDialog;
+    private bool showRebootDialog;
+    private bool isDisposed;
+    private long driveUsageScanId;
+
+    private double? TotalNetworkReceiveRate => SumRates(snapshot?.NetworkInterfaces.Where(item => !item.IsLoopback).Select(item => item.ReceiveBytesPerSecond));
+    private double? TotalNetworkTransmitRate => SumRates(snapshot?.NetworkInterfaces.Where(item => !item.IsLoopback).Select(item => item.TransmitBytesPerSecond));
+    private double? TotalDiskReadRate => SumRates(snapshot?.Disks.Select(item => item.ReadBytesPerSecond));
+    private double? TotalDiskWriteRate => SumRates(snapshot?.Disks.Select(item => item.WriteBytesPerSecond));
+    private int ListeningPortCount => snapshot?.Processes.Sum(process => process.ListeningPorts.Count) ?? 0;
+    private IReadOnlyList<DriveBreadcrumb> DriveBreadcrumbs => BuildDriveBreadcrumbs(driveUsage?.Path ?? driveUsageRequestedPath);
+    private IReadOnlyList<LmsConfigurationSummary> VisibleConfigurationSummaries => configurationSnapshot?.Summaries
+        .Where(summary => summary.Status != LmsConfigurationSummaryStatus.NotConfigured)
+        .ToArray() ?? [];
+    private IReadOnlyList<LmsConfigurationSummary> CompactConfigurationSummaries => configurationSnapshot?.Summaries
+        .Where(summary => summary.Status == LmsConfigurationSummaryStatus.NotConfigured)
+        .ToArray() ?? [];
+
+    private IEnumerable<ProcessListeningPortRow> ListeningPortRows =>
+        snapshot is null
+            ? []
+            : snapshot.Processes
+            .SelectMany(process => process.ListeningPorts.Select(port => new ProcessListeningPortRow(process, port)))
+            .OrderBy(row => row.Port.Port)
+            .ThenBy(row => row.Port.Protocol, StringComparer.Ordinal)
+            .ThenBy(row => row.Process.ProcessId);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshSnapshotAsync(CancellationToken.None);
+        StartPolling();
+    }
+
+    private async Task RefreshNowAsync()
+    {
+        if (activeTab == "configuration")
+        {
+            await RefreshConfigurationAsync();
+        }
+        else
+        {
+            await RefreshSnapshotAsync(CancellationToken.None);
+        }
+    }
+
+    private async Task RefreshSnapshotAsync(CancellationToken cancellationToken)
+    {
+        if (!await refreshGate.WaitAsync(0, cancellationToken))
+        {
+            return;
+        }
+
+        try
+        {
+            isRefreshing = true;
+            errorMessage = string.Empty;
+            snapshot = await SystemMonitor.CaptureAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            errorMessage = exception.Message;
+        }
+        finally
+        {
+            isRefreshing = false;
+            refreshGate.Release();
+            if (!isDisposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private async Task ChangePollPresetAsync(string value)
+    {
+        pollPreset = value;
+        await RestartPollingAsync();
+    }
+
+    private async Task ChangeCustomIntervalAsync(int value)
+    {
+        customPollSeconds = Math.Clamp(value, 1, 300);
+        await RestartPollingAsync();
+    }
+
+    private async Task SetActiveTabAsync(string? value)
+    {
+        activeTab = string.IsNullOrWhiteSpace(value) ? "overview" : value;
+        if (activeTab == "drive-usage" && driveUsage is null && !isDriveUsageBusy)
+        {
+            await LoadDriveUsageAsync("/");
+        }
+
+        if (activeTab == "configuration" && configurationSnapshot is null && !isConfigurationLoading)
+        {
+            await RefreshConfigurationAsync();
+        }
+    }
+
+    private async Task RefreshConfigurationAsync()
+    {
+        if (isConfigurationLoading)
+        {
+            return;
+        }
+
+        isConfigurationLoading = true;
+        configurationErrorMessage = string.Empty;
+        configurationCopyMessage = string.Empty;
+        try
+        {
+            configurationSnapshot = await ConfigurationSummaryService.GetSummariesAsync();
+        }
+        catch (Exception exception)
+        {
+            configurationErrorMessage = $"The local configuration summary could not be loaded: {exception.Message}";
+        }
+        finally
+        {
+            isConfigurationLoading = false;
+        }
+    }
+
+    private async Task CopyConfigurationSummaryAsync()
+    {
+        if (configurationSnapshot is null)
+        {
+            return;
+        }
+
+        var text = ConfigurationSummaryService.RenderPlainText(configurationSnapshot);
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", text);
+        configurationCopyFailed = !copied;
+        configurationCopyMessage = copied
+            ? "Server configuration copied."
+            : "The browser could not copy the server configuration.";
+    }
+
+    private static UiPillTone GetConfigurationTone(LmsConfigurationSummaryStatus status) => status switch
+    {
+        LmsConfigurationSummaryStatus.Configured => UiPillTone.Success,
+        LmsConfigurationSummaryStatus.Warning => UiPillTone.Warning,
+        LmsConfigurationSummaryStatus.Error => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+
+    private static string GetConfigurationStatusLabel(LmsConfigurationSummaryStatus status) => status switch
+    {
+        LmsConfigurationSummaryStatus.NotConfigured => "Not configured",
+        _ => status.ToString()
+    };
+
+    private static string GetConfigurationItemClass(LmsConfigurationSummaryStatus? status) => status switch
+    {
+        LmsConfigurationSummaryStatus.Configured => "success",
+        LmsConfigurationSummaryStatus.Warning => "warning",
+        LmsConfigurationSummaryStatus.Error => "error",
+        _ => string.Empty
+    };
+
+    private async Task LoadDriveUsageAsync(string path)
+    {
+        var previousCancellation = driveUsageCancellation;
+        previousCancellation?.Cancel();
+
+        var cancellation = new CancellationTokenSource();
+        driveUsageCancellation = cancellation;
+        var scanId = ++driveUsageScanId;
+        driveUsageRequestedPath = path;
+        driveUsageErrorMessage = string.Empty;
+        isDriveUsageBusy = true;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var result = await DriveUsageService.ScanAsync(path, cancellation.Token);
+            if (scanId == driveUsageScanId)
+            {
+                driveUsage = result;
+                driveUsageRequestedPath = result.Path;
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (scanId == driveUsageScanId)
+            {
+                driveUsageErrorMessage = exception.Message;
+            }
+        }
+        finally
+        {
+            if (scanId == driveUsageScanId)
+            {
+                isDriveUsageBusy = false;
+                driveUsageCancellation = null;
+            }
+
+            cancellation.Dispose();
+            previousCancellation?.Dispose();
+            if (!isDisposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private Task RefreshDriveUsageAsync() => LoadDriveUsageAsync(driveUsage?.Path ?? driveUsageRequestedPath);
+
+    private Task CancelDriveUsageScanAsync()
+    {
+        driveUsageCancellation?.Cancel();
+        return Task.CompletedTask;
+    }
+
+    private void OpenProcessTerminationDialog(LocalProcessMetric process)
+    {
+        if (isMaintenanceBusy || !CanEndProcess(process))
+        {
+            return;
+        }
+
+        maintenanceDialogError = string.Empty;
+        processPendingTermination = process;
+    }
+
+    private void CloseProcessTerminationDialog()
+    {
+        if (isMaintenanceBusy)
+        {
+            return;
+        }
+
+        processPendingTermination = null;
+        maintenanceDialogError = string.Empty;
+    }
+
+    private async Task ConfirmProcessTerminationAsync()
+    {
+        if (isMaintenanceBusy || processPendingTermination is not { } process)
+        {
+            return;
+        }
+
+        isMaintenanceBusy = true;
+        maintenanceDialogError = string.Empty;
+        try
+        {
+            maintenanceMessage = await SystemMaintenance.EndProcessAsync(
+                process.ProcessId,
+                process.ProcessStartTimeTicks,
+                process.Name);
+            maintenanceMessageIsError = false;
+            processPendingTermination = null;
+            await RefreshSnapshotAsync(CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            maintenanceDialogError = exception.Message;
+        }
+        finally
+        {
+            isMaintenanceBusy = false;
+        }
+    }
+
+    private void OpenDiskCleanupDialog()
+    {
+        if (isMaintenanceBusy)
+        {
+            return;
+        }
+
+        maintenanceDialogError = string.Empty;
+        showDiskCleanupDialog = true;
+    }
+
+    private void CloseDiskCleanupDialog()
+    {
+        if (isMaintenanceBusy)
+        {
+            return;
+        }
+
+        showDiskCleanupDialog = false;
+        maintenanceDialogError = string.Empty;
+    }
+
+    private async Task ConfirmDiskCleanupAsync()
+    {
+        if (isMaintenanceBusy || !showDiskCleanupDialog)
+        {
+            return;
+        }
+
+        isMaintenanceBusy = true;
+        maintenanceDialogError = string.Empty;
+        try
+        {
+            lastDiskCleanupResult = await SystemMaintenance.CleanupDiskAsync();
+            var succeeded = lastDiskCleanupResult.Steps.Count(static step => step.Succeeded);
+            var reclaimed = lastDiskCleanupResult.ReclaimedBytes.HasValue
+                ? $" Root filesystem space recovered: {FormatDriveSize(lastDiskCleanupResult.ReclaimedBytes.Value)}."
+                : string.Empty;
+            maintenanceMessage = lastDiskCleanupResult.HasFailures
+                ? $"Disk cleanup completed {succeeded} of {lastDiskCleanupResult.Steps.Count} actions.{reclaimed} Review the failed action below."
+                : $"Disk cleanup completed all {succeeded} actions.{reclaimed}";
+            maintenanceMessageIsError = lastDiskCleanupResult.HasFailures;
+            showDiskCleanupDialog = false;
+            await RefreshSnapshotAsync(CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            maintenanceDialogError = exception.Message;
+        }
+        finally
+        {
+            isMaintenanceBusy = false;
+        }
+    }
+
+    private void OpenRebootDialog()
+    {
+        if (isMaintenanceBusy)
+        {
+            return;
+        }
+
+        maintenanceDialogError = string.Empty;
+        showRebootDialog = true;
+    }
+
+    private void CloseRebootDialog()
+    {
+        if (isMaintenanceBusy)
+        {
+            return;
+        }
+
+        showRebootDialog = false;
+        maintenanceDialogError = string.Empty;
+    }
+
+    private async Task ConfirmRebootAsync()
+    {
+        if (isMaintenanceBusy || !showRebootDialog)
+        {
+            return;
+        }
+
+        isMaintenanceBusy = true;
+        maintenanceDialogError = string.Empty;
+        try
+        {
+            await SystemMaintenance.RebootAsync();
+            maintenanceMessage = "The reboot request was accepted. LMS will disconnect while the server restarts.";
+            maintenanceMessageIsError = false;
+            showRebootDialog = false;
+        }
+        catch (Exception exception)
+        {
+            maintenanceDialogError = exception.Message;
+        }
+        finally
+        {
+            isMaintenanceBusy = false;
+        }
+    }
+
+    private static bool CanEndProcess(LocalProcessMetric process) =>
+        process.ProcessId > 1 && process.ProcessId != Environment.ProcessId;
+
+    private static string GetEndProcessTitle(LocalProcessMetric process) =>
+        process.ProcessId == Environment.ProcessId
+            ? "LMS cannot end its own server process"
+            : process.ProcessId <= 1
+                ? "Linux PID 1 cannot be ended from LMS"
+                : $"End {process.Name} (PID {process.ProcessId})";
+
+    private void StartPolling()
+    {
+        var interval = GetPollInterval();
+        if (!interval.HasValue || isDisposed)
+        {
+            return;
+        }
+
+        pollingCancellation = new CancellationTokenSource();
+        pollingTask = PollAsync(interval.Value, pollingCancellation.Token);
+    }
+
+    private async Task RestartPollingAsync()
+    {
+        var previousCancellation = pollingCancellation;
+        var previousTask = pollingTask;
+        pollingCancellation = null;
+        pollingTask = null;
+        previousCancellation?.Cancel();
+
+        if (previousTask is not null)
+        {
+            try
+            {
+                await previousTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        previousCancellation?.Dispose();
+        StartPolling();
+    }
+
+    private async Task PollAsync(TimeSpan interval, CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(interval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await RefreshSnapshotAsync(cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    private TimeSpan? GetPollInterval()
+    {
+        if (pollPreset == "manual")
+        {
+            return null;
+        }
+
+        var seconds = pollPreset == "custom"
+            ? customPollSeconds
+            : int.TryParse(pollPreset, out var parsed) ? parsed : 2;
+        return TimeSpan.FromSeconds(Math.Clamp(seconds, 1, 300));
+    }
+
+    private string GetScheduleLabel() => pollPreset switch
+    {
+        "manual" => "Manual",
+        "custom" => $"Every {customPollSeconds}s",
+        "1" => "Live · 1s",
+        _ => $"Every {pollPreset}s"
+    };
+
+    private IEnumerable<LocalProcessMetric> GetCpuProcesses(int count) =>
+        snapshot?.Processes
+            .OrderByDescending(process => process.CpuPercent ?? -1)
+            .ThenByDescending(process => process.ResidentMemoryBytes)
+            .Take(count) ?? [];
+
+    private IEnumerable<LocalProcessMetric> GetMemoryProcesses(int count) =>
+        snapshot?.Processes
+            .OrderByDescending(process => process.ResidentMemoryBytes)
+            .ThenByDescending(process => process.CpuPercent ?? -1)
+            .Take(count) ?? [];
+
+    private IEnumerable<LocalProcessMetric> GetIoProcesses(int count) =>
+        snapshot?.Processes
+            .Where(process => process.ReadBytesPerSecond.HasValue || process.WriteBytesPerSecond.HasValue)
+            .OrderByDescending(GetTotalProcessIo)
+            .Take(count) ?? [];
+
+    private IEnumerable<LocalProcessMetric> FilteredProcesses
+    {
+        get
+        {
+            var query = snapshot?.Processes.AsEnumerable() ?? [];
+            var filter = processFilter.Trim();
+            if (!string.IsNullOrWhiteSpace(filter))
+            {
+                query = query.Where(process =>
+                    process.ProcessId.ToString().Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                    process.Name.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                    process.User.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                    process.CommandLine.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                    process.ListeningPorts.Any(port =>
+                        port.Port.ToString().Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                        port.Protocol.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                        port.Address.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                        port.InterfaceName.Contains(filter, StringComparison.OrdinalIgnoreCase)));
+            }
+
+            return processOrder switch
+            {
+                "memory" => query.OrderByDescending(process => process.ResidentMemoryBytes),
+                "io" => query.OrderByDescending(GetTotalProcessIo),
+                "ports" => query.OrderByDescending(process => process.ListeningPorts.Count)
+                    .ThenBy(process => process.Name, StringComparer.OrdinalIgnoreCase),
+                "pid" => query.OrderBy(process => process.ProcessId),
+                "name" => query.OrderBy(process => process.Name, StringComparer.OrdinalIgnoreCase),
+                _ => query.OrderByDescending(process => process.CpuPercent ?? -1)
+            };
+        }
+    }
+
+    private RenderFragment ProcessTable(
+        IEnumerable<LocalProcessMetric> processes,
+        bool showIo,
+        bool showActions)
+    {
+        var rows = processes.ToArray();
+        return @<div class="table-scroll">
+            <table class="system-analysis-table process-table">
+                <thead>
+                    <tr><th>PID</th><th>Process</th><th>User</th><th>State</th><th>CPU</th><th>Memory</th><th>Threads</th>@if (showIo) { <th>Read</th><th>Write</th> }<th>Listening ports</th>@if (showActions) { <th>Action</th> }</tr>
+                </thead>
+                <tbody>
+                    @if (rows.Length == 0)
+                    {
+                        <tr><td colspan="@(8 + (showIo ? 2 : 0) + (showActions ? 1 : 0))" class="meta-text">No matching process activity is visible for this interval.</td></tr>
+                    }
+                    @foreach (var process in rows)
+                    {
+                        <tr title="@process.CommandLine">
+                            <td>@process.ProcessId</td>
+                            <td><strong>@process.Name</strong><span class="system-analysis-command">@process.CommandLine</span></td>
+                            <td>@process.User</td>
+                            <td>@process.State</td>
+                            <td>@FormatPercent(process.CpuPercent)</td>
+                            <td>@FormatBytes(process.ResidentMemoryBytes)</td>
+                            <td>@process.ThreadCount</td>
+                            @if (showIo)
+                            {
+                                <td>@FormatRate(process.ReadBytesPerSecond)</td>
+                                <td>@FormatRate(process.WriteBytesPerSecond)</td>
+                            }
+                            <td class="system-analysis-port-cell">
+                                @if (process.ListeningPorts.Count > 0)
+                                {
+                                    <span class="system-analysis-port-list">
+                                        @foreach (var port in process.ListeningPorts)
+                                        {
+                                            <span class="system-analysis-port-binding" title="@($"{port.Protocol} on {port.InterfaceName}")">
+                                                <strong>@port.Protocol</strong>
+                                                <code>@FormatListeningEndpoint(port)</code>
+                                                <small>@port.InterfaceName</small>
+                                            </span>
+                                        }
+                                    </span>
+                                }
+                                else if (!process.ListeningPortsAccessible)
+                                {
+                                    <span class="meta-text" title="Linux did not permit LMS to inspect this process's file descriptors.">Restricted</span>
+                                }
+                                else
+                                {
+                                    <span class="meta-text">—</span>
+                                }
+                            </td>
+                            @if (showActions)
+                            {
+                                <td class="system-analysis-process-actions">
+                                    <UiCommandButton Label="End"
+                                                     Glyph="UiIconGlyph.Stop"
+                                                     Variant="UiButtonVariant.Danger"
+                                                     Title="@GetEndProcessTitle(process)"
+                                                     Disabled="@(isMaintenanceBusy || !CanEndProcess(process))"
+                                                     OnClick="@(() => OpenProcessTerminationDialog(process))" />
+                                </td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>;
+    }
+
+    private RenderFragment CpuBreakdown(string label, double? value) => @<article class="system-analysis-breakdown-card">
+            <div><span>@label</span><strong>@FormatPercent(value)</strong></div>
+            <div class="system-analysis-meter"><i style="@MeterStyle(value)"></i></div>
+        </article>;
+
+    private RenderFragment MemoryCard(string label, long value) => @<article class="system-analysis-metric-card">
+            <span>@label</span>
+            <strong>@FormatBytes(value)</strong>
+        </article>;
+
+    private static double GetTotalProcessIo(LocalProcessMetric process) =>
+        (process.ReadBytesPerSecond ?? 0) + (process.WriteBytesPerSecond ?? 0);
+
+    private static string FormatListeningEndpoint(LocalProcessListeningPortMetric port) =>
+        port.Address.Contains(':', StringComparison.Ordinal)
+            ? $"[{port.Address}]:{port.Port}"
+            : $"{port.Address}:{port.Port}";
+
+    private static double? SumRates(IEnumerable<double?>? values)
+    {
+        if (values is null)
+        {
+            return null;
+        }
+
+        var materialized = values.ToArray();
+        return materialized.Any(value => value.HasValue)
+            ? materialized.Sum(value => value ?? 0)
+            : null;
+    }
+
+    private static double? Percent(long used, long total) =>
+        total <= 0 ? null : Math.Clamp(used / (double)total * 100d, 0d, 100d);
+
+    private static string MeterStyle(double? value) =>
+        $"width: {Math.Clamp(value ?? 0, 0, 100):0.##}%";
+
+    private static string FormatPercent(double? value) =>
+        value.HasValue ? $"{value.Value:0.0}%" : "Sampling…";
+
+    private static string FormatDrivePercent(double? value) =>
+        value.HasValue ? $"{Math.Clamp(value.Value, 0, 100):0.00}%" : "Unavailable";
+
+    private static string FormatCount(long count, string noun) =>
+        $"{count:N0} {noun}{(count == 1 ? string.Empty : "s")}";
+
+    private static string FormatDriveSize(long bytes) => SystemInfoValueFormatter.FormatDriveSize(bytes);
+
+    private static IReadOnlyList<DriveBreadcrumb> BuildDriveBreadcrumbs(string path)
+    {
+        var normalizedPath = string.IsNullOrWhiteSpace(path) ? "/" : Path.GetFullPath(path);
+        var segments = normalizedPath.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+        var breadcrumbs = new List<DriveBreadcrumb>
+        {
+            new("/", "/", segments.Length == 0)
+        };
+        var currentPath = "/";
+        for (var index = 0; index < segments.Length; index++)
+        {
+            currentPath = Path.Combine(currentPath, segments[index]);
+            breadcrumbs.Add(new DriveBreadcrumb(segments[index], currentPath, index == segments.Length - 1));
+        }
+
+        return breadcrumbs;
+    }
+
+    private static string FormatInterval(double? value) =>
+        value.HasValue ? $"{value.Value:0.00}s" : "warming up";
+
+    private static string FormatCountRate(double? value) =>
+        value.HasValue ? $"{value.Value:0.0}/s" : "Sampling…";
+
+    private static string FormatRate(double? bytesPerSecond) =>
+        bytesPerSecond.HasValue ? $"{FormatBytes(bytesPerSecond.Value)}/s" : "Sampling…";
+
+    private static string FormatBytes(double value) => SystemInfoValueFormatter.FormatRateSize(value);
+
+    public async ValueTask DisposeAsync()
+    {
+        isDisposed = true;
+        driveUsageCancellation?.Cancel();
+        pollingCancellation?.Cancel();
+        if (pollingTask is not null)
+        {
+            try
+            {
+                await pollingTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        pollingCancellation?.Dispose();
+        refreshGate.Dispose();
+    }
+
+    private sealed record ProcessListeningPortRow(
+        LocalProcessMetric Process,
+        LocalProcessListeningPortMetric Port);
+
+    private sealed record DriveBreadcrumb(string Label, string Path, bool IsLast);
+}

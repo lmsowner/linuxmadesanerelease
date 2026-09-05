@@ -96,8 +96,8 @@ public sealed class LocalFileBrowsingService(
 
         var safeMaxBytes = Math.Clamp(maxBytes, 1, 1_048_576);
         await using var stream = fileInfo.OpenRead();
-        var buffer = new byte[safeMaxBytes];
-        var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+        var buffer = new byte[(int)Math.Min(fileInfo.Length, safeMaxBytes)];
+        var bytesRead = await StreamReadSupport.ReadUpToAsync(stream, buffer, cancellationToken);
         var decoded = TextFileEncoding.Decode(buffer.AsSpan(0, bytesRead));
 
         return new SftpFileContent(
@@ -133,8 +133,8 @@ public sealed class LocalFileBrowsingService(
 
         var safeMaxBytes = Math.Clamp(maxBytes, 1, 67_108_864);
         await using var stream = fileInfo.OpenRead();
-        var buffer = new byte[safeMaxBytes];
-        var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+        var buffer = new byte[(int)Math.Min(fileInfo.Length, safeMaxBytes)];
+        var bytesRead = await StreamReadSupport.ReadUpToAsync(stream, buffer, cancellationToken);
         var contentBytes = new byte[bytesRead];
         Buffer.BlockCopy(buffer, 0, contentBytes, 0, bytesRead);
 

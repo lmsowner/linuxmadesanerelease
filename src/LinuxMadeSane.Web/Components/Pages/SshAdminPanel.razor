@@ -1,0 +1,956 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@implements IDisposable
+@using LinuxMadeSane.Application.Interfaces
+@inject ISshAdminService SshAdminService
+@inject IJSRuntime JSRuntime
+
+<div class="ssh-admin-shell">
+    @if (!CanAdminister)
+    {
+        <p class="callout warning">This request has not passed the LMS administrator access boundary. Current settings remain visible.</p>
+    }
+
+    @if (isLoading)
+    {
+        <section class="surface-subcard">
+            <p class="meta-text">Reading the settings OpenSSH is actually using...</p>
+        </section>
+    }
+    else if (overview is null)
+    {
+        <section class="surface-subcard">
+            <p class="callout error">@statusMessage</p>
+            <UiCommandButton Label="Try again" Glyph="UiIconGlyph.Refresh" OnClick="LoadAsync" />
+        </section>
+    }
+    else
+    {
+        <header class="ssh-admin-toolbar">
+            <div>
+                <h2>SSH Admin</h2>
+                <span>Keys, access policy and authenticator login</span>
+            </div>
+            <UiCommandButton Label="Refresh" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@isBusy" OnClick="LoadAsync" />
+        </header>
+
+        <section class="ssh-admin-at-a-glance" aria-label="Current SSH settings">
+            <div class="@(overview.IsServiceActive ? "good" : "attention")">
+                <span>Service</span>
+                <strong>@(overview.IsServiceActive ? "Running" : "Stopped")</strong>
+            </div>
+            <div>
+                <span>Port</span>
+                <strong>@string.Join(", ", overview.EffectiveSettings.Ports)</strong>
+            </div>
+            <div class="@(overview.EffectiveSettings.PublicKeyAuthentication ? "good" : "attention")">
+                <span>Public keys</span>
+                <strong>@(overview.EffectiveSettings.PublicKeyAuthentication ? "Allowed" : "Blocked")</strong>
+            </div>
+            <div class="@(!overview.EffectiveSettings.PasswordAuthentication ? "good" : string.Empty)">
+                <span>Passwords</span>
+                <strong>@(overview.EffectiveSettings.PasswordAuthentication ? "Allowed" : "Blocked")</strong>
+            </div>
+            <div class="@(overview.EffectiveSettings.PermitRootLogin == "no" ? "good" : "attention")">
+                <span>Direct root</span>
+                <strong>@(overview.EffectiveSettings.PermitRootLogin == "no" ? "Blocked" : "Allowed")</strong>
+            </div>
+        </section>
+
+        @if (!overview.IsConfigurationValid)
+        {
+            <p class="callout error"><strong>OpenSSH rejected its current configuration.</strong> @overview.ConfigurationValidationMessage</p>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(statusMessage))
+        {
+            <p class="callout @statusTone" role="status">@statusMessage</p>
+        }
+
+        @if (ActiveTrial is not null)
+        {
+            <section class="surface-subcard ssh-admin-trial" role="alert" aria-live="polite">
+                <div>
+                    <div class="ssh-admin-trial-heading">
+                        <UiPill Tone="UiPillTone.Warning">Testing · @trialRemainingSeconds s</UiPill>
+                        <strong>Prove a new connection works</strong>
+                    </div>
+                    <p>@ActiveTrial.Detail</p>
+                    <small>Keep this browser page and your existing SSH session open. If you do nothing, LMS restores the previous file and reloads SSH.</small>
+                </div>
+                <div class="ssh-admin-inline-actions">
+                    <UiCommandButton Label="Keep settings" Glyph="UiIconGlyph.Save" Disabled="@isBusy" OnClick="KeepTrialAsync" />
+                    <UiCommandButton Label="Revert now" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@isBusy" OnClick="RevertTrialAsync" />
+                </div>
+            </section>
+        }
+
+        <details class="ssh-admin-server-details">
+            <summary>
+                <strong>Server details</strong>
+                <span>@overview.OpenSshVersion · @(overview.IsManagedByLms ? "LMS policy" : "system policy")</span>
+            </summary>
+            <div class="ssh-admin-fact-grid">
+                <div><span>Host</span><strong>@overview.HostName</strong></div>
+                <div><span>Addresses</span><strong>@(overview.HostAddresses.Count == 0 ? "Not reported" : string.Join(", ", overview.HostAddresses))</strong></div>
+                <div><span>Service unit</span><strong>@overview.ServiceName</strong></div>
+                <div><span>LMS drop-in</span><strong>@overview.ManagedConfigurationPath</strong></div>
+            </div>
+            @if (overview.HostKeys.Count > 0)
+            {
+                <div class="ssh-admin-host-keys">
+                    <strong>Server identity fingerprints</strong>
+                    <p class="meta-text">Compare one of these on the first connection. It proves the SSH prompt belongs to this server rather than an impostor.</p>
+                    @foreach (var hostKey in overview.HostKeys)
+                    {
+                        <div><strong>@hostKey.Algorithm · @hostKey.Bits bit</strong><code>@hostKey.FingerprintSha256</code></div>
+                    }
+                </div>
+            }
+        </details>
+
+        <nav class="ssh-admin-workflow-nav" aria-label="SSH Admin sections">
+            @foreach (var item in WorkflowItems)
+            {
+                <button type="button"
+                        class="@(activeSection == item.Value ? "active" : string.Empty)"
+                        @onclick="@(() => SelectSection(item.Value))">
+                    <span>@item.Step</span>
+                    @item.Label
+                </button>
+            }
+        </nav>
+
+        @if (activeSection == KeysSection)
+        {
+            <section class="surface-subcard ssh-admin-workflow-card">
+                <div class="ssh-admin-step-heading">
+                    <span class="ssh-admin-step-number">1</span>
+                    <div>
+                        <p class="eyebrow">Public-key setup</p>
+                        <h3>Give your device its own secure key</h3>
+                        <p>Your device keeps the <strong>private key</strong>. LMS receives only the matching <strong>public key</strong>, which cannot be used to impersonate you. Do not paste a private key into this page.</p>
+                    </div>
+                </div>
+
+                @RenderUserPicker("Linux account to sign in as", "The public key will be added to this account without removing its existing keys.")
+
+                @if (SelectedUser?.IsPublicKeyAuthenticationEnabled == false)
+                {
+                    <p class="callout warning">A later per-user SSH rule currently blocks public keys for @SelectedUserName. When the key is installed, LMS will add an earlier password-or-key onboarding rule so the key can be tested without removing the working password route.</p>
+                }
+
+                @if (SelectedUser?.AuthorizedKeys.Count > 0)
+                {
+                    <div class="ssh-admin-key-inventory">
+                        <div>
+                            <p class="eyebrow">Installed public keys</p>
+                            <strong>@SelectedUser.AuthorizedKeys.Count key(s) for @SelectedUserName</strong>
+                        </div>
+                        @foreach (var key in SelectedUser.AuthorizedKeys)
+                        {
+                            <div class="ssh-admin-key-row">
+                                <div>
+                                    <strong>@key.Comment</strong>
+                                    <span>@key.Algorithm</span>
+                                    <code>@key.FingerprintSha256</code>
+                                </div>
+                                <div class="ssh-admin-key-actions">
+                                    <UiCommandButton Label="Test this key"
+                                                     Glyph="UiIconGlyph.Analyze"
+                                                     Variant="UiButtonVariant.Ghost"
+                                                     Disabled="@(!CanChangeSsh || isBusy || !SelectedUser.IsPublicKeyAuthenticationEnabled)"
+                                                     OnClick="@(() => PrepareExistingKeyTest(key))" />
+                                    <UiCommandButton Label="Remove"
+                                                     Glyph="UiIconGlyph.Delete"
+                                                     Variant="UiButtonVariant.Danger"
+                                                     Disabled="@(!CanChangeSsh || isBusy)"
+                                                     OnClick="@(() => RemovePublicKeyAsync(key))" />
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <p class="meta-text">No public keys are installed in the location OpenSSH currently uses for @SelectedUserName.</p>
+                }
+
+                <div class="ssh-admin-platform-tabs" role="tablist" aria-label="Client operating system">
+                    @foreach (var platform in ClientPlatforms)
+                    {
+                        <button type="button" class="@(clientPlatform == platform.Value ? "active" : string.Empty)" @onclick="@(() => SelectPlatform(platform.Value))">@platform.Label</button>
+                    }
+                </div>
+
+                <div class="ssh-admin-guide-panel">
+                    @if (clientPlatform == GenericPlatform)
+                    {
+                        <ol>
+                            <li>In your SSH app, create a new <strong>Ed25519</strong> identity or key pair.</li>
+                            <li>Protect the private key with the device's secure storage or a passphrase.</li>
+                            <li>Export or copy the <strong>OpenSSH public key</strong>. It is one line, normally beginning <code>ssh-ed25519</code>.</li>
+                            <li>Paste that public line below. Never upload the private-key file.</li>
+                            <li>Set the app's host to <code>@ConnectionHost</code>, port <code>@CurrentPort</code>, and user to <code>@SelectedUserName</code>.</li>
+                        </ol>
+                    }
+                    else
+                    {
+                        <p>@PlatformIntro</p>
+                        <pre><code>@KeyGenerationCommands</code></pre>
+                        <UiCommandButton Label="Copy commands" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Ghost" OnClick="@(() => CopyAsync(KeyGenerationCommands, "Key-generation commands copied."))" />
+                        <p class="meta-text">Run each line on the device you will connect from. The final line displays the public key to paste below.</p>
+                    }
+                </div>
+
+                <UiTextAreaField @bind-Value="publicKeyText"
+                                 Label="Public key from your device"
+                                 Helper="Paste one .pub line. LMS validates its format and fingerprint before installing it."
+                                 Placeholder="ssh-ed25519 AAAAC3... your-device"
+                                 Rows="4" />
+                <div class="ssh-admin-inline-actions">
+                    <UiCommandButton Label="@(isInstallingKey ? "Installing..." : "Install public key")"
+                                     Glyph="UiIconGlyph.Key"
+                                     Disabled="@(!CanChangeSsh || isBusy || string.IsNullOrWhiteSpace(publicKeyText) || string.IsNullOrWhiteSpace(SelectedUserName))"
+                                     OnClick="InstallPublicKeyAsync" />
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(installedFingerprint))
+                {
+                    <section class="ssh-admin-test-panel">
+                        <div>
+                            <p class="eyebrow">Fingerprint</p>
+                            <code>@installedFingerprint</code>
+                        </div>
+                        <h4>Now test from a second terminal</h4>
+                        <p>Keep this page and any existing SSH connection open. The command must connect without asking for the Linux account password. A private-key passphrase prompt is normal.</p>
+                        <pre><code>@KeyTestCommand</code></pre>
+                        <div class="ssh-admin-inline-actions">
+                            <UiCommandButton Label="Copy test command" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Ghost" OnClick="@(() => CopyAsync(KeyTestCommand, "SSH test command copied."))" />
+                            <UiCommandButton Label="Check successful login" Glyph="UiIconGlyph.Analyze" Disabled="@(isBusy)" OnClick="VerifyKeyLoginAsync" />
+                        </div>
+                    </section>
+                }
+
+                @if (keyLoginVerifiedAtUtc.HasValue)
+                {
+                    <p class="callout success"><strong>Test passed.</strong> OpenSSH recorded a successful login for @verifiedUserName using @installedFingerprint. Password removal and authenticator setup are unlocked for 15 minutes.</p>
+                }
+            </section>
+        }
+        else if (activeSection == HardeningSection)
+        {
+            <section class="surface-subcard ssh-admin-workflow-card">
+                <div class="ssh-admin-step-heading">
+                    <span class="ssh-admin-step-number">2</span>
+                    <div>
+                        <p class="eyebrow">Server hardening</p>
+                        <h3>Choose what SSH will allow</h3>
+                        <p>LMS creates an early OpenSSH drop-in, validates the whole configuration, reloads rather than restarts SSH, and gives you a two-minute recovery window.</p>
+                    </div>
+                </div>
+
+                <EditForm Model="@hardeningEditor" class="ssh-admin-hardening-form">
+                    <DataAnnotationsValidator />
+                    <ValidationSummary />
+                    <div class="ssh-admin-hardening-grid">
+                        <UiNumberField TValue="int" @bind-Value="hardeningEditor.Port" Label="SSH port" Helper="Port 22 is fine when keys are used. Changing it reduces log noise, not the need for authentication." min="1" max="65535" />
+                        <UiNumberField TValue="int" @bind-Value="hardeningEditor.MaxAuthTries" Label="Attempts per connection" Helper="Three is a sensible default." min="1" max="10" />
+                        <UiNumberField TValue="int" @bind-Value="hardeningEditor.LoginGraceTimeSeconds" Label="Time to finish login (seconds)" Helper="Slow or abandoned logins are closed after this time." min="10" max="120" />
+                    </div>
+                    <div class="ssh-admin-toggle-grid">
+                        <UiCheckboxField @bind-Value="hardeningEditor.PublicKeyAuthentication" Label="Allow public-key login" Helper="Keep this on. A device proves it owns the private half of an installed public key." Card="true" />
+                        <UiCheckboxField @bind-Value="hardeningEditor.PasswordAuthentication" Label="Allow Linux passwords" Helper="Keep this temporarily while onboarding. LMS blocks turning it off until a key login is verified." Card="true" />
+                        <UiCheckboxField @bind-Value="hardeningEditor.PermitRootLogin" Label="Allow direct root login" Helper="Usually leave off. Sign in with a named user and use sudo when administration is needed." Card="true" />
+                        <UiCheckboxField @bind-Value="hardeningEditor.KeyboardInteractiveAuthentication" Label="Allow keyboard-interactive login" Helper="Leave off unless another PAM-based login method needs it. LMS enables it only for managed authenticator users." Card="true" />
+                        <UiCheckboxField @bind-Value="hardeningEditor.UsePam" Label="Use Linux PAM account checks" Helper="Keep this on for normal account policy and the optional authenticator workflow." Card="true" />
+                        <UiCheckboxField @bind-Value="hardeningEditor.X11Forwarding" Label="Allow remote graphical apps" Helper="X11 forwarding is unnecessary on most servers." Card="true" />
+                        <UiCheckboxField @bind-Value="hardeningEditor.AllowAgentForwarding" Label="Allow key-agent forwarding" Helper="Useful for jump hosts, but a compromised server could use the forwarded agent while connected." Card="true" />
+                        <UiCheckboxField @bind-Value="hardeningEditor.AllowTcpForwarding" Label="Allow SSH tunnels" Helper="Needed for port forwarding and some developer tools. Leave on if you use those features." Card="true" />
+                    </div>
+                </EditForm>
+
+                @if (!hardeningEditor.PasswordAuthentication && !KeyLoginIsVerified)
+                {
+                    <p class="callout warning">Password removal is locked. Install a public key in step 1, connect from a second terminal, and let LMS verify that successful login first.</p>
+                }
+
+                <div class="ssh-admin-inline-actions">
+                    <UiCommandButton Label="Preview safe change" Glyph="UiIconGlyph.Analyze" Variant="UiButtonVariant.Ghost" Disabled="@isBusy" OnClick="PreviewHardeningAsync" />
+                    <UiCommandButton Label="Start two-minute test" Glyph="UiIconGlyph.Lock" Disabled="@(!CanChangeSsh || isBusy || ActiveTrial is not null)" OnClick="ApplyHardeningAsync" />
+                </div>
+
+                @if (hardeningPlan is not null)
+                {
+                    <section class="ssh-admin-plan">
+                        <div>
+                            <h4>What will change</h4>
+                            <ul>
+                                @foreach (var change in hardeningPlan.Changes)
+                                {
+                                    <li>@change</li>
+                                }
+                            </ul>
+                        </div>
+                        <div>
+                            <h4>Safety checks</h4>
+                            <ul>
+                                @foreach (var check in hardeningPlan.SafetyChecks)
+                                {
+                                    <li>@check</li>
+                                }
+                            </ul>
+                        </div>
+                        @if (hardeningPlan.Warnings.Count > 0)
+                        {
+                            <div class="ssh-admin-plan-warnings">
+                                <h4>Before applying</h4>
+                                <ul>
+                                    @foreach (var warning in hardeningPlan.Warnings)
+                                    {
+                                        <li>@warning</li>
+                                    }
+                                </ul>
+                            </div>
+                        }
+                        <details>
+                            <summary>Show the LMS-managed OpenSSH file</summary>
+                            <pre><code>@hardeningPlan.GeneratedConfiguration</code></pre>
+                        </details>
+                    </section>
+                }
+            </section>
+        }
+        else if (activeSection == AuthenticatorSection)
+        {
+            <section class="surface-subcard ssh-admin-workflow-card">
+                <div class="ssh-admin-step-heading">
+                    <span class="ssh-admin-step-number">3</span>
+                    <div>
+                        <p class="eyebrow">Optional two-factor SSH</p>
+                        <h3>Require a private key and an authenticator code</h3>
+                        <p>This is not “password plus code.” The first factor is the private key on your device; the second is a six-digit TOTP code. LMS applies it only to users in its <code>lms-ssh-2fa</code> group.</p>
+                    </div>
+                </div>
+
+                @RenderUserPicker("Linux account to protect", "The account must have a public key and a fresh verified key login.")
+
+                @if (SelectedUser?.IsAuthenticatorRequired == true)
+                {
+                    <p class="callout success">SSH currently requires a public key and authenticator code for @SelectedUserName.</p>
+                    <UiCommandButton Label="Stop requiring authenticator" Glyph="UiIconGlyph.Unlock" Variant="UiButtonVariant.Ghost" Disabled="@(!CanChangeSsh || isBusy)" OnClick="DisableAuthenticatorAsync" />
+                }
+                else if (totpEnrollment is null)
+                {
+                    <div class="ssh-admin-readiness-list">
+                        <div class="@(SelectedUser?.AuthorizedKeyCount > 0 ? "ready" : string.Empty)"><span>1</span><strong>Public key installed</strong><small>@(SelectedUser?.AuthorizedKeyCount > 0 ? $"{SelectedUser.AuthorizedKeyCount} key(s) found" : "Complete step 1")</small></div>
+                        <div class="@(KeyLoginIsVerified ? "ready" : string.Empty)"><span>2</span><strong>Fresh key login verified</strong><small>@(KeyLoginIsVerified ? "Ready" : "Test in step 1")</small></div>
+                        <div class="@(overview.IsManagedByLms ? "ready" : string.Empty)"><span>3</span><strong>LMS hardening policy active</strong><small>@(overview.IsManagedByLms ? "Ready" : "Apply step 2 first")</small></div>
+                        <div class="@(overview.IsAuthenticatorModuleInstalled ? "ready" : string.Empty)"><span>4</span><strong>Authenticator PAM module</strong><small>@(overview.IsAuthenticatorModuleInstalled ? "Installed" : overview.CanInstallAuthenticatorModule ? "LMS will install it after confirmation" : "No supported package manager found")</small></div>
+                    </div>
+                    <UiCommandButton Label="Set up authenticator" Glyph="UiIconGlyph.Key" Disabled="@(!CanBeginAuthenticator || isBusy)" OnClick="BeginAuthenticatorAsync" />
+                }
+                else
+                {
+                    <div class="ssh-admin-totp-enrollment">
+                        <UiQrCode Payload="@totpEnrollment.OtpUri"
+                                  Class="ssh-admin-totp-qr"
+                                  Title="SSH authenticator setup QR"
+                                  AriaLabel="SSH authenticator setup QR"
+                                  Caption="Scan in your authenticator app" />
+                        <div>
+                            <h4>Add “LMS SSH” to your authenticator</h4>
+                            <ol>
+                                <li>Open Microsoft Authenticator, Google Authenticator, 1Password, Bitwarden, or another TOTP app.</li>
+                                <li>Scan the QR code. If scanning is unavailable, enter the manual key below.</li>
+                                <li>Enter the current six-digit code. LMS checks it before changing SSH.</li>
+                            </ol>
+                            <label class="ssh-admin-manual-key">
+                                <span>Manual setup key</span>
+                                <code>@totpEnrollment.ManualEntryKey</code>
+                            </label>
+                            <div class="ssh-admin-recovery-codes">
+                                <div>
+                                    <strong>One-time recovery codes</strong>
+                                    <span>Save these somewhere secure. Each works once if your authenticator is unavailable.</span>
+                                </div>
+                                <code>@string.Join("  ", totpEnrollment.RecoveryCodes)</code>
+                                <UiCommandButton Label="Copy recovery codes" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Ghost" OnClick="@(() => CopyAsync(string.Join(Environment.NewLine, totpEnrollment.RecoveryCodes), "Recovery codes copied."))" />
+                                <UiCheckboxField @bind-Value="recoveryCodesSaved" Label="I saved the recovery codes" Helper="LMS will not show these codes again after setup." />
+                            </div>
+                            <UiTextField @bind-Value="totpVerificationCode" Label="Current six-digit code" Placeholder="123456" inputmode="numeric" autocomplete="one-time-code" />
+                            <div class="ssh-admin-inline-actions">
+                                <UiCommandButton Label="Verify and enable" Glyph="UiIconGlyph.Lock" Disabled="@(!CanChangeSsh || isBusy || !recoveryCodesSaved || string.IsNullOrWhiteSpace(totpVerificationCode))" OnClick="EnableAuthenticatorAsync" />
+                                <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@isBusy" OnClick="CancelAuthenticator" />
+                            </div>
+                        </div>
+                    </div>
+                }
+            </section>
+        }
+        else
+        {
+            <section class="surface-subcard ssh-admin-workflow-card ssh-admin-guide">
+                <div class="ssh-admin-step-heading">
+                    <span class="ssh-admin-step-number">?</span>
+                    <div>
+                        <p class="eyebrow">Plain-English guide</p>
+                        <h3>What the SSH terms mean</h3>
+                        <p>You do not need to become an SSH expert to make a sound decision.</p>
+                    </div>
+                </div>
+                <div class="ssh-admin-glossary">
+                    <article><strong>SSH server</strong><p>The OpenSSH service on this Linux machine. It accepts encrypted terminal, file-copy, and tunnel connections.</p></article>
+                    <article><strong>Public key</strong><p>A safe-to-share identity line installed on the server. It works only with its matching private key.</p></article>
+                    <article><strong>Private key</strong><p>The secret file held by your laptop, desktop, phone, or password manager. Back it up securely and never paste it into LMS.</p></article>
+                    <article><strong>Key passphrase</strong><p>Encrypts the private-key file on your device. It is local protection and is not your Linux account password.</p></article>
+                    <article><strong>Host fingerprint</strong><p>The identity of the server itself. On first connection, compare it with a trusted value before accepting it.</p></article>
+                    <article><strong>Authenticator / TOTP</strong><p>A six-digit code that changes every 30 seconds. Here it is an optional second factor after the private key.</p></article>
+                    <article><strong>Root login</strong><p>Signing in directly as the all-powerful root account. A named user plus sudo is easier to audit and safer to restrict.</p></article>
+                    <article><strong>Port forwarding</strong><p>An encrypted tunnel through SSH to another TCP service. Useful, but unnecessary on machines that never use tunnels.</p></article>
+                </div>
+                <div class="ssh-admin-do-dont">
+                    <div>
+                        <h4>Good recovery habits</h4>
+                        <ul>
+                            <li>Keep the old session open until a new login succeeds.</li>
+                            <li>Keep a second trusted key on another device or in secure backup.</li>
+                            <li>Retain console or cloud-provider recovery access.</li>
+                            <li>Remove lost-device public keys promptly.</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h4>What LMS deliberately will not do</h4>
+                        <ul>
+                            <li>Collect or store your client private key.</li>
+                            <li>Disable every login method at once.</li>
+                            <li>Claim that moving away from port 22 is meaningful authentication.</li>
+                            <li>Keep an untested hardening change after its recovery timer expires.</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+        }
+    }
+</div>
+
+@code {
+    [Parameter] public bool CanAdminister { get; set; }
+
+    private const string KeysSection = "keys";
+    private const string HardeningSection = "hardening";
+    private const string AuthenticatorSection = "authenticator";
+    private const string GuideSection = "guide";
+    private const string WindowsPlatform = "windows";
+    private const string MacPlatform = "mac";
+    private const string LinuxPlatform = "linux";
+    private const string GenericPlatform = "generic";
+
+    private static readonly (string Value, string Step, string Label)[] WorkflowItems =
+    [
+        (KeysSection, "1", "Set up a key"),
+        (HardeningSection, "2", "Harden server"),
+        (AuthenticatorSection, "3", "Add authenticator"),
+        (GuideSection, "?", "Terminology & recovery")
+    ];
+
+    private static readonly (string Value, string Label)[] ClientPlatforms =
+    [
+        (WindowsPlatform, "Windows"),
+        (MacPlatform, "macOS"),
+        (LinuxPlatform, "Linux"),
+        (GenericPlatform, "SSH app")
+    ];
+
+    private SshAdminOverview? overview;
+    private SshHardeningEditor hardeningEditor = new();
+    private SshHardeningPlan? hardeningPlan;
+    private SshTotpEnrollment? totpEnrollment;
+    private string activeSection = KeysSection;
+    private string clientPlatform = WindowsPlatform;
+    private string selectedUserName = string.Empty;
+    private string? publicKeyText;
+    private string installedFingerprint = string.Empty;
+    private string? verifiedUserName;
+    private DateTimeOffset? verificationStartedAtUtc;
+    private DateTimeOffset? keyLoginVerifiedAtUtc;
+    private string? totpVerificationCode;
+    private bool recoveryCodesSaved;
+    private string? statusMessage;
+    private string statusTone = "success";
+    private bool isLoading = true;
+    private bool isBusy;
+    private bool isInstallingKey;
+    private bool isTestingExistingKey;
+    private int trialRemainingSeconds;
+    private CancellationTokenSource? trialMonitorCancellation;
+
+    private string SelectedUserName => selectedUserName;
+    private SshLocalUserViewModel? SelectedUser => overview?.Users.FirstOrDefault(user => user.UserName == selectedUserName);
+    private SshAdminTrialViewModel? ActiveTrial => overview?.ActiveTrial;
+    private bool CanChangeSsh => CanAdminister && overview?.IsOpenSshInstalled == true && overview.IsConfigurationValid;
+    private bool KeyLoginIsVerified => keyLoginVerifiedAtUtc.HasValue && verifiedUserName == SelectedUserName && keyLoginVerifiedAtUtc > DateTimeOffset.UtcNow.AddMinutes(-15);
+    private bool CanBeginAuthenticator => CanChangeSsh && !isBusy && SelectedUser?.AuthorizedKeyCount > 0 && KeyLoginIsVerified && overview?.IsManagedByLms == true && overview.EffectiveSettings.UsePam && (overview.IsAuthenticatorModuleInstalled || overview.CanInstallAuthenticatorModule);
+    private int CurrentPort => hardeningEditor.Port;
+    private string ConnectionHost => overview?.HostAddresses.FirstOrDefault() ?? overview?.HostName ?? "server-address";
+    private string PlatformIntro => clientPlatform switch
+    {
+        WindowsPlatform => "Windows 10 and 11 include OpenSSH. Open PowerShell as your normal user:",
+        MacPlatform => "Open Terminal on the Mac that will connect to this server:",
+        _ => "Open a terminal on the Linux device that will connect to this server:"
+    };
+
+    private string KeyGenerationCommands => clientPlatform switch
+    {
+        WindowsPlatform => "$key = \"$env:USERPROFILE\\.ssh\\id_ed25519_lms\"\nssh-keygen -t ed25519 -a 64 -f $key\nGet-Content \"$key.pub\"",
+        _ => "ssh-keygen -t ed25519 -a 64 -f ~/.ssh/id_ed25519_lms\ncat ~/.ssh/id_ed25519_lms.pub"
+    };
+
+    private string KeyTestCommand => clientPlatform switch
+    {
+        WindowsPlatform when isTestingExistingKey => $"ssh -o IdentitiesOnly=yes -i \"C:\\path\\to\\matching-private-key\" -p {CurrentPort} {SelectedUserName}@{ConnectionHost}",
+        _ when isTestingExistingKey => $"ssh -o IdentitiesOnly=yes -i /path/to/matching-private-key -p {CurrentPort} {SelectedUserName}@{ConnectionHost}",
+        WindowsPlatform => $"ssh -o IdentitiesOnly=yes -i \"$env:USERPROFILE\\.ssh\\id_ed25519_lms\" -p {CurrentPort} {SelectedUserName}@{ConnectionHost}",
+        GenericPlatform => $"Connect to {ConnectionHost}, port {CurrentPort}, as {SelectedUserName} using the private identity that matches {installedFingerprint}.",
+        _ => $"ssh -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519_lms -p {CurrentPort} {SelectedUserName}@{ConnectionHost}"
+    };
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        isLoading = true;
+        try
+        {
+            overview = await SshAdminService.GetOverviewAsync();
+            if (string.IsNullOrWhiteSpace(selectedUserName) || overview.Users.All(user => user.UserName != selectedUserName))
+            {
+                selectedUserName = overview.Users.FirstOrDefault(user => user.UserName == Environment.UserName)?.UserName
+                                   ?? overview.Users.FirstOrDefault(user => user.UserName != "root")?.UserName
+                                   ?? overview.Users.FirstOrDefault()?.UserName
+                                   ?? string.Empty;
+            }
+
+            hardeningEditor = BuildEditor(overview.EffectiveSettings);
+            if (overview.ActiveTrial is not null)
+            {
+                StartTrialMonitor();
+            }
+        }
+        catch (Exception exception)
+        {
+            statusMessage = exception.Message;
+            statusTone = "error";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private RenderFragment RenderUserPicker(string label, string helperText) => @<div class="ssh-admin-user-picker">
+        <UiComboboxField TValue="string"
+                         Value="@selectedUserName"
+                         ValueChanged="SelectUserAsync"
+                         ValueExpression="@(() => selectedUserName)"
+                         Label="@label"
+                         Helper="@helperText">
+            @foreach (var user in overview?.Users ?? [])
+            {
+                <option value="@user.UserName">@FormatUserOption(user)</option>
+            }
+        </UiComboboxField>
+    </div>;
+
+    private Task SelectUserAsync(string? userName)
+    {
+        selectedUserName = userName ?? string.Empty;
+        totpEnrollment = null;
+        totpVerificationCode = null;
+        recoveryCodesSaved = false;
+        isTestingExistingKey = false;
+        return Task.CompletedTask;
+    }
+
+    private void SelectSection(string value)
+    {
+        activeSection = value;
+        statusMessage = null;
+    }
+
+    private void SelectPlatform(string value) => clientPlatform = value;
+
+    private async Task InstallPublicKeyAsync()
+    {
+        isBusy = true;
+        isInstallingKey = true;
+        ClearStatus();
+        try
+        {
+            var result = await SshAdminService.InstallPublicKeyAsync(SelectedUserName, publicKeyText ?? string.Empty);
+            installedFingerprint = result.FingerprintSha256;
+            isTestingExistingKey = false;
+            verificationStartedAtUtc = DateTimeOffset.UtcNow.AddSeconds(-5);
+            keyLoginVerifiedAtUtc = null;
+            verifiedUserName = null;
+            SetStatus(result.Message, "success");
+            await RefreshOverviewPreservingEditorAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isInstallingKey = false;
+            isBusy = false;
+        }
+    }
+
+    private async Task VerifyKeyLoginAsync()
+    {
+        if (!verificationStartedAtUtc.HasValue || string.IsNullOrWhiteSpace(installedFingerprint))
+        {
+            return;
+        }
+
+        isBusy = true;
+        ClearStatus();
+        try
+        {
+            var result = await SshAdminService.VerifyRecentPublicKeyLoginAsync(
+                SelectedUserName,
+                installedFingerprint,
+                verificationStartedAtUtc.Value);
+            if (result.Succeeded)
+            {
+                verifiedUserName = SelectedUserName;
+                keyLoginVerifiedAtUtc = result.AcceptedAtUtc ?? DateTimeOffset.UtcNow;
+            }
+
+            SetStatus(result.Message, result.Succeeded ? "success" : "warning");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private void PrepareExistingKeyTest(SshAuthorizedKeyViewModel key)
+    {
+        installedFingerprint = key.FingerprintSha256;
+        verificationStartedAtUtc = DateTimeOffset.UtcNow.AddSeconds(-5);
+        keyLoginVerifiedAtUtc = null;
+        verifiedUserName = null;
+        isTestingExistingKey = true;
+        SetStatus($"Use the private key matching {key.FingerprintSha256} in a second terminal, then check the successful login.", "success");
+    }
+
+    private async Task RemovePublicKeyAsync(SshAuthorizedKeyViewModel key)
+    {
+        var confirmed = await JSRuntime.InvokeAsync<bool>(
+            "confirm",
+            $"Remove {key.Comment} ({key.FingerprintSha256}) from {SelectedUserName}? A device using that private key will immediately lose access.");
+        if (!confirmed)
+        {
+            return;
+        }
+
+        isBusy = true;
+        ClearStatus();
+        try
+        {
+            var result = await SshAdminService.RemovePublicKeyAsync(SelectedUserName, key.FingerprintSha256);
+            if (installedFingerprint == key.FingerprintSha256)
+            {
+                installedFingerprint = string.Empty;
+                verificationStartedAtUtc = null;
+                keyLoginVerifiedAtUtc = null;
+                verifiedUserName = null;
+            }
+
+            SetStatus(result.Message, result.Succeeded ? "success" : "error");
+            await RefreshOverviewPreservingEditorAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task PreviewHardeningAsync()
+    {
+        isBusy = true;
+        ClearStatus();
+        try
+        {
+            hardeningPlan = await SshAdminService.PreviewHardeningAsync(hardeningEditor, KeyLoginIsVerified ? verifiedUserName : null);
+            SetStatus(hardeningPlan.CanApply ? "Review the plan below. Nothing has changed yet." : "The plan is blocked until its safety checks pass.", hardeningPlan.CanApply ? "success" : "warning");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task ApplyHardeningAsync()
+    {
+        isBusy = true;
+        ClearStatus();
+        try
+        {
+            var result = await SshAdminService.StartHardeningTrialAsync(hardeningEditor, KeyLoginIsVerified ? verifiedUserName : null);
+            SetStatus(result.Message, result.Succeeded ? "success" : "error");
+            await RefreshOverviewPreservingEditorAsync();
+            if (result.Trial is not null)
+            {
+                overview = overview! with { ActiveTrial = result.Trial };
+                StartTrialMonitor();
+            }
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task KeepTrialAsync()
+    {
+        if (ActiveTrial is null)
+        {
+            return;
+        }
+
+        isBusy = true;
+        try
+        {
+            await SshAdminService.ConfirmTrialAsync(ActiveTrial.Id);
+            trialMonitorCancellation?.Cancel();
+            SetStatus("SSH settings kept. The automatic rollback has been cancelled.", "success");
+            await RefreshOverviewPreservingEditorAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task RevertTrialAsync()
+    {
+        if (ActiveTrial is null)
+        {
+            return;
+        }
+
+        isBusy = true;
+        try
+        {
+            await SshAdminService.RevertTrialAsync(ActiveTrial.Id);
+            trialMonitorCancellation?.Cancel();
+            SetStatus("The previous SSH settings have been restored and reloaded.", "success");
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task BeginAuthenticatorAsync()
+    {
+        isBusy = true;
+        ClearStatus();
+        try
+        {
+            totpEnrollment = await SshAdminService.BeginAuthenticatorEnrollmentAsync(SelectedUserName);
+            SetStatus("Scan the QR code and prove the current code before LMS changes SSH.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task EnableAuthenticatorAsync()
+    {
+        if (totpEnrollment is null || !keyLoginVerifiedAtUtc.HasValue)
+        {
+            return;
+        }
+
+        isBusy = true;
+        ClearStatus();
+        try
+        {
+            var result = await SshAdminService.EnableAuthenticatorAsync(
+                SelectedUserName,
+                totpEnrollment.Secret,
+                totpVerificationCode ?? string.Empty,
+                totpEnrollment.RecoveryCodes,
+                installedFingerprint,
+                keyLoginVerifiedAtUtc.Value);
+            totpEnrollment = null;
+            totpVerificationCode = null;
+            recoveryCodesSaved = false;
+            SetStatus(result.Message, result.Succeeded ? "success" : "error");
+            await RefreshOverviewPreservingEditorAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task DisableAuthenticatorAsync()
+    {
+        isBusy = true;
+        ClearStatus();
+        try
+        {
+            var result = await SshAdminService.DisableAuthenticatorAsync(SelectedUserName);
+            SetStatus(result.Message, result.Succeeded ? "success" : "error");
+            await RefreshOverviewPreservingEditorAsync();
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private void CancelAuthenticator()
+    {
+        totpEnrollment = null;
+        totpVerificationCode = null;
+        recoveryCodesSaved = false;
+        SetStatus("Authenticator setup cancelled. SSH was not changed.", "success");
+    }
+
+    private async Task RefreshOverviewPreservingEditorAsync()
+    {
+        overview = await SshAdminService.GetOverviewAsync();
+    }
+
+    private void StartTrialMonitor()
+    {
+        trialMonitorCancellation?.Cancel();
+        trialMonitorCancellation?.Dispose();
+        trialMonitorCancellation = new CancellationTokenSource();
+        _ = MonitorTrialAsync(trialMonitorCancellation.Token);
+    }
+
+    private async Task MonitorTrialAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (ActiveTrial is not null && !cancellationToken.IsCancellationRequested)
+            {
+                trialRemainingSeconds = Math.Max(0, (int)Math.Ceiling((ActiveTrial.ExpiresAtUtc - DateTimeOffset.UtcNow).TotalSeconds));
+                await InvokeAsync(StateHasChanged);
+                if (trialRemainingSeconds == 0)
+                {
+                    await Task.Delay(1200, cancellationToken);
+                    await InvokeAsync(async () =>
+                    {
+                        await RefreshOverviewPreservingEditorAsync();
+                        if (ActiveTrial is null)
+                        {
+                            SetStatus("The test expired, so LMS restored the previous SSH settings.", "success");
+                        }
+
+                        StateHasChanged();
+                    });
+                    return;
+                }
+
+                await Task.Delay(1000, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    private async Task CopyAsync(string text, string message)
+    {
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", text);
+        SetStatus(copied ? message : "Clipboard access was blocked. Select the text and copy it manually.", copied ? "success" : "warning");
+    }
+
+    private static SshHardeningEditor BuildEditor(SshEffectiveSettings settings) => new()
+    {
+        Port = settings.Ports.FirstOrDefault(22),
+        PermitRootLogin = settings.PermitRootLogin == "yes",
+        PasswordAuthentication = settings.PasswordAuthentication,
+        PublicKeyAuthentication = settings.PublicKeyAuthentication,
+        KeyboardInteractiveAuthentication = settings.KeyboardInteractiveAuthentication,
+        UsePam = settings.UsePam,
+        X11Forwarding = settings.X11Forwarding,
+        AllowAgentForwarding = settings.AllowAgentForwarding,
+        AllowTcpForwarding = settings.AllowTcpForwarding,
+        MaxAuthTries = Math.Clamp(settings.MaxAuthTries, 1, 10),
+        LoginGraceTimeSeconds = Math.Clamp(settings.LoginGraceTimeSeconds, 10, 120)
+    };
+
+    private static string FormatUserOption(SshLocalUserViewModel user)
+    {
+        var keyText = user.AuthorizedKeyCount == 0 ? "no keys" : $"{user.AuthorizedKeyCount} key(s)";
+        var keyPolicyText = user.IsPublicKeyAuthenticationEnabled ? string.Empty : " · keys currently blocked";
+        var authenticatorText = user.IsAuthenticatorRequired ? " · key + authenticator" : string.Empty;
+        var lockedText = user.IsLocked ? " · password locked" : string.Empty;
+        return $"{user.UserName} · {keyText}{keyPolicyText}{authenticatorText}{lockedText}";
+    }
+
+    private void SetStatus(string message, string tone)
+    {
+        statusMessage = message;
+        statusTone = tone;
+    }
+
+    private void ClearStatus() => statusMessage = null;
+
+    public void Dispose()
+    {
+        trialMonitorCancellation?.Cancel();
+        trialMonitorCancellation?.Dispose();
+    }
+}

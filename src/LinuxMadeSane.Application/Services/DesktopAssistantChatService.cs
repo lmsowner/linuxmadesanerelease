@@ -1868,8 +1868,19 @@ LMS_APT_SOURCE_REPAIR
         return parts.Length > 1 && long.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out kilobytes);
     }
 
-    private static string FormatMemory(long bytes) =>
-        $"{FormatOneDecimal(bytes / 1024d / 1024d)} MiB";
+    internal static string FormatMemory(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+        var value = Math.Max(0d, bytes);
+        var unit = 0;
+        while (Math.Round(value, 1) >= 1_000d && unit < units.Length - 1)
+        {
+            value /= 1_000d;
+            unit++;
+        }
+
+        return $"{FormatOneDecimal(value)} {units[unit]}";
+    }
 
     private static string FormatOneDecimal(double value) =>
         value.ToString("0.0", CultureInfo.InvariantCulture);

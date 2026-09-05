@@ -84,7 +84,7 @@ else if (ShowDetachedSearchWorkspace)
 }
 else
 {
-    <div class="host-file-browser-shell" @onclick="DismissContextMenu">
+    <div class="host-file-browser-shell @(sudoModeEnabled ? "sudo-mode" : null)" @onclick="DismissContextMenu">
         <div class="host-file-browser-explorer" @ref="uploadDropTargetElement" @onclick="IgnoreClick" @onclick:stopPropagation="true">
             <FileBrowserExplorer Title="@ResolvedExplorerTitle"
                                  RootPath="@EffectiveRootPath"
@@ -153,7 +153,17 @@ else
                                             IsLoadingSuggestions="@isPathSuggestionsLoading"
                                             EscapeValue="@currentPath" />
 
-                            <span class="host-file-address-status">@browserStatus</span>
+                            <div class="host-file-address-state">
+                                @if (sudoModeEnabled)
+                                {
+                                    <span class="host-file-sudo-indicator"
+                                          title="This file browser session is running filesystem operations with sudo.">
+                                        <span aria-hidden="true"><UiGlyphIcon Glyph="UiIconGlyph.Lock" /></span>
+                                        Sudo · root
+                                    </span>
+                                }
+                                <span class="host-file-address-status">@browserStatus</span>
+                            </div>
 
                             @if (CanShowPopout)
                             {
@@ -282,6 +292,11 @@ else
                                      Disabled="@(!canBrowse)"
                                      OnClick="TogglePreviewPanelAsync" />
                 </ToolbarContent>
+                <ThumbnailContent Context="item">
+                    <FileBrowserThumbnail Host="@browser.Host"
+                                          ConnectionProfile="@BuildConnectionProfile()"
+                                          Item="@item" />
+                </ThumbnailContent>
                 <DetailsContent Context="item">
                     <section class="host-file-preview-panel">
                         <header class="host-file-preview-header">
@@ -521,6 +536,11 @@ else
                 <UiContextMenuButton Label="New folder" Glyph="UiIconGlyph.NewFolder" OnClick="CreateFolderFromContextMenuAsync" Disabled="@(!CanCreateFolderFromContextMenu || isBusy)" />
                 <UiContextMenuButton Label="Find files" Glyph="UiIconGlyph.Search" OnClick="OpenFileSearchFromContextMenuAsync" Disabled="@(!CanOpenFileSearchFromContextMenu || isBusy)" />
                 <UiContextMenuButton Label="Open Terminal Here" Glyph="UiIconGlyph.Run" OnClick="OpenTerminalHereFromContextMenuAsync" Disabled="@(!CanOpenTerminalFromContextMenu || isBusy)" />
+                <UiContextMenuButton Label="@(sudoModeEnabled ? "Leave Sudo Access" : "Sudo Access")"
+                                     Title="@(sudoModeEnabled ? "Return this file browser to normal user access" : "Run this file browser session with non-interactive sudo access")"
+                                     Glyph="UiIconGlyph.Lock"
+                                     OnClick="ToggleSudoAccessFromContextMenuAsync"
+                                     Disabled="@isBusy" />
                 @if (ShowConnectAsContextMenu)
                 {
                     <div class="host-file-context-submenu">
@@ -1125,6 +1145,7 @@ else
     private string operationMessage = string.Empty;
     private string operationMessageTone = "success";
     private bool preferStoredCredentials = true;
+    private bool sudoModeEnabled;
     private bool hasResolvedStoredBrowseCredentials;
     private string storedBrowseCredentialsFailureMessage = string.Empty;
     private bool isBusy;
@@ -1586,6 +1607,9 @@ else
             PreferStoredCredentialsOverride ??
             (!string.IsNullOrWhiteSpace(browser.Host.PasswordSecretReference) ||
              !string.IsNullOrWhiteSpace(browser.Host.PrivateKeySecretReference));
+        sudoModeEnabled = detachedState?.SudoEnabled ??
+            detachedSearchState?.SudoEnabled ??
+            false;
         connectionProfileKey = detachedState?.ConnectionProfileKey ??
             detachedSearchState?.ConnectionProfileKey ??
             ConnectionProfileKeyOverride ??
@@ -1950,7 +1974,11 @@ else
                 pathInput = normalizedPath;
             }
 
-            browserStatus = UsesSshTransport ? "Live SSH listing" : "Live local listing";
+            browserStatus = sudoModeEnabled
+                ? "Privileged listing"
+                : UsesSshTransport
+                    ? "Live SSH listing"
+                    : "Live local listing";
             canBrowse = true;
             if (refreshAncillaryNavigation)
             {
@@ -2877,6 +2905,88 @@ else
         await ApplyConnectionIdentityAsync();
     }
 
+    private async Task ToggleSudoAccessFromContextMenuAsync()
+    {
+        if (browser is null || isBusy)
+        {
+            return;
+        }
+
+        var enable = !sudoModeEnabled;
+        var preferredSelectionPath = contextMenuRequest?.Item is not null
+            ? ResolveBrowserPath(contextMenuRequest.Item.FullPath)
+            : selectedItem is null
+                ? string.Empty
+                : ResolveBrowserPath(selectedItem.FullPath);
+        var restorePreview = previewPanelOpen;
+
+        DismissContextMenu();
+        ClearOperationMessage();
+        isBusy = true;
+        browserStatus = enable ? "Checking sudo access..." : "Leaving sudo access...";
+
+        try
+        {
+            if (enable)
+            {
+                var validation = await FileAccessService.ValidateAccessAsync(
+                    browser.Host,
+                    BuildConnectionProfile(useSudoOverride: true));
+                if (!validation.Success)
+                {
+                    SetOperationMessage(validation.FailureMessage, "error");
+                    browserStatus = canBrowse ? "Normal user access" : "Sudo unavailable";
+                    return;
+                }
+            }
+
+            sudoModeEnabled = enable;
+            ResetConnectionScopedBrowserState();
+            PersistDetachedBrowserState();
+            PersistDetachedSearchState();
+            await LoadItemsAsync(currentPath, preserveSessionOnFailure: false, updatePathInputOnSuccess: false);
+            if (!canBrowse)
+            {
+                throw new InvalidOperationException(
+                    string.IsNullOrWhiteSpace(errorMessage)
+                        ? "The file browser could not switch access mode."
+                        : errorMessage);
+            }
+
+            if (!string.IsNullOrWhiteSpace(preferredSelectionPath))
+            {
+                var restoredItem = FindItemByPath(items, preferredSelectionPath);
+                if (restoredItem is not null)
+                {
+                    selectedItem = restoredItem;
+                    if (restorePreview)
+                    {
+                        await LoadPreviewAsync(restoredItem, preservePanelState: true);
+                    }
+                }
+            }
+
+            SetOperationMessage(
+                enable
+                    ? "Sudo Access is active for this file browser session."
+                    : "Returned to normal user access.",
+                "success");
+        }
+        catch (Exception exception)
+        {
+            sudoModeEnabled = !enable;
+            PersistDetachedBrowserState();
+            PersistDetachedSearchState();
+            await LoadItemsAsync(currentPath, preserveSessionOnFailure: false, updatePathInputOnSuccess: false);
+            SetOperationMessage(exception.Message, "error");
+            browserStatus = sudoModeEnabled ? "Sudo · root" : "Normal user access";
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
     private async Task SelectConnectionProfileAsync(string value)
     {
         connectionProfileKey = value;
@@ -3550,7 +3660,8 @@ else
             connectionUsername,
             ConnectionSecretStore.Clone(connectionSecretHandle),
             preferStoredCredentials,
-            UseSshTransport));
+            UseSshTransport,
+            sudoModeEnabled));
         SetOperationMessage($"{(operation == FileBrowserClipboardOperation.Cut ? "Cut" : "Copied")} {DescribeItems(actionItems.Select(item => item.Name).ToArray())}.", "success");
         await InvokeAsync(StateHasChanged);
     }
@@ -3576,7 +3687,8 @@ else
             connectionUsername,
             ConnectionSecretStore.Clone(connectionSecretHandle),
             preferStoredCredentials,
-            UseSshTransport));
+            UseSshTransport,
+            sudoModeEnabled));
         SetOperationMessage($"{(operation == FileBrowserClipboardOperation.Cut ? "Cut" : "Copied")} {request.DisplayName}.", "success");
         await InvokeAsync(StateHasChanged);
     }
@@ -4664,7 +4776,8 @@ else
             previewPanelFocused && previewPanelOpen,
             previewDock,
             previewPanelSizePx,
-            foldersPaneCollapsed);
+            foldersPaneCollapsed,
+            sudoModeEnabled);
 
     private DetachedFileSearchSnapshot BuildDetachedSearchSnapshot(Guid? secretHandleOverride = null) =>
         new(
@@ -4677,7 +4790,8 @@ else
             preferStoredCredentials,
             connectionProfileKey,
             connectionProfileName,
-            pathSuggestions.ToArray());
+            pathSuggestions.ToArray(),
+            sudoModeEnabled);
 
     private void PersistDetachedBrowserState()
     {
@@ -6037,22 +6151,29 @@ else
         !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
         !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
 
-    private ManagedHostConnectionProfile BuildConnectionProfile() =>
-        new(connectionUsername, connectionSecretHandle, preferStoredCredentials, UseSshTransport);
+    private ManagedHostConnectionProfile BuildConnectionProfile(bool? useSudoOverride = null) =>
+        new(
+            connectionUsername,
+            connectionSecretHandle,
+            preferStoredCredentials,
+            UseSshTransport,
+            useSudoOverride ?? sudoModeEnabled);
 
     private FileActionExecutionContext BuildFileActionExecutionContext() =>
         new(
             connectionUsername,
             connectionSecretHandle,
             preferStoredCredentials,
-            UseSshTransport);
+            UseSshTransport,
+            sudoModeEnabled);
 
     private static FileActionExecutionContext BuildExecutionContextForClipboard(FileBrowserClipboardState clipboard) =>
         new(
             clipboard.Username,
             clipboard.SecretHandle,
             clipboard.PreferStoredCredentials,
-            clipboard.UseSshTransport);
+            clipboard.UseSshTransport,
+            clipboard.UseSudo);
 
     private Task EnsureFileActionsPopupAsync() =>
         JSRuntime.InvokeAsync<bool>(

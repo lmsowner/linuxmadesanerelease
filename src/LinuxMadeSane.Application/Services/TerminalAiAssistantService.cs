@@ -21,6 +21,7 @@ public sealed partial class TerminalAiAssistantService(
     private const int MaxHistoryEntries = 12;
     private const int MaxHistoryRecapChars = 1800;
     private const int MaxHistoryEntryChars = 260;
+    private const int MaxStructuredCommandOutputChars = 13_000;
 
     public async Task<TerminalAiTurnResult> ExecutePromptAsync(
         TerminalAiConversationState conversation,
@@ -177,11 +178,18 @@ public sealed partial class TerminalAiAssistantService(
         var builder = new StringBuilder();
         builder.AppendLine("You are helping with an ongoing terminal support conversation.");
         builder.AppendLine("Preserve context from earlier turns and build on what is already known.");
-        builder.AppendLine("Do not ask the user to paste large terminal output manually back into chat. If fresh evidence is needed, propose the single next command and assume the interface can run it and analyze the updated terminal session.");
+        builder.AppendLine("Do not ask the user to paste large terminal output manually back into chat. If fresh evidence is needed, propose the single next command and assume the interface can run it through a private command channel and return its structured result.");
         builder.AppendLine("Do not say 'if you want I can', 'you could try', or similar hedging. State the next fix, check, or command directly.");
-        builder.AppendLine("When a command is appropriate, include exactly one fenced bash block so the interface can offer Run then review or Run commands.");
+        builder.AppendLine("When a command is appropriate, include exactly one fenced bash block. The interface handles execution and feeds the result back automatically.");
+        builder.AppendLine("Keep a pipeline or continued shell command in one complete logical command. If a command fails, inspect its structured exit code, stdout, and stderr, then continue with a corrected command or a focused verification instead of ending the request.");
         builder.AppendLine("If the operator asks for live host state, counts, lists, running processes, services, Docker containers, packages, ports, devices, or current status, do not invent the answer. Return the single command that collects the evidence.");
         builder.AppendLine("If recent terminal output shows permission denied for the previous command, do not repeat the same unprivileged command. Retry the same focused check with sudo when that is the minimum safe next step.");
+        builder.AppendLine(request.AccessMode switch
+        {
+            TerminalAiAccessMode.ReadOnly => "Access is READ ONLY. Use read-only inspection commands when evidence is needed. Never propose a command that changes files, packages, services, configuration, processes, mounts, accounts, permissions, or host state. If a change is required, explain it briefly without emitting a command.",
+            TerminalAiAccessMode.FullAccess => "Access is FULL. Work hands-off: return the single next command needed to complete the request, then use the next terminal result to continue until the outcome is complete. Do not ask for confirmation or stop merely to offer a command.",
+            _ => "Access is AGENT. Run read-only checks freely. When a state-changing command is needed, return that single command; the interface obtains approval. Continue from the next terminal result until the outcome is complete."
+        });
         if (providerType == AiProviderType.Custom)
         {
             builder.AppendLine("This provider may be a small Docker-hosted OpenAI-compatible model. Keep the answer deterministic: one short sentence plus one fenced bash block whenever terminal evidence is needed.");
@@ -215,11 +223,23 @@ public sealed partial class TerminalAiAssistantService(
 
         builder.AppendLine($"Current directory: {workingDirectory}");
         builder.AppendLine();
+        if (!string.IsNullOrWhiteSpace(request.StructuredCommandOutput))
+        {
+            builder.AppendLine("Latest structured command result (private command channel; the interactive terminal was not modified):");
+            builder.AppendLine(TrimStructuredCommandOutput(request.StructuredCommandOutput));
+            builder.AppendLine();
+        }
+
         builder.AppendLine("Recent terminal output:");
         builder.AppendLine(outputTail);
 
         return builder.ToString().Trim();
     }
+
+    private static string TrimStructuredCommandOutput(string value) =>
+        value.Length <= MaxStructuredCommandOutputChars
+            ? value
+            : $"[earlier structured output omitted]{Environment.NewLine}{value[^MaxStructuredCommandOutputChars..]}";
 
     private static string BuildDisplayUserMessage(TerminalAiPromptRequest request)
     {
@@ -360,17 +380,48 @@ public sealed partial class TerminalAiAssistantService(
 
     private static string ExtractLikelyCommand(string value)
     {
+        string? candidate = null;
+
         foreach (var line in value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             var command = NormalizePotentialCommand(line);
-            if (IsLikelyShellCommand(command))
+            if (string.IsNullOrWhiteSpace(command) || command.StartsWith('#'))
             {
-                return command;
+                continue;
             }
+
+            if (candidate is null)
+            {
+                if (IsLikelyShellCommand(command))
+                {
+                    candidate = command;
+                }
+
+                continue;
+            }
+
+            if (NeedsShellContinuation(candidate) || StartsWithShellContinuation(command))
+            {
+                candidate = JoinShellContinuation(candidate, command);
+                continue;
+            }
+
+            return IsCompleteShellCommand(candidate) && IsLikelyShellCommand(candidate)
+                ? candidate
+                : string.Empty;
+        }
+
+        if (candidate is not null)
+        {
+            return IsCompleteShellCommand(candidate) && IsLikelyShellCommand(candidate)
+                ? candidate
+                : string.Empty;
         }
 
         var normalized = NormalizePotentialCommand(value);
-        return IsLikelyShellCommand(normalized) ? normalized : string.Empty;
+        return IsCompleteShellCommand(normalized) && IsLikelyShellCommand(normalized)
+            ? normalized
+            : string.Empty;
     }
 
     private static bool TryBuildFallbackCommand(
@@ -378,6 +429,16 @@ public sealed partial class TerminalAiAssistantService(
         string conversationRecap,
         out TerminalCommandFallback fallback)
     {
+        // A blank custom request is an automatic continuation after LMS has already
+        // run a command. Reusing the original conversation keywords here would keep
+        // emitting the same fallback command instead of letting the provider assess
+        // the new terminal result.
+        if (request.Mode == TerminalAiPromptMode.Custom && string.IsNullOrWhiteSpace(request.Request))
+        {
+            fallback = default;
+            return false;
+        }
+
         var context = $"{request.Request}{Environment.NewLine}{conversationRecap}".ToLowerInvariant();
         fallback = default;
 
@@ -449,7 +510,7 @@ public sealed partial class TerminalAiAssistantService(
 
         if (ContainsAny(context, "process", "processes", "ram", "memory", "cpu usage"))
         {
-            return "ps -eo pid,user,comm,%mem,%cpu,rss --sort=-rss | head -n 25";
+            return "ps -eo pid,user,comm,%mem,%cpu,rss --sort=-rss";
         }
 
         if (ContainsAny(context, "bluetooth"))
@@ -479,7 +540,7 @@ public sealed partial class TerminalAiAssistantService(
 
         if (ContainsAny(context, "network", "interface", "interfaces", "ip address", "addresses", "route", "gateway"))
         {
-            return "ip -brief address && ip route";
+            return "ip -brief address";
         }
 
         if (ContainsAny(context, "journal", "logs", "log entries"))
@@ -489,12 +550,12 @@ public sealed partial class TerminalAiAssistantService(
 
         if (ContainsAny(context, "gpu", "nvidia", "graphics"))
         {
-            return "nvidia-smi || lspci | grep -Ei 'vga|3d|display'";
+            return "nvidia-smi";
         }
 
         if (ContainsAny(context, "package", "packages", "apt", "dpkg"))
         {
-            return "apt list --installed 2>/dev/null | head -n 50";
+            return "apt list --installed";
         }
 
         return string.Empty;
@@ -525,6 +586,14 @@ public sealed partial class TerminalAiAssistantService(
             line => line.Contains("permission denied", StringComparison.OrdinalIgnoreCase) ||
                     line.Contains("operation not permitted", StringComparison.OrdinalIgnoreCase));
         if (errorIndex <= 0)
+        {
+            return string.Empty;
+        }
+
+        // Do not keep reacting to a stale permission error after another command has
+        // already been entered. The later command/result is now the relevant state.
+        if (lines.Skip(errorIndex + 1).Any(line =>
+                !string.IsNullOrWhiteSpace(ExtractCommandFromPromptLine(line))))
         {
             return string.Empty;
         }
@@ -695,6 +764,73 @@ public sealed partial class TerminalAiAssistantService(
         return IsExecutableToken(executable) &&
                !IsProseLeadToken(executable) &&
                HasShellCommandShape(tokens, tokenIndex);
+    }
+
+    private static bool IsCompleteShellCommand(string command) =>
+        !NeedsShellContinuation(command);
+
+    private static bool NeedsShellContinuation(string command)
+    {
+        var trimmed = command.TrimEnd();
+        if (string.IsNullOrWhiteSpace(trimmed) ||
+            trimmed.EndsWith("\\", StringComparison.Ordinal) ||
+            trimmed.EndsWith("|", StringComparison.Ordinal) ||
+            trimmed.EndsWith("&&", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var quote = '\0';
+        var escaped = false;
+        foreach (var character in trimmed)
+        {
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+
+            if (character == '\\' && quote != '\'')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (quote == '\0')
+            {
+                if (character is '\'' or '"' or '`')
+                {
+                    quote = character;
+                }
+
+                continue;
+            }
+
+            if (character == quote)
+            {
+                quote = '\0';
+            }
+        }
+
+        return escaped || quote != '\0';
+    }
+
+    private static bool StartsWithShellContinuation(string command)
+    {
+        var trimmed = command.TrimStart();
+        return trimmed.StartsWith("|", StringComparison.Ordinal) ||
+               trimmed.StartsWith("&&", StringComparison.Ordinal);
+    }
+
+    private static string JoinShellContinuation(string command, string continuation)
+    {
+        var prefix = command.TrimEnd();
+        if (prefix.EndsWith("\\", StringComparison.Ordinal))
+        {
+            prefix = prefix[..^1].TrimEnd();
+        }
+
+        return $"{prefix} {continuation.TrimStart()}";
     }
 
     private static bool IsCommandPrefixToken(string token) =>

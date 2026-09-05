@@ -23,6 +23,16 @@ public interface ITerminalSessionService
         string input,
         CancellationToken cancellationToken = default);
 
+    Task SendInterruptAsync(
+        Guid sessionId,
+        CancellationToken cancellationToken = default) =>
+        SendInputAsync(sessionId, "\u0003", cancellationToken);
+
+    Task<TerminalAiCommandResult> ExecuteAiCommandAsync(
+        TerminalAiCommandRequest request,
+        IProgress<CommandExecutionUpdate>? progress = null,
+        CancellationToken cancellationToken = default);
+
     Task ResizeAsync(
         Guid sessionId,
         int columns,
@@ -30,4 +40,6 @@ public interface ITerminalSessionService
         CancellationToken cancellationToken = default);
 
     Task CloseSessionAsync(Guid sessionId, CancellationToken cancellationToken = default);
+
+    Task CloseOwnedSessionsAsync(Guid ownerId, CancellationToken cancellationToken = default);
 }

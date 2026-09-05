@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.ComponentModel.DataAnnotations;
+using LinuxMadeSane.Core.Enums;
 
 namespace LinuxMadeSane.Application.Contracts.Security;
 
@@ -22,4 +23,7 @@ public sealed class TrustedNetworkEntryEditor
     public bool IsTrustedAccessEnabled { get; set; } = true;
 
     public bool IsAuthenticationEnabled { get; set; } = true;
+
+    public NetworkAccessDeniedResponseMode DeniedResponseMode { get; set; } =
+        NetworkAccessDeniedResponseMode.AccessDeniedPage;
 }

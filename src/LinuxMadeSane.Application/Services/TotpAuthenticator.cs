@@ -6,7 +6,7 @@ using System.Text;
 
 namespace LinuxMadeSane.Application.Services;
 
-internal static class TotpAuthenticator
+public static class TotpAuthenticator
 {
     private const string Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     private static readonly TimeSpan Step = TimeSpan.FromSeconds(30);

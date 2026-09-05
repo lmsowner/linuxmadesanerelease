@@ -30,6 +30,7 @@ public sealed class SqliteDatabaseInitializer(
         await EnsureSecurityTablesAsync(cancellationToken);
         await EnsureMessagingTablesAsync(cancellationToken);
         await EnsureCloudflareTablesAsync(cancellationToken);
+        await EnsureMailRelayTablesAsync(cancellationToken);
         await EnsurePortalTablesAsync(cancellationToken);
         await EnsureCaddyTablesAsync(cancellationToken);
         await EnsureEdgeGatewayTablesAsync(cancellationToken);
@@ -1788,6 +1789,7 @@ public sealed class SqliteDatabaseInitializer(
                 IsTrustedAccessEnabled INTEGER NOT NULL DEFAULT 1,
                 IsAuthenticationEnabled INTEGER NOT NULL DEFAULT 1,
                 IsBuiltIn INTEGER NOT NULL,
+                DeniedResponseMode INTEGER NOT NULL DEFAULT 0,
                 CreatedAtUtc TEXT NOT NULL,
                 UpdatedAtUtc TEXT NOT NULL
             );
@@ -1803,6 +1805,11 @@ public sealed class SqliteDatabaseInitializer(
             "trusted_network_entries",
             "IsAuthenticationEnabled",
             "INTEGER NOT NULL DEFAULT 1",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "trusted_network_entries",
+            "DeniedResponseMode",
+            "INTEGER NOT NULL DEFAULT 0",
             cancellationToken);
 
         const string trustedNetworksAddressIndexSql = """
@@ -1958,6 +1965,177 @@ public sealed class SqliteDatabaseInitializer(
         await dbContext.Database.ExecuteSqlRawAsync(exposedServiceHostHostnameIndexSql, cancellationToken);
     }
 
+    private async Task EnsureMailRelayTablesAsync(CancellationToken cancellationToken)
+    {
+        const string configurationSql = """
+            CREATE TABLE IF NOT EXISTS mail_relay_configurations (
+                Id TEXT NOT NULL PRIMARY KEY,
+                Enabled INTEGER NOT NULL,
+                RelayHostname TEXT NOT NULL,
+                PublicIpAddress TEXT NOT NULL,
+                SubmissionPort INTEGER NOT NULL,
+                AllowTailscale INTEGER NOT NULL,
+                AllowTrustedLan INTEGER NOT NULL,
+                AllowPublicSubmission INTEGER NOT NULL,
+                DeliveryMode INTEGER NOT NULL DEFAULT 0,
+                AllowLegacyPort25 INTEGER NOT NULL DEFAULT 0,
+                LegacyListenAddressesJson TEXT NOT NULL DEFAULT '[]',
+                LegacyAllowedNetworksJson TEXT NOT NULL DEFAULT '[]',
+                DefaultMessagesPerMinute INTEGER NOT NULL,
+                DefaultMessagesPerDay INTEGER NOT NULL,
+                QueueLimit INTEGER NOT NULL,
+                LogRetentionDays INTEGER NOT NULL,
+                TlsCertificateSecretReference TEXT NULL,
+                TlsPrivateKeySecretReference TEXT NULL,
+                CreatedUtc TEXT NOT NULL,
+                UpdatedUtc TEXT NOT NULL
+            );
+            """;
+
+        const string domainsSql = """
+            CREATE TABLE IF NOT EXISTS mail_relay_domains (
+                Id TEXT NOT NULL PRIMARY KEY,
+                MailRelayConfigurationId TEXT NOT NULL,
+                CloudflareZoneId TEXT NOT NULL DEFAULT '',
+                DomainName TEXT NOT NULL,
+                Enabled INTEGER NOT NULL,
+                CurrentDkimSelector TEXT NOT NULL,
+                CurrentDkimPrivateKeySecretReference TEXT NULL,
+                CurrentDkimCreatedUtc TEXT NULL,
+                CurrentDkimActivatedUtc TEXT NULL,
+                PreviousDkimSelector TEXT NULL,
+                PreviousDkimPrivateKeySecretReference TEXT NULL,
+                PreviousDkimCreatedUtc TEXT NULL,
+                PreviousDkimActivatedUtc TEXT NULL,
+                PreviousDkimRetiredUtc TEXT NULL,
+                DkimCloudflareRecordId TEXT NULL,
+                SpfCloudflareRecordId TEXT NULL,
+                DmarcCloudflareRecordId TEXT NULL,
+                SpfStatus INTEGER NOT NULL,
+                DkimStatus INTEGER NOT NULL,
+                DmarcStatus INTEGER NOT NULL,
+                DmarcPolicy INTEGER NOT NULL,
+                DmarcReportingAddress TEXT NULL,
+                CreatedUtc TEXT NOT NULL,
+                UpdatedUtc TEXT NOT NULL,
+                FOREIGN KEY (MailRelayConfigurationId) REFERENCES mail_relay_configurations(Id) ON DELETE CASCADE
+            );
+            """;
+
+        const string clientsSql = """
+            CREATE TABLE IF NOT EXISTS mail_relay_clients (
+                Id TEXT NOT NULL PRIMARY KEY,
+                MailRelayConfigurationId TEXT NOT NULL,
+                Name TEXT NOT NULL,
+                Username TEXT NOT NULL,
+                PasswordHash TEXT NOT NULL,
+                Enabled INTEGER NOT NULL,
+                AllowedSenderDomainsJson TEXT NOT NULL DEFAULT '[]',
+                AllowedNetworksJson TEXT NOT NULL DEFAULT '[]',
+                MessagesPerMinute INTEGER NOT NULL,
+                MessagesPerDay INTEGER NOT NULL,
+                Notes TEXT NOT NULL,
+                CreatedUtc TEXT NOT NULL,
+                UpdatedUtc TEXT NOT NULL,
+                LastUsedUtc TEXT NULL,
+                FOREIGN KEY (MailRelayConfigurationId) REFERENCES mail_relay_configurations(Id) ON DELETE CASCADE
+            );
+            """;
+
+        const string dnsRecordsSql = """
+            CREATE TABLE IF NOT EXISTS mail_relay_dns_records (
+                Id TEXT NOT NULL PRIMARY KEY,
+                MailRelayDomainId TEXT NOT NULL,
+                CloudflareRecordId TEXT NOT NULL,
+                Type TEXT NOT NULL,
+                Name TEXT NOT NULL,
+                Purpose TEXT NOT NULL,
+                CreatedByLms INTEGER NOT NULL,
+                ModifiedByLms INTEGER NOT NULL DEFAULT 0,
+                OriginalValue TEXT NULL,
+                CurrentValue TEXT NOT NULL DEFAULT '',
+                ChangeType INTEGER NOT NULL DEFAULT 0,
+                CreatedUtc TEXT NOT NULL,
+                UpdatedUtc TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00',
+                FOREIGN KEY (MailRelayDomainId) REFERENCES mail_relay_domains(Id) ON DELETE CASCADE
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(configurationSql, cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(domainsSql, cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(clientsSql, cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(dnsRecordsSql, cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_domains",
+            "CloudflareZoneId",
+            "TEXT NOT NULL DEFAULT ''",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "TlsCertificateSecretReference",
+            "TEXT NULL",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "TlsPrivateKeySecretReference",
+            "TEXT NULL",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "AllowLegacyPort25",
+            "INTEGER NOT NULL DEFAULT 0",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "LegacyListenAddressesJson",
+            "TEXT NOT NULL DEFAULT '[]'",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "DeliveryMode",
+            "INTEGER NOT NULL DEFAULT 0",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_dns_records",
+            "ModifiedByLms",
+            "INTEGER NOT NULL DEFAULT 0",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_dns_records",
+            "OriginalValue",
+            "TEXT NULL",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_dns_records",
+            "CurrentValue",
+            "TEXT NOT NULL DEFAULT ''",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_dns_records",
+            "ChangeType",
+            "INTEGER NOT NULL DEFAULT 0",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_dns_records",
+            "UpdatedUtc",
+            "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'",
+            cancellationToken);
+        await EnsureColumnExistsAsync(
+            "mail_relay_configurations",
+            "LegacyAllowedNetworksJson",
+            "TEXT NOT NULL DEFAULT '[]'",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE UNIQUE INDEX IF NOT EXISTS IX_mail_relay_domains_ConfigurationId_DomainName ON mail_relay_domains (MailRelayConfigurationId, DomainName);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE UNIQUE INDEX IF NOT EXISTS IX_mail_relay_clients_ConfigurationId_Username ON mail_relay_clients (MailRelayConfigurationId, Username);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_mail_relay_dns_records_CloudflareRecordId ON mail_relay_dns_records (CloudflareRecordId);",
+            cancellationToken);
+    }
+
     private async Task EnsureBuiltInTrustedNetworksAsync(CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
@@ -1974,10 +2152,11 @@ public sealed class SqliteDatabaseInitializer(
                     Label = definition.Label,
                     AddressOrCidr = definition.AddressOrCidr,
                     Description = definition.Description,
-                    IsEnabled = true,
-                    IsTrustedAccessEnabled = true,
+                    IsEnabled = definition.DefaultEnabled,
+                    IsTrustedAccessEnabled = definition.DefaultEnabled,
                     IsAuthenticationEnabled = true,
                     IsBuiltIn = true,
+                    DeniedResponseMode = definition.DeniedResponseMode,
                     CreatedAtUtc = now,
                     UpdatedAtUtc = now
                 });
@@ -2001,10 +2180,18 @@ public sealed class SqliteDatabaseInitializer(
         new(Guid.Parse("96c2fffe-f3ae-4277-bd88-a088d56ba790"), "Tailscale CGNAT", "100.64.0.0/10", "Tailscale and CGNAT IPv4 range."),
         new(Guid.Parse("a078122d-5263-4ded-8067-9a2f1816518d"), "Unique local IPv6", "fc00::/7", "Private IPv6 address space."),
         new(Guid.Parse("1bd57914-5ec6-4b8a-a9c2-c21b0a362dc2"), "Link-local IPv6", "fe80::/10", "Direct local IPv6 interfaces."),
-        new(Guid.Parse("71839414-3bd4-4b4f-9c0a-4fb35f6337d9"), "Tailscale IPv6", "fd7a:115c:a1e0::/48", "Tailscale IPv6 network range.")
+        new(Guid.Parse("71839414-3bd4-4b4f-9c0a-4fb35f6337d9"), "Tailscale IPv6", "fd7a:115c:a1e0::/48", "Tailscale IPv6 network range."),
+        new(Guid.Parse("a32b0fd3-a81f-4f43-8d2f-e6623c366dc3"), "Public IPv4", "0.0.0.0/0", "Fallback policy for IPv4 clients not covered by a more specific rule.", false, NetworkAccessDeniedResponseMode.EmptyNotFound),
+        new(Guid.Parse("9365587e-aab8-44c2-bd54-676a18b33e72"), "Public IPv6", "::/0", "Fallback policy for IPv6 clients not covered by a more specific rule.", false, NetworkAccessDeniedResponseMode.EmptyNotFound)
     ];
 
-    private sealed record BuiltInTrustedNetworkDefinition(Guid Id, string Label, string AddressOrCidr, string Description);
+    private sealed record BuiltInTrustedNetworkDefinition(
+        Guid Id,
+        string Label,
+        string AddressOrCidr,
+        string Description,
+        bool DefaultEnabled = true,
+        NetworkAccessDeniedResponseMode DeniedResponseMode = NetworkAccessDeniedResponseMode.AccessDeniedPage);
 
     private sealed record LocalManagedHostBootstrap(
         bool Enabled,

@@ -46,19 +46,36 @@ public sealed class AptPackageManagementService(ILinuxCommandRunner commandRunne
         var needsAptUpdate = actions.Any(action => action.Action is PackageActionKind.Install or PackageActionKind.Remove or PackageActionKind.Reinstall);
         if (needsAptUpdate)
         {
-            logs.Add(await RunAndMapAsync(
-                new LinuxCommandRequest("apt-get", ["update"], true, TimeSpan.FromMinutes(5), "Refresh package metadata"),
+            var update = await RunAndMapAsync(
+                BuildAptRequest(
+                    ["-o", "DPkg::Lock::Timeout=120", "update"],
+                    TimeSpan.FromMinutes(5),
+                    "Refresh package metadata"),
                 dryRun,
-                cancellationToken));
+                cancellationToken);
+            logs.Add(update);
+            if (update.Level == OperationLogLevel.Error)
+            {
+                return logs;
+            }
         }
 
         foreach (var action in actions)
         {
             var request = action.Action switch
             {
-                PackageActionKind.Install => new LinuxCommandRequest("apt-get", ["install", "-y", action.PackageName], true, TimeSpan.FromMinutes(10), $"Install {action.PackageName}"),
-                PackageActionKind.Remove => new LinuxCommandRequest("apt-get", ["remove", "-y", action.PackageName], true, TimeSpan.FromMinutes(10), $"Remove {action.PackageName}"),
-                PackageActionKind.Reinstall => new LinuxCommandRequest("apt-get", ["install", "--reinstall", "-y", action.PackageName], true, TimeSpan.FromMinutes(10), $"Reinstall {action.PackageName}"),
+                PackageActionKind.Install => BuildAptRequest(
+                    ["-o", "DPkg::Lock::Timeout=120", "-o", "Dpkg::Options::=--force-confold", "install", "-y", action.PackageName],
+                    TimeSpan.FromMinutes(10),
+                    $"Install {action.PackageName}"),
+                PackageActionKind.Remove => BuildAptRequest(
+                    ["-o", "DPkg::Lock::Timeout=120", "remove", "-y", action.PackageName],
+                    TimeSpan.FromMinutes(10),
+                    $"Remove {action.PackageName}"),
+                PackageActionKind.Reinstall => BuildAptRequest(
+                    ["-o", "DPkg::Lock::Timeout=120", "-o", "Dpkg::Options::=--force-confold", "install", "--reinstall", "-y", action.PackageName],
+                    TimeSpan.FromMinutes(10),
+                    $"Reinstall {action.PackageName}"),
                 _ => new LinuxCommandRequest("/bin/sh", ["-lc", $"dpkg-query -W {EscapeShellArgument(action.PackageName)} >/dev/null 2>&1 || true"], false, TimeSpan.FromSeconds(10), $"Inspect {action.PackageName}")
             };
 
@@ -83,6 +100,17 @@ public sealed class AptPackageManagementService(ILinuxCommandRunner commandRunne
             result.StandardOutput,
             result.StandardError);
     }
+
+    private static LinuxCommandRequest BuildAptRequest(
+        IReadOnlyList<string> aptArguments,
+        TimeSpan timeout,
+        string description) =>
+        new(
+            "env",
+            ["DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=l", "apt-get", .. aptArguments],
+            true,
+            timeout,
+            description);
 
     private static PackageState ParsePackageState(string line)
     {

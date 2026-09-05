@@ -13,37 +13,46 @@ public sealed class ManagedHostFileAccessService(
     ILocalFileBrowsingService localFileBrowsingService,
     ISftpFileBrowsingService sftpFileBrowsingService,
     ManagedHostSshCredentialResolver sshCredentialResolver,
-    ITransientConnectionSecretStore transientConnectionSecretStore) : IManagedHostFileAccessService
+    ITransientConnectionSecretStore transientConnectionSecretStore,
+    PrivilegedFileBrowsingService? privilegedFileBrowsingService = null) : IManagedHostFileAccessService
 {
     public async Task<ManagedHostConnectionValidationResult> ValidateAccessAsync(
         ManagedHost host,
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
-        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile) && !connectionProfile.UseSudo)
         {
             return new ManagedHostConnectionValidationResult(true, string.Empty);
         }
 
-        var username = connectionProfile.Username.Trim();
-        if (string.IsNullOrWhiteSpace(username))
+        if (!ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
-            return new ManagedHostConnectionValidationResult(false, "Provide a username to browse files.");
+            var username = connectionProfile.Username.Trim();
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                return new ManagedHostConnectionValidationResult(false, "Provide a username to browse files.");
+            }
+
+            var secrets = transientConnectionSecretStore.Get(connectionProfile.SecretHandle);
+            if (string.IsNullOrWhiteSpace(secrets.Password) && string.IsNullOrWhiteSpace(secrets.PrivateKey))
+            {
+                if (!connectionProfile.PreferStoredCredentials)
+                {
+                    return new ManagedHostConnectionValidationResult(false, "Provide a password or private key to browse files.");
+                }
+
+                var resolution = await sshCredentialResolver.TryResolveAsync(host, cancellationToken);
+                if (!resolution.Success)
+                {
+                    return new ManagedHostConnectionValidationResult(false, resolution.FailureMessage);
+                }
+            }
         }
 
-        var secrets = transientConnectionSecretStore.Get(connectionProfile.SecretHandle);
-        if (!string.IsNullOrWhiteSpace(secrets.Password) || !string.IsNullOrWhiteSpace(secrets.PrivateKey))
-        {
-            return new ManagedHostConnectionValidationResult(true, string.Empty);
-        }
-
-        if (!connectionProfile.PreferStoredCredentials)
-        {
-            return new ManagedHostConnectionValidationResult(false, "Provide a password or private key to browse files.");
-        }
-
-        var resolution = await sshCredentialResolver.TryResolveAsync(host, cancellationToken);
-        return new ManagedHostConnectionValidationResult(resolution.Success, resolution.FailureMessage);
+        return connectionProfile.UseSudo
+            ? await GetPrivilegedService().ValidateAccessAsync(host, connectionProfile, cancellationToken)
+            : new ManagedHostConnectionValidationResult(true, string.Empty);
     }
 
     public Task<IReadOnlyList<SftpItem>> ListItemsAsync(
@@ -52,6 +61,11 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().ListItemsAsync(host, path, connectionProfile, cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ListItemsAsync(host.DefaultWorkingDirectory, path, cancellationToken);
@@ -76,6 +90,16 @@ public sealed class ManagedHostFileAccessService(
         IProgress<FileSearchProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().SearchAsync(
+                host,
+                request,
+                connectionProfile,
+                progress,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.SearchAsync(host.DefaultWorkingDirectory, request, progress, cancellationToken);
@@ -101,6 +125,11 @@ public sealed class ManagedHostFileAccessService(
         int maxBytes,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().ReadFileAsync(host, path, connectionProfile, maxBytes, cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ReadFileAsync(host.DefaultWorkingDirectory, path, maxBytes, cancellationToken);
@@ -126,6 +155,11 @@ public sealed class ManagedHostFileAccessService(
         int maxBytes,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().ReadBinaryFileAsync(host, path, connectionProfile, maxBytes, cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ReadBinaryFileAsync(host.DefaultWorkingDirectory, path, maxBytes, cancellationToken);
@@ -152,6 +186,17 @@ public sealed class ManagedHostFileAccessService(
         IProgress<FileTransferProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().DownloadFileAsync(
+                host,
+                sourcePath,
+                localDestinationPath,
+                connectionProfile,
+                progress,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.DownloadFileAsync(host.DefaultWorkingDirectory, sourcePath, localDestinationPath, progress, cancellationToken);
@@ -179,6 +224,17 @@ public sealed class ManagedHostFileAccessService(
         IProgress<FileTransferProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().UploadFileAsync(
+                host,
+                localSourcePath,
+                destinationPath,
+                connectionProfile,
+                progress,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.UploadFileAsync(host.DefaultWorkingDirectory, localSourcePath, destinationPath, progress, cancellationToken);
@@ -207,6 +263,18 @@ public sealed class ManagedHostFileAccessService(
         string? encodingName = null,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().WriteFileAsync(
+                host,
+                path,
+                content,
+                connectionProfile,
+                createDirectories,
+                encodingName,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.WriteFileAsync(host.DefaultWorkingDirectory, path, content, createDirectories, encodingName, cancellationToken);
@@ -233,6 +301,11 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().CreateDirectoryAsync(host, path, connectionProfile, cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.CreateDirectoryAsync(host.DefaultWorkingDirectory, path, cancellationToken);
@@ -257,6 +330,11 @@ public sealed class ManagedHostFileAccessService(
         bool recursive,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().DeleteAsync(host, path, connectionProfile, recursive, cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.DeleteAsync(host.DefaultWorkingDirectory, path, recursive, cancellationToken);
@@ -283,6 +361,16 @@ public sealed class ManagedHostFileAccessService(
         CancellationToken cancellationToken = default,
         IProgress<FileTransferProgress>? progress = null)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().CopyAsync(
+                host,
+                sourcePath,
+                destinationPath,
+                connectionProfile,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.CopyAsync(host.DefaultWorkingDirectory, sourcePath, destinationPath, cancellationToken, progress);
@@ -309,6 +397,16 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().MoveAsync(
+                host,
+                sourcePath,
+                destinationPath,
+                connectionProfile,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.MoveAsync(host.DefaultWorkingDirectory, sourcePath, destinationPath, cancellationToken);
@@ -349,6 +447,17 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().CreateArchiveAsync(
+                host,
+                sourcePath,
+                destinationArchivePath,
+                format,
+                connectionProfile,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.CreateArchiveAsync(host.DefaultWorkingDirectory, sourcePath, destinationArchivePath, format, cancellationToken);
@@ -390,6 +499,17 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().ExtractArchiveAsync(
+                host,
+                archivePath,
+                destinationDirectoryPath,
+                format,
+                connectionProfile,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ExtractArchiveAsync(host.DefaultWorkingDirectory, archivePath, destinationDirectoryPath, format, cancellationToken);
@@ -417,6 +537,17 @@ public sealed class ManagedHostFileAccessService(
         int maxEntries,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().ListArchiveEntriesAsync(
+                host,
+                archivePath,
+                format,
+                connectionProfile,
+                maxEntries,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.ListArchiveEntriesAsync(host.DefaultWorkingDirectory, archivePath, format, maxEntries, cancellationToken);
@@ -442,6 +573,15 @@ public sealed class ManagedHostFileAccessService(
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default)
     {
+        if (connectionProfile.UseSudo)
+        {
+            return GetPrivilegedService().SetOwnershipAndPermissionsAsync(
+                host,
+                request,
+                connectionProfile,
+                cancellationToken);
+        }
+
         if (ShouldUseLocalFileBrowsing(host, connectionProfile))
         {
             return localFileBrowsingService.SetOwnershipAndPermissionsAsync(host.DefaultWorkingDirectory, request, cancellationToken);
@@ -476,6 +616,10 @@ public sealed class ManagedHostFileAccessService(
         ManagedHost host,
         ManagedHostConnectionProfile connectionProfile) =>
         AiLocalMachine.IsLocalMachine(host.Id) && !connectionProfile.UseSshTransport;
+
+    private PrivilegedFileBrowsingService GetPrivilegedService() =>
+        privilegedFileBrowsingService ??
+        throw new InvalidOperationException("Privileged file access is not configured.");
 
     private static string? NullIfEmpty(string value) =>
         string.IsNullOrWhiteSpace(value) ? null : value;

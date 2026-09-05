@@ -1,6 +1,8 @@
 // Copyright (c) Richard D. Kiernan.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using LinuxMadeSane.Core.Enums;
+
 namespace LinuxMadeSane.Core.Models;
 
 public sealed record TrustedNetworkEntry(
@@ -13,4 +15,5 @@ public sealed record TrustedNetworkEntry(
     bool IsAuthenticationEnabled,
     bool IsBuiltIn,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    NetworkAccessDeniedResponseMode DeniedResponseMode = NetworkAccessDeniedResponseMode.AccessDeniedPage);

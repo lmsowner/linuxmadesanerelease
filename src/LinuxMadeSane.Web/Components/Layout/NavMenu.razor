@@ -58,6 +58,20 @@
                     <span class="sidebar-account-value">@AuthenticatedEmail</span>
                 </span>
 
+                <a class="sidebar-passkey-action @PasskeyStateClass"
+                   href="@PasskeySetupHref"
+                   data-enhance-nav="false"
+                   title="@PasskeyActionTitle"
+                   aria-label="@PasskeyActionTitle">
+                    <span class="sidebar-passkey-icon" aria-hidden="true">
+                        <UiGlyphIcon Glyph="UiIconGlyph.Key" />
+                    </span>
+                    <span class="sidebar-passkey-copy">
+                        <strong>@PasskeyActionLabel</strong>
+                        <span>@PasskeyStatusLabel</span>
+                    </span>
+                </a>
+
                 <form method="post" action="/auth/logout" class="sidebar-logout-form">
                     <UiCommandButton Label="Sign out"
                                      Glyph="UiIconGlyph.SignOut"
@@ -73,6 +87,9 @@
 @code {
     [Parameter] public bool IsAuthenticated { get; set; }
     [Parameter] public string AuthenticatedEmail { get; set; } = string.Empty;
+    [Parameter] public int? PasskeyCount { get; set; }
+    [Parameter] public bool SignedInWithPasskey { get; set; }
+    [Parameter] public string PasskeySetupHref { get; set; } = "/auth/setup-passkey?returnUrl=%2F";
 
     private static readonly string ProductVersion = LinuxMadeSaneBuildVersion.GetCurrent(typeof(Program).Assembly);
     private static string VersionLabel => ProductVersion.Equals("dev", StringComparison.OrdinalIgnoreCase)
@@ -83,18 +100,53 @@
         ? "Signed in LMS account"
         : $"LMS Account: {AuthenticatedEmail}";
 
+    private string PasskeyActionLabel => SignedInWithPasskey
+        ? "Passkey in use"
+        : PasskeyCount > 0
+            ? "Passkey ready"
+            : PasskeyCount == 0
+                ? "Set up passkey"
+                : "Passkeys";
+
+    private string PasskeyStatusLabel => SignedInWithPasskey
+        ? BuildConfiguredPasskeyLabel("Current sign-in")
+        : PasskeyCount > 0
+            ? BuildConfiguredPasskeyLabel("Available for sign-in")
+            : PasskeyCount == 0
+                ? "Safer sign-in available"
+                : "Check setup status";
+
+    private string PasskeyActionTitle => SignedInWithPasskey
+        ? "This session used a passkey. Open passkey setup to add another device."
+        : PasskeyCount > 0
+            ? "A passkey is configured. Open passkey setup to add another device."
+            : "No passkey is configured. Set up a safer passkey sign-in.";
+
+    private string PasskeyStateClass => SignedInWithPasskey
+        ? "in-use"
+        : PasskeyCount > 0
+            ? "configured"
+            : "missing";
+
+    private string BuildConfiguredPasskeyLabel(string prefix) =>
+        PasskeyCount is > 1
+            ? $"{prefix} · {PasskeyCount} configured"
+            : $"{prefix} · 1 configured";
+
     private static readonly IReadOnlyList<NavItem> NavItems =
     [
         new("/", "Overview", UiIconName.Overview, NavLinkMatch.All),
+        new("/system-info", "System Info", UiIconName.SystemInfo),
         new("/hosts", "Hosts", UiIconName.Hosts),
         new("/integrations", "Integrations", UiIconName.Integrations),
         new("/edge-gateway", "Edge Gateway", UiIconName.Integrations),
+        new("/mail-relay", "Mail Relay", UiIconName.MailRelay),
         new("/scheduling", "Scheduling", UiIconName.Scheduling),
         new("/updates", "Updates", UiIconName.Updates),
         new("/commands", "Runbooks", UiIconName.Runbooks),
         new("/ai", "AI Services", UiIconName.AiOverview),
         new("/desktop-assistant", "Desktop Assistant", UiIconName.RdpOptimizer, AdditionalActivePathPrefixes: ["/rdp-optimizer"]),
-        new("/settings", "LMS Security", UiIconName.Security),
+        new("/settings", "LMS Security", UiIconName.Security, AdditionalActivePathPrefixes: ["/attack-surface"]),
         new("/shares/identities", "Users and Groups", UiIconName.UsersGroups),
         new("/sftp-server", "SFTP Server", UiIconName.SftpServer),
         new("/shares", "Network Shares", UiIconName.Shares, NavLinkMatch.All, AdditionalActivePathPrefixes: ["/shares/mounts", "/shares/manager"]),

@@ -8,8 +8,6 @@
 @inject LocalAccessRecoveryService AccessRecovery
 @inject NavigationManager Navigation
 
-<script type="module" src="@Assets["Components/Pages/Login.razor.js"]"></script>
-
 <PageTitle>LMS Account Login | Linux Made Sane</PageTitle>
 
 <div class="auth-login-shell">
@@ -20,11 +18,11 @@
     <section class="auth-login-panel">
         <div class="auth-login-heading">
             <p class="eyebrow">Linux Made Sane</p>
-            <h1>Verify access.</h1>
-            <p>Email and MFA. No LMS password.</p>
+            <h1>Sign in.</h1>
+            <p>Choose one method. Each sign-in flow stays separate.</p>
         </div>
 
-        @if (!string.IsNullOrWhiteSpace(Error))
+        @if (ShouldShowErrorFor("recovery") && !showRecovery)
         {
             <p class="callout error">@Error</p>
         }
@@ -32,159 +30,287 @@
         <form method="post"
               action="@LoginPostPath"
               class="stack-form auth-login-form"
-              data-passkey-options-url="@PasskeyOptionsPath"
-              data-passkey-complete-url="@PasskeyCompletePath"
+              data-initial-auth-method="@InitialAuthMethod"
               data-email-mfa-send-url="@EmailMfaSendPath"
               data-email-mfa-complete-url="@EmailMfaCompletePath">
             <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
 
-            <label class="auth-login-field-group">
-                <span>Email</span>
-                <div class="auth-login-field-shell auth-login-email-shell">
-                    <input name="email" type="email" value="@Email" autocomplete="email" placeholder="you@example.com" required />
-                </div>
-            </label>
-
-            <div class="auth-login-methods" aria-label="Available sign-in methods">
-                <div class="auth-login-method active">
-                    <span class="auth-login-method-icon">MFA</span>
-                    <span>Authenticator code</span>
-                </div>
-                <button class="auth-login-method auth-login-method-button" type="button" data-passkey-login>
-                    <span class="auth-login-method-icon">MFA</span>
-                    <span>Device passkey</span>
+            <div class="auth-login-methods" role="tablist" aria-label="Sign-in method">
+                <button class="auth-login-method auth-login-method-button @(IsInitialAuthMethod("passkey") ? "active" : null)"
+                        type="button"
+                        role="tab"
+                        id="auth-method-passkey"
+                        aria-controls="auth-panel-passkey"
+                        aria-selected="@(IsInitialAuthMethod("passkey") ? "true" : "false")"
+                        tabindex="@(IsInitialAuthMethod("passkey") ? "0" : "-1")"
+                        data-auth-method="passkey">
+                    <span class="auth-login-method-icon">KEY</span>
+                    <span>Passkey</span>
                 </button>
-                <button class="auth-login-method auth-login-method-button" type="button" data-email-mfa-send>
+                <button class="auth-login-method auth-login-method-button @(IsInitialAuthMethod("authenticator") ? "active" : null)"
+                        type="button"
+                        role="tab"
+                        id="auth-method-authenticator"
+                        aria-controls="auth-panel-authenticator"
+                        aria-selected="@(IsInitialAuthMethod("authenticator") ? "true" : "false")"
+                        tabindex="@(IsInitialAuthMethod("authenticator") ? "0" : "-1")"
+                        data-auth-method="authenticator">
+                    <span class="auth-login-method-icon">MFA</span>
+                    <span>Authenticator</span>
+                </button>
+                <button class="auth-login-method auth-login-method-button @(IsInitialAuthMethod("email") ? "active" : null)"
+                        type="button"
+                        role="tab"
+                        id="auth-method-email"
+                        aria-controls="auth-panel-email"
+                        aria-selected="@(IsInitialAuthMethod("email") ? "true" : "false")"
+                        tabindex="@(IsInitialAuthMethod("email") ? "0" : "-1")"
+                        data-auth-method="email">
                     <span class="auth-login-method-icon">MAIL</span>
-                    <span>Email code/link</span>
+                    <span>Email</span>
                 </button>
             </div>
 
-            <p class="callout auth-login-status" data-passkey-status hidden></p>
-
-            <label class="auth-login-field-group auth-login-email-code-group" data-email-code-group hidden>
-                <span>Email code</span>
-                <input type="hidden" data-email-code-hidden />
-
-                <div class="auth-login-otp-grid" data-email-code-grid role="group" aria-label="Email sign-in code">
-                    <input class="auth-login-otp-box"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="one-time-code"
-                           maxlength="1"
-                           aria-label="Email code digit 1"
-                           data-email-code-digit />
-                    <input class="auth-login-otp-box"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           aria-label="Email code digit 2"
-                           data-email-code-digit />
-                    <input class="auth-login-otp-box"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           aria-label="Email code digit 3"
-                           data-email-code-digit />
-                    <input class="auth-login-otp-box"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           aria-label="Email code digit 4"
-                           data-email-code-digit />
-                    <input class="auth-login-otp-box"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           aria-label="Email code digit 5"
-                           data-email-code-digit />
-                    <input class="auth-login-otp-box"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           aria-label="Email code digit 6"
-                           data-email-code-digit />
+            <section class="auth-login-flow"
+                     id="auth-panel-passkey"
+                     role="tabpanel"
+                     aria-labelledby="auth-method-passkey"
+                     data-auth-panel="passkey"
+                     hidden="@(!IsInitialAuthMethod("passkey"))">
+                <div class="auth-login-flow-heading">
+                    <h2>Use your passkey</h2>
+                    <p>Your device will ask you to choose and approve a passkey. No email or code is used.</p>
                 </div>
 
-                <span class="helper-text auth-login-otp-helper">Use the 6-digit email code, or open the secure link from your inbox.</span>
-            </label>
+                @if (ShouldShowErrorFor("passkey"))
+                {
+                    <p class="callout error" data-server-auth-error>@Error</p>
+                }
 
-            <label class="auth-login-field-group auth-login-otp-group">
-                <span>MFA code</span>
-                <input type="hidden" name="otpCode" data-otp-hidden />
+                <button class="auth-login-primary-action"
+                        type="button"
+                        data-passkey-login
+                        data-passkey-options-url="@PasskeyOptionsPath"
+                        data-passkey-complete-url="@PasskeyCompletePath"
+                        data-passkey-return-url="@NormalizedReturnUrl"
+                        disabled="@(!IsInitialAuthMethod("passkey"))">
+                    Continue with passkey
+                </button>
 
-                <div class="auth-login-otp-grid" data-otp-grid role="group" aria-label="Authenticator code">
-                    <input class="auth-login-otp-box"
-                           name="otpDigit"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="one-time-code"
-                           maxlength="1"
-                           pattern="[0-9]"
-                           aria-label="OTP digit 1"
-                           data-otp-digit
-                           required />
-                    <input class="auth-login-otp-box"
-                           name="otpDigit"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           pattern="[0-9]"
-                           aria-label="OTP digit 2"
-                           data-otp-digit
-                           required />
-                    <input class="auth-login-otp-box"
-                           name="otpDigit"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           pattern="[0-9]"
-                           aria-label="OTP digit 3"
-                           data-otp-digit
-                           required />
-                    <input class="auth-login-otp-box"
-                           name="otpDigit"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           pattern="[0-9]"
-                           aria-label="OTP digit 4"
-                           data-otp-digit
-                           required />
-                    <input class="auth-login-otp-box"
-                           name="otpDigit"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           pattern="[0-9]"
-                           aria-label="OTP digit 5"
-                           data-otp-digit
-                           required />
-                    <input class="auth-login-otp-box"
-                           name="otpDigit"
-                           type="text"
-                           inputmode="numeric"
-                           autocomplete="off"
-                           maxlength="1"
-                           pattern="[0-9]"
-                           aria-label="OTP digit 6"
-                           data-otp-digit
-                           required />
+                <p class="callout auth-login-status" role="status" aria-live="polite" data-auth-status="passkey" hidden></p>
+            </section>
+
+            <section class="auth-login-flow"
+                     id="auth-panel-authenticator"
+                     role="tabpanel"
+                     aria-labelledby="auth-method-authenticator"
+                     data-auth-panel="authenticator"
+                     hidden="@(!IsInitialAuthMethod("authenticator"))">
+                <div class="auth-login-flow-heading">
+                    <h2>Use an authenticator code</h2>
+                    <p>Enter the email on your LMS account, then the current six-digit code from your authenticator app.</p>
                 </div>
 
-                <span class="helper-text auth-login-otp-helper">Enter the 6-digit code. LMS verifies automatically when the code is complete.</span>
-            </label>
+                @if (ShouldShowErrorFor("authenticator"))
+                {
+                    <p class="callout error" data-server-auth-error>@Error</p>
+                }
 
-            <button class="auth-login-submit" type="submit">Verify code</button>
+                <label class="auth-login-field-group">
+                    <span>Email</span>
+                    <div class="auth-login-field-shell auth-login-email-shell">
+                        <input name="email"
+                               type="email"
+                               value="@(IsInitialAuthMethod("authenticator") ? Email : null)"
+                               autocomplete="email"
+                               placeholder="you@example.com"
+                               data-authenticator-email
+                               required
+                               disabled="@(!IsInitialAuthMethod("authenticator"))" />
+                    </div>
+                </label>
+
+                <label class="auth-login-field-group auth-login-otp-group">
+                    <span>Authenticator code</span>
+                    <input type="hidden" name="otpCode" data-otp-hidden disabled="@(!IsInitialAuthMethod("authenticator"))" />
+
+                    <div class="auth-login-otp-grid" data-otp-grid role="group" aria-label="Authenticator code">
+                        <input class="auth-login-otp-box"
+                               name="otpDigit"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="one-time-code"
+                               maxlength="1"
+                               pattern="[0-9]"
+                               aria-label="Authenticator code digit 1"
+                               data-otp-digit
+                               required
+                               disabled="@(!IsInitialAuthMethod("authenticator"))" />
+                        <input class="auth-login-otp-box"
+                               name="otpDigit"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               pattern="[0-9]"
+                               aria-label="Authenticator code digit 2"
+                               data-otp-digit
+                               required
+                               disabled="@(!IsInitialAuthMethod("authenticator"))" />
+                        <input class="auth-login-otp-box"
+                               name="otpDigit"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               pattern="[0-9]"
+                               aria-label="Authenticator code digit 3"
+                               data-otp-digit
+                               required
+                               disabled="@(!IsInitialAuthMethod("authenticator"))" />
+                        <input class="auth-login-otp-box"
+                               name="otpDigit"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               pattern="[0-9]"
+                               aria-label="Authenticator code digit 4"
+                               data-otp-digit
+                               required
+                               disabled="@(!IsInitialAuthMethod("authenticator"))" />
+                        <input class="auth-login-otp-box"
+                               name="otpDigit"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               pattern="[0-9]"
+                               aria-label="Authenticator code digit 5"
+                               data-otp-digit
+                               required
+                               disabled="@(!IsInitialAuthMethod("authenticator"))" />
+                        <input class="auth-login-otp-box"
+                               name="otpDigit"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               pattern="[0-9]"
+                               aria-label="Authenticator code digit 6"
+                               data-otp-digit
+                               required
+                               disabled="@(!IsInitialAuthMethod("authenticator"))" />
+                    </div>
+
+                    <span class="helper-text auth-login-otp-helper">Verification starts as soon as all six digits are entered.</span>
+                </label>
+
+                <button class="auth-login-primary-action auth-login-submit"
+                        type="submit"
+                        data-authenticator-submit
+                        disabled="@(!IsInitialAuthMethod("authenticator"))">
+                    Verify authenticator code
+                </button>
+
+                <p class="callout auth-login-status" role="status" aria-live="polite" data-auth-status="authenticator" hidden></p>
+            </section>
+
+            <section class="auth-login-flow"
+                     id="auth-panel-email"
+                     role="tabpanel"
+                     aria-labelledby="auth-method-email"
+                     data-auth-panel="email"
+                     hidden="@(!IsInitialAuthMethod("email"))">
+                <div class="auth-login-flow-heading">
+                    <h2>Sign in by email</h2>
+                    <p>LMS will send a secure link and a six-digit code. Use either one.</p>
+                </div>
+
+                @if (ShouldShowErrorFor("email"))
+                {
+                    <p class="callout error" data-server-auth-error>@Error</p>
+                }
+
+                <label class="auth-login-field-group">
+                    <span>Email</span>
+                    <div class="auth-login-field-shell auth-login-email-shell">
+                        <input type="email"
+                               value="@(IsInitialAuthMethod("email") ? Email : null)"
+                               autocomplete="email"
+                               placeholder="you@example.com"
+                               data-email-login-address
+                               required
+                               disabled="@(!IsInitialAuthMethod("email"))" />
+                    </div>
+                </label>
+
+                <button class="auth-login-primary-action"
+                        type="button"
+                        data-email-mfa-send
+                        disabled="@(!IsInitialAuthMethod("email"))">
+                    Send sign-in email
+                </button>
+
+                <label class="auth-login-field-group auth-login-email-code-group" data-email-code-group hidden>
+                    <span>Email code</span>
+
+                    <div class="auth-login-otp-grid" data-email-code-grid role="group" aria-label="Email sign-in code">
+                        <input class="auth-login-otp-box"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="one-time-code"
+                               maxlength="1"
+                               aria-label="Email code digit 1"
+                               data-email-code-digit
+                               disabled />
+                        <input class="auth-login-otp-box"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               aria-label="Email code digit 2"
+                               data-email-code-digit
+                               disabled />
+                        <input class="auth-login-otp-box"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               aria-label="Email code digit 3"
+                               data-email-code-digit
+                               disabled />
+                        <input class="auth-login-otp-box"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               aria-label="Email code digit 4"
+                               data-email-code-digit
+                               disabled />
+                        <input class="auth-login-otp-box"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               aria-label="Email code digit 5"
+                               data-email-code-digit
+                               disabled />
+                        <input class="auth-login-otp-box"
+                               type="text"
+                               inputmode="numeric"
+                               autocomplete="off"
+                               maxlength="1"
+                               aria-label="Email code digit 6"
+                               data-email-code-digit
+                               disabled />
+                    </div>
+
+                    <span class="helper-text auth-login-otp-helper">Or open the secure link from your inbox.</span>
+                </label>
+
+                <p class="callout auth-login-status" role="status" aria-live="polite" data-auth-status="email" hidden></p>
+            </section>
 
             <p class="auth-login-footnote">For Edge Gateway routes, LMS checks this local session before proxying.</p>
         </form>
@@ -199,6 +325,11 @@
                     <p>Lost access recovery</p>
                     <span>Use the code printed by the installer on this LMS host.</span>
                 </div>
+
+                @if (ShouldShowErrorFor("recovery"))
+                {
+                    <p class="callout error">@Error</p>
+                }
 
                 <label class="auth-login-field-group">
                     <span>LMS email</span>
@@ -238,10 +369,40 @@
     [SupplyParameterFromQuery]
     public string? Recovery { get; set; }
 
+    [SupplyParameterFromQuery]
+    public string? Method { get; set; }
+
     private bool showRecovery;
 
     private bool IsEdgeGatewayLogin =>
         new Uri(Navigation.Uri).AbsolutePath.Equals(EdgeGatewayAuthenticationPaths.Login, StringComparison.OrdinalIgnoreCase);
+
+    private string InitialAuthMethod
+    {
+        get
+        {
+            var requestedMethod = RequestedAuthenticationMethod;
+            if (requestedMethod is "passkey" or "authenticator" or "email")
+            {
+                return requestedMethod;
+            }
+
+            return string.IsNullOrWhiteSpace(Error) && string.IsNullOrWhiteSpace(Email)
+                ? "passkey"
+                : "authenticator";
+        }
+    }
+
+    private string? RequestedAuthenticationMethod
+    {
+        get
+        {
+            var method = Method?.Trim().ToLowerInvariant();
+            return method is "passkey" or "authenticator" or "email" or "recovery"
+                ? method
+                : null;
+        }
+    }
 
     private string NormalizedReturnUrl => NormalizeReturnUrl(ReturnUrl);
 
@@ -259,6 +420,13 @@
     {
         showRecovery = await AccessRecovery.HasActiveChallengeAsync(Recovery);
     }
+
+    private bool IsInitialAuthMethod(string method) =>
+        InitialAuthMethod.Equals(method, StringComparison.Ordinal);
+
+    private bool ShouldShowErrorFor(string method) =>
+        !string.IsNullOrWhiteSpace(Error) &&
+        (RequestedAuthenticationMethod ?? "authenticator").Equals(method, StringComparison.Ordinal);
 
     private static string NormalizeReturnUrl(string? returnUrl)
     {

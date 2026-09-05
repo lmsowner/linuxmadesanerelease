@@ -50,5 +50,8 @@ public enum UiIconGlyph
     Lock = 42,
     Unlock = 43,
     Key = 44,
-    Website = 45
+    Website = 45,
+    ListView = 46,
+    ThumbnailView = 47,
+    ImageCacheClear = 48
 }

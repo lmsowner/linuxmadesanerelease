@@ -20,6 +20,7 @@ public interface IEdgeGatewayService
     Task<EdgeGatewayCaddyApplyResult> RollbackCaddyConfigurationAsync(CancellationToken cancellationToken = default);
     Task<EdgeGatewayCaddyApplyResult> PanicDisableAllRoutesAsync(CancellationToken cancellationToken = default);
     Task<CloudflareValidationResult> ValidateCloudflareTokenAsync(string apiToken, bool saveToken, CancellationToken cancellationToken = default);
+    Task<EdgeGatewayCloudflaredInstallResult> InstallCloudflaredAsync(CancellationToken cancellationToken = default);
     Task ResetSetupAsync(CancellationToken cancellationToken = default);
     Task<EdgeGatewayCloudflareSetupResult> ProvisionCloudflareDomainAsync(string domainName, bool replaceExistingDnsRecord, CancellationToken cancellationToken = default);
     Task<EdgeGatewayCloudflareRelayRemovalResult> RemoveCloudflareDomainRelayAsync(string domainName, bool confirmed, CancellationToken cancellationToken = default);

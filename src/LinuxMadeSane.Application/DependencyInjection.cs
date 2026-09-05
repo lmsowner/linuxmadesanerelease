@@ -25,10 +25,13 @@ public static class DependencyInjection
         services.AddScoped<LinuxMadeSane.Core.Abstractions.ILocalAiEngineService, LocalAiEngineManagerService>();
         services.AddScoped<ITerminalAiAssistantService, TerminalAiAssistantService>();
         services.AddScoped<IRunbookAiDraftService, RunbookAiDraftService>();
+        services.AddScoped<IAttackSurfaceAuditService, AttackSurfaceAuditService>();
+        services.AddScoped<IMailRelayService, MailRelayService>();
         services.AddScoped<IDesktopAssistantChatService, DesktopAssistantChatService>();
         services.AddScoped<IAiThreadService, AiThreadService>();
         services.AddScoped<ISecuritySettingsService, SecuritySettingsService>();
         services.AddScoped<ISecurityAuthenticationService, SecurityAuthenticationService>();
+        services.AddSingleton<TrustedNetworkAccessTrialService>();
         services.AddScoped<IManagedHostService, ManagedHostService>();
         services.AddScoped<IRunbookService, RunbookService>();
         services.AddScoped<ICaddyIntegrationService, CaddyIntegrationService>();
