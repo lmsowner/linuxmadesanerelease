@@ -21,6 +21,7 @@
 @inject TrustedNetworkAccessTrialService NetworkAccessTrialService
 @inject IFirewallManagementService FirewallService
 @inject NavigationManager Navigation
+@inject IHttpContextAccessor HttpContextAccessor
 
 <PageTitle>LMS Security | Linux Made Sane</PageTitle>
 
@@ -1365,6 +1366,7 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private int? editingFirewallRuleNumber;
     private Guid? editingDisabledFirewallRuleId;
     private ClaimsPrincipal? currentPrincipal;
+    private bool circuitAccessAlreadyAuthorized;
     private string messagingTestRecipient = string.Empty;
     private readonly Dictionary<Guid, int> sessionLifetimeEditors = new();
     private readonly Dictionary<Guid, string> linuxUsernameEditors = new();
@@ -1394,7 +1396,7 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         Guid.TryParse(currentPrincipal.FindFirstValue(ClaimTypes.NameIdentifier), out _);
 
     private bool HasAdministratorAccess =>
-        HasAuthenticatedLmsUser || currentAccess.IsTrusted;
+        HasAuthenticatedLmsUser || currentAccess.IsTrusted || circuitAccessAlreadyAuthorized;
 
     private string CurrentAccountEmail =>
         currentPrincipal?.FindFirstValue(ClaimTypes.Email) ??
@@ -1433,7 +1435,8 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         var authenticationState = AuthenticationStateTask is null
             ? null
             : await AuthenticationStateTask;
-        currentPrincipal = authenticationState?.User ?? HttpContext?.User;
+        var httpContext = ResolveHttpContext();
+        currentPrincipal = authenticationState?.User ?? httpContext?.User;
         await LoadAsync();
         if (activeTab == FirewallTabValue && HasAdministratorAccess)
         {
@@ -1441,6 +1444,9 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         }
         isLoaded = true;
     }
+
+    private HttpContext? ResolveHttpContext() =>
+        HttpContext ?? HttpContextAccessor.HttpContext;
 
     private static bool IsKnownSecurityTab(string? value) => value is
         TrustedNetworksTabValue or
@@ -1458,16 +1464,25 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         SyncSessionLifetimeEditors();
         SyncLinuxUsernameEditors();
         networkInterfaces = LoadNetworkInterfaces();
-        if (HttpContext?.Items.TryGetValue("LmsTrustedNetworkAccess", out var cachedAccess) == true &&
+        var httpContext = ResolveHttpContext();
+        if (httpContext?.Items.TryGetValue("LmsTrustedNetworkAccess", out var cachedAccess) == true &&
             cachedAccess is TrustedNetworkAccessResult authorizedAccess)
         {
             currentAccess = authorizedAccess;
+            circuitAccessAlreadyAuthorized = authorizedAccess.IsAllowed || authorizedAccess.IsTrusted;
+        }
+        else if (httpContext is not null)
+        {
+            currentAccess = await TrustedNetworkAccessService.EvaluateAsync(
+                httpContext.Connection.RemoteIpAddress,
+                httpContext.Request.Host.Host);
+            circuitAccessAlreadyAuthorized = currentAccess.IsAllowed || currentAccess.IsTrusted;
         }
         else
         {
-            currentAccess = await TrustedNetworkAccessService.EvaluateAsync(
-                HttpContext?.Connection.RemoteIpAddress,
-                HttpContext?.Request.Host.Host);
+            // Interactive Server circuits often lose HttpContext after the page/circuit was already
+            // admitted by middleware. Do not reclassify that as "not an administrator".
+            circuitAccessAlreadyAuthorized = true;
         }
     }
 
@@ -1525,7 +1540,7 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     {
         if (!HasAdministratorAccess)
         {
-            firewallMessage = "This request has not passed the LMS administrator access boundary.";
+            firewallMessage = "SSH and firewall changes need an admitted LMS session. Refresh this page and try again.";
             firewallMessageIsError = true;
             return;
         }
