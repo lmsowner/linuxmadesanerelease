@@ -96,21 +96,6 @@
         <section class="surface-card mail-relay-overview" aria-labelledby="mail-relay-overview-title">
             <h2 id="mail-relay-overview-title" class="visually-hidden">Relay status</h2>
             <div class="mail-relay-summary-grid">
-                <div class="mail-relay-summary-item mail-relay-summary-zone">
-                    <UiSelectField TValue="string"
-                                   Label="Working Cloudflare zone"
-                                   Value="@selectedCloudflareZoneId"
-                                   ValueChanged="SelectCloudflareZoneAsync"
-                                   ValueExpression="@(() => selectedCloudflareZoneId)"
-                                   Disabled="@(isRunningPreflight || isChangingZone)"
-                                   Compact="true"
-                                   Class="mail-relay-zone-select">
-                        @foreach (var zone in dashboard.Preflight.AvailableZones)
-                        {
-                            <option value="@zone.ZoneId">@BuildZoneOptionLabel(zone)</option>
-                        }
-                    </UiSelectField>
-                </div>
                 <div class="mail-relay-summary-item">
                     <span>Status</span>
                     <UiPill Tone="@ReadinessTone">@ReadinessLabel</UiPill>
@@ -128,14 +113,6 @@
             {
                 <div class="mail-relay-summary-footer">
                     <span class="meta-text">@ReadinessSummary</span>
-                    @if (dashboard.Configuration?.Enabled != true)
-                    {
-                    <UiCommandButton Label="Set up Mail Relay"
-                                     Glyph="UiIconGlyph.Run"
-                                     Variant="UiButtonVariant.Primary"
-                                     Disabled="@SetupBusy"
-                                     OnClick="OpenInitialSetup" />
-                    }
                 </div>
             }
         </section>
@@ -267,24 +244,41 @@
             </UiModal>
         }
 
-        @if (dashboard.Configuration is not null)
-        {
-            <section class="surface-card mail-relay-domains" aria-labelledby="mail-relay-domains-title">
+        <section class="surface-card mail-relay-domains" aria-labelledby="mail-relay-domains-title">
                 <div class="mail-relay-section-heading">
                     <div class="mail-relay-heading-title">
                         <h2 id="mail-relay-domains-title">Sending domains</h2>
-                        <UiPill Tone="UiPillTone.Neutral">@dashboard.Domains.Count</UiPill>
+                        <UiPill Tone="UiPillTone.Neutral">@dashboard.Domains.Count(item => item.Enabled) configured</UiPill>
                     </div>
-                    <div class="mail-relay-heading-actions">
-                        <UiCommandButton Label="Add Sending Domain"
-                                         Glyph="UiIconGlyph.Plus"
-                                         Variant="UiButtonVariant.Primary"
-                                         OnClick="AddDomainAsync" />
+                </div>
+
+                <div class="mail-relay-domain-picker">
+                    <UiSelectField TValue="string"
+                                   Label="Cloudflare domain to configure"
+                                   Value="@selectedCloudflareZoneId"
+                                   ValueChanged="SelectCloudflareZoneAsync"
+                                   ValueExpression="@(() => selectedCloudflareZoneId)"
+                                   Disabled="@(isRunningPreflight || isChangingZone)"
+                                   Compact="true"
+                                   Class="mail-relay-zone-select">
+                        @foreach (var zone in dashboard.Preflight.AvailableZones)
+                        {
+                            <option value="@zone.ZoneId">@BuildZoneOptionLabel(zone)</option>
+                        }
+                    </UiSelectField>
+                    <div class="mail-relay-domain-picker-state">
+                        <span>Selected domain</span>
+                        <UiPill Tone="@SelectedZoneStateTone">@SelectedZoneStateLabel</UiPill>
                     </div>
+                    <UiCommandButton Label="@SelectedZoneActionLabel"
+                                     Glyph="@(SelectedZoneDomain is null ? UiIconGlyph.Plus : UiIconGlyph.Edit)"
+                                     Variant="UiButtonVariant.Primary"
+                                     Disabled="@SetupBusy"
+                                     OnClick="ConfigureSelectedZoneAsync" />
                 </div>
                 @if (dashboard.Domains.Count == 0)
                 {
-                    <p class="mail-relay-empty">No sending domains have been configured yet.</p>
+                    <p class="mail-relay-empty">Choose a Cloudflare domain above to configure it for sending.</p>
                 }
                 else
                 {
@@ -310,8 +304,7 @@
                         }
                     </div>
                 }
-            </section>
-        }
+        </section>
 
         @if (dashboard.Configuration?.Enabled == true)
         {
@@ -537,11 +530,13 @@
                  CloseOnBackdrop="@(!SetupBusy)"
                  OnClose="CloseDomainEditor">
             <div id="mail-relay-setup" class="mail-relay-domain-form">
+            @if (setupResult?.Success != true)
+            {
             <div class="mail-relay-setup-grid @(dashboard.Configuration?.Enabled == true ? "mail-relay-setup-grid-compact" : null)">
                 @if (dashboard.Configuration?.Enabled != true)
                 {
                     <UiTextField Label="Relay hostname"
-                                 Helper="The DNS-only hostname Postfix uses for EHLO."
+                                 Helper="The DNS-only hostname Postfix uses for EHLO. It must be unused; LMS will not replace an existing A, AAAA or CNAME record."
                                  @bind-Value="relayHostname"
                                  Disabled="@SetupBusy" />
                 }
@@ -721,6 +716,7 @@
                     }
                 </div>
             }
+            }
 
             @if (provisioningJob is not null && !provisioningJob.IsTerminal)
             {
@@ -756,6 +752,8 @@
                                              OnClick="CopyGeneratedPasswordAsync" />
                             <p class="meta-text">Copy this bootstrap password now, or set a password you manage under SMTP users at any time. LMS stores only a one-way verifier.</p>
                         }
+                        <UiCommandButton Label="Done"
+                                         OnClick="CloseDomainEditor" />
                     }
                 </div>
             }
@@ -1040,6 +1038,45 @@
             ? "Add sending domain"
             : "Create the relay";
 
+    private MailRelayCloudflareZoneOption? SelectedCloudflareZone => dashboard?.Preflight.AvailableZones
+        .FirstOrDefault(item => item.ZoneId.Equals(selectedCloudflareZoneId, StringComparison.Ordinal));
+
+    private MailRelayDomain? SelectedZoneDomain
+    {
+        get
+        {
+            var zone = SelectedCloudflareZone;
+            return zone is null
+                ? null
+                : dashboard?.Domains.FirstOrDefault(item =>
+                    item.DomainName.Equals(zone.ZoneName, StringComparison.OrdinalIgnoreCase) &&
+                    (string.IsNullOrWhiteSpace(item.CloudflareZoneId) ||
+                     item.CloudflareZoneId.Equals(zone.ZoneId, StringComparison.Ordinal)));
+        }
+    }
+
+    private string SelectedZoneStateLabel => SelectedZoneDomain switch
+    {
+        { Enabled: true } => "Configured",
+        not null => "Setup pending",
+        _ => "Not configured"
+    };
+
+    private UiPillTone SelectedZoneStateTone => SelectedZoneDomain switch
+    {
+        { Enabled: true } => UiPillTone.Success,
+        not null => UiPillTone.Warning,
+        _ => UiPillTone.Neutral
+    };
+
+    private string SelectedZoneActionLabel => SelectedZoneDomain switch
+    {
+        { Enabled: true } => "Edit configured domain",
+        not null => "Resume setup",
+        _ when dashboard?.Configuration?.Enabled == true => "Configure selected domain",
+        _ => "Set up with selected domain"
+    };
+
     private bool DnsEditPermissionMissing =>
         dashboard is not null &&
         dashboard.Preflight.DnsEditWasTested &&
@@ -1196,30 +1233,29 @@
         }
     }
 
-    private Task AddDomainAsync()
+    private async Task ConfigureSelectedZoneAsync()
     {
         if (dashboard is null)
         {
-            return Task.CompletedTask;
+            return;
+        }
+
+        if (SelectedZoneDomain is { } configuredDomain)
+        {
+            await EditDomainAsync(configuredDomain);
+            return;
         }
 
         editingDomainId = null;
-        sendingDomain = dashboard.Preflight.CloudflareZoneName;
+        sendingDomain = SelectedCloudflareZone?.ZoneName ?? dashboard.Preflight.CloudflareZoneName;
+        relayHostname = dashboard.Configuration?.Enabled == true
+            ? dashboard.Configuration.RelayHostname
+            : dashboard.Preflight.SuggestedRelayHostname;
         dkimSelector = $"lms{DateTime.UtcNow.Year}";
         setupPreview = null;
         setupResult = null;
         setupConfirmed = false;
         ApplyClientToSetup(dashboard.Clients.FirstOrDefault(item => item.Enabled));
-        domainEditorOpen = true;
-        return Task.CompletedTask;
-    }
-
-    private void OpenInitialSetup()
-    {
-        editingDomainId = null;
-        setupPreview = null;
-        setupResult = null;
-        setupConfirmed = false;
         domainEditorOpen = true;
     }
 
@@ -1938,14 +1974,32 @@
         _ => "None detected"
     };
 
-    private static string BuildZoneOptionLabel(MailRelayCloudflareZoneOption zone)
+    private string BuildZoneOptionLabel(MailRelayCloudflareZoneOption zone)
     {
-        var suffix = zone.Paused
-            ? " · paused"
-            : zone.IsSavedDefault
-                ? " · Edge Gateway default"
-                : string.Empty;
-        return $"{zone.ZoneName}{suffix}";
+        var domain = dashboard?.Domains.FirstOrDefault(item =>
+            item.DomainName.Equals(zone.ZoneName, StringComparison.OrdinalIgnoreCase) &&
+            (string.IsNullOrWhiteSpace(item.CloudflareZoneId) ||
+             item.CloudflareZoneId.Equals(zone.ZoneId, StringComparison.Ordinal)));
+        var markers = new List<string>();
+        if (domain?.Enabled == true)
+        {
+            markers.Add("configured");
+        }
+        else if (domain is not null)
+        {
+            markers.Add("setup pending");
+        }
+        if (zone.IsSavedDefault)
+        {
+            markers.Add("Edge Gateway default");
+        }
+        if (zone.Paused)
+        {
+            markers.Add("paused");
+        }
+        return markers.Count == 0
+            ? zone.ZoneName
+            : $"{zone.ZoneName} · {string.Join(" · ", markers)}";
     }
 
     private static UiPillTone GetCheckTone(MailRelayPreflightCheckState state) => state switch

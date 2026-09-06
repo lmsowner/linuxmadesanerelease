@@ -11,6 +11,7 @@ using LinuxMadeSane.Infrastructure.Persistence;
 using LinuxMadeSane.Infrastructure.Services.Cloudflare;
 using LinuxMadeSane.Infrastructure.Services;
 using LinuxMadeSane.Infrastructure.Services.ConfigurationSummary;
+using LinuxMadeSane.Infrastructure.Services.Storage;
 using LinuxMadeSane.Infrastructure.Stores;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Data.Sqlite;
@@ -61,6 +62,13 @@ public static class DependencyInjection
         services.AddSingleton<MailRelayPublicIpMonitorService>();
         services.AddSingleton<IMailRelayPublicIpMonitorService>(serviceProvider => serviceProvider.GetRequiredService<MailRelayPublicIpMonitorService>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<MailRelayPublicIpMonitorService>());
+        services.AddSingleton<StorageResizeQueue>();
+        services.AddSingleton<IStorageResizeExecutor>(serviceProvider => serviceProvider.GetRequiredService<StorageResizeQueue>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<StorageResizeQueue>());
+        services.AddSingleton<LinuxHostSystemUpdateService>();
+        services.AddSingleton<IHostSystemUpdateService>(serviceProvider =>
+            serviceProvider.GetRequiredService<LinuxHostSystemUpdateService>());
+        services.AddHostedService<HostSystemUpdateScheduleHostedService>();
         services.AddSingleton<MediaLibraryScanQueue>();
         services.AddSingleton<IMediaLibraryScanQueue>(serviceProvider => serviceProvider.GetRequiredService<MediaLibraryScanQueue>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<MediaLibraryScanQueue>());
@@ -95,6 +103,8 @@ public static class DependencyInjection
         services.AddScoped<IPortalConnectionStore, DisabledPortalConnectionStore>();
         services.AddScoped<ICloudflareExposureStore, SqliteCloudflareExposureStore>();
         services.AddScoped<IMailRelayStore, SqliteMailRelayStore>();
+        services.AddScoped<IStorageOperationRepository, SqliteStorageOperationRepository>();
+        services.AddScoped<IHostUpdateScheduleStore, SqliteHostUpdateScheduleStore>();
         services.AddScoped<IEdgeGatewaySettingsStore, SqliteEdgeGatewaySettingsStore>();
         services.AddScoped<IEdgeGatewayTemporaryIpApprovalStore, SqliteEdgeGatewayTemporaryIpApprovalStore>();
         services.AddScoped<IMessagingEmailSettingsStore, SqliteMessagingEmailSettingsStore>();
@@ -157,6 +167,9 @@ public static class DependencyInjection
         services.AddScoped<IMailRelayProvisioningService, MailRelayProvisioningService>();
         services.AddScoped<IMailRelayTestService, MailRelayTestService>();
         services.AddScoped<IMailRelayClientService, MailRelayClientService>();
+        services.AddScoped<IStorageDiscoveryService, LinuxStorageDiscoveryService>();
+        services.AddScoped<IStorageResizePlanner, LinuxStorageResizePlanner>();
+        services.AddScoped<IStorageDiskAttachmentPlanner, LinuxStorageDiskAttachmentPlanner>();
         services.AddScoped<IConfigurationSummaryService, ConfigurationSummaryService>();
         services.AddScoped<ILmsConfigurationSummaryProvider, SystemConfigurationSummaryProvider>();
         services.AddScoped<ILmsConfigurationSummaryProvider, EdgeGatewayConfigurationSummaryProvider>();
@@ -168,6 +181,7 @@ public static class DependencyInjection
         services.AddScoped<ILmsConfigurationSummaryProvider, ReverseProxyConfigurationSummaryProvider>();
         services.AddScoped<ILmsConfigurationSummaryProvider, ServiceDiscoveryConfigurationSummaryProvider>();
         services.AddScoped<ILmsConfigurationSummaryProvider, MailRelayConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, StorageConfigurationSummaryProvider>();
         services.AddHttpClient(nameof(MailRelayPreflightService), client =>
         {
             client.Timeout = TimeSpan.FromSeconds(10);

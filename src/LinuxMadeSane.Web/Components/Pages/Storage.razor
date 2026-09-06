@@ -1,0 +1,1319 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@page "/storage"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IAsyncDisposable
+@using System.Globalization
+@using System.Security.Claims
+@using System.Text.RegularExpressions
+@using Microsoft.AspNetCore.Components.Authorization
+@using LinuxMadeSane.Application.Contracts.Storage
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@inject IStorageDiscoveryService StorageDiscovery
+@inject IStorageResizePlanner ResizePlanner
+@inject IStorageDiskAttachmentPlanner AttachmentPlanner
+@inject IStorageResizeExecutor ResizeExecutor
+@inject IStorageOperationRepository OperationRepository
+@inject ILocalDriveUsageService DriveUsage
+@inject TimeProvider TimeProvider
+
+<PageTitle>Storage | Linux Made Sane</PageTitle>
+
+<div class="page-shell storage-page">
+    <header class="storage-header">
+        <div>
+            <h1>Storage</h1>
+            <p>See what Linux is using and safely claim available capacity.</p>
+        </div>
+        <UiCommandButton Label="@(isLoading ? "Refreshing…" : "Refresh")"
+                         Glyph="UiIconGlyph.Refresh"
+                         Disabled="@isLoading"
+                         OnClick="LoadAsync" />
+    </header>
+
+    @if (!string.IsNullOrWhiteSpace(errorMessage))
+    {
+        <p class="callout error">@errorMessage</p>
+    }
+
+    <TabControl ActiveValue="@activeTab"
+                ActiveValueChanged="ChangeTabAsync"
+                Class="page-tab-control storage-tabs"
+                PanelClass="page-tab-panel storage-tab-panel">
+        <ChildContent>
+            <TabPage Value="overview" Title="Overview">
+                <ChildContent>
+                    @if (topology is null)
+                    {
+                        <section class="surface-card storage-loading" aria-busy="true">
+                            <span class="storage-spinner"></span>
+                            <div>
+                                <strong>Reading disks and filesystems</strong>
+                                <small>No changes are being made.</small>
+                            </div>
+                        </section>
+                    }
+                    else
+                    {
+                        @foreach (var newDisk in topology.NewDisks)
+                        {
+                            <section class="storage-opportunity storage-new-disk" aria-label="New disk detected">
+                                <div>
+                                    <span class="storage-opportunity-size">New disk detected</span>
+                                    <strong>@FormatBytes(newDisk.SizeBytes) on @newDisk.DevicePath</strong>
+                                    <small>@newDisk.Detail Linux can use this for a folder, or add it to an LVM pool if one exists.</small>
+                                </div>
+                                <UiCommandButton Label="Use this disk"
+                                                 Glyph="UiIconGlyph.Run"
+                                                 Variant="UiButtonVariant.Primary"
+                                                 OnClick="(() => OpenNewDisk(newDisk))" />
+                            </section>
+                        }
+
+                        var expandableRoot = topology.FileSystems.FirstOrDefault(item => item.IsRoot && item.CanGrow && item.TrailingDiskFreeBytes >= OneGiB)
+                                             ?? topology.FileSystems.FirstOrDefault(item => item.IsRoot && item.CanGrow && item.FreeAfterGrowBytes >= OneGiB);
+                        @if (expandableRoot is not null)
+                        {
+                            var newlyDetected = expandableRoot.TrailingDiskFreeBytes >= OneGiB;
+                            <section class="storage-opportunity" aria-label="New storage available">
+                                <div>
+                                    <span class="storage-opportunity-size">@FormatBytes(newlyDetected ? expandableRoot.TrailingDiskFreeBytes : expandableRoot.FreeAfterGrowBytes) unused</span>
+                                    <strong>@(newlyDetected
+                                        ? $"{FormatBytes(expandableRoot.TrailingDiskFreeBytes)} is available but Linux is not using it."
+                                        : $"Linux can make more space available to {expandableRoot.MountPoint}")</strong>
+                                    <small>@(newlyDetected
+                                        ? $"Your disk can grow {expandableRoot.MountPoint} online without touching the command line."
+                                        : "Unused capacity already exists in the containing storage pool.")</small>
+                                </div>
+                                <UiCommandButton Label="Use all available space"
+                                                 Glyph="UiIconGlyph.Run"
+                                                 Variant="UiButtonVariant.Primary"
+                                                 OnClick="(() => OpenResize(expandableRoot, useMaximum: true))" />
+                            </section>
+                        }
+
+                        @foreach (var advice in BuildAdvisorCards(topology))
+                        {
+                            <section class="storage-advisor" aria-label="Storage advice">
+                                <div>
+                                    <span class="storage-advisor-eyebrow">@advice.Title</span>
+                                    <strong>@advice.Headline</strong>
+                                    <small>@advice.Detail</small>
+                                    @if (advice.Consumers.Count > 0)
+                                    {
+                                        <ul class="storage-advisor-consumers">
+                                            @foreach (var consumer in advice.Consumers)
+                                            {
+                                                <li><span>@consumer.Path</span><strong>@FormatBytes(consumer.Bytes)</strong></li>
+                                            }
+                                        </ul>
+                                    }
+                                </div>
+                                <div class="storage-advisor-actions">
+                                    @if (advice.CanAnalyze)
+                                    {
+                                        <UiCommandButton Label="@(advice.IsAnalyzing ? "Scanning…" : "Largest folders")"
+                                                         Glyph="UiIconGlyph.Search"
+                                                         Disabled="@advice.IsAnalyzing"
+                                                         OnClick="(() => AnalyzeConsumersAsync(advice.FileSystem))" />
+                                    }
+                                    @if (advice.FileSystem.CanGrow)
+                                    {
+                                        <UiCommandButton Label="Expand"
+                                                         Glyph="UiIconGlyph.Run"
+                                                         Variant="UiButtonVariant.Primary"
+                                                         OnClick="(() => OpenResize(advice.FileSystem, useMaximum: true))" />
+                                    }
+                                </div>
+                            </section>
+                        }
+
+                        <div class="storage-overview-toolbar">
+                            <div>
+                                <strong>@topology.Disks.Count disk@(topology.Disks.Count == 1 ? string.Empty : "s")</strong>
+                                <span>@topology.FileSystems.Count mounted local filesystem@(topology.FileSystems.Count == 1 ? string.Empty : "s")</span>
+                            </div>
+                            <UiCommandButton Label="@(isRescanning ? "Rescanning…" : "Rescan disks")"
+                                             Glyph="UiIconGlyph.Search"
+                                             Disabled="@(isLoading || isRescanning)"
+                                             OnClick="RescanAsync" />
+                        </div>
+
+                        @if (topology.Disks.Count == 0)
+                        {
+                            <section class="surface-card storage-empty">
+                                <strong>No physical disks were detected.</strong>
+                                <span>Storage discovery returned no local block devices.</span>
+                            </section>
+                        }
+
+                        <div class="storage-disk-list">
+                            @foreach (var disk in topology.Disks)
+                            {
+                                var diskFileSystems = topology.FileSystems.Where(item => item.DiskDevicePath == disk.DevicePath).ToArray();
+                                <section class="surface-card storage-disk">
+                                    <header class="storage-disk-header">
+                                        <div class="storage-disk-identity">
+                                            <span class="storage-disk-icon" aria-hidden="true"><UiIcon Name="UiIconName.Storage" /></span>
+                                            <div>
+                                                <h2>@disk.Model</h2>
+                                                <span>@disk.DevicePath · @FormatBytes(disk.SizeBytes) · @FormatTransport(disk.Transport)</span>
+                                            </div>
+                                        </div>
+                                        <div class="storage-disk-state">
+                                            <UiPill Tone="@(disk.Health == "Failing" ? UiPillTone.Failure : UiPillTone.Neutral)">@disk.Health</UiPill>
+                                            @if (disk.TemperatureCelsius.HasValue)
+                                            {
+                                                <span>@(disk.TemperatureCelsius)°C</span>
+                                            }
+                                            @if (disk.WearPercent.HasValue)
+                                            {
+                                                <span>@(disk.WearPercent)% wear</span>
+                                            }
+                                            @if (disk.UnallocatedBytes >= OneGiB)
+                                            {
+                                                <span>@FormatBytes(disk.UnallocatedBytes) unallocated</span>
+                                            }
+                                        </div>
+                                    </header>
+
+                                    @if (diskFileSystems.Length == 0)
+                                    {
+                                        <div class="storage-no-filesystem">
+                                            <span>No mounted filesystem was mapped to this disk.</span>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="storage-filesystem-grid">
+                                            @foreach (var fileSystem in diskFileSystems)
+                                            {
+                                                <article class="storage-filesystem-card">
+                                                    <div class="storage-filesystem-heading">
+                                                        <div>
+                                                            <h3>@fileSystem.MountPoint</h3>
+                                                            <span>@fileSystem.FileSystemType.ToUpperInvariant() · @FriendlyDevice(fileSystem)</span>
+                                                        </div>
+                                                        <UiPill Tone="@UsageTone(fileSystem)">@FormatPercent(fileSystem)</UiPill>
+                                                    </div>
+
+                                                    <div class="storage-usage-copy">
+                                                        <strong>@FormatBytes(fileSystem.UsedBytes) used</strong>
+                                                        <span>of @FormatBytes(fileSystem.CurrentSizeBytes)</span>
+                                                    </div>
+                                                    <div class="storage-meter" role="progressbar" aria-valuenow="@UsagePercent(fileSystem)" aria-valuemin="0" aria-valuemax="100">
+                                                        <i style="width: @UsagePercent(fileSystem).ToString("0.##", CultureInfo.InvariantCulture)%"></i>
+                                                    </div>
+
+                                                    <dl class="storage-facts">
+                                                        <div><dt>Current size</dt><dd>@FormatBytes(fileSystem.CurrentSizeBytes)</dd></div>
+                                                        <div><dt>Free in filesystem</dt><dd>@FormatBytes(fileSystem.AvailableBytes)</dd></div>
+                                                        <div><dt>Available to grow</dt><dd>@(fileSystem.FreeAfterGrowBytes >= OneMiB ? FormatBytes(fileSystem.FreeAfterGrowBytes) : "None")</dd></div>
+                                                        @if (fileSystem.VolumeGroupFreeBytes >= OneGiB)
+                                                        {
+                                                            <div><dt>Unused LVM space</dt><dd>@FormatBytes(fileSystem.VolumeGroupFreeBytes)</dd></div>
+                                                        }
+                                                        <div><dt>Shrink</dt><dd>@(fileSystem.CanShrink ? $"Yes · min {FormatBytes(fileSystem.MinimumSafeSizeBytes)}" : "Not available")</dd></div>
+                                                    </dl>
+
+                                                    <footer>
+                                                        @if (fileSystem.CanGrow || fileSystem.CanShrink)
+                                                        {
+                                                            <UiCommandButton Label="Resize"
+                                                                             Glyph="UiIconGlyph.Edit"
+                                                                             Variant="UiButtonVariant.Primary"
+                                                                             OnClick="(() => OpenResize(fileSystem, useMaximum: false))" />
+                                                        }
+                                                        @if (!string.IsNullOrWhiteSpace(ShrinkStatusMessage(fileSystem)))
+                                                        {
+                                                            <span class="storage-unavailable">@ShrinkStatusMessage(fileSystem)</span>
+                                                        }
+                                                    </footer>
+                                                </article>
+                                            }
+                                        </div>
+                                    }
+
+                                    <details class="storage-topology">
+                                        <summary>Disk details</summary>
+                                        <div class="storage-topology-tree">
+                                            <div class="storage-topology-row root">
+                                                <span>@disk.DevicePath</span>
+                                                <strong>@FormatBytes(disk.SizeBytes)</strong>
+                                            </div>
+                                            @foreach (var node in disk.Nodes)
+                                            {
+                                                <div class="storage-topology-row" style="--storage-depth: @NodeDepth(disk, node)">
+                                                    <span>@TopologyLabel(node)</span>
+                                                    <strong>@FormatBytes(node.SizeBytes)</strong>
+                                                </div>
+                                            }
+                                            @if (disk.UnallocatedBytes >= OneMiB)
+                                            {
+                                                <div class="storage-topology-row free" style="--storage-depth: 1">
+                                                    <span>Unallocated</span>
+                                                    <strong>@FormatBytes(disk.UnallocatedBytes)</strong>
+                                                </div>
+                                            }
+                                        </div>
+                                    </details>
+                                </section>
+                            }
+                        </div>
+
+                        @if (topology.Warnings.Count > 0)
+                        {
+                            <details class="surface-card storage-warnings">
+                                <summary>Inspect-only storage (@topology.Warnings.Count)</summary>
+                                @foreach (var warning in topology.Warnings)
+                                {
+                                    <p>@warning</p>
+                                }
+                            </details>
+                        }
+                    }
+                </ChildContent>
+            </TabPage>
+
+            <TabPage Value="history" Title="History">
+                <ChildContent>
+                    <section class="storage-history-header">
+                        <div>
+                            <h2>Resize history</h2>
+                            <p>Every plan, command result and verification is retained locally.</p>
+                        </div>
+                        <UiCommandButton Label="Refresh history" Glyph="UiIconGlyph.Refresh" OnClick="LoadHistoryAsync" />
+                    </section>
+                    @if (history.Count == 0)
+                    {
+                        <section class="surface-card storage-empty">
+                            <strong>No resize operations yet.</strong>
+                            <span>Validated operations will appear here.</span>
+                        </section>
+                    }
+                    else
+                    {
+                        <div class="storage-history-list">
+                            @foreach (var operation in history)
+                            {
+                                <details class="surface-card storage-history-item" open="@(activeOperation?.Id == operation.Id)">
+                                    <summary>
+                                        <div>
+                                            <strong>@operation.Plan.TargetMountPoint</strong>
+                                            <span>@FormatBytes(operation.Plan.CurrentSizeBytes) → @FormatBytes(operation.Plan.RequestedSizeBytes)</span>
+                                        </div>
+                                        <div>
+                                            <UiPill Tone="@OperationTone(operation.State)">@FormatState(operation.State)</UiPill>
+                                            <time>@operation.CreatedUtc.ToLocalTime().ToString("dd MMM yyyy HH:mm")</time>
+                                        </div>
+                                    </summary>
+                                    @if (!string.IsNullOrWhiteSpace(operation.FailureDetail))
+                                    {
+                                        <p class="callout @(operation.State == StorageOperationState.RecoveryRequired ? "warning" : "error")">@operation.FailureDetail</p>
+                                    }
+                                    <dl class="storage-history-facts">
+                                        <div><dt>Operation</dt><dd>@operation.Plan.OperationType</dd></div>
+                                        <div><dt>Device</dt><dd>@operation.Plan.TargetDevicePath</dd></div>
+                                        <div><dt>Requested by</dt><dd>@operation.RequestedBy</dd></div>
+                                        <div><dt>Backup confirmed</dt><dd>@(operation.BackupAcknowledged ? "Yes" : "Not required")</dd></div>
+                                    </dl>
+                                    <ol class="storage-history-steps">
+                                        @foreach (var step in operation.Plan.Steps.OrderBy(item => item.Order))
+                                        {
+                                            <li class="@step.State.ToString().ToLowerInvariant()">
+                                                <span class="storage-step-state">@StepSymbol(step.State)</span>
+                                                <div>
+                                                    <strong>@step.Title</strong>
+                                                    <span>@step.Description</span>
+                                                    @if (!string.IsNullOrWhiteSpace(step.VerificationDetail))
+                                                    {
+                                                        <small>@step.VerificationDetail</small>
+                                                    }
+                                                    <details class="storage-command-detail">
+                                                        <summary>Technical result</summary>
+                                                        <code>@step.CommandPreview</code>
+                                                        @if (step.ExitCode.HasValue)
+                                                        {
+                                                            <span>Exit @step.ExitCode · @step.StartedUtc?.ToLocalTime().ToString("HH:mm:ss")</span>
+                                                        }
+                                                        @if (!string.IsNullOrWhiteSpace(step.StandardError))
+                                                        {
+                                                            <pre>@step.StandardError</pre>
+                                                        }
+                                                    </details>
+                                                </div>
+                                            </li>
+                                        }
+                                    </ol>
+                                </details>
+                            }
+                        </div>
+                    }
+                </ChildContent>
+            </TabPage>
+        </ChildContent>
+    </TabControl>
+</div>
+
+<UiModal IsOpen="@(selectedFileSystem is not null)"
+         Title="@(resizePlan is null ? $"Resize {selectedFileSystem?.MountPoint}" : $"Review resize of {selectedFileSystem?.MountPoint}")"
+         Subtitle="@(resizePlan is null ? "Tell LMS how large the filesystem should be." : $"{FormatBytes(resizePlan.CurrentSizeBytes)} → {FormatBytes(resizePlan.RequestedSizeBytes)}")"
+         CloseOnBackdrop="@(!isPlanning && activeOperation is null)"
+         OnClose="CloseResize">
+    <ChildContent>
+        @if (selectedFileSystem is not null && resizePlan is null)
+        {
+            <div class="storage-resize-editor">
+                <div class="storage-resize-current">
+                    <div><span>Current</span><strong>@FormatBytes(selectedFileSystem.CurrentSizeBytes)</strong></div>
+                    <div><span>Used</span><strong>@FormatBytes(selectedFileSystem.UsedBytes)</strong></div>
+                    <div><span>Maximum</span><strong>@FormatBytes(selectedFileSystem.MaximumSizeBytes)</strong></div>
+                </div>
+
+                @if (selectedFileSystem.IsRoot)
+                {
+                    <p class="callout warning">Offline root shrinking is coming next. You can grow / today; shrinking / while Linux is running is not enabled yet.</p>
+                }
+                else if (!selectedFileSystem.CanShrink && selectedFileSystem.FileSystemType.Equals("xfs", StringComparison.OrdinalIgnoreCase))
+                {
+                    <p class="callout warning">XFS filesystems cannot currently be shrunk. Create a smaller filesystem and migrate the data instead.</p>
+                }
+
+                <UiTextField Label="New size"
+                             Helper="Examples: 400 GB, 0.5 TB, +100 GB, 80%, Maximum"
+                             @bind-Value="targetSizeInput"
+                             Disabled="@isPlanning" />
+
+                <input class="storage-size-slider"
+                       type="range"
+                       min="@MinimumSliderGiB.ToString("0.###", CultureInfo.InvariantCulture)"
+                       max="@MaximumSliderGiB.ToString("0.###", CultureInfo.InvariantCulture)"
+                       step="0.25"
+                       value="@SliderGiB.ToString("0.###", CultureInfo.InvariantCulture)"
+                       @oninput="UpdateSlider" />
+                <div class="storage-slider-labels">
+                    <span>@FormatBytes(selectedFileSystem.MinimumSafeSizeBytes)</span>
+                    <span>@FormatBytes(selectedFileSystem.MaximumSizeBytes)</span>
+                </div>
+
+                <div class="storage-quick-actions">
+                    @if (selectedFileSystem.CanShrink)
+                    {
+                        <UiCommandButton Label="Minimum safe" OnClick="SetMinimum" />
+                    }
+                    @if (selectedFileSystem.CanGrow)
+                    {
+                        <UiCommandButton Label="+50 GB" OnClick="(() => AddGiB(50))" />
+                        <UiCommandButton Label="+100 GB" OnClick="(() => AddGiB(100))" />
+                        <UiCommandButton Label="Maximum" OnClick="SetMaximum" />
+                    }
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(resizeError))
+                {
+                    <p class="callout error">@resizeError</p>
+                }
+
+                @if (TryPreviewTarget(out var previewBytes, out _))
+                {
+                    var shrinking = previewBytes < selectedFileSystem.CurrentSizeBytes;
+                    <section class="storage-size-result @(shrinking ? "shrink" : "grow")">
+                        <span>Result</span>
+                        <strong>@FormatBytes(selectedFileSystem.CurrentSizeBytes) → @FormatBytes(previewBytes)</strong>
+                        <small>@(shrinking
+                            ? selectedFileSystem.IsRoot
+                                ? "Root shrink requires an offline reboot workflow that is not enabled yet."
+                                : string.IsNullOrWhiteSpace(selectedFileSystem.LvmVolumeGroup)
+                                    ? $"{FormatBytes(selectedFileSystem.CurrentSizeBytes - previewBytes)} will become unallocated disk space."
+                                    : $"{FormatBytes(selectedFileSystem.CurrentSizeBytes - previewBytes)} will be returned to {selectedFileSystem.LvmVolumeGroup}."
+                            : $"{FormatBytes(previewBytes - selectedFileSystem.CurrentSizeBytes)} added")</small>
+                    </section>
+                }
+            </div>
+        }
+        else if (resizePlan is not null && activeOperation is null)
+        {
+            <div class="storage-plan-review">
+                <div class="storage-plan-summary">
+                    <div><span>Risk</span><UiPill Tone="@(resizePlan.RiskLevel == StorageResizeRisk.High ? UiPillTone.Warning : UiPillTone.Success)">@resizePlan.RiskLevel</UiPill></div>
+                    <div><span>Unmount</span><strong>@(resizePlan.RequiresUnmount ? "Required" : "No")</strong></div>
+                    <div><span>Reboot</span><strong>@(resizePlan.RequiresReboot ? "Required" : "No")</strong></div>
+                </div>
+
+                <ol class="storage-plan-steps">
+                    @foreach (var step in resizePlan.Steps.OrderBy(item => item.Order))
+                    {
+                        <li><span>@step.Order</span><div><strong>@step.Title</strong><small>@step.Description</small></div></li>
+                    }
+                </ol>
+
+                <div class="storage-preflight">
+                    <h3>Preflight</h3>
+                    @foreach (var result in resizePlan.ValidationResults)
+                    {
+                        <div class="@(result.Passed ? "pass" : result.Severity == StorageValidationSeverity.Warning ? "warning" : "fail")">
+                            <span>@(result.Passed ? "✓" : "!")</span>
+                            <strong>@result.Check</strong>
+                            <small>@result.Detail</small>
+                        </div>
+                    }
+                </div>
+
+                @foreach (var warning in resizePlan.Warnings)
+                {
+                    <p class="storage-plan-warning">@warning</p>
+                }
+
+                @if (resizePlan.OperationType == StorageResizeDirection.Shrink)
+                {
+                    <label class="storage-backup-confirmation">
+                        <input type="checkbox" @bind="backupAcknowledged" />
+                        <span><strong>I have a current backup.</strong> Shrinking can cause data loss if interrupted.</span>
+                    </label>
+                }
+
+                <details class="storage-technical-plan">
+                    <summary>Technical details</summary>
+                    @foreach (var step in resizePlan.Steps)
+                    {
+                        <code>@step.CommandPreview</code>
+                    }
+                </details>
+            </div>
+        }
+        else if (activeOperation is not null)
+        {
+            <div class="storage-execution">
+                <div class="storage-execution-status">
+                    <UiPill Tone="@OperationTone(activeOperation.State)">@FormatState(activeOperation.State)</UiPill>
+                    <span>@ExecutionSummary(activeOperation)</span>
+                </div>
+                <ol class="storage-execution-steps">
+                    @foreach (var step in activeOperation.Plan.Steps.OrderBy(item => item.Order))
+                    {
+                        <li class="@step.State.ToString().ToLowerInvariant()">
+                            <span>@StepSymbol(step.State)</span>
+                            <div><strong>@step.Title</strong><small>@(step.VerificationDetail ?? step.Description)</small></div>
+                        </li>
+                    }
+                </ol>
+                @if (!string.IsNullOrWhiteSpace(activeOperation.FailureDetail))
+                {
+                    <p class="callout @(activeOperation.State == StorageOperationState.RecoveryRequired ? "warning" : "error")">@activeOperation.FailureDetail</p>
+                }
+                <details class="storage-technical-plan">
+                    <summary>Technical log</summary>
+                    @foreach (var step in activeOperation.Plan.Steps.Where(item => item.State != StorageStepState.Pending))
+                    {
+                        <code>@step.CommandPreview</code>
+                        @if (!string.IsNullOrWhiteSpace(step.StandardError))
+                        {
+                            <pre>@step.StandardError</pre>
+                        }
+                    }
+                </details>
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        @if (activeOperation is not null)
+        {
+            <UiCommandButton Label="Close"
+                             Variant="UiButtonVariant.Primary"
+                             Disabled="@IsOperationActive(activeOperation.State)"
+                             OnClick="CloseResize" />
+        }
+        else if (resizePlan is null)
+        {
+            <UiCommandButton Label="Cancel" OnClick="CloseResize" />
+            <UiCommandButton Label="@(isPlanning ? "Checking plan…" : "Review plan")"
+                             Glyph="UiIconGlyph.Analyze"
+                             Variant="UiButtonVariant.Primary"
+                             Disabled="@isPlanning"
+                             OnClick="CreatePlanAsync" />
+        }
+        else
+        {
+            <UiCommandButton Label="Back" Disabled="@isQueueing" OnClick="BackToSize" />
+            <UiCommandButton Label="@(isQueueing ? "Queueing…" : resizePlan.OperationType == StorageResizeDirection.Grow ? "Expand" : "Resize")"
+                             Glyph="UiIconGlyph.Run"
+                             Variant="@(resizePlan.OperationType == StorageResizeDirection.Shrink ? UiButtonVariant.Danger : UiButtonVariant.Primary)"
+                             Disabled="@(!CanExecutePlan)"
+                             OnClick="ExecutePlanAsync" />
+        }
+    </Footer>
+</UiModal>
+
+<UiModal IsOpen="@(selectedNewDisk is not null)"
+         Title="@(resizePlan is null ? $"Use {selectedNewDisk?.DevicePath}" : $"Review plan for {selectedNewDisk?.DevicePath}")"
+         Subtitle="@(resizePlan is null ? "Choose how Linux should use this unused disk." : FormatNewDiskPlanSubtitle())"
+         CloseOnBackdrop="@(!isPlanning && activeOperation is null)"
+         OnClose="CloseNewDisk">
+    <ChildContent>
+        @if (selectedNewDisk is not null && resizePlan is null)
+        {
+            <div class="storage-newdisk-editor">
+                <div class="storage-resize-current">
+                    <div><span>Disk</span><strong>@selectedNewDisk.DevicePath</strong></div>
+                    <div><span>Size</span><strong>@FormatBytes(selectedNewDisk.SizeBytes)</strong></div>
+                    <div><span>Model</span><strong>@selectedNewDisk.Model</strong></div>
+                </div>
+                <p class="callout warning">This will erase anything currently on @selectedNewDisk.DevicePath.</p>
+
+                <div class="storage-newdisk-options">
+                    <label class="storage-newdisk-option @(newDiskAction == "mount" ? "selected" : null)">
+                        <input type="radio" name="new-disk-action" checked="@(newDiskAction == "mount")" @onchange="SelectMountAction" />
+                        <span>
+                            <strong>Use for a folder</strong>
+                            <small>Format as EXT4 and mount at an empty path such as /mnt/data, /mnt/logs or /mnt/apps.</small>
+                        </span>
+                    </label>
+                    @if (selectedNewDisk.Actions.Any(action => action.Id == "lvm") && topology?.VolumeGroups.Count > 0)
+                    {
+                        <label class="storage-newdisk-option @(newDiskAction == "lvm" ? "selected" : null)">
+                            <input type="radio" name="new-disk-action" checked="@(newDiskAction == "lvm")" @onchange="SelectLvmAction" />
+                            <span>
+                                <strong>Add to existing storage pool</strong>
+                                <small>Join an LVM volume group so existing filesystems can grow into this capacity.</small>
+                            </span>
+                        </label>
+                    }
+                </div>
+
+                @if (newDiskAction == "mount")
+                {
+                    <div class="storage-quick-actions">
+                        <UiCommandButton Label="/mnt/data" OnClick="SetMountData" />
+                        <UiCommandButton Label="/mnt/logs" OnClick="SetMountLogs" />
+                        <UiCommandButton Label="/mnt/apps" OnClick="SetMountApps" />
+                    </div>
+                    <UiTextField Label="Mount folder"
+                                 Helper="Must be empty or not exist yet. Automatic migration of /var/log and similar folders is coming next."
+                                 @bind-Value="newDiskMountPoint"
+                                 Disabled="@isPlanning" />
+                }
+                else if (newDiskAction == "lvm" && topology is not null)
+                {
+                    <label class="storage-newdisk-vg">
+                        <span>Volume group</span>
+                        <select @bind="newDiskVolumeGroup">
+                            @foreach (var group in topology.VolumeGroups)
+                            {
+                                <option value="@group.Name">@group.Name · @FormatBytes(group.FreeBytes) free</option>
+                            }
+                        </select>
+                    </label>
+                }
+
+                @if (!string.IsNullOrWhiteSpace(resizeError))
+                {
+                    <p class="callout error">@resizeError</p>
+                }
+            </div>
+        }
+        else if (resizePlan is not null && activeOperation is null && selectedNewDisk is not null)
+        {
+            <div class="storage-plan-review">
+                <div class="storage-plan-summary">
+                    <div><span>Risk</span><UiPill Tone="UiPillTone.Warning">@resizePlan.RiskLevel</UiPill></div>
+                    <div><span>Reboot</span><strong>No</strong></div>
+                    <div><span>Erases disk</span><strong>Yes</strong></div>
+                </div>
+                <ol class="storage-plan-steps">
+                    @foreach (var step in resizePlan.Steps.OrderBy(item => item.Order))
+                    {
+                        <li><span>@step.Order</span><div><strong>@step.Title</strong><small>@step.Description</small></div></li>
+                    }
+                </ol>
+                <div class="storage-preflight">
+                    <h3>Preflight</h3>
+                    @foreach (var result in resizePlan.ValidationResults)
+                    {
+                        <div class="@(result.Passed ? "pass" : result.Severity == StorageValidationSeverity.Warning ? "warning" : "fail")">
+                            <span>@(result.Passed ? "✓" : "!")</span>
+                            <strong>@result.Check</strong>
+                            <small>@result.Detail</small>
+                        </div>
+                    }
+                </div>
+                @foreach (var warning in resizePlan.Warnings)
+                {
+                    <p class="storage-plan-warning">@warning</p>
+                }
+                <label class="storage-backup-confirmation">
+                    <input type="checkbox" @bind="backupAcknowledged" />
+                    <span><strong>I understand this unused disk will be erased.</strong> A current backup is recommended.</span>
+                </label>
+                <details class="storage-technical-plan">
+                    <summary>Technical details</summary>
+                    @foreach (var step in resizePlan.Steps)
+                    {
+                        <code>@step.CommandPreview</code>
+                    }
+                </details>
+            </div>
+        }
+        else if (activeOperation is not null && selectedNewDisk is not null)
+        {
+            <div class="storage-execution">
+                <div class="storage-execution-status">
+                    <UiPill Tone="@OperationTone(activeOperation.State)">@FormatState(activeOperation.State)</UiPill>
+                    <span>@ExecutionSummary(activeOperation)</span>
+                </div>
+                <ol class="storage-execution-steps">
+                    @foreach (var step in activeOperation.Plan.Steps.OrderBy(item => item.Order))
+                    {
+                        <li class="@step.State.ToString().ToLowerInvariant()">
+                            <span>@StepSymbol(step.State)</span>
+                            <div><strong>@step.Title</strong><small>@(step.VerificationDetail ?? step.Description)</small></div>
+                        </li>
+                    }
+                </ol>
+                @if (!string.IsNullOrWhiteSpace(activeOperation.FailureDetail))
+                {
+                    <p class="callout @(activeOperation.State == StorageOperationState.RecoveryRequired ? "warning" : "error")">@activeOperation.FailureDetail</p>
+                }
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        @if (activeOperation is not null)
+        {
+            <UiCommandButton Label="Close"
+                             Variant="UiButtonVariant.Primary"
+                             Disabled="@IsOperationActive(activeOperation.State)"
+                             OnClick="CloseNewDisk" />
+        }
+        else if (resizePlan is null)
+        {
+            <UiCommandButton Label="Cancel" OnClick="CloseNewDisk" />
+            <UiCommandButton Label="@(isPlanning ? "Checking plan…" : "Review plan")"
+                             Glyph="UiIconGlyph.Analyze"
+                             Variant="UiButtonVariant.Primary"
+                             Disabled="@isPlanning"
+                             OnClick="CreateNewDiskPlanAsync" />
+        }
+        else
+        {
+            <UiCommandButton Label="Back" Disabled="@isQueueing" OnClick="BackToNewDiskOptions" />
+            <UiCommandButton Label="@(isQueueing ? "Queueing…" : "Use disk")"
+                             Glyph="UiIconGlyph.Run"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@(!CanExecuteNewDiskPlan)"
+                             OnClick="ExecutePlanAsync" />
+        }
+    </Footer>
+</UiModal>
+
+@code {
+    private const long OneMiB = 1024L * 1024L;
+    private const long OneGiB = 1024L * 1024L * 1024L;
+    private StorageTopologySnapshot? topology;
+    private IReadOnlyList<StorageResizeOperation> history = [];
+    private StorageFileSystem? selectedFileSystem;
+    private StorageNewDisk? selectedNewDisk;
+    private StorageResizePlan? resizePlan;
+    private StorageResizeOperation? activeOperation;
+    private CancellationTokenSource? pollCancellation;
+    private readonly Dictionary<string, AdvisorConsumerCache> advisorConsumers = new(StringComparer.Ordinal);
+    private readonly HashSet<string> analyzingMounts = new(StringComparer.Ordinal);
+    private string activeTab = "overview";
+    private string? targetSizeInput;
+    private string? errorMessage;
+    private string? resizeError;
+    private string newDiskAction = "mount";
+    private string newDiskMountPoint = "/mnt/data";
+    private string newDiskVolumeGroup = string.Empty;
+    private bool isLoading;
+    private bool isRescanning;
+    private bool isPlanning;
+    private bool isQueueing;
+    private bool backupAcknowledged;
+
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        if (isLoading) return;
+        isLoading = true;
+        errorMessage = null;
+        try
+        {
+            topology = await StorageDiscovery.DiscoverAsync();
+            history = await OperationRepository.ListAsync();
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"Storage could not be inspected: {exception.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task RescanAsync()
+    {
+        if (isRescanning) return;
+        isRescanning = true;
+        errorMessage = null;
+        try
+        {
+            topology = await StorageDiscovery.RescanAsync();
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"Disk rescan could not complete: {exception.Message}";
+        }
+        finally
+        {
+            isRescanning = false;
+        }
+    }
+
+    private async Task ChangeTabAsync(string? value)
+    {
+        activeTab = value ?? "overview";
+        if (activeTab == "history") await LoadHistoryAsync();
+    }
+
+    private async Task LoadHistoryAsync() => history = await OperationRepository.ListAsync();
+
+    private void OpenResize(StorageFileSystem fileSystem, bool useMaximum)
+    {
+        selectedNewDisk = null;
+        selectedFileSystem = fileSystem;
+        resizePlan = null;
+        activeOperation = null;
+        resizeError = null;
+        backupAcknowledged = false;
+        targetSizeInput = useMaximum
+            ? "Maximum"
+            : fileSystem.CanGrow
+                ? FormatInputBytes(Math.Min(fileSystem.MaximumSizeBytes, fileSystem.CurrentSizeBytes + 100 * OneGiB))
+                : FormatInputBytes(Math.Max(fileSystem.MinimumSafeSizeBytes, fileSystem.CurrentSizeBytes - 50 * OneGiB));
+    }
+
+    private void OpenNewDisk(StorageNewDisk disk)
+    {
+        selectedFileSystem = null;
+        selectedNewDisk = disk;
+        resizePlan = null;
+        activeOperation = null;
+        resizeError = null;
+        backupAcknowledged = false;
+        newDiskAction = disk.Actions.Any(action => action.Id == "mount") ? "mount" : "lvm";
+        newDiskMountPoint = "/mnt/data";
+        newDiskVolumeGroup = topology?.VolumeGroups.FirstOrDefault()?.Name ?? string.Empty;
+    }
+
+    private async Task CloseResize()
+    {
+        if (activeOperation is not null && IsOperationActive(activeOperation.State)) return;
+        pollCancellation?.Cancel();
+        pollCancellation?.Dispose();
+        pollCancellation = null;
+        selectedFileSystem = null;
+        resizePlan = null;
+        activeOperation = null;
+        resizeError = null;
+        await LoadAsync();
+    }
+
+    private async Task CloseNewDisk()
+    {
+        if (activeOperation is not null && IsOperationActive(activeOperation.State)) return;
+        pollCancellation?.Cancel();
+        pollCancellation?.Dispose();
+        pollCancellation = null;
+        selectedNewDisk = null;
+        resizePlan = null;
+        activeOperation = null;
+        resizeError = null;
+        await LoadAsync();
+    }
+
+    private void BackToSize()
+    {
+        resizePlan = null;
+        resizeError = null;
+        backupAcknowledged = false;
+    }
+
+    private void BackToNewDiskOptions()
+    {
+        resizePlan = null;
+        resizeError = null;
+        backupAcknowledged = false;
+    }
+
+    private void SelectMountAction(ChangeEventArgs _) => newDiskAction = "mount";
+    private void SelectLvmAction(ChangeEventArgs _) => newDiskAction = "lvm";
+    private void SetMountData() => newDiskMountPoint = "/mnt/data";
+    private void SetMountLogs() => newDiskMountPoint = "/mnt/logs";
+    private void SetMountApps() => newDiskMountPoint = "/mnt/apps";
+
+    private async Task CreateNewDiskPlanAsync()
+    {
+        if (selectedNewDisk is null || isPlanning) return;
+        resizeError = null;
+        isPlanning = true;
+        try
+        {
+            resizePlan = newDiskAction == "lvm"
+                ? await AttachmentPlanner.CreateVolumeGroupPlanAsync(new StorageAttachVolumeGroupRequest(
+                    selectedNewDisk.DevicePath,
+                    string.IsNullOrWhiteSpace(newDiskVolumeGroup)
+                        ? throw new InvalidOperationException("Choose a volume group.")
+                        : newDiskVolumeGroup))
+                : await AttachmentPlanner.CreateMountPlanAsync(new StorageAttachMountRequest(
+                    selectedNewDisk.DevicePath,
+                    string.IsNullOrWhiteSpace(newDiskMountPoint) ? "/mnt/data" : newDiskMountPoint));
+
+            var actor = await ResolveActorAsync();
+            var now = TimeProvider.GetUtcNow();
+            await OperationRepository.SaveAsync(new StorageResizeOperation(
+                resizePlan.Id,
+                resizePlan,
+                StorageOperationState.AwaitingConfirmation,
+                actor,
+                Environment.MachineName,
+                false,
+                now,
+                now,
+                null,
+                null,
+                null,
+                null,
+                null));
+            history = await OperationRepository.ListAsync();
+        }
+        catch (Exception exception)
+        {
+            resizeError = exception.Message;
+        }
+        finally
+        {
+            isPlanning = false;
+        }
+    }
+
+    private async Task CreatePlanAsync()
+    {
+        if (selectedFileSystem is null || isPlanning) return;
+        resizeError = null;
+        if (!TryPreviewTarget(out var target, out var parseError))
+        {
+            resizeError = parseError;
+            return;
+        }
+
+        isPlanning = true;
+        try
+        {
+            resizePlan = await ResizePlanner.CreatePlanAsync(new StorageResizePlanRequest(
+                selectedFileSystem.Id,
+                target,
+                targetSizeInput?.Trim().Equals("maximum", StringComparison.OrdinalIgnoreCase) == true));
+
+            var actor = await ResolveActorAsync();
+            var now = TimeProvider.GetUtcNow();
+            await OperationRepository.SaveAsync(new StorageResizeOperation(
+                resizePlan.Id,
+                resizePlan,
+                StorageOperationState.AwaitingConfirmation,
+                actor,
+                Environment.MachineName,
+                false,
+                now,
+                now,
+                null,
+                null,
+                null,
+                null,
+                null));
+            history = await OperationRepository.ListAsync();
+        }
+        catch (Exception exception)
+        {
+            resizeError = exception.Message;
+        }
+        finally
+        {
+            isPlanning = false;
+        }
+    }
+
+    private async Task ExecutePlanAsync()
+    {
+        if (resizePlan is null || !CanExecutePlan || isQueueing) return;
+        isQueueing = true;
+        resizeError = null;
+        try
+        {
+            var actor = await ResolveActorAsync();
+            var queued = await ResizeExecutor.QueueAsync(
+                resizePlan,
+                new StorageExecutionRequest(resizePlan.Id, backupAcknowledged, actor));
+            activeOperation = await OperationRepository.GetAsync(queued.OperationId);
+            StartPolling(queued.OperationId);
+        }
+        catch (Exception exception)
+        {
+            resizeError = exception.Message;
+        }
+        finally
+        {
+            isQueueing = false;
+        }
+    }
+
+    private async Task<string> ResolveActorAsync()
+    {
+        var actor = "Local LMS administrator";
+        if (AuthenticationStateTask is not null)
+        {
+            var principal = (await AuthenticationStateTask).User;
+            actor = principal.FindFirstValue(ClaimTypes.Email) ?? principal.Identity?.Name ?? actor;
+        }
+
+        return actor;
+    }
+
+    private IReadOnlyList<AdvisorCard> BuildAdvisorCards(StorageTopologySnapshot snapshot)
+    {
+        var cards = new List<AdvisorCard>();
+        foreach (var fileSystem in snapshot.FileSystems
+                     .Where(item => UsagePercent(item) >= 85)
+                     .OrderByDescending(UsagePercent)
+                     .Take(2))
+        {
+            advisorConsumers.TryGetValue(fileSystem.MountPoint, out var consumers);
+            var freeCapacity = fileSystem.FreeAfterGrowBytes >= OneGiB
+                ? $"{FormatBytes(fileSystem.FreeAfterGrowBytes)} of unused capacity is already available underneath this filesystem."
+                : "Free space inside the filesystem is low. Clean large folders or expand when capacity appears.";
+            cards.Add(new AdvisorCard(
+                fileSystem.IsRoot ? "Root filesystem" : fileSystem.MountPoint,
+                $"{FormatPercent(fileSystem)} full",
+                freeCapacity,
+                fileSystem,
+                consumers?.Items ?? [],
+                CanAnalyze: true,
+                IsAnalyzing: analyzingMounts.Contains(fileSystem.MountPoint)));
+        }
+
+        return cards;
+    }
+
+    private async Task AnalyzeConsumersAsync(StorageFileSystem fileSystem)
+    {
+        if (!analyzingMounts.Add(fileSystem.MountPoint)) return;
+        try
+        {
+            var snapshot = await DriveUsage.ScanAsync(fileSystem.MountPoint);
+            var items = snapshot.Items
+                .Where(item => item.IsDirectory)
+                .OrderByDescending(item => item.UsedBytes)
+                .Take(5)
+                .Select(item => new AdvisorConsumer(item.FullPath, item.UsedBytes))
+                .ToArray();
+            advisorConsumers[fileSystem.MountPoint] = new AdvisorConsumerCache(items);
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"Could not analyse {fileSystem.MountPoint}: {exception.Message}";
+        }
+        finally
+        {
+            analyzingMounts.Remove(fileSystem.MountPoint);
+            StateHasChanged();
+        }
+    }
+
+    private void StartPolling(Guid operationId)
+    {
+        pollCancellation?.Cancel();
+        pollCancellation?.Dispose();
+        pollCancellation = new CancellationTokenSource();
+        _ = PollOperationAsync(operationId, pollCancellation.Token);
+    }
+
+    private async Task PollOperationAsync(Guid operationId, CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                var operation = await OperationRepository.GetAsync(operationId, cancellationToken);
+                if (operation is null) return;
+                await InvokeAsync(() =>
+                {
+                    activeOperation = operation;
+                    StateHasChanged();
+                });
+                if (!IsOperationActive(operation.State))
+                {
+                    await InvokeAsync(async () =>
+                    {
+                        history = await OperationRepository.ListAsync(cancellationToken: cancellationToken);
+                        topology = await StorageDiscovery.DiscoverAsync(cancellationToken);
+                        StateHasChanged();
+                    });
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    private bool TryPreviewTarget(out long bytes, out string error)
+    {
+        bytes = 0;
+        error = string.Empty;
+        if (selectedFileSystem is null)
+        {
+            error = "Choose a filesystem first.";
+            return false;
+        }
+
+        var input = targetSizeInput?.Trim() ?? string.Empty;
+        if (input.Equals("maximum", StringComparison.OrdinalIgnoreCase) || input.Equals("max", StringComparison.OrdinalIgnoreCase))
+        {
+            bytes = selectedFileSystem.MaximumSizeBytes;
+            return true;
+        }
+
+        var percentage = Regex.Match(input, @"^(\d+(?:\.\d+)?)\s*%$", RegexOptions.CultureInvariant);
+        if (percentage.Success && double.TryParse(percentage.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var percent))
+        {
+            bytes = checked((long)(selectedFileSystem.MaximumSizeBytes * Math.Clamp(percent, 0, 100) / 100d));
+            return true;
+        }
+
+        var size = Regex.Match(input, @"^(\+)?\s*(\d+(?:\.\d+)?)\s*(GB|G|TB|T)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!size.Success || !double.TryParse(size.Groups[2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var amount) || amount <= 0)
+        {
+            error = "Enter a size such as 400 GB, 0.5 TB, +100 GB or Maximum.";
+            return false;
+        }
+
+        var multiplier = size.Groups[3].Value.StartsWith("T", StringComparison.OrdinalIgnoreCase) ? 1024d * OneGiB : OneGiB;
+        var requested = checked((long)(amount * multiplier));
+        bytes = size.Groups[1].Success ? checked(selectedFileSystem.CurrentSizeBytes + requested) : requested;
+        if (bytes < selectedFileSystem.CurrentSizeBytes && selectedFileSystem.IsRoot)
+        {
+            error = "Offline root shrinking is coming next. Growing / remains available.";
+            return false;
+        }
+
+        if (bytes < selectedFileSystem.MinimumSafeSizeBytes)
+        {
+            error = $"Cannot shrink to {FormatBytes(bytes)}. The estimated safe minimum is {FormatBytes(selectedFileSystem.MinimumSafeSizeBytes)}; LMS will calculate the exact EXT4 minimum before creating a plan.";
+            return false;
+        }
+
+        if (bytes > selectedFileSystem.MaximumSizeBytes)
+        {
+            error = $"The largest available size is {FormatBytes(selectedFileSystem.MaximumSizeBytes)}.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private void UpdateSlider(ChangeEventArgs args)
+    {
+        if (double.TryParse(args.Value?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var gib))
+        {
+            targetSizeInput = $"{gib:0.##} GB";
+        }
+    }
+
+    private void AddGiB(int gib)
+    {
+        if (selectedFileSystem is null) return;
+        targetSizeInput = FormatInputBytes(Math.Min(selectedFileSystem.MaximumSizeBytes, selectedFileSystem.CurrentSizeBytes + gib * OneGiB));
+    }
+
+    private void SetMinimum()
+    {
+        if (selectedFileSystem is not null) targetSizeInput = FormatInputBytes(selectedFileSystem.MinimumSafeSizeBytes);
+    }
+
+    private void SetMaximum() => targetSizeInput = "Maximum";
+
+    private double MinimumSliderGiB => selectedFileSystem?.MinimumSafeSizeBytes / (double)OneGiB ?? 0;
+    private double MaximumSliderGiB => selectedFileSystem?.MaximumSizeBytes / (double)OneGiB ?? 1;
+    private double SliderGiB => TryPreviewTarget(out var bytes, out _) ? bytes / (double)OneGiB : selectedFileSystem?.CurrentSizeBytes / (double)OneGiB ?? 0;
+    private bool CanExecutePlan => resizePlan is not null && !isQueueing && selectedFileSystem is not null &&
+                                   !resizePlan.ValidationResults.Any(result => !result.Passed && result.Severity == StorageValidationSeverity.Error) &&
+                                   (resizePlan.OperationType != StorageResizeDirection.Shrink || backupAcknowledged);
+
+    private bool CanExecuteNewDiskPlan => resizePlan is not null && !isQueueing && selectedNewDisk is not null &&
+                                          !resizePlan.ValidationResults.Any(result => !result.Passed && result.Severity == StorageValidationSeverity.Error) &&
+                                          backupAcknowledged;
+
+    private string FormatNewDiskPlanSubtitle() =>
+        resizePlan is null
+            ? string.Empty
+            : resizePlan.OperationType == StorageResizeDirection.AttachToVolumeGroup
+                ? $"Add {FormatBytes(resizePlan.RequestedSizeBytes - resizePlan.CurrentSizeBytes)} to {resizePlan.TargetMountPoint}"
+                : $"Mount at {resizePlan.TargetMountPoint}";
+
+    private static bool IsOperationActive(StorageOperationState state) => state is
+        StorageOperationState.Queued or StorageOperationState.Running or StorageOperationState.Verifying or StorageOperationState.Validated;
+
+    private static double UsagePercent(StorageFileSystem fileSystem) => fileSystem.CurrentSizeBytes <= 0
+        ? 0
+        : Math.Clamp(fileSystem.UsedBytes * 100d / fileSystem.CurrentSizeBytes, 0, 100);
+
+    private static string FormatPercent(StorageFileSystem fileSystem) => $"{UsagePercent(fileSystem):0}%";
+    private static UiPillTone UsageTone(StorageFileSystem fileSystem) => UsagePercent(fileSystem) >= 90
+        ? UiPillTone.Failure
+        : UsagePercent(fileSystem) >= 80 ? UiPillTone.Warning : UiPillTone.Success;
+
+    private static UiPillTone OperationTone(StorageOperationState state) => state switch
+    {
+        StorageOperationState.Completed => UiPillTone.Success,
+        StorageOperationState.Failed => UiPillTone.Failure,
+        StorageOperationState.RecoveryRequired => UiPillTone.Warning,
+        StorageOperationState.Running or StorageOperationState.Verifying or StorageOperationState.Queued => UiPillTone.Warning,
+        _ => UiPillTone.Neutral
+    };
+
+    private static string FormatState(StorageOperationState state) => state switch
+    {
+        StorageOperationState.RecoveryRequired => "Recovery required",
+        StorageOperationState.AwaitingConfirmation => "Awaiting confirmation",
+        _ => state.ToString()
+    };
+
+    private static string ExecutionSummary(StorageResizeOperation operation) => operation.State switch
+    {
+        StorageOperationState.Queued => "Waiting for the storage worker.",
+        StorageOperationState.Validated => "Preflight passed.",
+        StorageOperationState.Running => "Working through the validated plan.",
+        StorageOperationState.Verifying => "Checking the final result.",
+        StorageOperationState.Completed => operation.Plan.OperationType switch
+        {
+            StorageResizeDirection.AttachMount => "Disk mounted and remembered for reboot.",
+            StorageResizeDirection.AttachToVolumeGroup => "Disk added to the storage pool.",
+            _ => "Resize completed and verified."
+        },
+        StorageOperationState.RecoveryRequired => "Automatic work stopped. Review the completed steps before recovery.",
+        StorageOperationState.Failed => "Stopped safely at the failed step.",
+        _ => FormatState(operation.State)
+    };
+
+    private static string StepSymbol(StorageStepState state) => state switch
+    {
+        StorageStepState.Completed => "✓",
+        StorageStepState.Running => "●",
+        StorageStepState.Failed => "!",
+        StorageStepState.Skipped => "–",
+        _ => "○"
+    };
+
+    private static string FriendlyDevice(StorageFileSystem fileSystem) =>
+        string.IsNullOrWhiteSpace(fileSystem.LvmLogicalVolumePath)
+            ? fileSystem.DevicePath
+            : $"LVM · {fileSystem.LvmLogicalVolumePath}";
+
+    private static string? ShrinkStatusMessage(StorageFileSystem fileSystem)
+    {
+        if (fileSystem.CanShrink)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(fileSystem.ResizeUnavailableReason))
+        {
+            return fileSystem.ResizeUnavailableReason;
+        }
+
+        if (fileSystem.IsRoot)
+        {
+            return "Offline root shrinking is coming next. Free space inside / cannot be returned to the disk while Linux is running on it.";
+        }
+
+        if (string.IsNullOrWhiteSpace(fileSystem.LvmLogicalVolumePath))
+        {
+            return "Shrinking plain partitions is not enabled yet. Free space inside the filesystem stays on this partition for now.";
+        }
+
+        if (fileSystem.FileSystemType.Equals("xfs", StringComparison.OrdinalIgnoreCase))
+        {
+            return "XFS filesystems cannot currently be shrunk.";
+        }
+
+        return null;
+    }
+
+    private static string FormatTransport(string transport) => transport.Equals("Unknown", StringComparison.OrdinalIgnoreCase)
+        ? "local"
+        : transport.ToUpperInvariant();
+
+    private static string TopologyLabel(StorageNode node)
+    {
+        var label = node.Kind switch
+        {
+            StorageNodeKind.Partition => node.DevicePath,
+            StorageNodeKind.LvmLogicalVolume => $"LVM {node.DevicePath}",
+            StorageNodeKind.EncryptedVolume => $"Encrypted {node.DevicePath}",
+            StorageNodeKind.Raid => $"RAID {node.DevicePath}",
+            _ => node.DevicePath
+        };
+        if (!string.IsNullOrWhiteSpace(node.MountPoint)) label += $" · {node.FileSystemType?.ToUpperInvariant()} → {node.MountPoint}";
+        return label;
+    }
+
+    private static int NodeDepth(StorageDisk disk, StorageNode node)
+    {
+        var depth = 1;
+        var parentId = node.ParentId;
+        while (!string.IsNullOrWhiteSpace(parentId) && depth < 6)
+        {
+            depth++;
+            parentId = disk.Nodes.FirstOrDefault(item => item.Id == parentId)?.ParentId;
+        }
+
+        return depth;
+    }
+
+    private static string FormatInputBytes(long bytes) => $"{bytes / (double)OneGiB:0.##} GB";
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < OneMiB) return bytes == 0 ? "0 B" : $"{bytes / 1024d:0.#} KB";
+        if (bytes < OneGiB) return $"{bytes / (double)OneMiB:0.#} MB";
+        var gib = bytes / (double)OneGiB;
+        return gib >= 1024 ? $"{gib / 1024:0.##} TB" : $"{gib:0.##} GB";
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        pollCancellation?.Cancel();
+        pollCancellation?.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private sealed record AdvisorCard(
+        string Title,
+        string Headline,
+        string Detail,
+        StorageFileSystem FileSystem,
+        IReadOnlyList<AdvisorConsumer> Consumers,
+        bool CanAnalyze,
+        bool IsAnalyzing);
+
+    private sealed record AdvisorConsumer(string Path, long Bytes);
+
+    private sealed record AdvisorConsumerCache(IReadOnlyList<AdvisorConsumer> Items);
+}

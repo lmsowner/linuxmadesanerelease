@@ -1087,6 +1087,7 @@ public class Program
             return Results.Ok();
         }).DisableAntiforgery();
         app.MapMediaLibraryIntegrationApi();
+        app.MapStorageApi();
         var componentEndpoint = app.MapRazorComponents<App>()
             .AddInteractiveServerRenderMode();
         if (PluginModuleLoader.LoadedAssemblies.Count > 0)

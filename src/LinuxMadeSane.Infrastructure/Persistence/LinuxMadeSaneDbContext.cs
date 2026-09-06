@@ -58,6 +58,8 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<MailRelayDomainEntity> MailRelayDomains => Set<MailRelayDomainEntity>();
     public DbSet<MailRelayClientEntity> MailRelayClients => Set<MailRelayClientEntity>();
     public DbSet<MailRelayDnsRecordEntity> MailRelayDnsRecords => Set<MailRelayDnsRecordEntity>();
+    public DbSet<StorageResizeOperationEntity> StorageResizeOperations => Set<StorageResizeOperationEntity>();
+    public DbSet<HostUpdateScheduleEntity> HostUpdateSchedules => Set<HostUpdateScheduleEntity>();
     public DbSet<PortalConnectionSettingsEntity> PortalConnectionSettings => Set<PortalConnectionSettingsEntity>();
     public DbSet<LocalAiEngineSettingsEntity> LocalAiEngineSettings => Set<LocalAiEngineSettingsEntity>();
     public DbSet<LocalAiInstalledModelEntity> LocalAiInstalledModels => Set<LocalAiInstalledModelEntity>();
@@ -215,6 +217,30 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
                 .WithMany()
                 .HasForeignKey(item => item.MailRelayDomainId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<StorageResizeOperationEntity>(entity =>
+        {
+            entity.ToTable("storage_resize_operations");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.DiskDevicePath).HasMaxLength(255);
+            entity.Property(item => item.MountPoint).HasMaxLength(4096);
+            entity.Property(item => item.OperationType).HasMaxLength(32);
+            entity.Property(item => item.RequestedBy).HasMaxLength(320);
+            entity.Property(item => item.Hostname).HasMaxLength(255);
+            entity.Property(item => item.PlanJson).HasColumnType("TEXT");
+            entity.Property(item => item.BeforeTopologyJson).HasColumnType("TEXT");
+            entity.Property(item => item.AfterTopologyJson).HasColumnType("TEXT");
+            entity.Property(item => item.FailureDetail).HasColumnType("TEXT");
+            entity.HasIndex(item => new { item.DiskDevicePath, item.State });
+        });
+
+        modelBuilder.Entity<HostUpdateScheduleEntity>(entity =>
+        {
+            entity.ToTable("host_update_schedule");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.LastRunSummary).HasMaxLength(512);
+            entity.Property(item => item.LastRunDayKey).HasMaxLength(16);
         });
 
         modelBuilder.Entity<PortalConnectionSettingsEntity>(entity =>

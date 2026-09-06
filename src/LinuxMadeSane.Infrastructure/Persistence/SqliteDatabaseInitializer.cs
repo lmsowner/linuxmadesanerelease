@@ -31,6 +31,8 @@ public sealed class SqliteDatabaseInitializer(
         await EnsureMessagingTablesAsync(cancellationToken);
         await EnsureCloudflareTablesAsync(cancellationToken);
         await EnsureMailRelayTablesAsync(cancellationToken);
+        await EnsureStorageTablesAsync(cancellationToken);
+        await EnsureHostUpdateScheduleTableAsync(cancellationToken);
         await EnsurePortalTablesAsync(cancellationToken);
         await EnsureCaddyTablesAsync(cancellationToken);
         await EnsureEdgeGatewayTablesAsync(cancellationToken);
@@ -2170,6 +2172,57 @@ public sealed class SqliteDatabaseInitializer(
         await dbContext.Database.ExecuteSqlRawAsync(
             "CREATE INDEX IF NOT EXISTS IX_mail_relay_dns_records_CloudflareRecordId ON mail_relay_dns_records (CloudflareRecordId);",
             cancellationToken);
+    }
+
+    private async Task EnsureStorageTablesAsync(CancellationToken cancellationToken)
+    {
+        const string operationsSql = """
+            CREATE TABLE IF NOT EXISTS storage_resize_operations (
+                Id TEXT NOT NULL PRIMARY KEY,
+                State INTEGER NOT NULL,
+                DiskDevicePath TEXT NOT NULL,
+                MountPoint TEXT NOT NULL,
+                OperationType TEXT NOT NULL,
+                BeforeSizeBytes INTEGER NOT NULL,
+                AfterSizeBytes INTEGER NOT NULL,
+                RequestedBy TEXT NOT NULL,
+                Hostname TEXT NOT NULL,
+                BackupAcknowledged INTEGER NOT NULL,
+                PlanJson TEXT NOT NULL,
+                BeforeTopologyJson TEXT NULL,
+                AfterTopologyJson TEXT NULL,
+                FailureDetail TEXT NULL,
+                CreatedUtc TEXT NOT NULL,
+                UpdatedUtc TEXT NOT NULL,
+                StartedUtc TEXT NULL,
+                CompletedUtc TEXT NULL
+            );
+            """;
+        await dbContext.Database.ExecuteSqlRawAsync(operationsSql, cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_storage_resize_operations_DiskDevicePath_State ON storage_resize_operations (DiskDevicePath, State);",
+            cancellationToken);
+    }
+
+    private async Task EnsureHostUpdateScheduleTableAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            CREATE TABLE IF NOT EXISTS host_update_schedule (
+                Id INTEGER NOT NULL PRIMARY KEY,
+                Enabled INTEGER NOT NULL,
+                HourLocal INTEGER NOT NULL,
+                MinuteLocal INTEGER NOT NULL,
+                ApplyPackageUpdates INTEGER NOT NULL,
+                SecurityOnly INTEGER NOT NULL,
+                UseDistUpgrade INTEGER NOT NULL,
+                RebootIfRequired INTEGER NOT NULL,
+                LastRunAtUtc TEXT NULL,
+                LastRunSummary TEXT NULL,
+                LastRunDayKey TEXT NULL,
+                UpdatedAtUtc TEXT NOT NULL
+            );
+            """;
+        await dbContext.Database.ExecuteSqlRawAsync(sql, cancellationToken);
     }
 
     private async Task EnsureBuiltInTrustedNetworksAsync(CancellationToken cancellationToken)

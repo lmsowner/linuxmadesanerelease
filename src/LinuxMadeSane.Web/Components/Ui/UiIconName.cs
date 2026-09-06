@@ -8,6 +8,7 @@ public enum UiIconName
     MachineSection,
     Overview,
     SystemInfo,
+    Storage,
     Hosts,
     Integrations,
     MailRelay,

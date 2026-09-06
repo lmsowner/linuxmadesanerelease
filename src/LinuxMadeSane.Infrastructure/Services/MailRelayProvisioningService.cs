@@ -46,6 +46,8 @@ public sealed partial class MailRelayProvisioningService(
         var normalized = Normalize(request);
         var errors = Validate(normalized).ToList();
         var preflight = await preflightService.InspectAsync(true, normalized.CloudflareZoneId, cancellationToken);
+        var existingConfiguration = await store.GetConfigurationAsync(cancellationToken);
+        var isInitialRelaySetup = existingConfiguration?.Enabled != true;
 
         if (!preflight.CloudflareDnsReady)
         {
@@ -69,9 +71,14 @@ public sealed partial class MailRelayProvisioningService(
             errors.Add("The selected Cloudflare zone is no longer available to the Edge Gateway token.");
         }
 
-        if (!IsWithinZone(normalized.RelayHostname, preflight.CloudflareZoneName))
+        if (isInitialRelaySetup && !IsWithinZone(normalized.RelayHostname, preflight.CloudflareZoneName))
         {
             errors.Add($"Relay hostname must be inside the selected Cloudflare zone {preflight.CloudflareZoneName}.");
+        }
+        else if (!isInitialRelaySetup &&
+                 !normalized.RelayHostname.Equals(existingConfiguration!.RelayHostname, StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add($"The relay hostname is already configured as {existingConfiguration.RelayHostname}. Edit the relay settings separately rather than changing it while configuring a sending domain.");
         }
 
         if (!IsWithinZone(normalized.SendingDomain, preflight.CloudflareZoneName))
@@ -113,7 +120,15 @@ public sealed partial class MailRelayProvisioningService(
                  selectedDkimRecord.Comment.Equals(ManagedDnsComment, StringComparison.OrdinalIgnoreCase));
 
             existingEmailConfiguration = BuildExistingEmailConfiguration(records, normalized.SendingDomain, spf);
-            changes.Add(BuildAddressChange(records, normalized.RelayHostname, preflight.PublicIpAddress));
+            if (isInitialRelaySetup)
+            {
+                var relayRecord = Find(records, "A", normalized.RelayHostname).FirstOrDefault();
+                var relayRecordIsManaged = relayRecord is not null &&
+                    trackedRecords.Any(item =>
+                        item.CloudflareRecordId.Equals(relayRecord.Id, StringComparison.Ordinal) &&
+                        item.CreatedByLms);
+                changes.Add(BuildAddressChange(records, normalized.RelayHostname, preflight.PublicIpAddress, relayRecordIsManaged));
+            }
             changes.Add(BuildSpfChange(normalized.SendingDomain, spf));
             changes.Add(BuildDkimChange(records, normalized.SendingDomain, normalized.DkimSelector, selectedDkimIsManaged));
             changes.Add(BuildDmarcChange(records, normalized.SendingDomain));
@@ -534,6 +549,7 @@ public sealed partial class MailRelayProvisioningService(
 
             var now = DateTimeOffset.UtcNow;
             var configuration = await store.GetConfigurationAsync(cancellationToken) ?? MailRelayConfiguration.CreateDefault(now);
+            var isInitialRelaySetup = !configuration.Enabled;
             var domains = await store.ListDomainsAsync(cancellationToken);
             var domain = domains.FirstOrDefault(item => item.DomainName.Equals(normalized.SendingDomain, StringComparison.OrdinalIgnoreCase));
 
@@ -612,7 +628,10 @@ public sealed partial class MailRelayProvisioningService(
             }
 
             Report("config", MailRelaySetupStepState.Running, "Writing managed Postfix, SMTP AUTH, sender restriction and OpenDKIM configuration.");
-            var allDomains = domains.Where(item => item.Id != domain.Id).Append(domain).ToArray();
+            var allDomains = domains
+                .Where(item => item.Id != domain.Id)
+                .Append(domain with { Enabled = true })
+                .ToArray();
             var allClients = clients.Where(item => item.Id != client.Id).Append(client).ToArray();
             var dkimKeys = new Dictionary<Guid, string> { [domain.Id] = dkim.PrivateKeyPem };
             foreach (var configuredDomain in allDomains.Where(item => item.Id != domain.Id))
@@ -653,13 +672,23 @@ public sealed partial class MailRelayProvisioningService(
                                              item.CloudflareRecordId.Equals(selectedDkimRecord.Id, StringComparison.Ordinal) &&
                                              item.CreatedByLms) ||
                                          selectedDkimRecord.Comment.Equals(ManagedDnsComment, StringComparison.OrdinalIgnoreCase));
-            var currentPlans = new[]
+            var currentPlans = new List<MailRelaySetupChange>();
+            if (isInitialRelaySetup)
             {
-                BuildAddressChange(records, normalized.RelayHostname, preview.Preflight.PublicIpAddress),
-                BuildSpfChange(normalized.SendingDomain, spfAnalysis),
-                BuildDkimChange(records, normalized.SendingDomain, normalized.DkimSelector, selectedDkimIsManaged),
-                BuildDmarcChange(records, normalized.SendingDomain)
-            };
+                var relayRecord = Find(records, "A", normalized.RelayHostname).FirstOrDefault();
+                var relayRecordIsManaged = relayRecord is not null &&
+                    trackedDnsRecords.Any(item =>
+                        item.CloudflareRecordId.Equals(relayRecord.Id, StringComparison.Ordinal) &&
+                        item.CreatedByLms);
+                currentPlans.Add(BuildAddressChange(
+                    records,
+                    normalized.RelayHostname,
+                    preview.Preflight.PublicIpAddress,
+                    relayRecordIsManaged));
+            }
+            currentPlans.Add(BuildSpfChange(normalized.SendingDomain, spfAnalysis));
+            currentPlans.Add(BuildDkimChange(records, normalized.SendingDomain, normalized.DkimSelector, selectedDkimIsManaged));
+            currentPlans.Add(BuildDmarcChange(records, normalized.SendingDomain));
             var blockedPlan = currentPlans.FirstOrDefault(item => item.Kind == MailRelaySetupChangeKind.Blocked);
             if (blockedPlan is not null)
             {
@@ -670,9 +699,23 @@ public sealed partial class MailRelayProvisioningService(
                 throw new InvalidOperationException("Mail DNS changed after it was reviewed. No DNS records were written; review the current preserve-and-merge plan again.");
             }
 
-            var addressRecord = await UpsertRecordAsync(apiToken, normalized.CloudflareZoneId, records, "A", normalized.RelayHostname, preview.Preflight.PublicIpAddress, false, cancellationToken);
+            CloudflareDnsRecord? addressRecord = null;
+            if (isInitialRelaySetup)
+            {
+                addressRecord = await UpsertRecordAsync(
+                    apiToken,
+                    normalized.CloudflareZoneId,
+                    records,
+                    "A",
+                    normalized.RelayHostname,
+                    preview.Preflight.PublicIpAddress,
+                    false,
+                    cancellationToken);
+                await SaveDnsOwnershipAsync(domain.Id, addressRecord, "Relay hostname", records, now, cancellationToken);
+            }
             var spfValue = spfAnalysis.ProposedValue;
             var spfRecord = await UpsertRecordAsync(apiToken, normalized.CloudflareZoneId, records, "TXT", normalized.SendingDomain, spfValue, false, cancellationToken);
+            await SaveDnsOwnershipAsync(domain.Id, spfRecord, "SPF", records, now, cancellationToken);
             if (!spfRecord.Content.Equals(spfValue, StringComparison.Ordinal) ||
                 !spfRecord.Content.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .Any(term => SpfTermAuthorizesIpv4(term, preview.Preflight.PublicIpAddress)))
@@ -681,9 +724,11 @@ public sealed partial class MailRelayProvisioningService(
             }
             var dkimName = selectedDkimName;
             var dkimRecord = await UpsertRecordAsync(apiToken, normalized.CloudflareZoneId, records, "TXT", dkimName, dkim.PublicDnsValue, false, cancellationToken);
+            await SaveDnsOwnershipAsync(domain.Id, dkimRecord, "DKIM", records, now, cancellationToken);
             var dmarcName = $"_dmarc.{normalized.SendingDomain}";
             var existingDmarc = Find(records, "TXT", dmarcName).FirstOrDefault(item => item.Content.StartsWith("v=DMARC1", StringComparison.OrdinalIgnoreCase));
             var dmarcRecord = existingDmarc ?? await UpsertRecordAsync(apiToken, normalized.CloudflareZoneId, records, "TXT", dmarcName, "v=DMARC1; p=none", false, cancellationToken);
+            await SaveDnsOwnershipAsync(domain.Id, dmarcRecord, "DMARC", records, now, cancellationToken);
             var refreshedRecords = await cloudflareDnsService.ListRecordsAsync(apiToken, normalized.CloudflareZoneId, cancellationToken);
             ValidatePreservedMailDns(
                 records,
@@ -711,7 +756,7 @@ public sealed partial class MailRelayProvisioningService(
             var publicDnsSummary = publicSpfMatches && publicDkimMatches && publicDmarcMatches
                 ? "Public SPF, DKIM and DMARC now match."
                 : "Cloudflare is correct; one or more public TXT answers are still propagating.";
-            Report("dns", MailRelaySetupStepState.Complete, $"MX and existing provider records are unchanged. SMTP proxying is off for {addressRecord.Name}. {publicDnsSummary}");
+            Report("dns", MailRelaySetupStepState.Complete, $"MX and existing provider records are unchanged. SMTP proxying is off for {normalized.RelayHostname}. {publicDnsSummary}");
 
             Report("runtime", MailRelaySetupStepState.Running, "Replacing the managed relay container and starting SMTP submission.");
             await RestartContainerAsync(cancellationToken);
@@ -756,13 +801,10 @@ public sealed partial class MailRelayProvisioningService(
                 AllowPublicSubmission = false,
                 UpdatedUtc = now
             };
+            domain = domain with { Enabled = true, UpdatedUtc = now };
             await store.SaveConfigurationAsync(configuration, cancellationToken);
             await store.SaveDomainAsync(domain, cancellationToken);
             await store.SaveClientAsync(client, cancellationToken);
-            await SaveDnsOwnershipAsync(domain.Id, addressRecord, "Relay hostname", records, now, cancellationToken);
-            await SaveDnsOwnershipAsync(domain.Id, spfRecord, "SPF", records, now, cancellationToken);
-            await SaveDnsOwnershipAsync(domain.Id, dkimRecord, "DKIM", records, now, cancellationToken);
-            await SaveDnsOwnershipAsync(domain.Id, dmarcRecord, "DMARC", records, now, cancellationToken);
 
             Report("save", MailRelaySetupStepState.Complete, "Relay configuration, domain and application were saved.");
             return new MailRelaySetupResult(
@@ -1259,13 +1301,12 @@ public sealed partial class MailRelayProvisioningService(
                                  !string.IsNullOrWhiteSpace(existing.CurrentDkimPrivateKeySecretReference);
         var domain = existing is null
             ? new MailRelayDomain(
-                Guid.NewGuid(), configurationId, request.CloudflareZoneId, request.SendingDomain, true, request.DkimSelector, reference, now, now,
+                Guid.NewGuid(), configurationId, request.CloudflareZoneId, request.SendingDomain, false, request.DkimSelector, reference, now, now,
                 null, null, null, null, null, null, null, null,
                 MailRelayDnsStatus.Pending, MailRelayDnsStatus.Pending, MailRelayDnsStatus.Pending,
                 MailRelayDmarcPolicy.Monitor, null, now, now)
             : existing with
             {
-                Enabled = true,
                 PreviousDkimSelector = rotatesExistingKey ? existing.CurrentDkimSelector : existing.PreviousDkimSelector,
                 PreviousDkimPrivateKeySecretReference = rotatesExistingKey ? existing.CurrentDkimPrivateKeySecretReference : existing.PreviousDkimPrivateKeySecretReference,
                 PreviousDkimCreatedUtc = rotatesExistingKey ? existing.CurrentDkimCreatedUtc : existing.PreviousDkimCreatedUtc,
@@ -2433,21 +2474,46 @@ public sealed partial class MailRelayProvisioningService(
         .SelectMany(value => value.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         .FirstOrDefault() ?? "No diagnostic output was returned.";
 
-    private static MailRelaySetupChange BuildAddressChange(IReadOnlyList<CloudflareDnsRecord> records, string hostname, string ip)
+    private static MailRelaySetupChange BuildAddressChange(
+        IReadOnlyList<CloudflareDnsRecord> records,
+        string hostname,
+        string ip,
+        bool existingRecordIsManaged)
     {
-        var sameName = records.Where(item => item.Name.Equals(hostname, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var sameName = records
+            .Where(item => item.Name.TrimEnd('.').Equals(hostname.TrimEnd('.'), StringComparison.OrdinalIgnoreCase))
+            .ToArray();
         if (sameName.Any(item => item.Type.Equals("CNAME", StringComparison.OrdinalIgnoreCase)))
         {
-            return new("Relay hostname", "A", hostname, ip, MailRelaySetupChangeKind.Blocked, $"{hostname} already has a CNAME. Remove or rename it before installing Mail Relay.");
+            return new("Relay hostname", "A", hostname, ip, MailRelaySetupChangeKind.Blocked, $"{hostname} is already used by a CNAME. Choose an unused relay hostname; LMS will not replace it.");
         }
-        var existing = sameName.FirstOrDefault(item => item.Type.Equals("A", StringComparison.OrdinalIgnoreCase));
+        if (sameName.Any(item => item.Type.Equals("AAAA", StringComparison.OrdinalIgnoreCase)))
+        {
+            return new("Relay hostname", "A", hostname, ip, MailRelaySetupChangeKind.Blocked, $"{hostname} already has an IPv6 address. Choose an unused relay hostname so SMTP clients cannot reach a different server over IPv6.");
+        }
+        var addressRecords = sameName.Where(item => item.Type.Equals("A", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (addressRecords.Length > 1)
+        {
+            return new("Relay hostname", "A", hostname, ip, MailRelaySetupChangeKind.Blocked, $"{hostname} already has multiple A records. Choose an unused relay hostname; LMS will not guess which record it may own.");
+        }
+        var existing = addressRecords.SingleOrDefault();
         if (existing is null)
         {
             return new("Relay hostname", "A", hostname, ip, MailRelaySetupChangeKind.Create, "Create a DNS-only A record. Cloudflare proxying will be off.");
         }
+        if (!existingRecordIsManaged)
+        {
+            return new(
+                "Relay hostname",
+                "A",
+                hostname,
+                ip,
+                MailRelaySetupChangeKind.Blocked,
+                $"{hostname} already has an A record pointing to {existing.Content}. LMS did not create it and will not replace or reuse it. Choose an unused relay hostname.");
+        }
         return existing.Content == ip && !existing.Proxied
-            ? new("Relay hostname", "A", hostname, ip, MailRelaySetupChangeKind.Keep, "The existing DNS-only A record is already correct.")
-            : new("Relay hostname", "A", hostname, ip, MailRelaySetupChangeKind.Update, $"Replace {existing.Content} and force Cloudflare proxying off.");
+            ? new("Relay hostname", "A", hostname, ip, MailRelaySetupChangeKind.Keep, "The LMS-managed DNS-only A record is already correct.")
+            : new("Relay hostname", "A", hostname, ip, MailRelaySetupChangeKind.Update, $"Update the LMS-managed record from {existing.Content} and force Cloudflare proxying off.");
     }
 
     private static MailRelaySetupChange BuildSpfChange(string domain, SpfAnalysis analysis)
