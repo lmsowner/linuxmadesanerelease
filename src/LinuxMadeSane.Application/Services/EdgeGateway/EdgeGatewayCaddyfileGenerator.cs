@@ -34,6 +34,15 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
 
         builder.AppendLine("    encode zstd gzip");
         builder.AppendLine();
+        // Only the local cloudflared connector may supply Cloudflare's client address.
+        // Direct visitors cannot select their source IP using forwarded headers.
+        builder.AppendLine("    vars lms_edge_client_ip {remote_host}");
+        builder.AppendLine("    @lms_cloudflare_client {");
+        builder.AppendLine("        remote_ip 127.0.0.1/32 ::1/128");
+        builder.AppendLine("        header_regexp lms_cloudflare_ip CF-Connecting-IP ^[0-9a-fA-F:.]+$");
+        builder.AppendLine("    }");
+        builder.AppendLine("    vars @lms_cloudflare_client lms_edge_client_ip {http.request.header.CF-Connecting-IP}");
+        builder.AppendLine();
         builder.AppendLine($"    import {RemoteLmsRelayImportPath}");
         builder.AppendLine();
 
@@ -114,6 +123,9 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
                 builder.AppendLine($"        forward_auth 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
                 builder.AppendLine("            uri /edge-auth/check");
                 builder.AppendLine("            header_up Cookie {http.request.header.Cookie}");
+                // ForwardedHeaders consumes the final local hop. The client address remains
+                // available to the route allow-list while the auth caller remains loopback.
+                builder.AppendLine("            header_up X-Forwarded-For \"{vars.lms_edge_client_ip}, 127.0.0.1\"");
                 builder.AppendLine("            header_up X-Forwarded-Proto https");
                 builder.AppendLine("            header_up X-Forwarded-Host {host}");
                 builder.AppendLine("            header_up X-Forwarded-Uri {uri}");

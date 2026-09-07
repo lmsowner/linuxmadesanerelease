@@ -22,6 +22,7 @@
 @inject IFirewallManagementService FirewallService
 @inject NavigationManager Navigation
 @inject IHttpContextAccessor HttpContextAccessor
+@inject IJSRuntime JS
 
 <PageTitle>LMS Security | Linux Made Sane</PageTitle>
 
@@ -560,10 +561,19 @@
                                                 </UiSelectField>
                                             </div>
                                             <div class="field-row">
-                                                <UiTextField @bind-Value="firewallEditor.Source"
-                                                             Label="Allow from"
-                                                             Placeholder="any"
-                                                             Helper="Client IP or CIDR. Blank means any source." />
+                                                <div class="firewall-source-field">
+                                                    <UiTextField @bind-Value="firewallEditor.Source"
+                                                                 Label="Allow from"
+                                                                 Placeholder="any"
+                                                                 Helper="Client IP or CIDR. Blank means any source." />
+                                                    <div class="toolbar-row">
+                                                        <UiCommandButton Label="Allow my current IP"
+                                                                         Glyph="UiIconGlyph.Plus"
+                                                                         Disabled="@(!CanUseCurrentFirewallClientIp)"
+                                                                         OnClick="@(() => UseCurrentFirewallClientIp(firewallEditor))" />
+                                                    </div>
+                                                    <span class="meta-text">@CurrentFirewallClientIpHint</span>
+                                                </div>
                                                 <UiTextField @bind-Value="firewallEditor.Destination"
                                                              Label="Allow to"
                                                              Placeholder="any"
@@ -1181,10 +1191,19 @@
                 </UiSelectField>
             </div>
             <div class="field-row">
-                <UiTextField @bind-Value="firewallEditEditor.Source"
-                             Label="Allow from"
-                             Placeholder="any"
-                             Helper="Client IP or CIDR. Blank means any source." />
+                <div class="firewall-source-field">
+                    <UiTextField @bind-Value="firewallEditEditor.Source"
+                                 Label="Allow from"
+                                 Placeholder="any"
+                                 Helper="Client IP or CIDR. Blank means any source." />
+                    <div class="toolbar-row">
+                        <UiCommandButton Label="Allow my current IP"
+                                         Glyph="UiIconGlyph.Plus"
+                                         Disabled="@(!CanUseCurrentFirewallClientIp)"
+                                         OnClick="@(() => UseCurrentFirewallClientIp(firewallEditEditor))" />
+                    </div>
+                    <span class="meta-text">@CurrentFirewallClientIpHint</span>
+                </div>
                 <UiTextField @bind-Value="firewallEditEditor.Destination"
                              Label="Allow to"
                              Placeholder="any"
@@ -1354,6 +1373,9 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private bool isLoadingFirewall;
     private bool isChangingFirewall;
     private bool firewallAutoRollbackEnabled = true;
+    private bool hasCheckedFirewallBrowserIp;
+    private bool isCheckingFirewallBrowserIp;
+    private string? firewallBrowserIp;
     private string? networkMessage;
     private bool networkMessageIsError;
     private string? userMessage;
@@ -1447,6 +1469,39 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
 
     private HttpContext? ResolveHttpContext() =>
         HttpContext ?? HttpContextAccessor.HttpContext;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!isLoaded || activeTab != FirewallTabValue || !HasAdministratorAccess || hasCheckedFirewallBrowserIp)
+        {
+            return;
+        }
+
+        hasCheckedFirewallBrowserIp = true;
+        var requestHost = new Uri(Navigation.Uri).Host;
+        if (!FirewallClientIpResolver.ShouldCheckCloudflare(requestHost))
+        {
+            return;
+        }
+
+        isCheckingFirewallBrowserIp = true;
+        StateHasChanged();
+        try
+        {
+            await using var module = await JS.InvokeAsync<IJSObjectReference>("import", "./scripts/firewall-client-ip.js");
+            var address = await module.InvokeAsync<string?>("getCloudflareClientIp");
+            firewallBrowserIp = FirewallClientIpResolver.NormalizeBrowserAddress(address);
+        }
+        catch (JSException)
+        {
+            // Direct origins and blocked trace requests fall back to the connection address.
+        }
+        finally
+        {
+            isCheckingFirewallBrowserIp = false;
+            StateHasChanged();
+        }
+    }
 
     private static bool IsKnownSecurityTab(string? value) => value is
         TrustedNetworksTabValue or
@@ -1616,6 +1671,31 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         if (!firewallMessageIsError)
         {
             firewallEditor = new FirewallAllowRuleEditor();
+        }
+    }
+
+    private string? CurrentFirewallClientIp => FirewallClientIpResolver.Resolve(
+        currentAccess.RemoteAddress,
+        new Uri(Navigation.Uri).Host,
+        firewallBrowserIp);
+
+    private bool CanUseCurrentFirewallClientIp =>
+        HasAdministratorAccess && !isChangingFirewall && !IsAnySecurityTrialActive &&
+        !isCheckingFirewallBrowserIp && CurrentFirewallClientIp is not null;
+
+    private string CurrentFirewallClientIpHint => isCheckingFirewallBrowserIp
+        ? "Detecting your browser's IP…"
+        : firewallBrowserIp is { } browserIp
+            ? $"Your public IP: {browserIp}. This UFW rule applies to direct connections; access through Cloudflare is controlled at Cloudflare or Edge Gateway."
+            : CurrentFirewallClientIp is { } address
+                ? $"Your connection: {address}. Applies when you save this rule."
+                : "Your browser's IP could not be detected through the local proxy. Enter the client IP manually.";
+
+    private void UseCurrentFirewallClientIp(FirewallAllowRuleEditor editor)
+    {
+        if (CanUseCurrentFirewallClientIp && CurrentFirewallClientIp is { } address)
+        {
+            editor.Source = address;
         }
     }
 

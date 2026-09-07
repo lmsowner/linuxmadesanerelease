@@ -1,0 +1,81 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@inject IHttpContextAccessor HttpContextAccessor
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+@implements IDisposable
+
+<div class="current-client-ip">
+    <div class="toolbar-row">
+        <UiCommandButton Label="Allow my current IP"
+                         Glyph="UiIconGlyph.Plus"
+                         Disabled="@(Disabled || isDetecting || currentIp is null)"
+                         OnClick="SelectCurrentIpAsync" />
+    </div>
+    <span class="meta-text" role="status">@Hint</span>
+</div>
+
+@code {
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public EventCallback<string> OnSelected { get; set; }
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+
+    private string? connectionIp;
+    private string? currentIp;
+    private bool isDetecting = true;
+    private bool disposed;
+
+    private string Hint => isDetecting
+        ? "Detecting your browser's IP…"
+        : currentIp is { } address
+            ? $"Your current IP: {address}. Adds it to the list; save the service to apply."
+            : "Your browser's IP could not be detected. Enter the client IP manually.";
+
+    protected override void OnInitialized()
+    {
+        var context = HttpContext ?? HttpContextAccessor.HttpContext;
+        connectionIp = context?.Connection.RemoteIpAddress?.ToString();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        var requestHost = new Uri(Navigation.Uri).Host;
+        string? browserIp = null;
+        try
+        {
+            if (FirewallClientIpResolver.ShouldCheckCloudflare(requestHost))
+            {
+                await using var module = await JS.InvokeAsync<IJSObjectReference>("import", "./scripts/firewall-client-ip.js");
+                browserIp = await module.InvokeAsync<string?>("getCloudflareClientIp");
+            }
+        }
+        catch (JSException)
+        {
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            currentIp = FirewallClientIpResolver.Resolve(connectionIp, requestHost, browserIp);
+            isDetecting = false;
+            if (!disposed)
+            {
+                StateHasChanged();
+            }
+        }
+    }
+
+    private Task SelectCurrentIpAsync() =>
+        !Disabled && !isDetecting && currentIp is { } address
+            ? OnSelected.InvokeAsync(address)
+            : Task.CompletedTask;
+
+    public void Dispose() => disposed = true;
+}

@@ -129,6 +129,26 @@ public static partial class EdgeGatewayRouteValidator
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToArray();
 
+    public static string AddKnownIp(string? existingList, string address)
+    {
+        if (!IPAddress.TryParse(address, out var parsed))
+        {
+            throw new InvalidOperationException("The current client IP could not be determined.");
+        }
+
+        parsed = parsed.IsIPv4MappedToIPv6 ? parsed.MapToIPv4() : parsed;
+        var entries = SplitList(existingList);
+        if (entries.Any(entry =>
+                (IPAddress.TryParse(entry, out var existing) &&
+                 (existing.IsIPv4MappedToIPv6 ? existing.MapToIPv4() : existing).Equals(parsed)) ||
+                (IPNetwork.TryParse(entry, out var network) && network.Contains(parsed))))
+        {
+            return existingList ?? string.Empty;
+        }
+
+        return string.Join(Environment.NewLine, entries.Append(parsed.ToString()));
+    }
+
     private static string StripScheme(string? value)
     {
         var normalized = (value ?? string.Empty).Trim();

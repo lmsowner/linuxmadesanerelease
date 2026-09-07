@@ -786,14 +786,32 @@
                             <small>Allow-lists, source filtering and notes</small>
                         </summary>
                         <div class="edge-form-grid edge-form-grid-two">
-                            <UiTextAreaField @bind-Value="routeEditor.AllowKnownIps" Label="Known IP allow-list" Helper="Optional IP/CIDR list. Leave blank to allow any source after auth." Rows="3" Compact="true" />
-                            <UiTextAreaField @bind-Value="routeEditor.AllowedUsers" Label="Allowed users" Helper="Optional comma or line separated email allow-list." Rows="3" Compact="true" />
-                            <UiTextAreaField @bind-Value="routeEditor.AllowedGroups" Label="Allowed groups" Helper="Optional group claims for future SSO/passkey policies." Rows="3" Compact="true" />
+                            <div class="edge-known-ip-field">
+                                <UiTextAreaField @bind-Value="routeEditor.AllowKnownIps" Label="Known IP allow-list" Helper="Optional IP/CIDR list. Leave blank to allow any source after auth." Rows="3" Compact="true" />
+                                <UiCurrentClientIpButton Disabled="@isSavingRoute" OnSelected="AddCurrentIpToAllowList" />
+                            </div>
+                            <UiMultiSelect Label="Allowed users"
+                                           HelperText="Optional LMS users. Leave empty to allow any signed-in LMS user."
+                                           Placeholder="Search LMS users..."
+                                           EmptyText="No enabled LMS users found. Add users in LMS Security."
+                                           Items="@approvalRecipientOptions"
+                                           @bind-Value="routeEditor.AllowedUsers" />
+                            @if (!string.IsNullOrWhiteSpace(routeEditor.AllowedGroups))
+                            {
+                                <UiMultiSelect Label="Existing group restrictions"
+                                               HelperText="These saved restrictions require external group claims. LMS passkey users do not have groups. Remove the selections to use Allowed users on its own."
+                                               EmptyText="LMS has no managed user groups. Select individual LMS users above."
+                                               @bind-Value="routeEditor.AllowedGroups" />
+                            }
                             <UiTextAreaField @bind-Value="routeEditor.Notes" Label="Notes" Rows="3" Compact="true" />
                             <div class="edge-advanced-checkboxes">
                                 <UiCheckboxField @bind-Value="routeEditor.AllowLanOnly" Label="LAN sources only" Helper="Reject public source IPs before auth policy checks." Compact="true" />
                             </div>
                         </div>
+                        @if (routeEditor.AuthMode is EdgeGatewayAuthMode.PassThrough or EdgeGatewayAuthMode.Blocked)
+                        {
+                            <p class="meta-text">IP and user allow-lists apply when the service uses LMS authentication or temporary IP approval. Pass-through delegates access to the backend; blocked services deny every request.</p>
+                        }
                         <div class="edge-proxy-options-grid">
                             <UiCheckboxField @bind-Value="routeEditor.UsePublicHostHeader"
                                              Label="Send public Host header"
@@ -1456,6 +1474,14 @@
         }
 
         showRouteModal = false;
+    }
+
+    private void AddCurrentIpToAllowList(string address)
+    {
+        if (!isSavingRoute)
+        {
+            routeEditor.AllowKnownIps = EdgeGatewayRouteValidator.AddKnownIp(routeEditor.AllowKnownIps, address);
+        }
     }
 
     private async Task OpenHttpServicePickerAsync()
