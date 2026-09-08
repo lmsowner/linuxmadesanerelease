@@ -1,0 +1,74 @@
+@* Copyright (c) Richard D. Kiernan.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@page "/local-workspace/{WorkspaceKind}"
+@layout PopupLayout
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Web.Services
+@inject IManagedHostService HostService
+@inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+@inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
+@inject FileBrowserWorkspaceRegistry FileBrowserWorkspaceRegistry
+@inject NavigationManager NavigationManager
+
+<PageTitle>Opening workspace | Linux Made Sane</PageTitle>
+
+<div class="page-shell">
+    <UiPanel>
+        <p role="status">@status</p>
+    </UiPanel>
+</div>
+
+@code {
+    [Parameter] public string WorkspaceKind { get; set; } = string.Empty;
+
+    private string status = "Opening a new workspace…";
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (WorkspaceKind is not ("terminal" or "files"))
+        {
+            status = "Unknown workspace. Open Terminal or Files from Overview.";
+            return;
+        }
+
+        var host = (await HostService.ListHostsAsync())
+            .FirstOrDefault(host => AiLocalMachine.IsLocalMachine(host.Id));
+        if (host is null)
+        {
+            status = "The local LMS host is unavailable. Check the Hosts page and try again.";
+            return;
+        }
+
+        var workspaceId = TerminalWorkspaceAccessor.GetWorkspaceId();
+        if (WorkspaceKind == "terminal")
+        {
+            var workspace = TerminalWorkspaceRegistry.GetOrCreate(workspaceId);
+            var tab = workspace.AddTab(host, activate: false);
+            workspace.SetDetached(tab.Id, true);
+            NavigationManager.NavigateTo($"/terminal-window/{tab.Id}?autoconnect=true", replace: true);
+        }
+        else
+        {
+            var workspace = FileBrowserWorkspaceRegistry.GetOrCreate(workspaceId);
+            var browser = workspace.CreateDetachedBrowser(new DetachedFileBrowserSnapshot(
+                host.Id,
+                host.DefaultWorkingDirectory,
+                string.Empty,
+                host.Username,
+                null,
+                false,
+                ConnectionProfileSelectionKeys.HostDefault,
+                host.Username,
+                false,
+                false,
+                FileBrowserPreviewDock.Right,
+                520,
+                false));
+            NavigationManager.NavigateTo(
+                $"/file-browser-window/{browser.BrowserId}?workspaceId={Uri.EscapeDataString(workspaceId)}",
+                replace: true);
+        }
+    }
+}

@@ -48,48 +48,58 @@
     </div>
 
     <div class="sidebar-footer">
-        @if (IsAuthenticated)
-        {
-            <div class="sidebar-account">
-                <span class="sidebar-account-chip"
-                      title="@LmsAccountLabel"
-                      aria-label="@LmsAccountLabel">
-                    <span class="sidebar-account-kicker">LMS Account</span>
-                    <span class="sidebar-account-value">@AuthenticatedEmail</span>
-                </span>
+        <div class="sidebar-account" data-lms-account>
+            @if (IsAuthenticated)
+            {
+                <div class="sidebar-account-chip" aria-label="@LmsAccountLabel">
+                    <div class="sidebar-account-details">
+                        <span class="sidebar-account-kicker">LMS Account</span>
+                        <span class="sidebar-account-value" title="@AuthenticatedEmail">@AuthenticatedEmail</span>
+                        <span class="sidebar-account-auth" aria-label="Authentication method: @AuthenticationMethod">@AuthenticationMethod</span>
+                    </div>
+                    <UiIconButton Label="Sign out"
+                                  Glyph="UiIconGlyph.SignOut"
+                                  Class="sidebar-signout-button"
+                                  aria-haspopup="dialog"
+                                  data-account-signout-open />
+                </div>
 
-                <a class="sidebar-passkey-action @PasskeyStateClass"
-                   href="@PasskeySetupHref"
-                   data-enhance-nav="false"
-                   title="@PasskeyActionTitle"
-                   aria-label="@PasskeyActionTitle">
-                    <span class="sidebar-passkey-icon" aria-hidden="true">
-                        <UiGlyphIcon Glyph="UiIconGlyph.Key" />
-                    </span>
-                    <span class="sidebar-passkey-copy">
-                        <strong>@PasskeyActionLabel</strong>
-                        <span>@PasskeyStatusLabel</span>
-                    </span>
-                </a>
+                <dialog class="sidebar-signout-dialog"
+                        data-account-signout-dialog
+                        aria-labelledby="@signOutTitleId"
+                        aria-describedby="@signOutDescriptionId">
+                    <header class="sidebar-signout-heading">
+                        <h2 id="@signOutTitleId">Sign out of LMS?</h2>
+                        <UiIconButton Label="Close sign-out dialog"
+                                      Glyph="UiIconGlyph.Clear"
+                                      data-account-signout-close />
+                    </header>
+                    <p id="@signOutDescriptionId">End your LMS session in this browser.</p>
+                    <p class="sidebar-signout-email">@AuthenticatedEmail</p>
+                    <form method="post" action="/auth/logout" data-enhance="false" class="sidebar-signout-actions">
+                        <UiButton Type="button" Variant="UiButtonVariant.Ghost" data-account-signout-close autofocus>Cancel</UiButton>
+                        <UiCommandButton Label="Sign out" Glyph="UiIconGlyph.SignOut" Type="submit" />
+                    </form>
+                </dialog>
+            }
 
-                <form method="post" action="/auth/logout" class="sidebar-logout-form">
-                    <UiCommandButton Label="Sign out"
-                                     Glyph="UiIconGlyph.SignOut"
-                                     Type="submit"
-                                     Variant="UiButtonVariant.Toolbar" />
-                </form>
+            <div class="sidebar-linux-user" title="Local Linux account on this LMS instance: @LinuxUsername" aria-label="Local Linux user: @LinuxUsername">
+                <span class="sidebar-linux-user-icon" aria-hidden="true"><UiGlyphIcon Glyph="UiIconGlyph.User" /></span>
+                <span class="sidebar-linux-user-label">Linux</span>
+                <strong>@LinuxUsername</strong>
             </div>
-        }
-
+        </div>
     </div>
 </div>
 
 @code {
     [Parameter] public bool IsAuthenticated { get; set; }
     [Parameter] public string AuthenticatedEmail { get; set; } = string.Empty;
-    [Parameter] public int? PasskeyCount { get; set; }
-    [Parameter] public bool SignedInWithPasskey { get; set; }
-    [Parameter] public string PasskeySetupHref { get; set; } = "/auth/setup-passkey?returnUrl=%2F";
+    [Parameter] public string AuthenticationMethod { get; set; } = "Authenticated session";
+    [Parameter] public string LinuxUsername { get; set; } = Environment.UserName;
+
+    private readonly string signOutTitleId = $"lms-signout-title-{Guid.NewGuid():N}";
+    private readonly string signOutDescriptionId = $"lms-signout-description-{Guid.NewGuid():N}";
 
     private static readonly string ProductVersion = LinuxMadeSaneBuildVersion.GetCurrent(typeof(Program).Assembly);
     private static string VersionLabel => ProductVersion.Equals("dev", StringComparison.OrdinalIgnoreCase)
@@ -100,45 +110,11 @@
         ? "Signed in LMS account"
         : $"LMS Account: {AuthenticatedEmail}";
 
-    private string PasskeyActionLabel => SignedInWithPasskey
-        ? "Passkey in use"
-        : PasskeyCount > 0
-            ? "Passkey ready"
-            : PasskeyCount == 0
-                ? "Set up passkey"
-                : "Passkeys";
-
-    private string PasskeyStatusLabel => SignedInWithPasskey
-        ? BuildConfiguredPasskeyLabel("Current sign-in")
-        : PasskeyCount > 0
-            ? BuildConfiguredPasskeyLabel("Available for sign-in")
-            : PasskeyCount == 0
-                ? "Safer sign-in available"
-                : "Check setup status";
-
-    private string PasskeyActionTitle => SignedInWithPasskey
-        ? "This session used a passkey. Open passkey setup to add another device."
-        : PasskeyCount > 0
-            ? "A passkey is configured. Open passkey setup to add another device."
-            : "No passkey is configured. Set up a safer passkey sign-in.";
-
-    private string PasskeyStateClass => SignedInWithPasskey
-        ? "in-use"
-        : PasskeyCount > 0
-            ? "configured"
-            : "missing";
-
-    private string BuildConfiguredPasskeyLabel(string prefix) =>
-        PasskeyCount is > 1
-            ? $"{prefix} · {PasskeyCount} configured"
-            : $"{prefix} · 1 configured";
-
     private static readonly IReadOnlyList<NavItem> NavItems =
     [
-        new("/", "Overview", UiIconName.Overview, NavLinkMatch.All),
-        new("/system-info", "System Info", UiIconName.SystemInfo),
-        new("/storage", "Storage", UiIconName.Storage),
+        new("/", "Overview", UiIconName.Overview, NavLinkMatch.All, AdditionalActivePathPrefixes: ["/system-info", "/system-analysis"]),
         new("/hosts", "Hosts", UiIconName.Hosts),
+        new("/storage", "Storage", UiIconName.Storage),
         new("/integrations", "Integrations", UiIconName.Integrations),
         new("/edge-gateway", "Edge Gateway", UiIconName.Integrations),
         new("/mail-relay", "Mail Relay", UiIconName.MailRelay),

@@ -8,6 +8,9 @@ namespace LinuxMadeSane.Web.Services;
 public sealed class ApplicationUpdateHostedService(
     ApplicationUpdateService updateService,
     IOptionsMonitor<ApplicationUpdateOptions> optionsMonitor,
+    IConfiguration configuration,
+    IHostEnvironment environment,
+    IHostApplicationLifetime applicationLifetime,
     ILogger<ApplicationUpdateHostedService> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -28,6 +31,20 @@ public sealed class ApplicationUpdateHostedService(
 
             try
             {
+                if (applicationLifetime.ApplicationStarted.IsCancellationRequested &&
+                    (options.Edition.Equals("community", StringComparison.OrdinalIgnoreCase) ||
+                     options.Edition.Equals("ce", StringComparison.OrdinalIgnoreCase)))
+                {
+                    try
+                    {
+                        CommunityReleaseRetention.Trim(AppContext.BaseDirectory, environment.ContentRootPath, configuration, logger);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "CE release cleanup failed; it will be retried at the next update check.");
+                    }
+                }
+
                 if (options.Enabled)
                 {
                     var status = await updateService.CheckForUpdatesAsync(stoppingToken);

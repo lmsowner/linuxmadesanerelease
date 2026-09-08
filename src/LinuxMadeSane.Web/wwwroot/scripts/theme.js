@@ -895,6 +895,42 @@ window.lmsLayout = (() => {
     };
 })();
 
+// Native dialogs stay above the sidebar's clipping and work on server-rendered pages.
+(() => {
+    document.addEventListener("click", event => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+
+        const opener = target.closest("[data-account-signout-open]");
+        if (opener) {
+            const dialog = opener.closest("[data-lms-account]")?.querySelector("[data-account-signout-dialog]");
+            if (dialog instanceof HTMLDialogElement && !dialog.open) {
+                event.preventDefault();
+                dialog.showModal();
+            }
+            return;
+        }
+
+        const closer = target.closest("[data-account-signout-close]");
+        if (closer) {
+            const dialog = closer.closest("[data-account-signout-dialog]");
+            if (dialog instanceof HTMLDialogElement) {
+                event.preventDefault();
+                dialog.close();
+            }
+            return;
+        }
+
+        if (target instanceof HTMLDialogElement && target.matches("[data-account-signout-dialog]")) {
+            const bounds = target.getBoundingClientRect();
+            if (event.clientX < bounds.left || event.clientX > bounds.right ||
+                event.clientY < bounds.top || event.clientY > bounds.bottom) {
+                target.close();
+            }
+        }
+    });
+})();
+
 window.lmsAbout = (() => {
     const modalSelector = "[data-about-splash]";
     const openSelector = "[data-about-open]";

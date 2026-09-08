@@ -72,6 +72,7 @@ install -m 0755 \
   "$TOOLS_OUTPUT_DIR/linux-made-sane-desktop-helper-launcher"
 
 printf 'ce\n' > "$PACKAGE_ROOT/edition.txt"
+printf 'ce\n' > "$PACKAGE_ROOT/app/edition.txt"
 printf '%s\n' "$APP_VERSION" > "$PACKAGE_ROOT/version.txt"
 printf '%s\n' "$APP_VERSION" > "$PACKAGE_ROOT/app/version.txt"
 lms_create_tarball "$PACKAGE_ROOT" "$PACKAGE_TARBALL"

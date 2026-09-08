@@ -5,6 +5,9 @@
 @page "/system-analysis"
 @rendermode InteractiveServer
 @implements IAsyncDisposable
+@using System.Net
+@using System.Net.NetworkInformation
+@using System.Net.Sockets
 @using LinuxMadeSane.Application.Contracts.SystemInfo
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Abstractions
@@ -15,29 +18,38 @@
 @inject IConfigurationSummaryService ConfigurationSummaryService
 @inject IJSRuntime JSRuntime
 
-<PageTitle>System Info | Linux Made Sane</PageTitle>
+<PageTitle>@(IsOverview ? "Overview" : "System Info") | Linux Made Sane</PageTitle>
 
 <div class="page-shell system-analysis-page">
-    <UiHeroPanel Eyebrow="Current LMS host"
-                 Title="System Info"
-                 Description="Live host information plus a concise view of the local services and LMS modules configured on this server."
+    <UiHeroPanel Eyebrow="@(IsOverview ? null : "Current LMS host")"
+                 Title="@(IsOverview ? "Overview" : "System Info")"
+                 Description="@(IsOverview ? null : "Live host information plus a concise view of the local services and LMS modules configured on this server.")"
                  Compact="true">
+        <ChildContent>
+            @if (IsOverview)
+            {
+                <p class="overview-instance-meta">@currentInstanceLabel</p>
+            }
+        </ChildContent>
         <Actions>
-            <UiCommandButton Label="Clean disk"
-                             Glyph="UiIconGlyph.Delete"
-                             Variant="UiButtonVariant.Ghost"
-                             Disabled="@isMaintenanceBusy"
-                             OnClick="OpenDiskCleanupDialog" />
-            <UiCommandButton Label="Reboot server"
-                             Glyph="UiIconGlyph.Restart"
-                             Variant="UiButtonVariant.Danger"
-                             Disabled="@isMaintenanceBusy"
-                             OnClick="OpenRebootDialog" />
-            <UiCommandButton Label="Refresh now"
-                             Glyph="UiIconGlyph.Refresh"
-                             Variant="UiButtonVariant.Ghost"
-                             Disabled="@(isRefreshing || isConfigurationLoading || isMaintenanceBusy)"
-                             OnClick="RefreshNowAsync" />
+            @if (IsOverview)
+            {
+                <div class="overview-workspace-actions">
+                    <UiIconButton Label="Open a new terminal window"
+                                  Glyph="UiIconGlyph.Terminal"
+                                  Href="/local-workspace/terminal"
+                                  Target="_blank"
+                                  Rel="noopener"
+                                  OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+                    <UiIconButton Label="Open a new files window"
+                                  Glyph="UiIconGlyph.Files"
+                                  Href="/local-workspace/files"
+                                  Target="_blank"
+                                  Rel="noopener"
+                                  OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+                    <UiDisplayPreferenceToolbar />
+                </div>
+            }
         </Actions>
     </UiHeroPanel>
 
@@ -500,6 +512,11 @@
                                                          Variant="UiButtonVariant.Ghost"
                                                          Disabled="@isDriveUsageBusy"
                                                          OnClick="RefreshDriveUsageAsync" />
+                                        <UiCommandButton Label="Clean disk"
+                                                         Glyph="UiIconGlyph.Delete"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@isMaintenanceBusy"
+                                                         OnClick="OpenDiskCleanupDialog" />
                                         @if (isDriveUsageBusy)
                                         {
                                             <UiCommandButton Label="Cancel scan"
@@ -733,34 +750,42 @@
     </div>
 </UiModal>
 
-<UiModal IsOpen="@showRebootDialog"
-         Title="Reboot server"
-         Subtitle="Restart the current LMS host immediately."
-         Class="system-analysis-maintenance-modal"
-         CloseOnBackdrop="false"
-         OnClose="CloseRebootDialog">
-    <div class="system-analysis-maintenance-dialog">
-        <p class="callout warning">This disconnects every LMS user, terminal, file operation, and running session on this server. There is no rollback. LMS will be unavailable until Linux finishes rebooting.</p>
-        @if (!string.IsNullOrWhiteSpace(maintenanceDialogError))
-        {
-            <p class="callout error">@maintenanceDialogError</p>
-        }
-        <div class="toolbar-row">
-            <UiCommandButton Label="Cancel"
-                             Glyph="UiIconGlyph.Clear"
-                             Variant="UiButtonVariant.Ghost"
-                             Disabled="@isMaintenanceBusy"
-                             OnClick="CloseRebootDialog" />
-            <UiCommandButton Label="@(isMaintenanceBusy ? "Rebooting..." : "Reboot server")"
-                             Glyph="UiIconGlyph.Restart"
-                             Variant="UiButtonVariant.Danger"
-                             Disabled="@isMaintenanceBusy"
-                             OnClick="ConfirmRebootAsync" />
-        </div>
-    </div>
-</UiModal>
-
 @code {
+    [Parameter] public bool IsOverview { get; set; }
+
+    private readonly string currentInstanceLabel = BuildCurrentInstanceLabel();
+
+    private static string BuildCurrentInstanceLabel()
+    {
+        var hostname = Dns.GetHostName();
+        var address = GetPrimaryLocalAddress();
+        return string.IsNullOrWhiteSpace(address)
+            ? hostname
+            : $"{hostname} - {address}";
+    }
+
+    private static string GetPrimaryLocalAddress()
+    {
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .Where(static networkInterface =>
+                    networkInterface.OperationalStatus == OperationalStatus.Up &&
+                    networkInterface.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                .SelectMany(static networkInterface => networkInterface.GetIPProperties().UnicastAddresses)
+                .Select(static address => address.Address)
+                .Where(static address =>
+                    address.AddressFamily == AddressFamily.InterNetwork &&
+                    !IPAddress.IsLoopback(address))
+                .Select(static address => address.ToString())
+                .FirstOrDefault() ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
     private LocalSystemMonitorSnapshot? snapshot;
     private LmsConfigurationSummarySnapshot? configurationSnapshot;
     private CancellationTokenSource? pollingCancellation;
@@ -789,7 +814,6 @@
     private bool isMaintenanceBusy;
     private bool maintenanceMessageIsError;
     private bool showDiskCleanupDialog;
-    private bool showRebootDialog;
     private bool isDisposed;
     private long driveUsageScanId;
 
@@ -819,18 +843,6 @@
     {
         await RefreshSnapshotAsync(CancellationToken.None);
         StartPolling();
-    }
-
-    private async Task RefreshNowAsync()
-    {
-        if (activeTab == "configuration")
-        {
-            await RefreshConfigurationAsync();
-        }
-        else
-        {
-            await RefreshSnapshotAsync(CancellationToken.None);
-        }
     }
 
     private async Task RefreshSnapshotAsync(CancellationToken cancellationToken)
@@ -1103,54 +1115,6 @@
             maintenanceMessageIsError = lastDiskCleanupResult.HasFailures;
             showDiskCleanupDialog = false;
             await RefreshSnapshotAsync(CancellationToken.None);
-        }
-        catch (Exception exception)
-        {
-            maintenanceDialogError = exception.Message;
-        }
-        finally
-        {
-            isMaintenanceBusy = false;
-        }
-    }
-
-    private void OpenRebootDialog()
-    {
-        if (isMaintenanceBusy)
-        {
-            return;
-        }
-
-        maintenanceDialogError = string.Empty;
-        showRebootDialog = true;
-    }
-
-    private void CloseRebootDialog()
-    {
-        if (isMaintenanceBusy)
-        {
-            return;
-        }
-
-        showRebootDialog = false;
-        maintenanceDialogError = string.Empty;
-    }
-
-    private async Task ConfirmRebootAsync()
-    {
-        if (isMaintenanceBusy || !showRebootDialog)
-        {
-            return;
-        }
-
-        isMaintenanceBusy = true;
-        maintenanceDialogError = string.Empty;
-        try
-        {
-            await SystemMaintenance.RebootAsync();
-            maintenanceMessage = "The reboot request was accepted. LMS will disconnect while the server restarts.";
-            maintenanceMessageIsError = false;
-            showRebootDialog = false;
         }
         catch (Exception exception)
         {

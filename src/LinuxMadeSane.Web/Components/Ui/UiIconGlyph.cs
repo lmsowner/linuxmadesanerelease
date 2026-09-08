@@ -53,5 +53,7 @@ public enum UiIconGlyph
     Website = 45,
     ListView = 46,
     ThumbnailView = 47,
-    ImageCacheClear = 48
+    ImageCacheClear = 48,
+    Terminal = 49,
+    Files = 50
 }
