@@ -88,6 +88,7 @@ public static class DependencyInjection
         services.AddScoped<IAiProviderSettingsStore, SqliteAiProviderSettingsStore>();
         services.AddScoped<IUserDisplayPreferenceStore, SqliteUserDisplayPreferenceStore>();
         services.AddScoped<IFileBrowserShortcutStore, SqliteFileBrowserShortcutStore>();
+        services.AddScoped<IUserManagedHostCredentialProfileStore, SqliteUserManagedHostCredentialProfileStore>();
         services.AddScoped<ILocalAiEngineStore, SqliteLocalAiEngineStore>();
         services.AddScoped<IAiProviderRegistry, SqliteAiProviderRegistry>();
         services.AddScoped<IAiProviderConnectionTester, AiProviderConnectionTester>();
@@ -118,7 +119,6 @@ public static class DependencyInjection
         services.AddScoped<ITrustedNetworkStore, SqliteTrustedNetworkStore>();
         services.AddScoped<ITrustedNetworkAccessService, TrustedNetworkAccessService>();
         services.AddScoped<IManagedHostStore, SqliteManagedHostStore>();
-        services.AddScoped<IUserManagedHostCredentialProfileStore, SqliteUserManagedHostCredentialProfileStore>();
         services.AddScoped<IManagedHostHealthProbe, ManagedHostHealthProbe>();
         services.AddScoped<ISavedCommandStore, SqliteSavedCommandStore>();
         services.AddScoped<ILinuxShareModuleDataService, SqliteLinuxShareModuleDataService>();
@@ -193,10 +193,15 @@ public static class DependencyInjection
         services.AddScoped<ICommandExecutionService, ManagedHostCommandExecutionService>();
         services.AddScoped<ILocalHttpServiceDiscoveryService, LocalHttpServiceDiscoveryService>();
         services.AddScoped<IManagedHostFileAccessService, ManagedHostFileAccessService>();
+        services.AddScoped<PrivilegedFileBrowsingService>();
         services.AddSingleton<ITerminalSessionService, SshTerminalSessionService>();
         services.AddSingleton<ILocalSystemMonitorService, LocalProcSystemMonitorService>();
         services.AddSingleton<ILocalSystemMaintenanceService, LocalSystemMaintenanceService>();
         services.AddSingleton<ILocalDriveUsageService, LocalDriveUsageService>();
+        services.AddSingleton<TerminalAiCommandDaemon>();
+        services.AddSingleton<ITerminalAiCommandDaemon>(serviceProvider =>
+            serviceProvider.GetRequiredService<TerminalAiCommandDaemon>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<TerminalAiCommandDaemon>());
         services.AddScoped<ILocalFileBrowsingService, LocalFileBrowsingService>();
         services.AddScoped<ISftpFileBrowsingService, SshSftpFileBrowsingService>();
         return services;

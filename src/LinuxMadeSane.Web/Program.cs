@@ -55,6 +55,7 @@ public class Program
         builder.Services.AddCascadingAuthenticationState();
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddMemoryCache();
+        builder.Services.AddRequiredComponentServices(builder.Configuration, builder.Environment.ContentRootPath);
         builder.Services.Configure<ForwardedHeadersOptions>(options =>
         {
             options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
@@ -1160,6 +1161,7 @@ public class Program
     private static async Task SmokeStartupAsync(IServiceProvider services)
     {
         using var scope = services.CreateScope();
+        ComponentInjectionValidator.Validate(scope.ServiceProvider, typeof(App).Assembly);
         var dbContext = scope.ServiceProvider.GetRequiredService<LinuxMadeSaneDbContext>();
         var dataSource = dbContext.Database.GetDbConnection().DataSource;
 
