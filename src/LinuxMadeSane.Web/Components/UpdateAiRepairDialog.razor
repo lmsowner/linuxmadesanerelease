@@ -2,6 +2,7 @@
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @implements IAsyncDisposable
+@using LinuxMadeSane.Application.Contracts.Updates
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Enums
@@ -53,6 +54,12 @@
 
     [Parameter]
     public IReadOnlyList<string> FailureLog { get; set; } = [];
+
+    [Parameter]
+    public IReadOnlyList<HostUpgradeablePackage> PendingPackages { get; set; } = [];
+
+    [Parameter]
+    public bool NeedsAttention { get; set; }
 
     [Parameter]
     public EventCallback OnClose { get; set; }
@@ -154,23 +161,8 @@
         }
     }
 
-    private string BuildRepairPrompt()
-    {
-        var recentLog = string.Join(Environment.NewLine, FailureLog.TakeLast(80));
-        return $"""
-Repair the package update failure on this LMS host. Investigate the cause, make only the changes needed to restore package updates, and verify that APT metadata refresh and the upgradeable-package check complete successfully. Do not install ordinary pending package upgrades unless they are required to repair package management. Explain the final result when verification is complete.
-
-An LMS package operation may still be running. Inspect its current state and recent log first. Do not start another APT or dpkg transaction concurrently; wait for the active transaction to finish before running repair commands.
-
-LMS update status:
-{FailureSummary}
-
-Recent Host update log:
-```text
-{recentLog}
-```
-""";
-    }
+    private string BuildRepairPrompt() =>
+        PackageUpdateAiPromptBuilder.Build(FailureSummary, FailureLog, PendingPackages, NeedsAttention);
 
     private async Task RunTerminalCommandAsync(string command, CancellationToken cancellationToken)
     {
