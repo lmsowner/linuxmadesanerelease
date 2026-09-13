@@ -120,6 +120,7 @@ stage_edition() {
   local label="$4"
 
   lms_reset_dir "$destination_dir"
+  chmod 2775 "$destination_dir"
 
   local checksum_path="$destination_dir/SHA256SUMS"
   local manifest_path="$destination_dir/release-manifest-${APP_VERSION}.json"
