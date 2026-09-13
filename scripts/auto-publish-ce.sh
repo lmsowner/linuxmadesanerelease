@@ -46,6 +46,7 @@ fi
 git -C "$CHECKOUT_ROOT" checkout --quiet --detach --force "$source_commit"
 git -C "$CHECKOUT_ROOT" clean -ffdqx
 version="$(tr -d '\r\n' < "$CHECKOUT_ROOT/VERSION")"
+private_source_commit="$(tr -d '\r\n' < "$CHECKOUT_ROOT/PRIVATE-SOURCE-COMMIT" 2>/dev/null || true)"
 [[ "$version" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]] ||
   die "invalid VERSION in $source_commit: $version"
 
@@ -57,10 +58,12 @@ live_manifest="$COMMUNITY_RELEASE_ROOT/$version/release-manifest-$version.json"
 live_source_commit="$(
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sourceCommit", ""))' "$live_manifest" 2>/dev/null || true
 )"
-if [[ "$version" == "$latest_version" && "$source_commit" == "$live_source_commit" ]]; then
+if [[ "$version" == "$latest_version" ]] &&
+   { [[ "$source_commit" == "$live_source_commit" ]] ||
+     [[ -n "$private_source_commit" && "$private_source_commit" == "$live_source_commit" ]]; }; then
   printf '%s\n%s\n' "$source_commit" "$version" > "$STATE_FILE.tmp"
   mv "$STATE_FILE.tmp" "$STATE_FILE"
-  log "Release $version from $source_commit is already live; state synchronized."
+  log "Release $version for public source $source_commit is already live; state synchronized."
   exit 0
 fi
 if [[ -n "$latest_version" && ( "$version" == "$latest_version" || "$version" < "$latest_version" ) ]]; then
