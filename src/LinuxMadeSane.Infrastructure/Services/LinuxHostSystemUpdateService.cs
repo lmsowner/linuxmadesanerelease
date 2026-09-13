@@ -462,14 +462,15 @@ public sealed partial class LinuxHostSystemUpdateService(
                 false,
                 "Release upgrade tool not installed",
                 "Install ubuntu-release-upgrader-core (or your distro equivalent) to check for a new OS release.",
-                null);
+                null,
+                false);
         }
 
         var text = $"{output}\n{error}";
         var match = NewReleaseRegex().Match(text);
         if (match.Success)
         {
-            var target = match.Groups["release"].Value;
+            var target = match.Groups["release"].Value.Trim();
             return new HostOsReleaseUpgradeInfo(
                 true,
                 true,
@@ -493,7 +494,8 @@ public sealed partial class LinuxHostSystemUpdateService(
             false,
             "Could not determine release upgrade status",
             string.IsNullOrWhiteSpace(text) ? "do-release-upgrade returned no usable output." : text.Trim(),
-            null);
+            null,
+            false);
     }
 
     private async Task<LinuxCommandResult> ApplySecurityUpdatesAsync(CancellationToken cancellationToken)
@@ -918,7 +920,7 @@ public sealed partial class LinuxHostSystemUpdateService(
     private static partial Regex UpgradeablePackageRegex();
 
     [GeneratedRegex(
-        @"New release ['""]?(?<release>[^'""\s]+)['""]? available",
+        @"New release\s+(?:['""](?<release>[^'""\r\n]+)['""]|(?<release>\S+))\s+available",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex NewReleaseRegex();
 }

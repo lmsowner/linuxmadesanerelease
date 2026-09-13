@@ -390,11 +390,20 @@
                                                  Disabled="@(IsHostBusy || !releaseAcknowledged)" />
                             </div>
                         }
-                        else if (hostSnapshot.LastRefreshedAtUtc is not null && hostSnapshot.ReleaseUpgrade.ToolAvailable)
+                        else if (hostSnapshot.LastRefreshedAtUtc is not null &&
+                                 hostSnapshot.ReleaseUpgrade.ToolAvailable &&
+                                 hostSnapshot.ReleaseUpgrade.CheckSucceeded)
                         {
                             <div class="updates-empty">
                                 <strong>No newer distro reported</strong>
                                 <span>LMS asked the OS release upgrader and it did not advertise a newer release for this host.</span>
+                            </div>
+                        }
+                        else if (hostSnapshot.LastRefreshedAtUtc is not null && hostSnapshot.ReleaseUpgrade.ToolAvailable)
+                        {
+                            <div class="updates-empty">
+                                <strong>Release check needs attention</strong>
+                                <span>LMS could not determine whether a newer distro is available. Review the result above.</span>
                             </div>
                         }
                         else if (!hostSnapshot.ReleaseUpgrade.ToolAvailable)
@@ -758,16 +767,20 @@
     private string GetReleaseLabel() =>
         !hostSnapshot.ReleaseUpgrade.ToolAvailable
             ? "Tool missing"
-            : hostSnapshot.ReleaseUpgrade.IsAvailable
-                ? "Upgrade available"
-                : "Current release";
+            : !hostSnapshot.ReleaseUpgrade.CheckSucceeded
+                ? "Check failed"
+                : hostSnapshot.ReleaseUpgrade.IsAvailable
+                    ? "Upgrade available"
+                    : "Current release";
 
     private UiPillTone GetReleaseTone() =>
         !hostSnapshot.ReleaseUpgrade.ToolAvailable
             ? UiPillTone.Neutral
-            : hostSnapshot.ReleaseUpgrade.IsAvailable
-                ? UiPillTone.Warning
-                : UiPillTone.Success;
+            : !hostSnapshot.ReleaseUpgrade.CheckSucceeded
+                ? UiPillTone.Failure
+                : hostSnapshot.ReleaseUpgrade.IsAvailable
+                    ? UiPillTone.Warning
+                    : UiPillTone.Success;
 
     private sealed class ScheduleEditorModel
     {

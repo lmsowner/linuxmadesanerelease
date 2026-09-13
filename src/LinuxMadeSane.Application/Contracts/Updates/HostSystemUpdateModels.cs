@@ -37,7 +37,8 @@ public sealed record HostOsReleaseUpgradeInfo(
     bool IsAvailable,
     string Summary,
     string Detail,
-    string? TargetRelease);
+    string? TargetRelease,
+    bool CheckSucceeded = true);
 
 public sealed record HostSystemUpdateJobStatus(
     HostSystemUpdateJobState State,

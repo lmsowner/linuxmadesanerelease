@@ -392,6 +392,16 @@ public sealed partial class TerminalAiAssistantService(
 
         for (var index = 0; index < lines.Length; index++)
         {
+            if (candidate is not null && HasUnclosedShellQuote(candidate))
+            {
+                // A quoted argument can contain a complete script, such as bash -lc
+                // with one statement per line. Preserve those line breaks and the
+                // text verbatim; normalizing each line changes shell syntax and can
+                // corrupt patterns containing colons.
+                candidate = $"{candidate}\n{lines[index]}";
+                continue;
+            }
+
             var rawLine = lines[index].Trim();
             if (rawLine.StartsWith('#'))
             {
@@ -889,18 +899,17 @@ public sealed partial class TerminalAiAssistantService(
 
     private static bool IsLikelyShellCommand(string command)
     {
-        if (string.IsNullOrWhiteSpace(command) ||
-            command.Contains('\n') ||
-            command.Contains('\r') ||
-            IsMarkdownProseLine(command) ||
-            command.EndsWith(".", StringComparison.Ordinal) ||
-            command.Contains(" should ", StringComparison.OrdinalIgnoreCase) ||
-            command.Contains(" can ", StringComparison.OrdinalIgnoreCase))
+        var commandLead = command.ReplaceLineEndings("\n").Split('\n', 2)[0];
+        if (string.IsNullOrWhiteSpace(commandLead) ||
+            IsMarkdownProseLine(commandLead) ||
+            commandLead.EndsWith(".", StringComparison.Ordinal) ||
+            commandLead.Contains(" should ", StringComparison.OrdinalIgnoreCase) ||
+            commandLead.Contains(" can ", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
-        var tokens = command.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var tokens = commandLead.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var tokenIndex = 0;
         while (tokenIndex < tokens.Length && IsCommandPrefixToken(tokens[tokenIndex]))
         {
@@ -961,9 +970,14 @@ public sealed partial class TerminalAiAssistantService(
             return true;
         }
 
+        return HasUnclosedShellQuote(trimmed);
+    }
+
+    private static bool HasUnclosedShellQuote(string command)
+    {
         var quote = '\0';
         var escaped = false;
-        foreach (var character in trimmed)
+        foreach (var character in command)
         {
             if (escaped)
             {
@@ -993,7 +1007,7 @@ public sealed partial class TerminalAiAssistantService(
             }
         }
 
-        return escaped || quote != '\0';
+        return quote != '\0';
     }
 
     private static bool StartsWithShellContinuation(string command)
