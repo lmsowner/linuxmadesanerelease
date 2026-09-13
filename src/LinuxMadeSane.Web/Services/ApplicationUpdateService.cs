@@ -230,6 +230,19 @@ public sealed class ApplicationUpdateService(
                 ? $"Manifest checked. Latest {edition} version is {latestVersion}, but no {rid} asset was found."
                 : $"Manifest checked. Latest {edition} {rid} asset is {matchingAsset.FileName}.");
         }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Linux Made Sane update check timed out.");
+            SetStatus(current => current with
+            {
+                State = ApplicationUpdateState.Failed,
+                Summary = "Update check timed out.",
+                Detail = "The release manifest did not respond in time. Check the network connection and try again.",
+                LastCheckedAtUtc = DateTimeOffset.UtcNow,
+                ProgressPercent = 100
+            });
+            AppendLog("Update check timed out while reading the release manifest.");
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Linux Made Sane update check failed.");

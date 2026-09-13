@@ -62,7 +62,8 @@ public sealed partial class LinuxHostSystemUpdateService(
                 "Checking for updates…",
                 "Reading package and release information.",
                 10,
-                clearPackages: true);
+                clearPackages: true,
+                clearLog: true);
             AppendLog(refreshMetadata
                 ? "Refreshing APT metadata and upgrade list."
                 : "Refreshing upgrade list without a full metadata pull.");
@@ -701,7 +702,8 @@ public sealed partial class LinuxHostSystemUpdateService(
         string detail,
         int progressPercent,
         DateTimeOffset? startedAtUtc = null,
-        bool clearPackages = false)
+        bool clearPackages = false,
+        bool clearLog = false)
     {
         lock (syncRoot)
         {
@@ -717,7 +719,8 @@ public sealed partial class LinuxHostSystemUpdateService(
                     CompletedAtUtc = state is HostSystemUpdateJobState.Completed or HostSystemUpdateJobState.Failed
                         ? timeProvider.GetUtcNow()
                         : null,
-                    NeedsAttention = state == HostSystemUpdateJobState.Failed
+                    NeedsAttention = state == HostSystemUpdateJobState.Failed,
+                    LogLines = clearLog ? Array.Empty<string>() : snapshot.Job.LogLines
                 }
             };
 
