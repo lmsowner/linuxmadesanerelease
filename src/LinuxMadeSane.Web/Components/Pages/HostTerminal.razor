@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/hosts/{HostId:guid}/terminal"
@@ -709,12 +709,22 @@
 
     private async Task ConnectTabAsync(TerminalTabState tab, CancellationToken cancellationToken = default)
     {
+        if (tab.IsBusy || tab.IsSessionActive)
+        {
+            return;
+        }
+
         tab.RequestConnection();
         await tab.ConnectionGate.WaitAsync(cancellationToken);
         using var operationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         tab.RegisterConnectionOperation(operationCts);
         try
         {
+            if (tab.IsSessionActive)
+            {
+                return;
+            }
+
             await ConnectTabCoreAsync(tab, operationCts.Token);
         }
         finally
@@ -802,7 +812,10 @@
                     string.Empty,
                     0,
                     session.StartedAtUtc,
-                    session.LastActivityUtc);
+                    session.LastActivityUtc)
+                {
+                    Username = session.Username
+                };
             ConnectionSecretStore.Delete(tab.SecretHandle);
             tab.SecretHandle = null;
             tab.ConnectionOptionsOpen = false;

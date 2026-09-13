@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Globalization;
@@ -41,8 +41,9 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
             }
 
             var privilegedSocketOwnership = await ReadPrivilegedSocketOwnershipAsync(cancellationToken);
+            var privilegedProcessIo = await ReadPrivilegedProcessIoAsync(cancellationToken);
             var current = await Task.Run(
-                () => CaptureRawSample(privilegedSocketOwnership),
+                () => CaptureRawSample(privilegedSocketOwnership, privilegedProcessIo),
                 cancellationToken);
             var snapshot = BuildSnapshot(current, previousSample);
             previousSample = current;
@@ -55,7 +56,9 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
         }
     }
 
-    private static RawSample CaptureRawSample(PrivilegedSocketOwnership privilegedSocketOwnership)
+    private static RawSample CaptureRawSample(
+        PrivilegedSocketOwnership privilegedSocketOwnership,
+        IReadOnlyDictionary<int, ProcessIoCounters> privilegedProcessIo)
     {
         if (!OperatingSystem.IsLinux())
         {
@@ -72,7 +75,7 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
             ReadMemoryCounters(),
             ReadRootFileSystem(),
             ReadUptime(),
-            ReadProcesses(users, socketSnapshot.ListeningSockets, privilegedSocketOwnership),
+            ReadProcesses(users, socketSnapshot.ListeningSockets, privilegedSocketOwnership, privilegedProcessIo),
             ReadNetworkInterfaces(),
             ReadDisks(),
             socketSnapshot.TcpEstablishedConnectionCount,
@@ -371,7 +374,8 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
     private static IReadOnlyList<RawProcess> ReadProcesses(
         IReadOnlyDictionary<int, string> users,
         IReadOnlyDictionary<long, LocalProcessListeningPortMetric> listeningSockets,
-        PrivilegedSocketOwnership privilegedSocketOwnership)
+        PrivilegedSocketOwnership privilegedSocketOwnership,
+        IReadOnlyDictionary<int, ProcessIoCounters> privilegedProcessIo)
     {
         var processes = new List<RawProcess>();
         foreach (var directory in Directory.EnumerateDirectories("/proc"))
@@ -400,7 +404,9 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
                 }
 
                 var userId = ReadProcessUserId(directory);
-                var io = ReadProcessIo(directory);
+                var io = privilegedProcessIo.TryGetValue(processId, out var privilegedIo)
+                    ? (privilegedIo.ReadBytes, privilegedIo.WriteBytes)
+                    : ReadProcessIo(directory);
                 var commandLine = ReadProcessCommandLine(directory, name);
                 var processPorts = privilegedSocketOwnership.IsAvailable
                     ? ReadPrivilegedProcessListeningPorts(
@@ -580,6 +586,54 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
                consecutivePrivilegedSocketOwnershipFailures <= PrivilegedSocketOwnershipFailureTolerance
             ? lastSuccessfulPrivilegedSocketOwnership
             : PrivilegedSocketOwnership.Unavailable;
+    }
+
+    private async Task<IReadOnlyDictionary<int, ProcessIoCounters>> ReadPrivilegedProcessIoAsync(
+        CancellationToken cancellationToken)
+    {
+        if (commandRunner is null)
+        {
+            return new Dictionary<int, ProcessIoCounters>();
+        }
+
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "find",
+                [
+                    "/proc", "-ignore_readdir_race", "-regextype", "posix-extended",
+                    "-maxdepth", "2", "-regex", "/proc/[0-9]+/io", "-type", "f",
+                    "-exec", "awk",
+                    "FNR==1 { if (NR>1 && pid != \"\") print pid \"\\t\" read_bytes \"\\t\" write_bytes; pid=FILENAME; sub(\"^/proc/\", \"\", pid); sub(\"/io$\", \"\", pid); read_bytes=\"\"; write_bytes=\"\" } /^(read_bytes|write_bytes):/ { if ($1 == \"read_bytes:\") read_bytes=$2; else write_bytes=$2 } END { if (pid != \"\") print pid \"\\t\" read_bytes \"\\t\" write_bytes }",
+                    "{}", "+"
+                ],
+                RequiresSudo: true,
+                Timeout: TimeSpan.FromSeconds(10),
+                Description: "Read privileged process disk I/O counters"),
+            dryRun: false,
+            cancellationToken);
+
+        return result.ExitCode == 0
+            ? ParsePrivilegedProcessIo(result.StandardOutput)
+            : new Dictionary<int, ProcessIoCounters>();
+    }
+
+    internal static IReadOnlyDictionary<int, ProcessIoCounters> ParsePrivilegedProcessIo(string output)
+    {
+        var result = new Dictionary<int, ProcessIoCounters>();
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var fields = line.Split('\t', StringSplitOptions.TrimEntries);
+            if (fields.Length == 3 &&
+                int.TryParse(fields[0], NumberStyles.None, CultureInfo.InvariantCulture, out var pid) &&
+                long.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var read) &&
+                long.TryParse(fields[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var write) &&
+                pid > 0 && read >= 0 && write >= 0)
+            {
+                result[pid] = new ProcessIoCounters(read, write);
+            }
+        }
+
+        return result;
     }
 
     internal static IReadOnlyDictionary<int, IReadOnlySet<long>> ParsePrivilegedSocketOwnership(string output)
@@ -1049,6 +1103,8 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
             false,
             new Dictionary<int, IReadOnlySet<long>>());
     }
+
+    internal readonly record struct ProcessIoCounters(long ReadBytes, long WriteBytes);
 
     private sealed record ProcessPortReadResult(
         bool IsAccessible,

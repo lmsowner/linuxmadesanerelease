@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Net;
@@ -821,10 +821,11 @@ public sealed class EdgeGatewayService(
         }
 
         var configuration = await cloudflareTunnelService.GetConfigurationAsync(apiToken, account.Id, tunnel.Id, cancellationToken);
-        await cloudflareTunnelService.UpdateConfigurationAsync(
+        await UpdateTunnelConfigurationIfChangedAsync(
             apiToken,
             account.Id,
             tunnel.Id,
+            configuration,
             new CloudflareTunnelConfiguration(MergeWildcardTunnelRoute(configuration.Routes, wildcardHostname, caddyServiceUrl)),
             cancellationToken);
         steps.Add($"Configured tunnel ingress {wildcardHostname} -> {caddyServiceUrl}.");
@@ -1132,10 +1133,11 @@ public sealed class EdgeGatewayService(
             account.Id,
             gatewaySetup.Tunnel.Id,
             cancellationToken);
-        await cloudflareTunnelService.UpdateConfigurationAsync(
+        await UpdateTunnelConfigurationIfChangedAsync(
             apiToken,
             account.Id,
             gatewaySetup.Tunnel.Id,
+            configuration,
             new CloudflareTunnelConfiguration(MergeHostnameTunnelRoute(configuration.Routes, normalizedHostname, ResolveCaddyServiceUrl())),
             cancellationToken);
         steps.Add($"Configured tunnel ingress {normalizedHostname} -> {ResolveCaddyServiceUrl()}.");
@@ -1272,10 +1274,11 @@ public sealed class EdgeGatewayService(
             account.Id,
             gatewaySetup.Tunnel.Id,
             cancellationToken);
-        await cloudflareTunnelService.UpdateConfigurationAsync(
+        await UpdateTunnelConfigurationIfChangedAsync(
             apiToken,
             account.Id,
             gatewaySetup.Tunnel.Id,
+            configuration,
             new CloudflareTunnelConfiguration(MergeHostnameTunnelRoute(configuration.Routes, normalizedHostname, caddyServiceUrl)),
             cancellationToken);
         steps.Add($"Configured tunnel ingress {normalizedHostname} -> {caddyServiceUrl}.");
@@ -2234,10 +2237,11 @@ public sealed class EdgeGatewayService(
         }
 
         var configuration = await cloudflareTunnelService.GetConfigurationAsync(apiToken, account.Id, tunnel.Id, cancellationToken);
-        await cloudflareTunnelService.UpdateConfigurationAsync(
+        await UpdateTunnelConfigurationIfChangedAsync(
             apiToken,
             account.Id,
             tunnel.Id,
+            configuration,
             new CloudflareTunnelConfiguration(MergeWildcardTunnelRoute(configuration.Routes, wildcardHostname, caddyServiceUrl)),
             cancellationToken);
         steps.Add($"Configured tunnel ingress {wildcardHostname} -> {caddyServiceUrl}.");
@@ -2561,17 +2565,19 @@ public sealed class EdgeGatewayService(
     private static IReadOnlyList<CloudflareTunnelRoute> MergeWildcardTunnelRoute(
         IReadOnlyList<CloudflareTunnelRoute> existingRoutes,
         string wildcardHostname,
-        string caddyServiceUrl)
-    {
-        var routes = existingRoutes
-            .Where(route => !string.IsNullOrWhiteSpace(route.Hostname) &&
-                            !route.Hostname.Equals(wildcardHostname, StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        string caddyServiceUrl) =>
+        MergeHostnameTunnelRoute(existingRoutes, wildcardHostname, caddyServiceUrl);
 
-        routes.Add(new CloudflareTunnelRoute(wildcardHostname, caddyServiceUrl, BuildEdgeGatewayOriginRequest(caddyServiceUrl)));
-        routes.Add(new CloudflareTunnelRoute(string.Empty, "http_status:404"));
-        return routes;
-    }
+    private Task UpdateTunnelConfigurationIfChangedAsync(
+        string apiToken,
+        string accountId,
+        string tunnelId,
+        CloudflareTunnelConfiguration current,
+        CloudflareTunnelConfiguration desired,
+        CancellationToken cancellationToken) =>
+        current.Routes.SequenceEqual(desired.Routes)
+            ? Task.CompletedTask
+            : cloudflareTunnelService.UpdateConfigurationAsync(apiToken, accountId, tunnelId, desired, cancellationToken);
 
     private static IReadOnlyList<CloudflareTunnelRoute> RemoveWildcardTunnelRoute(
         IReadOnlyList<CloudflareTunnelRoute> existingRoutes,
@@ -2610,13 +2616,26 @@ public sealed class EdgeGatewayService(
         string hostname,
         string caddyServiceUrl)
     {
-        var routes = existingRoutes
-            .Where(route => !string.IsNullOrWhiteSpace(route.Hostname) &&
-                            !route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        // Ingress uses the first matching rule. Preserve other services' order and
+        // the catch-all, including when saving a change to authentication only.
+        var routes = existingRoutes.ToList();
+        var index = routes.FindIndex(route => route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase));
+        var desired = new CloudflareTunnelRoute(hostname, caddyServiceUrl, BuildEdgeGatewayOriginRequest(caddyServiceUrl));
+        if (index >= 0)
+        {
+            routes[index] = desired with { Hostname = routes[index].Hostname };
+        }
+        else
+        {
+            var fallbackIndex = routes.FindIndex(route => string.IsNullOrWhiteSpace(route.Hostname));
+            routes.Insert(fallbackIndex >= 0 ? fallbackIndex : routes.Count, desired);
+        }
 
-        routes.Add(new CloudflareTunnelRoute(hostname, caddyServiceUrl, BuildEdgeGatewayOriginRequest(caddyServiceUrl)));
-        routes.Add(new CloudflareTunnelRoute(string.Empty, "http_status:404"));
+        if (routes.All(static route => !string.IsNullOrWhiteSpace(route.Hostname)))
+        {
+            routes.Add(new CloudflareTunnelRoute(string.Empty, "http_status:404"));
+        }
+
         return routes;
     }
 

@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.ComponentModel;
@@ -10,12 +10,29 @@ using Microsoft.Extensions.Logging;
 
 namespace LinuxMadeSane.Infrastructure.Services;
 
-public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILinuxCommandRunner
+public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILinuxCommandRunner, IStreamingLinuxCommandRunner
 {
     public async Task<LinuxCommandResult> RunAsync(
         LinuxCommandRequest request,
         bool dryRun,
         CancellationToken cancellationToken = default)
+        => await RunCoreAsync(request, dryRun, null, cancellationToken);
+
+    public async Task<LinuxCommandResult> RunStreamingAsync(
+        LinuxCommandRequest request,
+        bool dryRun,
+        Action<LinuxCommandOutput> onOutput,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(onOutput);
+        return await RunCoreAsync(request, dryRun, onOutput, cancellationToken);
+    }
+
+    private async Task<LinuxCommandResult> RunCoreAsync(
+        LinuxCommandRequest request,
+        bool dryRun,
+        Action<LinuxCommandOutput>? onOutput,
+        CancellationToken cancellationToken)
     {
         var commandText = RenderCommand(request);
         var operationLabel = ResolveOperationLabel(request, commandText);
@@ -50,8 +67,8 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
             process.Start();
 
             var inputTask = WriteStandardInputAsync(process, request.StandardInputBytes, timeoutCts.Token);
-            var stdoutTask = process.StandardOutput.ReadToEndAsync();
-            var stderrTask = process.StandardError.ReadToEndAsync();
+            var stdoutTask = ReadOutputAsync(process.StandardOutput, false, onOutput, timeoutCts.Token);
+            var stderrTask = ReadOutputAsync(process.StandardError, true, onOutput, timeoutCts.Token);
 
             await process.WaitForExitAsync(timeoutCts.Token);
 
@@ -124,6 +141,22 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
         {
             process?.Dispose();
         }
+    }
+
+    private static async Task<string> ReadOutputAsync(
+        StreamReader reader,
+        bool isError,
+        Action<LinuxCommandOutput>? onOutput,
+        CancellationToken cancellationToken)
+    {
+        var output = new StringBuilder();
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            output.AppendLine(line);
+            onOutput?.Invoke(new LinuxCommandOutput(line, isError, DateTimeOffset.UtcNow));
+        }
+
+        return output.ToString();
     }
 
     private static void TryKillProcessTree(Process? process)

@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 namespace LinuxMadeSane.Application.Contracts.Updates;
@@ -46,7 +46,8 @@ public sealed record HostSystemUpdateJobStatus(
     int ProgressPercent,
     IReadOnlyList<string> LogLines,
     DateTimeOffset? StartedAtUtc,
-    DateTimeOffset? CompletedAtUtc);
+    DateTimeOffset? CompletedAtUtc,
+    bool NeedsAttention = false);
 
 public sealed record HostUpdateScheduleSettings(
     bool Enabled,

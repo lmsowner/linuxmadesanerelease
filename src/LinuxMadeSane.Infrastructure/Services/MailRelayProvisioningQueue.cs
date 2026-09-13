@@ -1,10 +1,11 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 using LinuxMadeSane.Application.Contracts.MailRelay;
 using LinuxMadeSane.Application.Interfaces;
+using LinuxMadeSane.Application.Services.EdgeGateway;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -36,6 +37,8 @@ public sealed class MailRelayProvisioningQueue(
                 .FirstOrDefault();
             if (active is not null)
             {
+                if (active.Request != request)
+                    throw new InvalidOperationException($"Mail Relay setup is already running for {active.Request.SendingDomain}. Wait for it to finish before starting another setup.");
                 return Task.FromResult(active);
             }
 
@@ -90,6 +93,12 @@ public sealed class MailRelayProvisioningQueue(
                 var provisioning = scope.ServiceProvider.GetRequiredService<IMailRelayProvisioningService>();
                 var progress = new InlineProgress(update => UpdateProgress(jobId, update));
                 var result = await provisioning.ProvisionAsync(queued.Request, progress, stoppingToken);
+                if (result.Success && queued.Request.ConfigureLmsEmail)
+                {
+                    UpdateProgress(jobId, new("lms-email", "LMS email", MailRelaySetupStepState.Running, "Configuring LMS to send through the local Mail Relay."));
+                    result = await scope.ServiceProvider.GetRequiredService<LmsServerEmailSetupService>()
+                        .ConfigureEmailAsync(queued.Request, result, stoppingToken);
+                }
                 Update(jobId, current => current with
                 {
                     Status = result.Success

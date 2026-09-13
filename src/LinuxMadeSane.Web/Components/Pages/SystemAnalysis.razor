@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/system-info"
@@ -20,7 +20,7 @@
 
 <PageTitle>@(IsOverview ? "Overview" : "System Info") | Linux Made Sane</PageTitle>
 
-<div class="page-shell system-analysis-page">
+<div class="page-shell system-analysis-page @(IsOverview ? "overview-page" : string.Empty)">
     <UiHeroPanel Eyebrow="@(IsOverview ? null : "Current LMS host")"
                  Title="@(IsOverview ? "Overview" : "System Info")"
                  Description="@(IsOverview ? null : "Live host information plus a concise view of the local services and LMS modules configured on this server.")"
@@ -28,13 +28,47 @@
         <ChildContent>
             @if (IsOverview)
             {
-                <p class="overview-instance-meta">@currentInstanceLabel</p>
+                <p class="overview-instance-meta" title="@(snapshot is null ? null : $"{snapshot.OperatingSystem} · kernel {snapshot.KernelVersion}")">@currentInstanceLabel</p>
             }
         </ChildContent>
         <Actions>
-            @if (IsOverview)
-            {
-                <div class="overview-workspace-actions">
+            <div class="overview-workspace-actions">
+                <div class="system-analysis-update-cycle @(activeTab == "configuration" ? "is-inactive" : null)"
+                     aria-hidden="@(activeTab == "configuration" ? "true" : null)"
+                     title="@UpdateCycleStatus">
+                    <input type="range"
+                           min="0"
+                           max="5"
+                           step="1"
+                           @bind:get="pollPresetIndex"
+                           @bind:set="ChangePollPresetAsync"
+                           @bind:event="oninput"
+                           aria-label="Update cycle"
+                           aria-valuetext="@UpdateCycleLabel" />
+                    <div class="system-analysis-update-stops">
+                        <button type="button"
+                                class="@(pollPresetIndex == 0 ? "selected" : null)"
+                                title="Manual refresh"
+                                aria-label="Manual refresh"
+                                aria-pressed="@(pollPresetIndex == 0 ? "true" : "false")"
+                                disabled="@isRefreshing"
+                                @onclick="RefreshManuallyAsync">
+                            <UiGlyphIcon Glyph="UiIconGlyph.Refresh" />
+                        </button>
+                        @for (var index = 1; index < PollIntervalsSeconds.Length; index++)
+                        {
+                            var stop = index;
+                            <button type="button"
+                                    class="@(pollPresetIndex == stop ? "selected" : null)"
+                                    title="@($"Update every {PollIntervalsSeconds[stop]} seconds")"
+                                    aria-label="@($"Update every {PollIntervalsSeconds[stop]} seconds")"
+                                    aria-pressed="@(pollPresetIndex == stop ? "true" : "false")"
+                                    @onclick="@(() => ChangePollPresetAsync(stop))">@(PollIntervalsSeconds[stop])s</button>
+                        }
+                    </div>
+                </div>
+                @if (IsOverview)
+                {
                     <UiIconButton Label="Open a new terminal window"
                                   Glyph="UiIconGlyph.Terminal"
                                   Href="/local-workspace/terminal"
@@ -48,60 +82,10 @@
                                   Rel="noopener"
                                   OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
                     <UiDisplayPreferenceToolbar />
-                </div>
-            }
-        </Actions>
-    </UiHeroPanel>
-
-    @if (activeTab != "configuration")
-    {
-        <section class="surface-card system-analysis-controls" aria-label="Refresh schedule">
-            <div class="system-analysis-host-copy">
-                <strong>@(snapshot?.HostName ?? "Current LMS host")</strong>
-                <span class="meta-text">@(snapshot is null ? "Waiting for first sample" : $"{snapshot.OperatingSystem} · kernel {snapshot.KernelVersion}")</span>
-            </div>
-
-            <UiSelectField TValue="string"
-                           Label="Update schedule"
-                           Value="@pollPreset"
-                           ValueChanged="ChangePollPresetAsync"
-                           ValueExpression="@(() => pollPreset)"
-                           Compact="true"
-                           Class="system-analysis-schedule-select">
-                <option value="1">Live · 1 second</option>
-                <option value="2">Every 2 seconds</option>
-                <option value="5">Every 5 seconds</option>
-                <option value="10">Every 10 seconds</option>
-                <option value="30">Every 30 seconds</option>
-                <option value="custom">Custom</option>
-                <option value="manual">Manual only</option>
-            </UiSelectField>
-
-            @if (pollPreset == "custom")
-            {
-                <div class="system-analysis-custom-interval">
-                    <UiNumberField TValue="int"
-                                   Label="Seconds"
-                                   Value="@customPollSeconds"
-                                   ValueChanged="ChangeCustomIntervalAsync"
-                                   ValueExpression="@(() => customPollSeconds)"
-                                   Min="1"
-                                   Max="300"
-                                   Compact="true" />
-                </div>
-            }
-
-            <div class="system-analysis-sample-status">
-                <UiPill Tone="@(isRefreshing ? UiPillTone.Warning : UiPillTone.Success)">
-                    @(isRefreshing ? "Sampling" : GetScheduleLabel())
-                </UiPill>
-                @if (snapshot is not null)
-                {
-                    <span class="meta-text">Updated @snapshot.CapturedAtUtc.ToLocalTime().ToString("HH:mm:ss") · interval @FormatInterval(snapshot.SampleDurationSeconds)</span>
                 }
             </div>
-        </section>
-    }
+        </Actions>
+    </UiHeroPanel>
 
         @if (!string.IsNullOrWhiteSpace(errorMessage))
         {
@@ -793,8 +777,9 @@
     private Task? pollingTask;
     private readonly SemaphoreSlim refreshGate = new(1, 1);
     private string activeTab = "overview";
-    private string pollPreset = "2";
-    private int customPollSeconds = 15;
+    private static readonly int[] PollIntervalsSeconds = [0, 1, 2, 5, 10, 30];
+    private int pollPresetIndex = 2;
+    private int pollingGeneration;
     private string processFilter = string.Empty;
     private string processOrder = "cpu";
     private string errorMessage = string.Empty;
@@ -876,16 +861,18 @@
         }
     }
 
-    private async Task ChangePollPresetAsync(string value)
+    private async Task ChangePollPresetAsync(int value)
     {
-        pollPreset = value;
+        var nextIndex = Math.Clamp(value, 0, PollIntervalsSeconds.Length - 1);
+        if (pollPresetIndex == nextIndex) return;
+        pollPresetIndex = nextIndex;
         await RestartPollingAsync();
     }
 
-    private async Task ChangeCustomIntervalAsync(int value)
+    private async Task RefreshManuallyAsync()
     {
-        customPollSeconds = Math.Clamp(value, 1, 300);
-        await RestartPollingAsync();
+        await ChangePollPresetAsync(0);
+        await RefreshSnapshotAsync(CancellationToken.None);
     }
 
     private async Task SetActiveTabAsync(string? value)
@@ -1150,6 +1137,7 @@
 
     private async Task RestartPollingAsync()
     {
+        var generation = ++pollingGeneration;
         var previousCancellation = pollingCancellation;
         var previousTask = pollingTask;
         pollingCancellation = null;
@@ -1168,7 +1156,7 @@
         }
 
         previousCancellation?.Dispose();
-        StartPolling();
+        if (generation == pollingGeneration) StartPolling();
     }
 
     private async Task PollAsync(TimeSpan interval, CancellationToken cancellationToken)
@@ -1186,26 +1174,19 @@
         }
     }
 
-    private TimeSpan? GetPollInterval()
-    {
-        if (pollPreset == "manual")
-        {
-            return null;
-        }
+    private TimeSpan? GetPollInterval() => pollPresetIndex == 0
+        ? null
+        : TimeSpan.FromSeconds(PollIntervalsSeconds[pollPresetIndex]);
 
-        var seconds = pollPreset == "custom"
-            ? customPollSeconds
-            : int.TryParse(pollPreset, out var parsed) ? parsed : 2;
-        return TimeSpan.FromSeconds(Math.Clamp(seconds, 1, 300));
-    }
+    private string UpdateCycleLabel => pollPresetIndex == 0
+        ? "Manual updates"
+        : $"Update every {PollIntervalsSeconds[pollPresetIndex]} seconds";
 
-    private string GetScheduleLabel() => pollPreset switch
-    {
-        "manual" => "Manual",
-        "custom" => $"Every {customPollSeconds}s",
-        "1" => "Live · 1s",
-        _ => $"Every {pollPreset}s"
-    };
+    private string UpdateCycleStatus => isRefreshing
+        ? "Sampling…"
+        : snapshot is null
+            ? $"{UpdateCycleLabel} · Waiting for first sample"
+            : $"{UpdateCycleLabel} · Updated {snapshot.CapturedAtUtc.ToLocalTime():HH:mm:ss} · interval {FormatInterval(snapshot.SampleDurationSeconds)}";
 
     private IEnumerable<LocalProcessMetric> GetCpuProcesses(int count) =>
         snapshot?.Processes

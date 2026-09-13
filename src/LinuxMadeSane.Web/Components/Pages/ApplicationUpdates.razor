@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/updates"
@@ -6,8 +6,10 @@
 @implements IAsyncDisposable
 @using LinuxMadeSane.Application.Contracts.Updates
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.Ai
 @inject ApplicationUpdateService LmsUpdateService
 @inject IHostSystemUpdateService HostUpdateService
+@inject IAiThreadService AiThreadService
 
 <PageTitle>Updates | Linux Made Sane</PageTitle>
 
@@ -168,6 +170,39 @@
                         <div class="update-progress-bar" style="@($"width: {HostProgressPercent}%;")"></div>
                     </div>
 
+                    @if (HasAiRepairProvider || hostSnapshot.Job.NeedsAttention)
+                    {
+                        <section class="surface-card updates-ai-repair-offer">
+                            <div>
+                                <p class="eyebrow">Guided repair</p>
+                                <h2>@(hostSnapshot.Job.NeedsAttention ? "Package updates need attention" : "AI Update/Repair")</h2>
+                                <p class="meta-text">
+                                    @if (HasAiRepairProvider)
+                                    {
+                                        <text>Ask @aiRepairProviderLabel to inspect or repair package updates through the same guided agent used in Terminal.</text>
+                                    }
+                                    else
+                                    {
+                                        <text>Review the Host update log, then use Terminal to investigate and repair the package system.</text>
+                                    }
+                                </p>
+                            </div>
+                            <div class="updates-action-row">
+                                @if (HasAiRepairProvider)
+                                {
+                                    <UiCommandButton Label="AI Update/Repair"
+                                                     Glyph="UiIconGlyph.Ai"
+                                                     Variant="UiButtonVariant.PrimaryMuted"
+                                                     OnClick="OpenAiRepairAsync" />
+                                }
+                                <UiCommandButton Label="Open Terminal"
+                                                 Glyph="UiIconGlyph.Terminal"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Href="@LocalTerminalHref" />
+                            </div>
+                        </section>
+                    }
+
                     <section class="surface-card updates-actions-card">
                         <div class="table-header">
                             <div>
@@ -177,6 +212,11 @@
                             </div>
                         </div>
                         <div class="updates-action-row">
+                            <UiCommandButton Label="Repair APT"
+                                             Glyph="UiIconGlyph.Repair"
+                                             Variant="UiButtonVariant.Ghost"
+                                             OnClick="RepairAptAsync"
+                                             Disabled="@IsHostBusy" />
                             <UiCommandButton Label="@(hostSnapshot.SecurityCount > 0 ? $"Install {hostSnapshot.SecurityCount} security" : "Security updates")"
                                              Glyph="UiIconGlyph.Lock"
                                              Variant="UiButtonVariant.PrimaryMuted"
@@ -209,7 +249,14 @@
                             }
                         </div>
 
-                        @if (hostSnapshot.Packages.Count == 0)
+                        @if (hostSnapshot.Job.State == HostSystemUpdateJobState.Refreshing)
+                        {
+                            <div class="updates-empty">
+                                <strong>Checking the current package state…</strong>
+                                <span>The previous package list was cleared. LMS is rebuilding it from APT now.</span>
+                            </div>
+                        }
+                        else if (hostSnapshot.Packages.Count == 0)
                         {
                             <div class="updates-empty">
                                 <strong>Nothing pending</strong>
@@ -430,6 +477,11 @@
     </TabControl>
 </div>
 
+<UpdateAiRepairDialog IsOpen="@isAiRepairOpen"
+                      FailureSummary="@hostSnapshot.Job.Summary"
+                      FailureLog="@hostSnapshot.Job.LogLines"
+                      OnClose="CloseAiRepairAsync" />
+
 @code {
     private static readonly Dictionary<string, object> HourAttributes = new() { ["min"] = 0, ["max"] = 23 };
     private static readonly Dictionary<string, object> MinuteAttributes = new() { ["min"] = 0, ["max"] = 59 };
@@ -444,6 +496,8 @@
     private bool releaseAcknowledged;
     private bool isSavingSchedule;
     private bool hostLoaded;
+    private bool isAiRepairOpen;
+    private string aiRepairProviderLabel = string.Empty;
     private string? scheduleMessage;
 
     private bool IsLmsBusy =>
@@ -458,14 +512,17 @@
 
     private int LmsProgressPercent => Math.Clamp(lmsStatus.ProgressPercent, 0, 100);
     private int HostProgressPercent => Math.Clamp(hostSnapshot.Job.ProgressPercent, 0, 100);
+    private bool HasAiRepairProvider => !string.IsNullOrWhiteSpace(aiRepairProviderLabel);
+    private static string LocalTerminalHref => $"/hosts/{AiLocalMachine.ManagedHostId}/terminal";
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         lmsStatus = LmsUpdateService.GetStatus();
         hostSnapshot = HostUpdateService.GetSnapshot();
         scheduleEditor = ScheduleEditorModel.From(hostSnapshot.Schedule);
         pollingCancellationTokenSource = new CancellationTokenSource();
         _ = PollStatusAsync(pollingCancellationTokenSource.Token);
+        await LoadAiRepairAvailabilityAsync();
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -549,6 +606,53 @@
         _ = HostUpdateService.ApplyPackageUpdatesAsync(mode, shouldReboot, CancellationToken.None);
         RefreshHostStatus();
         return Task.CompletedTask;
+    }
+
+    private Task RepairAptAsync()
+    {
+        _ = HostUpdateService.RepairAptAsync(CancellationToken.None);
+        RefreshHostStatus();
+        return Task.CompletedTask;
+    }
+
+    private Task OpenAiRepairAsync()
+    {
+        if (HasAiRepairProvider)
+        {
+            isAiRepairOpen = true;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task CloseAiRepairAsync()
+    {
+        isAiRepairOpen = false;
+        _ = HostUpdateService.RefreshAsync(refreshMetadata: true, CancellationToken.None);
+        RefreshHostStatus();
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAiRepairAvailabilityAsync()
+    {
+        try
+        {
+            var context = await AiThreadService.GetEditorAsync();
+            var runnableProviders = context.ConfiguredProviders
+                .Where(item =>
+                    item.IsEnabled &&
+                    context.SupportedProviders.FirstOrDefault(definition => definition.ProviderType == item.ProviderType)?.IsRuntimeImplemented != false)
+                .ToArray();
+            var provider = runnableProviders.FirstOrDefault(item =>
+                               item.ProviderKey.Equals(context.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                           ?? runnableProviders.FirstOrDefault(item => item.IsDefault)
+                           ?? runnableProviders.FirstOrDefault();
+            aiRepairProviderLabel = provider?.DisplayName ?? string.Empty;
+        }
+        catch
+        {
+            aiRepairProviderLabel = string.Empty;
+        }
     }
 
     private Task StartReleaseUpgradeAsync()

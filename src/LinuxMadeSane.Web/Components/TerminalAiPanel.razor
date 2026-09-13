@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @implements IAsyncDisposable
@@ -356,6 +356,8 @@
     private string selectedProviderKey = string.Empty;
     private string selectedModelId = string.Empty;
     private Guid? observedTabId;
+    private Guid? observedSessionId;
+    private string observedUsername = string.Empty;
     private bool isDisposed;
     private ManagedHostEditor? publicKeySetupEditor;
     private GeneratedSshKeyPair? publicKeySetupKeyPair;
@@ -399,6 +401,19 @@
     public Task AnalyzeSessionAsync() =>
         SendPromptAsync(TerminalAiPromptMode.Analyze, string.Empty, TerminalAiAccessMode.ReadOnly);
 
+    public async Task StartAgentPromptAsync(string requestText)
+    {
+        if (isBusy || string.IsNullOrWhiteSpace(requestText))
+        {
+            return;
+        }
+
+        Tab.AiAccessMode = TerminalAiAccessMode.Agent;
+        Tab.AiCommandApprovalSessionId = null;
+        promptText = requestText.Trim();
+        await SendCustomPromptAsync();
+    }
+
     public async Task AnalyzeSelectionAsync(string selectionText)
     {
         var selected = selectionText.Trim();
@@ -438,9 +453,10 @@ Selected terminal content:
         }
 
         isRunningAgent = true;
+        var requestTab = Tab;
         var runCts = new CancellationTokenSource();
         agentRunCts = runCts;
-        Tab.RegisterAiOperation(runCts);
+        requestTab.RegisterAiOperation(runCts);
         var cancellationToken = runCts.Token;
         panelInfo = string.Empty;
         panelError = string.Empty;
@@ -517,6 +533,10 @@ Selected terminal content:
                     agentStatus = string.Empty;
                     return;
                 }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
                 catch (Exception exception)
                 {
                     recoveryTurns++;
@@ -545,7 +565,7 @@ Selected terminal content:
 
             agentStatus = $"Stopped after {MaxAgentCommands} commands. Send a follow-up to continue.";
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
             agentStatus = "Stopped.";
         }
@@ -560,7 +580,7 @@ Selected terminal content:
             {
                 agentRunCts = null;
             }
-            Tab.UnregisterAiOperation(runCts);
+            requestTab.UnregisterAiOperation(runCts);
             runCts.Dispose();
             isRunningAgent = false;
             if (!isDisposed)
@@ -605,7 +625,7 @@ Selected terminal content:
         agentStatus = "Waiting for approval.";
         await InvokeAsync(StateHasChanged);
 
-        var allowed = await source.Task;
+        var allowed = await source.Task.WaitAsync(agentRunCts?.Token ?? CancellationToken.None);
 
         if (ReferenceEquals(pendingApprovalSource, source))
         {
@@ -659,6 +679,9 @@ Selected terminal content:
         string requestText,
         TerminalAiAccessMode? accessModeOverride = null)
     {
+        var requestTab = Tab;
+        using var operation = new CancellationTokenSource();
+        requestTab.RegisterAiOperation(operation);
         isSendingPrompt = true;
         panelInfo = string.Empty;
         panelError = string.Empty;
@@ -666,8 +689,12 @@ Selected terminal content:
 
         try
         {
-            await ExecutePromptCoreAsync(mode, requestText, accessModeOverride: accessModeOverride);
+            await ExecutePromptCoreAsync(mode, requestText, accessModeOverride: accessModeOverride, cancellationToken: operation.Token);
             promptText = string.Empty;
+        }
+        catch (OperationCanceledException)
+        {
+            agentStatus = "Stopped because the terminal connection changed.";
         }
         catch (Exception exception)
         {
@@ -675,6 +702,7 @@ Selected terminal content:
         }
         finally
         {
+            requestTab.UnregisterAiOperation(operation);
             isSendingPrompt = false;
             await InvokeAsync(StateHasChanged);
         }
@@ -730,15 +758,19 @@ Selected terminal content:
 
     protected override Task OnParametersSetAsync()
     {
-        if (observedTabId != Tab.Id)
+        if (observedTabId != Tab.Id || observedSessionId != Tab.SessionId || observedUsername != Tab.ConnectedUsername)
         {
             pendingApprovalSource?.TrySetResult(false);
+            pendingApprovalSource = null;
+            pendingApprovalCommand = string.Empty;
             pendingSecureInputSource?.TrySetResult(null);
             pendingSecureInputSource = null;
             pendingSecureCommand = string.Empty;
             secureInputText = string.Empty;
             latestStructuredCommandOutput = string.Empty;
             observedTabId = Tab.Id;
+            observedSessionId = Tab.SessionId;
+            observedUsername = Tab.ConnectedUsername;
             ResetPublicKeySetupState();
         }
 
@@ -753,11 +785,24 @@ Selected terminal content:
         TerminalAiAccessMode? accessModeOverride = null,
         CancellationToken cancellationToken = default)
     {
+        var requestTab = Tab;
+        var requestSessionId = Tab.SessionId;
+        var username = Tab.ConnectedUsername;
         await EnsureProviderContextAsync(cancellationToken);
+        EnsureCurrentTerminalContext(requestTab, requestSessionId, username, cancellationToken);
         SyncTerminalProviderSelection();
 
+        var conversation = new TerminalAiConversationState
+        {
+            ProviderKey = Tab.AiConversation.ProviderKey,
+            ProviderLabel = Tab.AiConversation.ProviderLabel,
+            ModelId = Tab.AiConversation.ModelId,
+            ProviderConversationReference = Tab.AiConversation.ProviderConversationReference,
+            ProviderResponseId = Tab.AiConversation.ProviderResponseId,
+            Entries = Tab.AiConversation.Entries.ToList()
+        };
         var result = await TerminalAiAssistantService.ExecutePromptAsync(
-            Tab.AiConversation,
+            conversation,
             new TerminalAiPromptRequest
             {
                 Mode = mode,
@@ -765,6 +810,7 @@ Selected terminal content:
                 HostId = Tab.HostId,
                 HostName = Tab.HostName,
                 HostAddress = Tab.HostAddress,
+                Username = username,
                 WorkingDirectory = Tab.WorkingDirectory,
                 TerminalOutput = Tab.Snapshot?.Output ?? string.Empty,
                 StructuredCommandOutput = latestStructuredCommandOutput,
@@ -772,6 +818,7 @@ Selected terminal content:
                 AllowInternetResearch = Tab.AllowInternetResearch
             },
             cancellationToken);
+        EnsureCurrentTerminalContext(requestTab, requestSessionId, username, cancellationToken);
         latestStructuredCommandOutput = string.Empty;
 
         panelInfo = result.Sanitization.Applied
@@ -788,6 +835,19 @@ Selected terminal content:
         Tab.AiConversation.Entries.Add(result.AssistantEntry);
         await InvokeAsync(StateHasChanged);
         return result;
+    }
+
+    private void EnsureCurrentTerminalContext(
+        TerminalTabState requestTab,
+        Guid? requestSessionId,
+        string username,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!ReferenceEquals(Tab, requestTab) || Tab.SessionId != requestSessionId || Tab.ConnectedUsername != username)
+        {
+            throw new OperationCanceledException("The terminal connection changed. Send a new request for the connected Linux user.", cancellationToken);
+        }
     }
 
     private async Task EnsureProviderContextAsync(CancellationToken cancellationToken = default)
@@ -1024,6 +1084,7 @@ Selected terminal content:
         CancellationToken cancellationToken = default,
         CommandExecutionInput? standardInput = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!Tab.SessionId.HasValue || !Tab.IsSessionActive)
         {
             throw new TerminalSessionUnavailableException(
@@ -1032,7 +1093,10 @@ Selected terminal content:
                 connectionRecovered: false);
         }
 
-        return await TerminalAiCommandDaemon.ExecuteAsync(
+        var requestTab = Tab;
+        var requestSessionId = Tab.SessionId;
+        var username = Tab.ConnectedUsername;
+        var result = await TerminalAiCommandDaemon.ExecuteAsync(
             new TerminalAiCommandRequest(
                 Guid.NewGuid(),
                 Tab.SessionId.Value,
@@ -1040,6 +1104,8 @@ Selected terminal content:
                 Tab.WorkingDirectory,
                 standardInput),
             cancellationToken: cancellationToken);
+        EnsureCurrentTerminalContext(requestTab, requestSessionId, username, cancellationToken);
+        return result;
     }
 
     private async Task<string?> RequestSecureInputAsync(

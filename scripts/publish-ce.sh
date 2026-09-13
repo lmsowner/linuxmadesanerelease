@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright (c) Richard D. Kiernan.
+# Copyright (c) Linux Made Sane.
 # Licensed under the Business Source License 1.1. See LICENSE for details.
 
 
@@ -11,8 +11,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/deploy-common.sh"
 
 lms_require_command dotnet
+lms_require_command python3
 
 REPO_ROOT="$(lms_repo_root)"
+REQUIRE_PUSHED_GIT_STATE="${REQUIRE_PUSHED_GIT_STATE:-true}"
+if lms_is_truthy "$REQUIRE_PUSHED_GIT_STATE"; then
+  lms_require_clean_pushed_release_source "$REPO_ROOT"
+fi
+SOURCE_COMMIT="${LINUX_MADE_SANE_SOURCE_COMMIT:-$(lms_release_source_commit "$REPO_ROOT")}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 RUNTIME="${RUNTIME:-linux-x64}"
 SELF_CONTAINED="${SELF_CONTAINED:-false}"
@@ -35,6 +41,16 @@ lms_validate_version "$APP_VERSION"
 lms_reset_dir "$PACKAGE_ROOT"
 mkdir -p "$PACKAGE_ROOT/app" "$DESKTOP_HELPER_ARCHIVE_DIR" "$TOOLS_OUTPUT_DIR"
 
+lms_log "Refreshing About package credits from the CE dependency graph"
+for project in Web DesktopHelper; do
+  dotnet restore "$REPO_ROOT/src/LinuxMadeSane.$project/LinuxMadeSane.$project.csproj" -r "$RUNTIME" /p:SelfContained="$SELF_CONTAINED"
+done
+python3 "$REPO_ROOT/scripts/generate-about-credits.py"
+if lms_is_truthy "$REQUIRE_PUSHED_GIT_STATE" &&
+   [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]]; then
+  lms_die "release generation changed tracked source; commit and push the generated files before publishing"
+fi
+
 lms_log "Publishing CE package to $PACKAGE_ROOT/app"
 dotnet publish \
   "$REPO_ROOT/src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj" \
@@ -45,6 +61,9 @@ dotnet publish \
   /p:LinuxMadeSaneVersion="$APP_VERSION" \
   /p:LinuxMadeSaneVersionDate="$VERSION_DATE" \
   /p:LinuxMadeSaneVersionRevision="$VERSION_REVISION" \
+  /p:DebugType=None \
+  /p:DebugSymbols=false \
+  /p:PathMap="$REPO_ROOT=/_/lms" \
   /p:LinuxMadeSaneSkipPluginPackaging=true
 
 if find "$PACKAGE_ROOT/app" -path '*/.playwright' -type d -prune -print -quit | grep -q .; then
@@ -60,7 +79,10 @@ dotnet publish \
   -o "$DESKTOP_HELPER_OUTPUT_DIR" \
   /p:LinuxMadeSaneVersion="$APP_VERSION" \
   /p:LinuxMadeSaneVersionDate="$VERSION_DATE" \
-  /p:LinuxMadeSaneVersionRevision="$VERSION_REVISION"
+  /p:LinuxMadeSaneVersionRevision="$VERSION_REVISION" \
+  /p:DebugType=None \
+  /p:DebugSymbols=false \
+  /p:PathMap="$REPO_ROOT=/_/lms"
 
 tar -czf "$DESKTOP_HELPER_ARCHIVE_DIR/desktop-helper.tar.gz" -C "$DESKTOP_HELPER_OUTPUT_DIR" .
 
@@ -75,6 +97,8 @@ printf 'ce\n' > "$PACKAGE_ROOT/edition.txt"
 printf 'ce\n' > "$PACKAGE_ROOT/app/edition.txt"
 printf '%s\n' "$APP_VERSION" > "$PACKAGE_ROOT/version.txt"
 printf '%s\n' "$APP_VERSION" > "$PACKAGE_ROOT/app/version.txt"
+printf '%s\n' "$SOURCE_COMMIT" > "$PACKAGE_ROOT/source-commit.txt"
+printf '%s\n' "$SOURCE_COMMIT" > "$PACKAGE_ROOT/app/source-commit.txt"
 lms_create_tarball "$PACKAGE_ROOT" "$PACKAGE_TARBALL"
 lms_cleanup_expanded_release_output "$PACKAGE_ROOT" "${OUTPUT_ROOT:+true}"
 

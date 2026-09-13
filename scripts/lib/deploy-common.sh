@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright (c) Richard D. Kiernan.
+# Copyright (c) Linux Made Sane.
 # Licensed under the Business Source License 1.1. See LICENSE for details.
 
 
@@ -23,6 +23,42 @@ lms_die() {
 
 lms_require_command() {
   command -v "$1" >/dev/null 2>&1 || lms_die "required command not found: $1"
+}
+
+lms_release_source_commit() {
+  local repository_root="${1:-$(lms_repo_root)}"
+  git -C "$repository_root" rev-parse HEAD
+}
+
+lms_require_clean_pushed_release_source() {
+  local repository_root="${1:-$(lms_repo_root)}"
+  local remote="${RELEASE_GIT_REMOTE:-origin}"
+  local branch="${RELEASE_GIT_BRANCH:-}"
+  local head_commit
+  local remote_commit
+
+  lms_require_command git
+  git -C "$repository_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    lms_die "release source is not a git working tree: $repository_root"
+
+  if [[ -n "$(git -C "$repository_root" status --porcelain --untracked-files=normal)" ]]; then
+    lms_die "release source has uncommitted or untracked files; commit and push the complete release first"
+  fi
+
+  head_commit="$(git -C "$repository_root" rev-parse HEAD)"
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD || true)"
+  fi
+  [[ -n "$branch" ]] ||
+    lms_die "release source is detached; set RELEASE_GIT_BRANCH to the remote branch containing $head_commit"
+
+  remote_commit="$(git -C "$repository_root" ls-remote --exit-code --heads "$remote" "refs/heads/$branch" | awk 'NR == 1 { print $1 }')" ||
+    lms_die "could not verify $remote/$branch before release"
+  [[ -n "$remote_commit" ]] || lms_die "remote branch was not found: $remote/$branch"
+  [[ "$head_commit" == "$remote_commit" ]] ||
+    lms_die "release commit $head_commit is not the current pushed commit on $remote/$branch ($remote_commit)"
+
+  lms_log "Verified clean pushed release source $head_commit on $remote/$branch"
 }
 
 lms_shell_quote() {
@@ -381,11 +417,70 @@ lms_prepare_local_ssh_runner() {
   chmod 600 "$key_file"
   chmod 644 "$public_key_file"
 
+  lms_configure_local_runner_ssh_pam "$runner_user"
+
   if lms_is_truthy "$enable_local_sudo"; then
     lms_write_local_sudoers "$service_user" "$runner_user"
   fi
 
   lms_log "Prepared localhost SSH runner $runner_user with key-only authentication"
+}
+
+lms_configure_local_runner_ssh_pam() {
+  local runner_user="$1"
+  local pam_source="/etc/pam.d/sshd"
+  local pam_service="linux-made-sane-runner"
+  local pam_target="/etc/pam.d/$pam_service"
+  local ssh_drop_in_dir="/etc/ssh/sshd_config.d"
+  local ssh_drop_in="$ssh_drop_in_dir/95-linux-made-sane-local-runner.conf"
+  local sshd_binary
+
+  if [[ ! "$runner_user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
+    lms_die "Invalid local SSH runner username: $runner_user"
+  fi
+
+  if [[ ! -f "$pam_source" ]]; then
+    lms_log "Skipping local runner PAM optimization because $pam_source is unavailable"
+    return
+  fi
+
+  sshd_binary="$(command -v sshd || true)"
+  if [[ -z "$sshd_binary" ]]; then
+    lms_log "Skipping local runner PAM optimization because sshd is unavailable"
+    return
+  fi
+
+  mkdir -p "$ssh_drop_in_dir"
+  awk '
+    /^[[:space:]]*session[[:space:]].*pam_motd\.so([[:space:]]|$)/ { next }
+    { print }
+  ' "$pam_source" > "$pam_target.tmp"
+  chmod 0644 "$pam_target.tmp"
+  chown root:root "$pam_target.tmp"
+  mv "$pam_target.tmp" "$pam_target"
+
+  cat > "$ssh_drop_in.tmp" <<EOF
+# Managed by Linux Made Sane. Manual edits will be overwritten.
+# The dedicated automation account does not need PAM's interactive MOTD.
+Match all
+Match User $runner_user
+    PAMServiceName $pam_service
+Match all
+EOF
+  chmod 0644 "$ssh_drop_in.tmp"
+  chown root:root "$ssh_drop_in.tmp"
+  mv "$ssh_drop_in.tmp" "$ssh_drop_in"
+
+  "$sshd_binary" -t
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet ssh.service; then
+      systemctl reload ssh.service
+    elif systemctl is-active --quiet sshd.service; then
+      systemctl reload sshd.service
+    fi
+  fi
+
+  lms_log "Configured fast PAM sessions for local SSH runner $runner_user"
 }
 
 lms_write_local_sudoers() {

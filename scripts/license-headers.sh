@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright (c) Richard D. Kiernan.
+# Copyright (c) Linux Made Sane.
 # Licensed under the Business Source License 1.1. See LICENSE for details.
 
 
@@ -58,35 +58,38 @@ done
 
 ROOT="$(cd "$ROOT" && pwd)"
 
-marker_for() {
-  case "$1" in
-    *.razor) printf '%s\n' '@* Copyright (c) Richard D. Kiernan.' ;;
-    *) printf '%s\n' 'Copyright (c) Richard D. Kiernan.' ;;
-  esac
-}
-
 header_for() {
   case "$1" in
     *.cs)
-      printf '// Copyright (c) Richard D. Kiernan.\n// Licensed under the Business Source License 1.1. See %s for details.\n\n' "$LICENSE_FILE"
+      printf '// Copyright (c) Linux Made Sane.\n// Licensed under the Business Source License 1.1. See %s for details.\n\n' "$LICENSE_FILE"
       ;;
     *.razor)
-      printf '@* Copyright (c) Richard D. Kiernan.\n   Licensed under the Business Source License 1.1. See %s for details. *@\n\n' "$LICENSE_FILE"
+      printf '@* Copyright (c) Linux Made Sane.\n   Licensed under the Business Source License 1.1. See %s for details. *@\n\n' "$LICENSE_FILE"
       ;;
     *.css|*.js)
-      printf '/* Copyright (c) Richard D. Kiernan.\n * Licensed under the Business Source License 1.1. See %s for details. */\n\n' "$LICENSE_FILE"
+      printf '/* Copyright (c) Linux Made Sane.\n * Licensed under the Business Source License 1.1. See %s for details. */\n\n' "$LICENSE_FILE"
       ;;
     *.sh)
-      printf '# Copyright (c) Richard D. Kiernan.\n# Licensed under the Business Source License 1.1. See %s for details.\n\n' "$LICENSE_FILE"
+      printf '# Copyright (c) Linux Made Sane.\n# Licensed under the Business Source License 1.1. See %s for details.\n\n' "$LICENSE_FILE"
       ;;
   esac
 }
 
 has_header() {
   local file="$1"
-  local marker
-  marker="$(marker_for "$file")"
-  head -n 12 "$file" | grep -Fq "$marker"
+  head -n 12 "$file" | grep -Fq 'Copyright (c)' &&
+    head -n 12 "$file" | grep -Fq 'Licensed under the Business Source License 1.1.'
+}
+
+normalize_owned_credit() {
+  local file="$1"
+  local temp_file
+  has_header "$file" || return 0
+  temp_file="$(mktemp)"
+  # Canonicalize only an existing LMS header; never rewrite upstream notices.
+  sed -E '1,12s/^((\/\/|\/\*|@\*|#) Copyright \(c\) ).*\.$/\1Linux Made Sane./' "$file" > "$temp_file"
+  chmod --reference="$file" "$temp_file"
+  mv "$temp_file" "$file"
 }
 
 remove_utf8_bom() {
@@ -146,6 +149,7 @@ while IFS= read -r -d '' file; do
   checked=$((checked + 1))
   if [[ "$MODE" == "apply" ]]; then
     remove_utf8_bom "$file"
+    normalize_owned_credit "$file"
   fi
 
   if has_header "$file"; then

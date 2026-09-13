@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Net;
@@ -435,7 +435,7 @@ public sealed class SecuritySettingsService(
             existing.SmtpPasswordSecretReference,
             editor.SmtpPassword,
             "messaging:smtp-password",
-            provider == MessagingEmailProvider.Smtp,
+            provider is MessagingEmailProvider.Smtp or MessagingEmailProvider.MailRelay,
             cancellationToken);
         var graphClientSecretReference = await ResolveMessagingSecretReferenceAsync(
             existing.GraphClientSecretReference,
@@ -452,10 +452,16 @@ public sealed class SecuritySettingsService(
             SenderDisplayName = string.IsNullOrWhiteSpace(editor.SenderDisplayName)
                 ? "Linux Made Sane"
                 : editor.SenderDisplayName.Trim(),
-            SmtpHost = NormalizeOptional(editor.SmtpHost),
-            SmtpPort = Math.Clamp(editor.SmtpPort, 1, 65535),
+            SmtpHost = provider == MessagingEmailProvider.MailRelay
+                ? "127.0.0.1"
+                : NormalizeOptional(editor.SmtpHost),
+            SmtpPort = provider == MessagingEmailProvider.MailRelay
+                ? 587
+                : Math.Clamp(editor.SmtpPort, 1, 65535),
             SmtpUseStartTls = editor.SmtpUseStartTls,
-            SmtpUsername = NormalizeOptional(editor.SmtpUsername),
+            SmtpUsername = provider == MessagingEmailProvider.MailRelay
+                ? (string.IsNullOrWhiteSpace(editor.SmtpUsername) ? "lms-server-email" : editor.SmtpUsername.Trim())
+                : NormalizeOptional(editor.SmtpUsername),
             SmtpPasswordSecretReference = smtpPasswordSecretReference,
             GraphTenantId = NormalizeOptional(editor.GraphTenantId),
             GraphClientId = NormalizeOptional(editor.GraphClientId),
@@ -668,6 +674,16 @@ public sealed class SecuritySettingsService(
             if (string.IsNullOrWhiteSpace(settings.SmtpHost))
             {
                 throw new InvalidOperationException("SMTP host is required.");
+            }
+
+            return;
+        }
+
+        if (settings.Provider == MessagingEmailProvider.MailRelay)
+        {
+            if (string.IsNullOrWhiteSpace(settings.SmtpUsername))
+            {
+                throw new InvalidOperationException("The configured Mail Relay does not have an LMS email client.");
             }
 
             return;

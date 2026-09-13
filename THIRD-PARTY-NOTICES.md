@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Linux Made Sane includes third-party components that are not owned by Richard D. Kiernan and are not licensed under the Linux Made Sane Business Source License. Those components remain under their own upstream licenses.
+Linux Made Sane includes third-party components that are not owned by Linux Made Sane and are not licensed under the Linux Made Sane Business Source License. Those components remain under their own upstream licenses.
 
 This notice is intended to preserve attribution and make redistribution review practical. It does not change the license terms of any third-party component.
 
@@ -18,10 +18,13 @@ The following browser assets are vendored under `src/LinuxMadeSane.Web/wwwroot/l
 | mpegts.js | `wwwroot/lib/media-player/vendor/mpegts.min.js` | `https://github.com/xqq/mpegts.js` | Apache License 2.0. |
 | h265web.js | `wwwroot/lib/media-player/h265web` | `https://github.com/numberwolf/h265web.js` | CYL_Free-1.0 / upstream free usage agreement. This is a non-standard license. Review before using it in a paid redistribution, appliance, or customer-facing hosted product. |
 | GitHub Invertocat mark | `wwwroot/images/brand/github-invertocat-black.svg` | `https://brand.github.com/foundations/logo` | GitHub, the GitHub logo design, Invertocat, Octocat, and related marks are trademarks of GitHub, Inc.; the Octocat design is the exclusive property of GitHub, Inc. Used only as a social link to the public GitHub project. |
-| LinkedIn [in] logo | `wwwroot/images/brand/linkedin-in-bug.png` | `https://brand.linkedin.com/in-logo` | LinkedIn logo copyright LinkedIn Corporation. Used only as a hyperlink to the project owner's LinkedIn profile, subject to LinkedIn Brand and User Agreements. |
 | h265web.js bundled dependencies | `wwwroot/lib/media-player/h265web` | h265web.js distribution | Includes bundled dependencies with embedded MIT and Apache-2.0 notices, including `es6-promise`, `m3u8-parser`, `mpd-parser`, `video.js`, `vtt.js`, `@videojs/http-streaming`, `aes-decrypter`, and `pkcs7`. Preserve embedded notices. |
 
 ## NuGet Packages
+
+The LMS About page includes a searchable inventory of the resolved Community Edition server and Desktop Assistant dependencies, with versions, authors, upstream links, and package license metadata. The snapshot is stored in `src/LinuxMadeSane.Web/Resources/about-packages.json` and refreshed by `scripts/generate-about-credits.py` during CE packaging. Browser library acknowledgments are maintained alongside it in `about-browser-packages.json`, based on the vendored notices; entries marked `Bundled` do not claim a verified upstream version.
+
+After restoring the Web and DesktopHelper projects, run `python3 scripts/generate-about-credits.py` to refresh the NuGet inventory, or add `--check` to verify it. Resolved dependencies include build tooling and platform-specific packages; the actual assets shipped depend on the target platform. This inventory does not replace upstream license texts or embedded notices.
 
 Top-level and runtime package dependencies are resolved by NuGet. The package license metadata should be checked during release preparation with:
 
@@ -40,6 +43,7 @@ Known package license metadata at the time of this review:
 | SSH.NET | MIT |
 | BouncyCastle.Cryptography | MIT |
 | NSec.Cryptography | MIT |
+| libsodium | ISC |
 | SQLitePCLRaw packages | Apache License 2.0 package metadata; SQLite itself is public-domain software where applicable |
 | Avalonia, Avalonia.Desktop, Avalonia.Themes.Fluent | MIT package family used by the Desktop Assistant helper native Linux UI and tray integration |
 | SkiaSharp, HarfBuzzSharp, MicroCom.Runtime, Tmds.DBus.Protocol | MIT package families pulled by Avalonia for Linux rendering, text shaping, native interop, and desktop bus integration |

@@ -2,15 +2,15 @@ Business Source License 1.1
 
 Parameters
 
-Licensor: Richard D. Kiernan
+Licensor: Linux Made Sane
 
-Licensed Work: Linux Made Sane Community Edition. The Licensed Work includes the Community Edition source code, binaries, scripts, documentation, and other files distributed by Richard D. Kiernan as part of Linux Made Sane Community Edition, excluding third-party components that are identified as separately licensed in THIRD-PARTY-NOTICES.md or preserved upstream notices.
+Licensed Work: Linux Made Sane Community Edition. The Licensed Work includes the Community Edition source code, binaries, scripts, documentation, and other files distributed by Linux Made Sane as part of Linux Made Sane Community Edition, excluding third-party components that are identified as separately licensed in THIRD-PARTY-NOTICES.md or preserved upstream notices.
 
 Additional Use Grant:
 
 You may use, copy, modify, and run Linux Made Sane Community Edition for personal use, homelab use, educational use, non-profit use, and internal business use, including use by commercial organisations to manage their own infrastructure.
 
-The Additional Use Grant does not permit the following unless you have a commercial license from Richard D. Kiernan:
+The Additional Use Grant does not permit the following unless you have a commercial license from Linux Made Sane:
 
 - offer LMS as a hosted, managed, SaaS, or cloud service to third parties
 - use LMS to manage infrastructure belonging to third-party customers as an MSP, consultant, outsourcing provider, hosting provider, or service bureau

@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Core.Abstractions;
@@ -91,39 +91,29 @@ public sealed class SshSftpFileBrowsingService(
             privateKey,
             privateKeyPassphrase,
             preferStoredCredentials,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
 
-        var result = await RunBlockingRemoteOperationAsync(
-            () =>
-            {
-                using var client = ConnectShell(host, credentials);
-                using var command = client.CreateCommand(BuildPythonFileSearchCommand(normalizedRequest));
-                command.CommandTimeout = TimeSpan.FromMinutes(10);
-                using var cancellationRegistration = cancellationToken.Register(
-                    static state =>
-                    {
-                        try
-                        {
-                            ((SshClient)state!).Disconnect();
-                        }
-                        catch
-                        {
-                            // Ignore disconnect failures during cancellation.
-                        }
-                    },
-                    client);
+        using var client = sshConnectionFactory.CreateSshClient(host, credentials, ConnectTimeout, KeepAliveInterval);
+        await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
+        using var command = client.CreateCommand(BuildPythonFileSearchCommand(normalizedRequest));
+        command.CommandTimeout = TimeSpan.FromMinutes(10);
+        logger.LogInformation("Executing remote file search for host {HostId} path {Path}", host.Id, normalizedRequest.RootPath);
 
-                logger.LogInformation("Executing remote file search for host {HostId} path {Path}", host.Id, normalizedRequest.RootPath);
-                var asyncResult = command.BeginExecute();
-                var errorTask = ReadRemoteSearchErrorStreamAsync(command, progress, cancellationToken);
-                var output = command.EndExecute(asyncResult);
-                var error = errorTask.GetAwaiter().GetResult();
-                var exitCode = command.ExitStatus ?? -1;
+        // ExecuteAsync signals the remote search to terminate on cancellation.
+        // SSH.NET pipe reads may block synchronously, so run them off the UI thread.
+        var execution = command.ExecuteAsync(cancellationToken);
+        var errorTask = Task.Run(() => ReadRemoteSearchErrorStreamAsync(command, progress, cancellationToken), CancellationToken.None);
+        try
+        {
+            await Task.WhenAll(execution, errorTask).ConfigureAwait(false);
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
 
-                client.Disconnect();
-                return (output, error, exitCode);
-            },
-            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = (output: command.Result, error: await errorTask, exitCode: command.ExitStatus ?? -1);
 
         if (result.exitCode != 0)
         {
@@ -1287,7 +1277,7 @@ public sealed class SshSftpFileBrowsingService(
         $"LMS_SEARCH_ACCESSED_FROM={QuoteShellArgument(request.AccessedFromUtc?.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) ?? string.Empty)} " +
         $"LMS_SEARCH_ACCESSED_TO={QuoteShellArgument(request.AccessedToUtc?.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) ?? string.Empty)} " +
         $"LMS_SEARCH_MAX_RESULTS={QuoteShellArgument(request.MaxResults.ToString(CultureInfo.InvariantCulture))} " +
-        "python3 - <<'PY'\n" +
+        "exec python3 - <<'PY'\n" +
         "import datetime\n" +
         "import fnmatch\n" +
         "import json\n" +

@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text;
@@ -181,6 +181,7 @@ public sealed partial class TerminalAiAssistantService(
         builder.AppendLine("Do not ask the user to paste large terminal output manually back into chat. If fresh evidence is needed, propose the single next command and assume the interface can run it through a private command channel and return its structured result.");
         builder.AppendLine("Do not say 'if you want I can', 'you could try', or similar hedging. State the next fix, check, or command directly.");
         builder.AppendLine("When a command is appropriate, include exactly one fenced bash block. The interface handles execution and feeds the result back automatically.");
+        builder.AppendLine("Keep a here-document's opening command, complete body, and closing delimiter in that same bash block. Preserve script indentation and put the exact closing delimiter on its own line.");
         builder.AppendLine("Keep a pipeline or continued shell command in one complete logical command. If a command fails, inspect its structured exit code, stdout, and stderr, then continue with a corrected command or a focused verification instead of ending the request.");
         builder.AppendLine("If the operator asks for live host state, counts, lists, running processes, services, Docker containers, packages, ports, devices, or current status, do not invent the answer. Return the single command that collects the evidence.");
         builder.AppendLine("If recent terminal output shows permission denied for the previous command, do not repeat the same unprivileged command. Retry the same focused check with sudo when that is the minimum safe next step.");
@@ -221,6 +222,8 @@ public sealed partial class TerminalAiAssistantService(
             builder.AppendLine();
         }
 
+        builder.AppendLine($"Connected Linux user: {(string.IsNullOrWhiteSpace(request.Username) ? "Unknown — confirm with id -un when needed" : request.Username.Trim())}");
+        builder.AppendLine("Commands execute as this connected Linux user, using that account's home directory, environment, and permissions. Do not assume the LMS service account, the host's saved default account, or root. Use $HOME or ~ for this user's home; do not reuse another account's paths. Any sudo command still uses this account's own sudo permissions.");
         builder.AppendLine($"Current directory: {workingDirectory}");
         builder.AppendLine();
         if (!string.IsNullOrWhiteSpace(request.StructuredCommandOutput))
@@ -354,7 +357,8 @@ public sealed partial class TerminalAiAssistantService(
 
     private static string ExtractSuggestedCommand(string assistantText)
     {
-        foreach (Match match in SuggestedCommandPattern().Matches(assistantText))
+        var fencedCommands = SuggestedCommandPattern().Matches(assistantText);
+        foreach (Match match in fencedCommands)
         {
             var command = ExtractLikelyCommand(match.Groups[1].Value);
             if (!string.IsNullOrWhiteSpace(command))
@@ -363,28 +367,33 @@ public sealed partial class TerminalAiAssistantService(
             }
         }
 
-        foreach (var line in assistantText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        // Never rescan a rejected block line by line: that can turn an incomplete
+        // compound command into an executable fragment.
+        if (fencedCommands.Count > 0)
         {
-            var command = NormalizePotentialCommand(line);
-            if (IsLikelyShellCommand(command))
-            {
-                return command;
-            }
+            return string.Empty;
         }
 
         var inlineMatch = InlineBacktickCommandPattern().Match(assistantText);
-        return inlineMatch.Success && IsLikelyShellCommand(inlineMatch.Groups[1].Value.Trim())
-            ? inlineMatch.Groups[1].Value.Trim()
+        return inlineMatch.Success
+            ? ExtractLikelyCommand(inlineMatch.Groups[1].Value)
             : string.Empty;
     }
 
     private static string ExtractLikelyCommand(string value)
     {
         string? candidate = null;
+        var lines = value.ReplaceLineEndings("\n").Split('\n');
 
-        foreach (var line in value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        for (var index = 0; index < lines.Length; index++)
         {
-            var command = NormalizePotentialCommand(line);
+            var rawLine = lines[index].Trim();
+            if (rawLine.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var command = NormalizePotentialCommand(lines[index]);
             if (string.IsNullOrWhiteSpace(command) || command.StartsWith('#'))
             {
                 continue;
@@ -396,19 +405,40 @@ public sealed partial class TerminalAiAssistantService(
                 {
                     candidate = command;
                 }
-
-                continue;
             }
-
-            if (NeedsShellContinuation(candidate) || StartsWithShellContinuation(command))
+            else if (NeedsShellContinuation(candidate) || StartsWithShellContinuation(command))
             {
                 candidate = JoinShellContinuation(candidate, command);
-                continue;
+            }
+            else
+            {
+                return IsCompleteShellCommand(candidate) && IsLikelyShellCommand(candidate)
+                    ? candidate
+                    : string.Empty;
             }
 
-            return IsCompleteShellCommand(candidate) && IsLikelyShellCommand(candidate)
-                ? candidate
-                : string.Empty;
+            if (candidate is not null && !candidate.TrimEnd().EndsWith('\\'))
+            {
+                var documents = FindHereDocuments(candidate);
+                if (documents.Count > 0)
+                {
+                    var completeCommand = ReadHereDocumentBodies(candidate, documents, lines, index + 1, out var nextIndex);
+                    if (NeedsShellContinuation(candidate))
+                    {
+                        // With a trailing pipe/&&, Bash reads the here-document
+                        // before the next command. Keep that command after the delimiter.
+                        var continuation = ExtractLikelyCommand(string.Join('\n', lines.Skip(nextIndex)));
+                        if (string.IsNullOrWhiteSpace(continuation))
+                        {
+                            throw new InvalidOperationException("The AI returned an incomplete command after a here-document. The command was not run.");
+                        }
+
+                        return $"{completeCommand}\n{continuation}";
+                    }
+
+                    return completeCommand;
+                }
+            }
         }
 
         if (candidate is not null)
@@ -422,6 +452,127 @@ public sealed partial class TerminalAiAssistantService(
         return IsCompleteShellCommand(normalized) && IsLikelyShellCommand(normalized)
             ? normalized
             : string.Empty;
+    }
+
+    private static string ReadHereDocumentBodies(
+        string command,
+        IReadOnlyList<(string Delimiter, bool StripTabs)> documents,
+        string[] lines,
+        int index,
+        out int nextIndex)
+    {
+        var builder = new StringBuilder(command);
+        foreach (var (delimiter, stripTabs) in documents)
+        {
+            var terminated = false;
+            while (index < lines.Length)
+            {
+                // Here-document data is not shell command text. Do not trim it,
+                // remove comments/blank lines, or normalize script indentation.
+                var line = lines[index++];
+                builder.Append('\n').Append(line);
+                if (string.Equals(stripTabs ? line.TrimStart('\t') : line, delimiter, StringComparison.Ordinal))
+                {
+                    terminated = true;
+                    break;
+                }
+            }
+
+            if (!terminated)
+            {
+                throw new InvalidOperationException("The AI returned an incomplete here-document. Its closing delimiter must appear on its own line. The command was not run.");
+            }
+        }
+
+        nextIndex = index;
+        return builder.ToString();
+    }
+
+    private static List<(string Delimiter, bool StripTabs)> FindHereDocuments(string command)
+    {
+        var documents = new List<(string Delimiter, bool StripTabs)>();
+        var quote = '\0';
+        var arithmeticDepth = 0;
+        for (var index = 0; index < command.Length; index++)
+        {
+            var character = command[index];
+            if (character == '\\' && quote != '\'')
+            {
+                index++;
+                continue;
+            }
+
+            if (quote != '\0')
+            {
+                if (character == quote) quote = '\0';
+                continue;
+            }
+
+            if (character is '\'' or '"' or '`')
+            {
+                quote = character;
+                continue;
+            }
+
+            if (arithmeticDepth > 0)
+            {
+                if (character == '(') arithmeticDepth++;
+                if (character == ')') arithmeticDepth--;
+                continue;
+            }
+
+            if (character == '(' && index + 1 < command.Length && command[index + 1] == '(')
+            {
+                arithmeticDepth = 2;
+                index++;
+                continue;
+            }
+
+            if (character == '#' && (index == 0 || char.IsWhiteSpace(command[index - 1]))) break;
+            if (character != '<' || index + 1 >= command.Length || command[index + 1] != '<') continue;
+            index += 2;
+            if (index < command.Length && command[index] == '<') continue; // Here-string, not a here-document.
+
+            var stripTabs = index < command.Length && command[index] == '-';
+            if (stripTabs) index++;
+            while (index < command.Length && char.IsWhiteSpace(command[index])) index++;
+
+            var delimiter = new StringBuilder();
+            var delimiterQuote = '\0';
+            for (; index < command.Length; index++)
+            {
+                character = command[index];
+                if (delimiterQuote == '\0' && (char.IsWhiteSpace(character) || character is ';' or '|' or '&' or '<' or '>' or '(' or ')')) break;
+                if (character == '\\' && delimiterQuote != '\'' && index + 1 < command.Length)
+                {
+                    var next = command[++index];
+                    if (delimiterQuote == '"' && next is not ('$' or '`' or '"' or '\\')) delimiter.Append('\\');
+                    delimiter.Append(next);
+                }
+                else if (delimiterQuote == '\0' && character is '\'' or '"')
+                {
+                    delimiterQuote = character;
+                }
+                else if (character == delimiterQuote)
+                {
+                    delimiterQuote = '\0';
+                }
+                else
+                {
+                    delimiter.Append(character);
+                }
+            }
+
+            if (delimiter.Length == 0 || delimiterQuote != '\0')
+            {
+                throw new InvalidOperationException("The AI returned a here-document without a complete delimiter. The command was not run.");
+            }
+
+            documents.Add((delimiter.ToString(), stripTabs));
+            index--;
+        }
+
+        return documents;
     }
 
     private static bool TryBuildFallbackCommand(
@@ -736,6 +887,7 @@ public sealed partial class TerminalAiAssistantService(
         if (string.IsNullOrWhiteSpace(command) ||
             command.Contains('\n') ||
             command.Contains('\r') ||
+            IsMarkdownProseLine(command) ||
             command.EndsWith(".", StringComparison.Ordinal) ||
             command.Contains(" should ", StringComparison.OrdinalIgnoreCase) ||
             command.Contains(" can ", StringComparison.OrdinalIgnoreCase))
@@ -764,6 +916,30 @@ public sealed partial class TerminalAiAssistantService(
         return IsExecutableToken(executable) &&
                !IsProseLeadToken(executable) &&
                HasShellCommandShape(tokens, tokenIndex);
+    }
+
+    private static bool IsMarkdownProseLine(string command)
+    {
+        var trimmed = command.TrimStart();
+        if (trimmed.StartsWith("- ", StringComparison.Ordinal) ||
+            trimmed.StartsWith("* ", StringComparison.Ordinal) ||
+            trimmed.StartsWith("+ ", StringComparison.Ordinal) ||
+            trimmed.StartsWith("> ", StringComparison.Ordinal) ||
+            trimmed.StartsWith("• ", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var markerEnd = 0;
+        while (markerEnd < trimmed.Length && char.IsDigit(trimmed[markerEnd]))
+        {
+            markerEnd++;
+        }
+
+        return markerEnd > 0 &&
+               markerEnd + 1 < trimmed.Length &&
+               trimmed[markerEnd] is '.' or ')' &&
+               char.IsWhiteSpace(trimmed[markerEnd + 1]);
     }
 
     private static bool IsCompleteShellCommand(string command) =>
@@ -851,6 +1027,7 @@ public sealed partial class TerminalAiAssistantService(
 
     private static bool IsExecutableToken(string token) =>
         token.Length > 0 &&
+        token.Any(char.IsLetterOrDigit) &&
         token.All(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.' or '/' or '+');
 
     private static bool IsProseLeadToken(string token)

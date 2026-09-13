@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Application.Contracts.Updates;
@@ -16,6 +16,9 @@ public interface IHostSystemUpdateService
     Task<HostSystemUpdateSnapshot> ApplyPackageUpdatesAsync(
         HostPackageUpdateMode mode,
         bool rebootIfRequired,
+        CancellationToken cancellationToken = default);
+
+    Task<HostSystemUpdateSnapshot> RepairAptAsync(
         CancellationToken cancellationToken = default);
 
     Task<HostSystemUpdateSnapshot> StartReleaseUpgradeAsync(

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright (c) Richard D. Kiernan.
+# Copyright (c) Linux Made Sane.
 # Licensed under the Business Source License 1.1. See LICENSE for details.
 
 
@@ -17,6 +17,7 @@ PUBLIC_SITE_ROOT="$REPO_ROOT/src/LinuxMadeSane.PublicSite"
 PUBLIC_SITE_APPSETTINGS="$PUBLIC_SITE_ROOT/appsettings.json"
 LIVE_PUBLIC_SITE_RELEASE_ROOT="${LIVE_PUBLIC_SITE_RELEASE_ROOT:-/var/lib/linuxmadesane/public-site/releases}"
 APP_VERSION="$(lms_resolve_version)"
+SOURCE_COMMIT="${LINUX_MADE_SANE_SOURCE_COMMIT:-$(lms_release_source_commit "$REPO_ROOT")}"
 RUNTIMES="${RUNTIMES:-linux-x64 linux-arm64 linux-arm}"
 PACKAGE_DIR="${PACKAGE_DIR:-$REPO_ROOT/artifacts/packages}"
 STAGE_EDITIONS="${STAGE_EDITIONS:-${EDITIONS:-community pro}}"
@@ -155,6 +156,7 @@ stage_edition() {
     printf '{\n'
     printf '  "version": "%s",\n' "$APP_VERSION"
     printf '  "builtUtc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "sourceCommit": "%s",\n' "$SOURCE_COMMIT"
     printf '  "edition": "%s",\n' "$edition"
     printf '  "artifacts": [\n'
     for index in "${!artifacts[@]}"; do

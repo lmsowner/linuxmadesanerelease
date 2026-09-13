@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @using LinuxMadeSane.Core.Enums
@@ -301,10 +301,48 @@
                                                         <td class="file-browser-permissions-cell">@FormatPermissions(item)</td>
                                                     }
                                                     <td class="file-browser-size-column">
-                                                        @FormatBytes(item.SizeBytes)
-                                                        @if (isBlockedFolder)
+                                                        @if (item.ItemType == SftpItemType.Folder)
                                                         {
-                                                            <span class="file-browser-item-note">Not accessible</span>
+                                                            @if (isBlockedFolder)
+                                                            {
+                                                                <span class="file-browser-item-note">Not accessible</span>
+                                                            }
+                                                            else if (TryGetFolderSize(item, out var folderSizeBytes))
+                                                            {
+                                                                <span class="file-browser-folder-size">@FormatDriveSize(folderSizeBytes)</span>
+                                                            }
+                                                            else
+                                                            {
+                                                                var isSizeLoading = IsFolderSizeLoading(item);
+                                                                @if (isSizeLoading)
+                                                                {
+                                                                    <button type="button"
+                                                                            class="file-browser-get-size-button"
+                                                                            title="@($"Cancel size calculation for {item.Name}")"
+                                                                            disabled="@(!FolderSizeCancellationRequested.HasDelegate)"
+                                                                            @onclick="@(() => CancelFolderSizeAsync(item))"
+                                                                            @onclick:stopPropagation="true"
+                                                                            @onpointerdown:stopPropagation="true">
+                                                                        Cancel
+                                                                    </button>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <button type="button"
+                                                                            class="file-browser-get-size-button"
+                                                                            title="@($"Calculate space used by {item.Name}")"
+                                                                            disabled="@(IsBusy || !FolderSizeRequested.HasDelegate)"
+                                                                            @onclick="@(() => RequestFolderSizeAsync(item))"
+                                                                            @onclick:stopPropagation="true"
+                                                                            @onpointerdown:stopPropagation="true">
+                                                                        Get size
+                                                                    </button>
+                                                                }
+                                                            }
+                                                        }
+                                                        else
+                                                        {
+                                                            @FormatBytes(item.SizeBytes)
                                                         }
                                                     </td>
                                                     <td class="file-browser-modified-column">@(item.LastModifiedUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "n/a")</td>
@@ -462,7 +500,40 @@
                                                 </div>
                                                 <div class="file-browser-detail-row">
                                                     <dt>Size</dt>
-                                                    <dd>@FormatBytes(detailItem.SizeBytes)</dd>
+                                                    <dd>
+                                                        @if (detailItem.ItemType == SftpItemType.Folder)
+                                                        {
+                                                            @if (TryGetFolderSize(detailItem, out var folderSizeBytes))
+                                                            {
+                                                                @FormatDriveSize(folderSizeBytes)
+                                                            }
+                                                            else
+                                                            {
+                                                                @if (IsFolderSizeLoading(detailItem))
+                                                                {
+                                                                    <button type="button"
+                                                                            class="file-browser-get-size-button"
+                                                                            disabled="@(!FolderSizeCancellationRequested.HasDelegate)"
+                                                                            @onclick="@(() => CancelFolderSizeAsync(detailItem))">
+                                                                        Cancel
+                                                                    </button>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <button type="button"
+                                                                            class="file-browser-get-size-button"
+                                                                            disabled="@(IsBusy || !FolderSizeRequested.HasDelegate)"
+                                                                            @onclick="@(() => RequestFolderSizeAsync(detailItem))">
+                                                                        Get size
+                                                                    </button>
+                                                                }
+                                                            }
+                                                        }
+                                                        else
+                                                        {
+                                                            @FormatBytes(detailItem.SizeBytes)
+                                                        }
+                                                    </dd>
                                                 </div>
                                                 <div class="file-browser-detail-row">
                                                     <dt>Modified</dt>
@@ -519,6 +590,8 @@
     [Parameter] public int DetailPanelSizePx { get; set; } = 520;
     [Parameter] public bool SidebarCollapsed { get; set; }
     [Parameter] public bool DetailPanelFocused { get; set; }
+    [Parameter] public IReadOnlyDictionary<string, long> FolderSizes { get; set; } = new Dictionary<string, long>(StringComparer.Ordinal);
+    [Parameter] public IReadOnlySet<string> LoadingFolderSizes { get; set; } = new HashSet<string>(StringComparer.Ordinal);
     [Parameter] public EventCallback RefreshRequested { get; set; }
     [Parameter] public EventCallback GoUpRequested { get; set; }
     [Parameter] public EventCallback<(bool Selected, IReadOnlyList<SftpItem> Items)> SelectAllRequested { get; set; }
@@ -527,6 +600,8 @@
     [Parameter] public EventCallback<string> NavigateRequested { get; set; }
     [Parameter] public EventCallback<string> ToggleDirectoryRequested { get; set; }
     [Parameter] public EventCallback<FileBrowserContextMenuRequest> ContextMenuRequested { get; set; }
+    [Parameter] public EventCallback<SftpItem> FolderSizeRequested { get; set; }
+    [Parameter] public EventCallback<SftpItem> FolderSizeCancellationRequested { get; set; }
     [Parameter] public EventCallback<int> DetailPanelSizeChanged { get; set; }
     [Parameter] public EventCallback<bool> SidebarCollapsedChanged { get; set; }
     [Parameter] public EventCallback<bool> DetailPanelFocusedChanged { get; set; }
@@ -566,6 +641,18 @@
 
     private Task NavigateToPathAsync(string path) =>
         NavigateRequested.HasDelegate ? NavigateRequested.InvokeAsync(path) : Task.CompletedTask;
+
+    private Task RequestFolderSizeAsync(SftpItem item) =>
+        FolderSizeRequested.HasDelegate ? FolderSizeRequested.InvokeAsync(item) : Task.CompletedTask;
+
+    private Task CancelFolderSizeAsync(SftpItem item) =>
+        FolderSizeCancellationRequested.HasDelegate ? FolderSizeCancellationRequested.InvokeAsync(item) : Task.CompletedTask;
+
+    private bool TryGetFolderSize(SftpItem item, out long sizeBytes) =>
+        FolderSizes.TryGetValue(NormalizePath(item.FullPath), out sizeBytes);
+
+    private bool IsFolderSizeLoading(SftpItem item) =>
+        LoadingFolderSizes.Contains(NormalizePath(item.FullPath));
 
     private Task ToggleDirectoryAsync(string path) =>
         ToggleDirectoryRequested.HasDelegate ? ToggleDirectoryRequested.InvokeAsync(path) : Task.CompletedTask;
@@ -846,6 +933,8 @@
 
         return $"{value:0.#} {units[index]}";
     }
+
+    private static string FormatDriveSize(long bytes) => SystemInfoValueFormatter.FormatDriveSize(bytes);
 
     private static string FormatMetadataValue(string value) =>
         string.IsNullOrWhiteSpace(value) ? "-" : value;

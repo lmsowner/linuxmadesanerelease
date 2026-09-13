@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Security.Claims;
@@ -24,6 +24,20 @@ public sealed class PasskeyAuthenticationService(
     private const string AssertionStatePrefix = "passkeys:assertion:";
     private static readonly TimeSpan FreshOtpEnrollmentWindow = TimeSpan.FromMinutes(5);
     private static readonly JsonSerializerOptions PasskeyDeserializeOptions = BuildPasskeyDeserializeOptions();
+
+    public async Task<bool> HasRegisteredPasskeysAsync(CancellationToken cancellationToken = default)
+    {
+        var users = await userStore.ListAsync(cancellationToken);
+        foreach (var user in users.Where(user => user.IsEnabled))
+        {
+            if ((await passkeyStore.ListByUserAsync(user.Id, cancellationToken)).Count > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     public async Task<IReadOnlyList<SecurityPasskeyCredential>> ListForPrincipalAsync(
         ClaimsPrincipal principal,

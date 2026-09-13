@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @using Microsoft.AspNetCore.Components
@@ -11,7 +11,14 @@
         <UiIcon Name="@UiIconName.TextSize" />
     </label>
 
-    <div class="ui-combobox-shell ui-select-shell ui-theme-font-scale-shell">
+    <div class="ui-theme-font-scale-stepper" role="group" aria-label="Adjust text size">
+        <button type="button"
+                class="ui-theme-font-scale-step"
+                title="Decrease text size"
+                aria-label="Decrease text size"
+                disabled="@(Value <= ThemeFontScaleOptionCatalog.Options.First().Percent)"
+                @onclick="() => ChangeByStepAsync(-1)">−</button>
+        <div class="ui-combobox-shell ui-select-shell ui-theme-font-scale-shell">
         <select id="@fontScaleSelectId"
                 class="ui-combobox-input ui-select-input ui-theme-font-scale-select"
                 value="@Value"
@@ -28,6 +35,13 @@
                 <path d="m2.5 4.5 3.5 3 3.5-3" />
             </svg>
         </span>
+        </div>
+        <button type="button"
+                class="ui-theme-font-scale-step"
+                title="Increase text size"
+                aria-label="Increase text size"
+                disabled="@(Value >= ThemeFontScaleOptionCatalog.Options.Last().Percent)"
+                @onclick="() => ChangeByStepAsync(1)">+</button>
     </div>
 </div>
 
@@ -43,5 +57,15 @@
             ? parsedValue
             : 100;
         return ValueChanged.InvokeAsync(value);
+    }
+
+    private Task ChangeByStepAsync(int direction)
+    {
+        var options = ThemeFontScaleOptionCatalog.Options;
+        var currentIndex = options
+            .Select((option, index) => (option.Percent, index))
+            .FirstOrDefault(item => item.Percent >= Value).index;
+        var nextIndex = Math.Clamp(currentIndex + direction, 0, options.Count - 1);
+        return ValueChanged.InvokeAsync(options[nextIndex].Percent);
     }
 }

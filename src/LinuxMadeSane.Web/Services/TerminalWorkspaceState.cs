@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Collections.Concurrent;
@@ -396,6 +396,9 @@ public sealed class TerminalTabState
     private CancellationTokenSource? activeAiOperation;
     private CancellationTokenSource? activeConnectionOperation;
     private volatile bool connectionDesired;
+    private Guid? sessionId;
+    private TerminalSessionSnapshot? snapshot;
+    private string? previousConnectedUsername;
 
     internal SemaphoreSlim ConnectionGate { get; } = new(1, 1);
 
@@ -443,9 +446,43 @@ public sealed class TerminalTabState
 
     public TerminalAiConversationState AiConversation { get; } = new();
 
-    public Guid? SessionId { get; set; }
+    public Guid? SessionId
+    {
+        get => sessionId;
+        set
+        {
+            if (sessionId == value) return;
+            CancelAiOperation();
+            AiCommandApprovalSessionId = null;
+            sessionId = value;
+        }
+    }
 
-    public TerminalSessionSnapshot? Snapshot { get; set; }
+    public TerminalSessionSnapshot? Snapshot
+    {
+        get => snapshot;
+        set
+        {
+            if (value is { Status: TerminalSessionStatus.Active } && value.SessionId != SessionId) return;
+            snapshot = value;
+            if (value?.Status != TerminalSessionStatus.Active || string.IsNullOrWhiteSpace(value.Username)) return;
+            if (previousConnectedUsername is not null &&
+                !string.Equals(previousConnectedUsername, value.Username, StringComparison.Ordinal))
+            {
+                CancelAiOperation();
+                AiCommandApprovalSessionId = null;
+                AiConversation.ProviderConversationReference = string.Empty;
+                AiConversation.ProviderResponseId = string.Empty;
+                AiConversation.Entries.Clear();
+            }
+
+            previousConnectedUsername = value.Username;
+        }
+    }
+
+    public string ConnectedUsername => Snapshot is { Status: TerminalSessionStatus.Active } current && current.SessionId == SessionId
+        ? current.Username
+        : string.Empty;
 
     public string ErrorMessage { get; set; } = string.Empty;
 

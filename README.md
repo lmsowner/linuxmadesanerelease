@@ -24,7 +24,6 @@ https://www.linuxmadesane.com
 Public links:
 
 - Website: https://www.linuxmadesane.com
-- LinkedIn: https://www.linkedin.com/in/richardkiernan/
 - Public Community Edition repository: https://github.com/lmsowner/linuxmadesanerelease
 
 Do not put the public website project, Pro/Enterprise packages, portal packages, private manifests, license secrets, private configuration, databases, credentials, or proprietary implementation details in this repository.
@@ -123,7 +122,7 @@ It is free for personal, homelab, educational, non-profit, and internal commerci
 
 Desktop Assistant and the local Desktop Helper are included in Community Edition. Future Pro or Enterprise desktop work may add remote desktop help, team workflows, or managed support paths, but the local GUI-session helper is part of the CE baseline.
 
-A commercial license from Richard D. Kiernan is required for hosted, MSP, SaaS, white-label, resale, or third-party managed-service use.
+A commercial license from Linux Made Sane is required for hosted, MSP, SaaS, white-label, resale, or third-party managed-service use.
 
 Linux Made Sane is provided as-is, with no warranties, express or implied. You are responsible for how you install, configure, expose, and operate it, and you use it at your own risk.
 

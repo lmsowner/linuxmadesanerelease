@@ -1,0 +1,222 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
+@using LinuxMadeSane.Web.Services
+@inject IManagedHostService HostService
+@inject ITerminalSessionService TerminalSessionService
+
+<UiModal IsOpen="@IsOpen"
+         Title="AI Update/Repair"
+         Subtitle="Uses the same guided AI agent and private command channel as Terminal."
+         Class="updates-ai-repair-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseAsync">
+    <ChildContent>
+        <div class="updates-ai-repair-dialog">
+            @if (isPreparing)
+            {
+                <p class="callout info">Connecting the AI Update/Repair session to this LMS host…</p>
+            }
+            else if (!string.IsNullOrWhiteSpace(connectionError))
+            {
+                <div class="callout error">
+                    <strong>AI Update/Repair could not start.</strong>
+                    <span>@connectionError</span>
+                </div>
+                <UiCommandButton Label="Open Terminal"
+                                 Glyph="UiIconGlyph.Terminal"
+                                 Variant="UiButtonVariant.ActionSubtle"
+                                 Href="@TerminalHref" />
+            }
+            else if (repairTab is not null)
+            {
+                <TerminalAiPanel Tab="repairTab"
+                                 @ref="terminalAiPanel"
+                                 RunCommand="RunTerminalCommandAsync" />
+            }
+        </div>
+    </ChildContent>
+</UiModal>
+
+@code {
+    [Parameter]
+    public bool IsOpen { get; set; }
+
+    [Parameter]
+    public string FailureSummary { get; set; } = string.Empty;
+
+    [Parameter]
+    public IReadOnlyList<string> FailureLog { get; set; } = [];
+
+    [Parameter]
+    public EventCallback OnClose { get; set; }
+
+    private TerminalTabState? repairTab;
+    private TerminalAiPanel? terminalAiPanel;
+    private CancellationTokenSource? connectionCts;
+    private bool wasOpen;
+    private bool isPreparing;
+    private bool startPromptAfterRender;
+    private string connectionError = string.Empty;
+
+    private static string TerminalHref => $"/hosts/{AiLocalMachine.ManagedHostId}/terminal";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (IsOpen && !wasOpen)
+        {
+            await PrepareSessionAsync();
+        }
+
+        wasOpen = IsOpen;
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!startPromptAfterRender || terminalAiPanel is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        startPromptAfterRender = false;
+        _ = terminalAiPanel.StartAgentPromptAsync(BuildRepairPrompt());
+        return Task.CompletedTask;
+    }
+
+    private async Task PrepareSessionAsync()
+    {
+        await CloseSessionAsync();
+        var operation = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        connectionCts = operation;
+        isPreparing = true;
+        connectionError = string.Empty;
+
+        try
+        {
+            var localHost = (await HostService.ListHostsAsync(operation.Token))
+                .FirstOrDefault(host => AiLocalMachine.IsLocalMachine(host.Id));
+            if (localHost is null)
+            {
+                throw new InvalidOperationException("The LMS host is not available in Hosts.");
+            }
+
+            var tab = TerminalTabState.Create(localHost);
+            tab.AiAccessMode = TerminalAiAccessMode.Agent;
+            tab.RequestConnection();
+            repairTab = tab;
+
+            var session = await TerminalSessionService.StartSessionAsync(
+                localHost,
+                new TerminalConnectionRequest(
+                    tab.Username,
+                    null,
+                    null,
+                    null,
+                    PreferStoredCredentials: true,
+                    Columns: 160,
+                    Rows: 40,
+                    WorkingDirectory: tab.DefaultWorkingDirectory,
+                    OwnerId: tab.Id),
+                operation.Token);
+
+            tab.SessionId = session.Id;
+            tab.Snapshot = await TerminalSessionService.GetSnapshotAsync(session.Id, operation.Token)
+                ?? new TerminalSessionSnapshot(
+                    session.Id,
+                    session.Status,
+                    session.WorkingDirectory,
+                    string.Empty,
+                    0,
+                    session.StartedAtUtc,
+                    session.LastActivityUtc)
+                {
+                    Username = session.Username
+                };
+            startPromptAfterRender = true;
+        }
+        catch (OperationCanceledException) when (operation.IsCancellationRequested)
+        {
+            connectionError = "The terminal connection timed out. Open Terminal to check the LMS host connection.";
+        }
+        catch (Exception exception)
+        {
+            connectionError = exception.Message;
+        }
+        finally
+        {
+            isPreparing = false;
+        }
+    }
+
+    private string BuildRepairPrompt()
+    {
+        var recentLog = string.Join(Environment.NewLine, FailureLog.TakeLast(80));
+        return $"""
+Repair the package update failure on this LMS host. Investigate the cause, make only the changes needed to restore package updates, and verify that APT metadata refresh and the upgradeable-package check complete successfully. Do not install ordinary pending package upgrades unless they are required to repair package management. Explain the final result when verification is complete.
+
+An LMS package operation may still be running. Inspect its current state and recent log first. Do not start another APT or dpkg transaction concurrently; wait for the active transaction to finish before running repair commands.
+
+LMS update status:
+{FailureSummary}
+
+Recent Host update log:
+```text
+{recentLog}
+```
+""";
+    }
+
+    private async Task RunTerminalCommandAsync(string command, CancellationToken cancellationToken)
+    {
+        if (repairTab?.SessionId is not { } sessionId || !repairTab.IsSessionActive)
+        {
+            throw new InvalidOperationException("The AI Update/Repair terminal session is no longer active.");
+        }
+
+        await TerminalSessionService.SendInputAsync(sessionId, command.TrimEnd() + Environment.NewLine, cancellationToken);
+    }
+
+    private async Task CloseAsync()
+    {
+        await CloseSessionAsync();
+        wasOpen = false;
+        await OnClose.InvokeAsync();
+    }
+
+    private async Task CloseSessionAsync()
+    {
+        connectionCts?.Cancel();
+        connectionCts?.Dispose();
+        connectionCts = null;
+        startPromptAfterRender = false;
+
+        var tab = repairTab;
+        repairTab = null;
+        terminalAiPanel = null;
+        if (tab is null)
+        {
+            return;
+        }
+
+        tab.RequestDisconnect();
+        tab.CancelAiOperation();
+        if (tab.SessionId is { } sessionId)
+        {
+            tab.SessionId = null;
+            await TerminalSessionService.CloseSessionAsync(sessionId, CancellationToken.None);
+        }
+
+        await TerminalSessionService.CloseOwnedSessionsAsync(tab.Id, CancellationToken.None);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await CloseSessionAsync();
+    }
+}

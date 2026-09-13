@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/login"
@@ -6,6 +6,7 @@
 @layout AuthLayout
 @using LinuxMadeSane.Application.Contracts.EdgeGateway
 @inject LocalAccessRecoveryService AccessRecovery
+@inject PasskeyAuthenticationService PasskeyAuthentication
 @inject NavigationManager Navigation
 
 <PageTitle>LMS Account Login | Linux Made Sane</PageTitle>
@@ -19,7 +20,7 @@
         <div class="auth-login-heading">
             <p class="eyebrow">Linux Made Sane</p>
             <h1>Sign in.</h1>
-            <p>Choose one method. Each sign-in flow stays separate.</p>
+            <p>@(Reason == "connection-lost" ? "Your connection was interrupted. Sign in to continue." : "Choose one method. Each sign-in flow stays separate.")</p>
         </div>
 
         @if (ShouldShowErrorFor("recovery") && !showRecovery)
@@ -372,7 +373,11 @@
     [SupplyParameterFromQuery]
     public string? Method { get; set; }
 
+    [SupplyParameterFromQuery]
+    public string? Reason { get; set; }
+
     private bool showRecovery;
+    private bool hasRegisteredPasskeys;
 
     private bool IsEdgeGatewayLogin =>
         new Uri(Navigation.Uri).AbsolutePath.Equals(EdgeGatewayAuthenticationPaths.Login, StringComparison.OrdinalIgnoreCase);
@@ -387,7 +392,7 @@
                 return requestedMethod;
             }
 
-            return string.IsNullOrWhiteSpace(Error) && string.IsNullOrWhiteSpace(Email)
+            return hasRegisteredPasskeys && string.IsNullOrWhiteSpace(Error)
                 ? "passkey"
                 : "authenticator";
         }
@@ -419,6 +424,7 @@
     protected override async Task OnParametersSetAsync()
     {
         showRecovery = await AccessRecovery.HasActiveChallengeAsync(Recovery);
+        hasRegisteredPasskeys = await PasskeyAuthentication.HasRegisteredPasskeysAsync();
     }
 
     private bool IsInitialAuthMethod(string method) =>

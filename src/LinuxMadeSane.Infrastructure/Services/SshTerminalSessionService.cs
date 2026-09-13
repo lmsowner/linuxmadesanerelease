@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Collections.Concurrent;
@@ -18,6 +18,7 @@ public sealed class SshTerminalSessionService(
 {
     private readonly ConcurrentDictionary<Guid, SessionState> sessions = new();
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan SessionSetupTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(15);
     private const int MaxAiCommandOutputChars = 120_000;
 
@@ -29,6 +30,9 @@ public sealed class SshTerminalSessionService(
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        using var setupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        setupCancellation.CancelAfter(SessionSetupTimeout);
+        var setupToken = setupCancellation.Token;
         var credentials = await sshConnectionFactory.ResolveCredentialsAsync(
             host,
             new ManagedHostSshCredentialRequest(
@@ -37,7 +41,7 @@ public sealed class SshTerminalSessionService(
                 request.PrivateKey,
                 request.PrivateKeyPassphrase,
                 request.PreferStoredCredentials),
-            cancellationToken);
+            setupToken);
 
         var client = sshConnectionFactory.CreateSshClient(host, credentials, ConnectTimeout, KeepAliveInterval);
         Task? connectTask = null;
@@ -47,22 +51,22 @@ public sealed class SshTerminalSessionService(
         try
         {
             connectTask = Task.Run(client.Connect, CancellationToken.None);
-            await connectTask.WaitAsync(cancellationToken);
+            await connectTask.WaitAsync(setupToken);
+            var workingDirectory = await ResolveInitialWorkingDirectoryAsync(client, host, request, credentials.Username, setupToken);
             createStreamTask = Task.Run(
                 () => client.CreateShellStream("xterm-256color", (uint)request.Columns, (uint)request.Rows, 0, 0, 4096),
                 CancellationToken.None);
-            var stream = await createStreamTask.WaitAsync(cancellationToken);
-            var workingDirectory = string.IsNullOrWhiteSpace(request.WorkingDirectory)
-                ? host.DefaultWorkingDirectory
-                : request.WorkingDirectory.Trim();
-
+            var stream = await createStreamTask.WaitAsync(setupToken);
             var session = new TerminalSession(
                 Guid.NewGuid(),
                 host.Id,
                 TerminalSessionStatus.Active,
                 workingDirectory,
                 DateTimeOffset.UtcNow,
-                DateTimeOffset.UtcNow);
+                DateTimeOffset.UtcNow)
+            {
+                Username = credentials.Username
+            };
 
             var state = new SessionState(session, host, credentials, client, stream, request.OwnerId);
             sessions[session.Id] = state;
@@ -78,6 +82,10 @@ public sealed class SshTerminalSessionService(
             logger.LogInformation("Started SSH terminal session {SessionId} for host {HostId}", session.Id, host.Id);
 
             return session;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && setupCancellation.IsCancellationRequested)
+        {
+            throw new TimeoutException($"The terminal session did not finish opening within {SessionSetupTimeout.TotalSeconds:0} seconds.");
         }
         catch
         {
@@ -125,7 +133,10 @@ public sealed class SshTerminalSessionService(
                 state.CachedOutput,
                 state.OutputRevision,
                 state.Session.StartedAtUtc,
-                state.Session.LastActivityUtc);
+                state.Session.LastActivityUtc)
+            {
+                Username = state.Credentials.Username
+            };
 
             return Task.FromResult<TerminalSessionSnapshot?>(snapshot);
         }
@@ -578,6 +589,36 @@ public sealed class SshTerminalSessionService(
 
     private static string QuoteShellArgument(string value) =>
         "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
+
+    internal static bool ShouldUseConnectedUserHome(ManagedHost host, TerminalConnectionRequest request, string username) =>
+        !string.Equals(username, host.Username.Trim(), StringComparison.Ordinal) &&
+        (string.IsNullOrWhiteSpace(request.WorkingDirectory) ||
+         string.Equals(request.WorkingDirectory.Trim(), host.DefaultWorkingDirectory.Trim(), StringComparison.Ordinal));
+
+    private static async Task<string> ResolveInitialWorkingDirectoryAsync(
+        SshClient client,
+        ManagedHost host,
+        TerminalConnectionRequest request,
+        string username,
+        CancellationToken cancellationToken)
+    {
+        if (!ShouldUseConnectedUserHome(host, request, username))
+        {
+            return string.IsNullOrWhiteSpace(request.WorkingDirectory)
+                ? host.DefaultWorkingDirectory
+                : request.WorkingDirectory.Trim();
+        }
+
+        using var command = client.CreateCommand("printf '%s' \"$HOME\"");
+        command.CommandTimeout = ConnectTimeout;
+        await command.ExecuteAsync(cancellationToken);
+        if (command.ExitStatus != 0 || !command.Result.StartsWith('/'))
+        {
+            throw new InvalidOperationException("Could not resolve the connected Linux user's home directory.");
+        }
+
+        return command.Result;
+    }
 
     private static string BuildAiRemoteCommand(string commandText, string workingDirectory) =>
         string.IsNullOrWhiteSpace(workingDirectory)

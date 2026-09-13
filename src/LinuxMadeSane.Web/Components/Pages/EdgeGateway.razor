@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/edge-gateway"
@@ -17,6 +17,9 @@
 @inject EdgeGatewayOptions EdgeGatewayOptions
 @inject ILocalHttpServiceDiscoveryService HttpServiceDiscovery
 @inject ISecurityUserStore SecurityUserStore
+@inject EdgeGatewayServerPublishingService ServerPublishing
+@inject LmsServerEmailSetupService ServerEmailSetup
+@inject IMailRelayService MailRelayService
 
 <PageTitle>Edge Gateway | Linux Made Sane</PageTitle>
 
@@ -459,7 +462,7 @@
                                         <div class="edge-local-relay-main">
                                             <strong>@domain.DomainName</strong>
                                             <span><code>@domain.GatewayDomainName</code></span>
-                                            <CompactUIButton Label="Add"
+                                            <UiCommandButton Label="Add" Class="edge-zone-action"
                                                              Glyph="UiIconGlyph.Plus"
                                                              Disabled="@isProvisioningCloudflareDomain"
                                                              OnClick="@(() => UseCloudflareDomain(domain.DomainName))" />
@@ -485,12 +488,40 @@
                                             {
                                                 <span>No app routes on this zone yet.</span>
                                             }
+                                            <span class="edge-zone-setup-hint">Publish Server enables MFA at @BuildServerUrl(domain.DomainName). Enable Email configures this domain for outgoing LMS mail.</span>
+                                            @if (zoneSetupMessages.TryGetValue(domain.DomainName, out var message))
+                                            {
+                                                <p class="edge-route-status @(message.IsError ? "error" : "success")" role="status">@message.Text</p>
+                                                @if (message.HelpUrl is not null)
+                                                {
+                                                    <a href="@message.HelpUrl">@(message.HelpUrl == "/settings" ? "LMS Security" : "Mail Relay details")</a>
+                                                }
+                                                @if (message.PublishedUrl is not null)
+                                                {
+                                                    <a href="@message.PublishedUrl" target="_blank" rel="noopener noreferrer">Open LMS Server</a>
+                                                }
+                                            }
+                                            @if (quickMailJob is { Request.ConfigureLmsEmail: true } job && job.Request.SendingDomain.Equals(domain.DomainName, StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                <p class="edge-route-status @(job.Status == LinuxMadeSane.Application.Contracts.MailRelay.MailRelayProvisioningJobStatus.Failed ? "error" : "success")" role="status">@job.Summary</p>
+                                                <a href="/mail-relay">Mail Relay details</a>
+                                            }
                                         </div>
                                         <div class="edge-local-relay-actions">
-                                            <CompactUIButton Label="Delete"
+                                            <UiCommandButton Label="Delete" Class="edge-zone-action" Variant="UiButtonVariant.Danger"
                                                              Glyph="UiIconGlyph.Delete"
-                                                             Disabled="@(isProvisioningCloudflareDomain || isDeletingRelay)"
+                                                             Disabled="@(isProvisioningCloudflareDomain || isDeletingRelay || busySetupZone is not null)"
                                                              OnClick="@(() => OpenRelayDeleteDialog(domain))" />
+                                            <UiCommandButton Label="Publish Server" Class="edge-zone-action"
+                                                             Glyph="UiIconGlyph.Website"
+                                                             Title="@($"Publish {BuildServerUrl(domain.DomainName)} with MFA security")"
+                                                             Disabled="@(!CanRunZoneSetup(domain))"
+                                                             OnClick="@(() => PublishServerAsync(domain))" />
+                                            <UiCommandButton Label="Enable Email" Class="edge-zone-action"
+                                                             Glyph="UiIconGlyph.Send"
+                                                             Title="Configure Mail Relay and use it for LMS outgoing email"
+                                                             Disabled="@(!CanRunZoneSetup(domain) || quickMailJob is { IsTerminal: false })"
+                                                             OnClick="@(() => EnableServerEmailAsync(domain))" />
                                         </div>
                                     </div>
                                 }
@@ -647,6 +678,9 @@
                             <p class="meta-text">No Edge Gateway access decisions have been logged yet.</p>
                         }
                     </section>
+                </TabPage>
+                <TabPage Value="@CaddyTabValue" Title="Caddy">
+                    <CaddyIntegrationWorkspace />
                 </TabPage>
             </ChildContent>
         </TabControl>
@@ -1159,7 +1193,7 @@
             selectedRelaySetupDomainNameValue = value;
         }
     }
-    private bool IsRouteActionBusy => publishingRouteId.HasValue || togglingRouteId.HasValue || isDeletingRoute;
+    private bool IsRouteActionBusy => publishingRouteId.HasValue || togglingRouteId.HasValue || isDeletingRoute || busySetupZone is not null;
     private bool IsCaddyReady => dashboard?.Runtime.Caddy.Status == EdgeGatewayDiagnosticStatus.Good;
     private bool IsCloudflareReady =>
         dashboard?.Cloudflare.IsAvailable == true &&
@@ -1218,11 +1252,17 @@
         SelectedRelaySetupCloudflareDomain is { } domain &&
         domain.DomainName.Equals(provisioningCloudflareDomainName, StringComparison.OrdinalIgnoreCase);
 
-    protected override void OnInitialized() => BeginDashboardLoad();
+    protected override void OnInitialized()
+    {
+        BeginDashboardLoad();
+        _ = WatchMailSetupAsync(quickSetupCancellation.Token);
+    }
 
     public void Dispose()
     {
         isDisposed = true;
+        quickSetupCancellation.Cancel();
+        quickSetupCancellation.Dispose();
         dashboardLoadCancellation?.Cancel();
         dashboardLoadCancellation?.Dispose();
     }

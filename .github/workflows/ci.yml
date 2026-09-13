@@ -1,0 +1,30 @@
+name: Community source CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Validate release scripts
+        run: bash -n scripts/*.sh scripts/lib/*.sh
+      - name: Restore Community projects
+        run: |
+          dotnet restore src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj
+          dotnet restore src/LinuxMadeSane.DesktopHelper/LinuxMadeSane.DesktopHelper.csproj
+      - name: Verify package inventory
+        run: python3 scripts/generate-about-credits.py --check
+      - name: Build Community Edition
+        run: dotnet build src/LinuxMadeSane.Web/LinuxMadeSane.Web.csproj --configuration Release --no-restore /p:LinuxMadeSaneSkipPluginPackaging=true

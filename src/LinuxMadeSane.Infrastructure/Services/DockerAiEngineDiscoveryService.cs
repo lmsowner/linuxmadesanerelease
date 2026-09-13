@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text.Json;
@@ -36,7 +36,7 @@ public sealed class DockerAiEngineDiscoveryService(
             11434,
             11434,
             "lms-ollama",
-            "qwen2.5-coder:7b",
+            "qwen3.5:4b",
             false,
             false,
             "docker run -d --name lms-ollama -p 127.0.0.1:11434:11434 -v lms-ollama:/root/.ollama --restart unless-stopped ollama/ollama:latest",

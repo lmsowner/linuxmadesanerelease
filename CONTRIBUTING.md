@@ -11,12 +11,12 @@ Unless otherwise agreed in writing, contributions are accepted under the same Bu
 By submitting a contribution, you confirm that:
 
 - you have the right to submit the code, documentation, or other material
-- your contribution can be licensed by Richard D. Kiernan under the Business Source License 1.1, the applicable Change License, and commercial Linux Made Sane licenses
+- your contribution can be licensed by Linux Made Sane under the Business Source License 1.1, the applicable Change License, and commercial Linux Made Sane licenses
 - your contribution does not knowingly include third-party code or content under incompatible terms
 
 ## Contributor Grant
 
-By submitting a contribution, you grant Richard D. Kiernan a perpetual, worldwide, non-exclusive, irrevocable, royalty-free license to use, reproduce, modify, prepare derivative works of, publicly display, publicly perform, sublicense, relicense, distribute, and otherwise exploit your contribution as part of Linux Made Sane and related products or services.
+By submitting a contribution, you grant Linux Made Sane a perpetual, worldwide, non-exclusive, irrevocable, royalty-free license to use, reproduce, modify, prepare derivative works of, publicly display, publicly perform, sublicense, relicense, distribute, and otherwise exploit your contribution as part of Linux Made Sane and related products or services.
 
 This grant allows Linux Made Sane to publish Community Edition under the Business Source License, publish versions under the applicable Change License after the Change Date, and offer commercial, Pro, Business, Enterprise, hosted, or managed editions under separate terms.
 

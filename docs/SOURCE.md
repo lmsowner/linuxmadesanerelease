@@ -2,7 +2,7 @@
 
 This repository contains the public Linux Made Sane CE source subset needed to build the Community app.
 
-Linux Made Sane Community Edition is source-available under the Business Source License 1.1. Internal business use is allowed for free; hosted, MSP, SaaS, white-label, resale, and third-party managed-service use require a commercial license from Richard D. Kiernan.
+Linux Made Sane Community Edition is source-available under the Business Source License 1.1. Internal business use is allowed for free; hosted, MSP, SaaS, white-label, resale, and third-party managed-service use require a commercial license from Linux Made Sane.
 
 Redistributions must preserve the root license, notice, trademark, commercial licensing, and third-party notices.
 

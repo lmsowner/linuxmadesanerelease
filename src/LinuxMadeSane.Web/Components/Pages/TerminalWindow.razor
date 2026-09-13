@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/terminal-window/{TabId:guid}"
@@ -479,7 +479,7 @@
     private async Task ConnectAsync(CancellationToken cancellationToken)
     {
         var targetTab = tab;
-        if (targetTab is null)
+        if (targetTab is null || targetTab.IsBusy || targetTab.IsSessionActive)
         {
             return;
         }
@@ -490,6 +490,11 @@
         targetTab.RegisterConnectionOperation(operationCts);
         try
         {
+            if (targetTab.IsSessionActive)
+            {
+                return;
+            }
+
             await ConnectCoreAsync(operationCts.Token);
         }
         finally
@@ -578,7 +583,10 @@
                     string.Empty,
                     0,
                     session.StartedAtUtc,
-                    session.LastActivityUtc);
+                    session.LastActivityUtc)
+                {
+                    Username = session.Username
+                };
             ConnectionSecretStore.Delete(tab.SecretHandle);
             tab.SecretHandle = null;
             tab.ConnectionOptionsOpen = false;

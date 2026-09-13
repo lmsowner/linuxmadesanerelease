@@ -1,6 +1,6 @@
 # Trademarks
 
-Linux Made Sane, LMS, the Linux Made Sane logo, and related product names, marks, branding, page names, release names, and trade dress are trademarks or service marks of Richard D. Kiernan.
+Linux Made Sane, LMS, the Linux Made Sane logo, and related product names, marks, branding, page names, release names, and trade dress are trademarks or service marks of Linux Made Sane.
 
 The Business Source License for Linux Made Sane Community Edition grants copyright permissions for the licensed work. It does not grant trademark rights.
 
@@ -16,7 +16,7 @@ Examples:
 
 ## Restricted Use
 
-You may not, without written permission from Richard D. Kiernan:
+You may not, without written permission from Linux Made Sane:
 
 - sell, host, or promote a product or service under the Linux Made Sane or LMS names
 - use Linux Made Sane branding for a fork, derivative product, appliance, managed service, hosted service, or SaaS offering

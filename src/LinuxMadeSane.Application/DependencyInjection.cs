@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Application.Interfaces;
@@ -37,6 +37,9 @@ public static class DependencyInjection
         services.AddScoped<ICaddyIntegrationService, CaddyIntegrationService>();
         services.AddScoped<EdgeGatewayCaddyfileGenerator>();
         services.AddScoped<IEdgeGatewayService, EdgeGatewayService>();
+        services.AddScoped<EdgeGatewayServerPublishingService>();
+        services.AddScoped<LmsServerEmailSetupService>();
+        // File previews also use the media metadata and streaming services.
         services.AddScoped<IMediaLibraryIntegrationService, MediaLibraryIntegrationService>();
         services.AddScoped<ISftpServerManagerService, SftpServerManagerService>();
         services.AddScoped<IExposedServiceManager, ExposedServiceManager>();

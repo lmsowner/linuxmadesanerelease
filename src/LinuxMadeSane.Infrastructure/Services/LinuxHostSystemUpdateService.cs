@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Globalization;
@@ -20,10 +20,18 @@ public sealed partial class LinuxHostSystemUpdateService(
     ILogger<LinuxHostSystemUpdateService> logger) : IHostSystemUpdateService
 {
     private const int MaxLogLines = 200;
+    private const string FailureStatusDetail = "See the Host update log below for details.";
     private static readonly TimeSpan MetadataTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ApplyTimeout = TimeSpan.FromHours(2);
     private static readonly TimeSpan ReleaseCheckTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan ReleaseUpgradeTimeout = TimeSpan.FromHours(4);
+    private static readonly string[] AptNetworkOptions =
+    [
+        "-o", "Acquire::http::Timeout=30",
+        "-o", "Acquire::https::Timeout=30",
+        "-o", "Acquire::Retries=0",
+        "-o", "DPkg::Lock::Timeout=120"
+    ];
 
     private readonly SemaphoreSlim operationLock = new(1, 1);
     private readonly object syncRoot = new();
@@ -49,15 +57,21 @@ public sealed partial class LinuxHostSystemUpdateService(
         try
         {
             EnsureLinux();
-            SetJob(HostSystemUpdateJobState.Refreshing, "Checking for updates…", "Reading package and release information.", 10);
+            SetJob(
+                HostSystemUpdateJobState.Refreshing,
+                "Checking for updates…",
+                "Reading package and release information.",
+                10,
+                clearPackages: true);
             AppendLog(refreshMetadata
                 ? "Refreshing APT metadata and upgrade list."
                 : "Refreshing upgrade list without a full metadata pull.");
 
+            var aptNeedsAttention = false;
             if (refreshMetadata)
             {
                 var update = await RunAptAsync(
-                    ["-o", "DPkg::Lock::Timeout=120", "update"],
+                    [.. AptNetworkOptions, "update"],
                     MetadataTimeout,
                     "Refresh package metadata",
                     cancellationToken);
@@ -67,7 +81,10 @@ public sealed partial class LinuxHostSystemUpdateService(
                     return GetSnapshot();
                 }
 
-                AppendLog("Package metadata refreshed.");
+                aptNeedsAttention = HasActionableAptDiagnostics(update);
+                AppendLog(aptNeedsAttention
+                    ? "Package metadata refreshed with warnings that need attention."
+                    : "Package metadata refreshed.");
                 SetProgress(35);
             }
 
@@ -78,7 +95,16 @@ public sealed partial class LinuxHostSystemUpdateService(
             var os = ReadOsRelease();
             var now = timeProvider.GetUtcNow();
 
-            CompleteRefresh(os, packages, reboot, release, schedule, now);
+            CompleteRefresh(
+                os,
+                packages,
+                reboot,
+                release,
+                schedule,
+                now,
+                summary: aptNeedsAttention ? "APT reported package source problems." : null,
+                detail: aptNeedsAttention ? FailureStatusDetail : null,
+                needsAttention: aptNeedsAttention);
             return GetSnapshot();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -122,7 +148,7 @@ public sealed partial class LinuxHostSystemUpdateService(
             AppendLog($"Starting {modeLabel}.");
 
             var update = await RunAptAsync(
-                ["-o", "DPkg::Lock::Timeout=120", "update"],
+                [.. AptNetworkOptions, "update"],
                 MetadataTimeout,
                 "Refresh package metadata",
                 cancellationToken);
@@ -131,6 +157,7 @@ public sealed partial class LinuxHostSystemUpdateService(
                 FailJob("Could not refresh package metadata before applying updates.", BuildFailureDetail(update));
                 return GetSnapshot();
             }
+            var aptNeedsAttention = HasActionableAptDiagnostics(update);
 
             SetProgress(25);
             AppendLog("Metadata refreshed. Applying updates.");
@@ -145,7 +172,7 @@ public sealed partial class LinuxHostSystemUpdateService(
                 var verb = mode == HostPackageUpdateMode.DistUpgrade ? "dist-upgrade" : "upgrade";
                 apply = await RunAptAsync(
                     [
-                        "-o", "DPkg::Lock::Timeout=120",
+                        .. AptNetworkOptions,
                         "-o", "Dpkg::Options::=--force-confold",
                         verb, "-y"
                     ],
@@ -159,6 +186,7 @@ public sealed partial class LinuxHostSystemUpdateService(
                 FailJob("Package updates failed.", BuildFailureDetail(apply));
                 return GetSnapshot();
             }
+            aptNeedsAttention |= HasActionableAptDiagnostics(apply);
 
             AppendLog("Package updates completed. Rechecking status.");
             SetProgress(75);
@@ -176,11 +204,16 @@ public sealed partial class LinuxHostSystemUpdateService(
                 schedule,
                 timeProvider.GetUtcNow(),
                 HostSystemUpdateJobState.Completed,
-                packages.Count == 0 ? "Packages are up to date." : $"{packages.Count} package(s) still pending.",
-                reboot.Required
+                aptNeedsAttention
+                    ? "Package updates completed with APT warnings."
+                    : packages.Count == 0 ? "Packages are up to date." : $"{packages.Count} package(s) still pending.",
+                aptNeedsAttention
+                    ? FailureStatusDetail
+                    : reboot.Required
                     ? "A reboot is required to finish applying kernel or core updates."
                     : "No reboot is currently required.",
-                100);
+                100,
+                aptNeedsAttention);
 
             if (rebootIfRequired && reboot.Required)
             {
@@ -194,6 +227,94 @@ public sealed partial class LinuxHostSystemUpdateService(
         {
             logger.LogWarning(ex, "Host package update apply failed.");
             FailJob("Package updates failed.", ex.Message);
+            return GetSnapshot();
+        }
+        finally
+        {
+            operationLock.Release();
+        }
+    }
+
+    public async Task<HostSystemUpdateSnapshot> RepairAptAsync(CancellationToken cancellationToken = default)
+    {
+        if (!await operationLock.WaitAsync(0, cancellationToken))
+        {
+            return GetSnapshot();
+        }
+
+        try
+        {
+            EnsureLinux();
+            SetJob(
+                HostSystemUpdateJobState.Applying,
+                "Repairing APT…",
+                "Waiting for package locks, completing interrupted packages, and refreshing metadata.",
+                5);
+            AppendLog("Starting APT repair.");
+
+            var configure = await RunPrivilegedAsync(
+                "dpkg",
+                ["--configure", "-a"],
+                TimeSpan.FromMinutes(3),
+                "Complete interrupted package configuration",
+                cancellationToken);
+            if (configure.ExitCode != 0)
+            {
+                FailJob("APT repair failed while completing package configuration.", BuildFailureDetail(configure));
+                return GetSnapshot();
+            }
+            var aptNeedsAttention = HasActionableAptDiagnostics(configure);
+
+            SetProgress(30);
+            var fixBroken = await RunAptAsync(
+                [.. AptNetworkOptions, "--fix-broken", "install", "-y"],
+                ApplyTimeout,
+                "Repair broken package dependencies",
+                cancellationToken);
+            if (fixBroken.ExitCode != 0)
+            {
+                FailJob("APT repair failed while fixing package dependencies.", BuildFailureDetail(fixBroken));
+                return GetSnapshot();
+            }
+            aptNeedsAttention |= HasActionableAptDiagnostics(fixBroken);
+
+            SetProgress(65);
+            var metadata = await RunAptAsync(
+                [.. AptNetworkOptions, "update"],
+                MetadataTimeout,
+                "Refresh package metadata after APT repair",
+                cancellationToken);
+            if (metadata.ExitCode != 0)
+            {
+                FailJob("APT repair completed partially but metadata refresh failed.", BuildFailureDetail(metadata));
+                return GetSnapshot();
+            }
+            aptNeedsAttention |= HasActionableAptDiagnostics(metadata);
+
+            var packages = await ListUpgradeablePackagesAsync(cancellationToken);
+            var release = await ReadReleaseUpgradeAsync(cancellationToken);
+            var reboot = ReadRebootRequired();
+            var schedule = await LoadScheduleAsync(cancellationToken);
+            CompleteRefresh(
+                ReadOsRelease(),
+                packages,
+                reboot,
+                release,
+                schedule,
+                timeProvider.GetUtcNow(),
+                HostSystemUpdateJobState.Completed,
+                aptNeedsAttention ? "APT repair completed with warnings." : "APT repair completed.",
+                aptNeedsAttention
+                    ? FailureStatusDetail
+                    : packages.Count == 0 ? "Package metadata is current and no updates are pending." : $"{packages.Count} package(s) pending.",
+                100,
+                aptNeedsAttention);
+            return GetSnapshot();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "APT repair failed.");
+            FailJob("APT repair failed.", ex.Message);
             return GetSnapshot();
         }
         finally
@@ -399,7 +520,7 @@ public sealed partial class LinuxHostSystemUpdateService(
         AppendLog($"Installing {securityNames.Length} security package(s).");
         return await RunAptAsync(
             [
-                "-o", "DPkg::Lock::Timeout=120",
+                .. AptNetworkOptions,
                 "-o", "Dpkg::Options::=--force-confold",
                 "install", "-y",
                 .. securityNames
@@ -456,23 +577,64 @@ public sealed partial class LinuxHostSystemUpdateService(
         string description,
         CancellationToken cancellationToken)
     {
-        var result = await commandRunner.RunAsync(
-            new LinuxCommandRequest(
-                "env",
-                ["DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a", "apt-get", .. aptArguments],
-                RequiresSudo: true,
-                Timeout: timeout,
-                Description: description),
-            dryRun: false,
-            cancellationToken);
+        var request = new LinuxCommandRequest(
+            "env",
+            ["DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a", "apt-get", .. aptArguments],
+            RequiresSudo: true,
+            Timeout: timeout,
+            Description: description);
+        var result = commandRunner is IStreamingLinuxCommandRunner streamingRunner
+            ? await streamingRunner.RunStreamingAsync(request, false, output => AppendLog(output.Text), cancellationToken)
+            : await commandRunner.RunAsync(request, false, cancellationToken);
         if (!string.IsNullOrWhiteSpace(result.StandardOutput))
         {
-            AppendLog(TrimForLog(result.StandardOutput));
+            if (commandRunner is not IStreamingLinuxCommandRunner)
+            {
+                AppendLog(TrimForLog(result.StandardOutput));
+            }
         }
 
         if (result.ExitCode != 0 && !string.IsNullOrWhiteSpace(result.StandardError))
         {
-            AppendLog(TrimForLog(result.StandardError));
+            if (commandRunner is not IStreamingLinuxCommandRunner)
+            {
+                AppendLog(TrimForLog(result.StandardError));
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<LinuxCommandResult> RunPrivilegedAsync(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        TimeSpan timeout,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        var request = new LinuxCommandRequest(
+            "env",
+            ["DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a", fileName, .. arguments],
+            RequiresSudo: true,
+            Timeout: timeout,
+            Description: description);
+        var result = commandRunner is IStreamingLinuxCommandRunner streamingRunner
+            ? await streamingRunner.RunStreamingAsync(request, false, output => AppendLog(output.Text), cancellationToken)
+            : await commandRunner.RunAsync(request, false, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(result.StandardOutput))
+        {
+            if (commandRunner is not IStreamingLinuxCommandRunner)
+            {
+                AppendLog(TrimForLog(result.StandardOutput));
+            }
+        }
+
+        if (result.ExitCode != 0 && !string.IsNullOrWhiteSpace(result.StandardError))
+        {
+            if (commandRunner is not IStreamingLinuxCommandRunner)
+            {
+                AppendLog(TrimForLog(result.StandardError));
+            }
         }
 
         return result;
@@ -495,7 +657,8 @@ public sealed partial class LinuxHostSystemUpdateService(
         HostSystemUpdateJobState state = HostSystemUpdateJobState.Completed,
         string? summary = null,
         string? detail = null,
-        int progressPercent = 100)
+        int progressPercent = 100,
+        bool needsAttention = false)
     {
         var securityCount = packages.Count(item => item.IsSecurity);
         lock (syncRoot)
@@ -513,7 +676,8 @@ public sealed partial class LinuxHostSystemUpdateService(
                         : "Review package updates, OS upgrades, or schedule automatic maintenance."),
                 ProgressPercent = progressPercent,
                 CompletedAtUtc = refreshedAtUtc,
-                LogLines = snapshot.Job.LogLines.ToArray()
+                LogLines = snapshot.Job.LogLines.ToArray(),
+                NeedsAttention = needsAttention
             };
             snapshot = new HostSystemUpdateSnapshot(
                 os,
@@ -534,11 +698,12 @@ public sealed partial class LinuxHostSystemUpdateService(
         string summary,
         string detail,
         int progressPercent,
-        DateTimeOffset? startedAtUtc = null)
+        DateTimeOffset? startedAtUtc = null,
+        bool clearPackages = false)
     {
         lock (syncRoot)
         {
-            snapshot = snapshot with
+            var updatedSnapshot = snapshot with
             {
                 Job = snapshot.Job with
                 {
@@ -549,9 +714,20 @@ public sealed partial class LinuxHostSystemUpdateService(
                     StartedAtUtc = startedAtUtc ?? snapshot.Job.StartedAtUtc ?? timeProvider.GetUtcNow(),
                     CompletedAtUtc = state is HostSystemUpdateJobState.Completed or HostSystemUpdateJobState.Failed
                         ? timeProvider.GetUtcNow()
-                        : null
+                        : null,
+                    NeedsAttention = state == HostSystemUpdateJobState.Failed
                 }
             };
+
+            snapshot = clearPackages
+                ? updatedSnapshot with
+                {
+                    UpgradeableCount = 0,
+                    SecurityCount = 0,
+                    Packages = Array.Empty<HostUpgradeablePackage>(),
+                    LastRefreshedAtUtc = null
+                }
+                : updatedSnapshot;
         }
     }
 
@@ -569,7 +745,19 @@ public sealed partial class LinuxHostSystemUpdateService(
     private void FailJob(string summary, string detail)
     {
         AppendLog(detail);
-        SetJob(HostSystemUpdateJobState.Failed, summary, detail, 100);
+        SetJob(HostSystemUpdateJobState.Failed, summary, FailureStatusDetail, 100);
+    }
+
+    internal static bool HasActionableAptDiagnostics(LinuxCommandResult result)
+    {
+        var output = $"{result.StandardOutput}\n{result.StandardError}";
+        return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(line =>
+                line.StartsWith("W:", StringComparison.OrdinalIgnoreCase) ||
+                line.StartsWith("E:", StringComparison.OrdinalIgnoreCase) ||
+                line.StartsWith("Err:", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("Failed to fetch", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("configured multiple times", StringComparison.OrdinalIgnoreCase));
     }
 
     private void AppendLog(string line)

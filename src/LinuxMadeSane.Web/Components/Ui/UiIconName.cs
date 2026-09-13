@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 namespace LinuxMadeSane.Web.Components.Ui;
@@ -33,5 +33,6 @@ public enum UiIconName
     TextSize,
     Contrast,
     Security,
-    LaterSection
+    LaterSection,
+    About
 }

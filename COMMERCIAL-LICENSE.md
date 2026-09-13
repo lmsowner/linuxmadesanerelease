@@ -2,7 +2,7 @@
 
 Linux Made Sane Community Edition is free for normal internal use, including internal use by commercial organisations.
 
-A commercial agreement from Richard D. Kiernan is required when LMS becomes part of a third-party commercial service, product, or customer-delivery model.
+A commercial agreement from Linux Made Sane is required when LMS becomes part of a third-party commercial service, product, or customer-delivery model.
 
 The Community Edition source license permits redistribution of the licensed work subject to the Business Source License. It does not grant permission to turn LMS into a paid hosted service, MSP delivery platform, white-label product, commercial appliance, customer support platform, or paid embedded component without a commercial agreement.
 
@@ -33,4 +33,4 @@ Redistribution must retain Linux Made Sane copyright, license, attribution, and 
 
 See `TRADEMARKS.md` and `THIRD-PARTY-NOTICES.md`.
 
-If your use is close to the boundary, ask Richard D. Kiernan before building a customer-facing service around LMS.
+If your use is close to the boundary, ask Linux Made Sane before building a customer-facing service around LMS.

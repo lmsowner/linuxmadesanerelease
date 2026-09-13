@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.ComponentModel.DataAnnotations;
@@ -142,10 +142,10 @@ public sealed class LocalAiEngineManagerService(
         if (!status.Runtime.IsInstalled)
         {
             actions.Add(new LocalAiPlanAction(
-                "Install Ollama",
-                "Install the Ollama runtime and register its systemd service on this LMS host.",
+                "Install local AI engine",
+                "Install the private local AI runtime used by Linux Made Sane on this computer.",
                 "curl -fsSL https://ollama.com/install.sh -o /tmp/lms-ollama-install.sh && sudo sh /tmp/lms-ollama-install.sh",
-                "Adds the local AI runtime and systemd service.",
+                "Adds the local AI engine and starts it automatically after install.",
                 true,
                 true));
         }
@@ -153,10 +153,10 @@ public sealed class LocalAiEngineManagerService(
         if (!status.Runtime.IsServiceActive)
         {
             actions.Add(new LocalAiPlanAction(
-                "Start Ollama service",
-                "Enable and start the Ollama systemd service.",
+                "Start local AI engine",
+                "Start the local AI engine so Linux Made Sane can talk to it on this computer only.",
                 "sudo systemctl enable --now ollama",
-                "Makes the localhost Ollama API reachable to Linux Made Sane.",
+                "Makes the private local AI endpoint available to Linux Made Sane.",
                 true,
                 true));
         }
@@ -164,51 +164,51 @@ public sealed class LocalAiEngineManagerService(
         if (!installed)
         {
             actions.Add(new LocalAiPlanAction(
-                "Pull model",
-                $"Pull {recommendedModel.ModelId} into the local Ollama model cache.",
+                "Download model",
+                $"Download {recommendedModel.DisplayName} for private use on this computer.",
                 $"ollama pull {recommendedModel.ModelId}",
-                "Consumes disk space and downloads the selected local model.",
+                "Uses disk space to store the selected local model.",
                 true,
                 false));
         }
 
         actions.Add(new LocalAiPlanAction(
-            "Test inference",
-            "Run a small local test prompt against the selected model.",
+            "Test the model",
+            "Send a short private test prompt to confirm the model answers.",
             $"ollama run {recommendedModel.ModelId} \"Reply with exactly OK.\"",
-            "Verifies that Linux Made Sane can talk to the local runtime.",
+            "Checks that Local AI is ready before wiring it into chat and Deep Fix.",
             false,
             false));
 
         actions.Add(new LocalAiPlanAction(
-            "Configure provider",
-            "Create or update the Linux Made Sane Local Ollama provider record.",
+            "Connect Local AI to LMS",
+            "Register the local model as an LMS AI provider.",
             $"Create provider {status.Settings.LocalProviderKey} with default model {recommendedModel.ModelId}",
-            "Makes the local AI engine selectable by existing AI chat and Deep Fix.",
+            "Lets chat, terminal help, and Deep Fix use this private model.",
             true,
             false));
 
         if (enableSharing)
         {
             actions.Add(new LocalAiPlanAction(
-                "Publish shared AI engine",
-                "Register this LMS host as a shared AI engine through LMS Connect.",
+                "Share with other LMS instances",
+                "Publish this computer as a private shared AI engine through LMS Connect.",
                 "Sync sharing metadata to LMS Portal",
-                "Allows other authorized LMS instances to route AI requests here without exposing Ollama publicly.",
+                "Lets other authorised LMS instances use this engine without exposing it publicly.",
                 true,
                 false));
         }
 
         return new LocalAiSetupPlan(
-            "Prepare this LMS host as a managed local AI engine.",
+            "Set up private Local AI on this computer.",
             recommendedModel.SuitabilityWarning.Length == 0
-                ? $"Recommended model: {recommendedModel.DisplayName}."
-                : $"Recommended model: {recommendedModel.DisplayName}. {recommendedModel.SuitabilityWarning}",
+                ? $"Linux Made Sane will use {recommendedModel.DisplayName}."
+                : $"Linux Made Sane will use {recommendedModel.DisplayName}. {recommendedModel.SuitabilityWarning}",
             installed ? 0 : recommendedModel.EstimatedRamBytes,
             recommendedModel.EstimatedRamBytes,
             true,
             false,
-            "Linux Made Sane will verify Ollama service health and run a local inference test after changes.",
+            "Linux Made Sane will confirm the engine is healthy and run a short private model test.",
             actions);
     }
 
@@ -245,8 +245,8 @@ public sealed class LocalAiEngineManagerService(
 
         ReportSetupProgress(
             progress,
-            "Inspecting local AI runtime",
-            "Checking Ollama, installed models, and current hardware before applying the setup plan.",
+            "Checking this computer",
+            "Reviewing Local AI readiness, installed models, and available memory before setup.",
             LocalAiSetupProgressState.Running);
         var status = await InspectAsync(cancellationToken);
         var model = string.IsNullOrWhiteSpace(selectedModelId)
@@ -258,8 +258,8 @@ public sealed class LocalAiEngineManagerService(
         {
             ReportSetupProgress(
                 progress,
-                "Installing Ollama",
-                "Downloading and installing the Ollama runtime, then enabling its systemd service.",
+                "Installing local AI engine",
+                "Downloading and installing the private local AI engine used by Linux Made Sane.",
                 LocalAiSetupProgressState.Running);
             var install = await ollamaRuntimeService.InstallAsync(true, cancellationToken);
             output.AddRange(install.OutputLines);
@@ -267,7 +267,7 @@ public sealed class LocalAiEngineManagerService(
             {
                 ReportSetupProgress(
                     progress,
-                    "Ollama install failed",
+                    "Local AI install failed",
                     install.Detail,
                     LocalAiSetupProgressState.Failed);
                 await RecordAuditAsync("local-ai.install.failed", "runtime", install.Summary, install.Detail, false, cancellationToken);
@@ -276,23 +276,23 @@ public sealed class LocalAiEngineManagerService(
 
             ReportSetupProgress(
                 progress,
-                "Ollama installed",
+                "Local AI engine installed",
                 install.Detail,
                 LocalAiSetupProgressState.Completed);
         }
 
         ReportSetupProgress(
             progress,
-            "Refreshing runtime status",
-            "Re-checking Ollama health and the currently installed models after any runtime changes.",
+            "Refreshing Local AI status",
+            "Re-checking engine health and installed models after any runtime changes.",
             LocalAiSetupProgressState.Running);
         status = await InspectAsync(cancellationToken);
         if (!status.InstalledModels.Any(item => item.ModelId.Equals(model.ModelId, StringComparison.OrdinalIgnoreCase)))
         {
             ReportSetupProgress(
                 progress,
-                $"Pulling model {model.ModelId}",
-                $"Downloading {model.DisplayName} into the local Ollama model cache.",
+                $"Downloading {model.DisplayName}",
+                $"Downloading {model.DisplayName} for private use on this computer.",
                 LocalAiSetupProgressState.Running);
             var pull = await ollamaRuntimeService.PullModelAsync(model.ModelId, true, cancellationToken);
             output.AddRange(pull.OutputLines);
@@ -300,7 +300,7 @@ public sealed class LocalAiEngineManagerService(
             {
                 ReportSetupProgress(
                     progress,
-                    $"Model pull failed for {model.ModelId}",
+                    $"Download failed for {model.DisplayName}",
                     pull.Detail,
                     LocalAiSetupProgressState.Failed);
                 await RecordAuditAsync("local-ai.model.pull.failed", "models", pull.Summary, pull.Detail, false, cancellationToken);
@@ -309,15 +309,15 @@ public sealed class LocalAiEngineManagerService(
 
             ReportSetupProgress(
                 progress,
-                $"Model ready: {model.ModelId}",
+                $"{model.DisplayName} ready",
                 pull.Detail,
                 LocalAiSetupProgressState.Completed);
         }
 
         ReportSetupProgress(
             progress,
-            "Testing local inference",
-            $"Running a small inference test against {model.ModelId}.",
+            "Testing the model",
+            $"Running a short private test against {model.DisplayName}.",
             LocalAiSetupProgressState.Running);
         var benchmark = await ollamaRuntimeService.TestModelAsync(model.ModelId, cancellationToken);
         await store.SaveBenchmarkResultAsync(benchmark, cancellationToken);
@@ -326,7 +326,7 @@ public sealed class LocalAiEngineManagerService(
         {
             ReportSetupProgress(
                 progress,
-                "Local inference test failed",
+                "Model test failed",
                 benchmark.Detail,
                 LocalAiSetupProgressState.Failed);
             await RecordAuditAsync("local-ai.test.failed", "models", "Local AI model test failed.", benchmark.Detail, false, cancellationToken);
@@ -335,20 +335,20 @@ public sealed class LocalAiEngineManagerService(
 
         ReportSetupProgress(
             progress,
-            "Local inference test passed",
+            "Model test passed",
             benchmark.Detail,
             LocalAiSetupProgressState.Completed);
 
         ReportSetupProgress(
             progress,
-            "Registering local provider",
-            $"Creating or updating the LMS Local Ollama provider with default model {model.ModelId}.",
+            "Connecting Local AI to LMS",
+            $"Making {model.DisplayName} available in chat and Deep Fix.",
             LocalAiSetupProgressState.Running);
         await CreateOrUpdateLocalProviderAsync(model.ModelId, cancellationToken);
         ReportSetupProgress(
             progress,
-            "Local provider ready",
-            "Existing AI chat and Deep Fix can now select the local Ollama provider.",
+            "Local AI connected",
+            "Chat and Deep Fix can now use this private local model.",
             LocalAiSetupProgressState.Completed);
 
         var currentSettings = await store.GetSettingsAsync(cancellationToken);
@@ -398,13 +398,13 @@ public sealed class LocalAiEngineManagerService(
         ReportSetupProgress(
             progress,
             "Setup complete",
-            $"Linux Made Sane can now use {model.DisplayName} through the local Ollama runtime.",
+            $"Linux Made Sane can now use {model.DisplayName} privately on this computer.",
             LocalAiSetupProgressState.Completed);
 
         return new LocalAiApplyResult(
             true,
-            "Local AI Engine configured.",
-            $"Linux Made Sane can now use {model.DisplayName} through the local Ollama runtime.",
+            "Local AI is ready.",
+            $"Linux Made Sane can now use {model.DisplayName} privately on this computer.",
             false,
             output,
             DateTimeOffset.UtcNow);
@@ -895,27 +895,27 @@ public sealed class LocalAiEngineManagerService(
         var warnings = new List<string>();
         if (!runtime.IsInstalled)
         {
-            warnings.Add("Ollama is not installed on this LMS host.");
+            warnings.Add("Local AI is not installed on this computer yet. Use Quick Setup to finish it in a few clicks.");
         }
 
         if (hardware.TotalMemoryBytes > 0 && hardware.TotalMemoryBytes < 8L * 1024 * 1024 * 1024)
         {
-            warnings.Add("This LMS host has less than 8 GB RAM. Local AI is possible, but only very small models are realistic.");
+            warnings.Add("This computer has less than 8 GB RAM. Local AI still works, but stick with Tiny or Light.");
         }
 
         if (hardware.GpuAccelerationState == LocalAiGpuAccelerationState.Available)
         {
-            warnings.Add("GPU detected, but Linux Made Sane could not confirm CUDA or ROCm acceleration.");
+            warnings.Add("A GPU was detected, but Linux Made Sane could not confirm acceleration yet. CPU mode still works.");
         }
 
         if (!installedModels.Any())
         {
-            warnings.Add("No local models are installed yet.");
+            warnings.Add("No local models are downloaded yet. Quick Setup can install the recommended model for you.");
         }
 
         if (settings.SharingEnabled && !runtime.IsApiReachable)
         {
-            warnings.Add("Sharing is enabled, but the local Ollama API is not currently reachable.");
+            warnings.Add("Sharing is enabled, but Local AI is not currently reachable on this computer.");
         }
 
         return warnings;

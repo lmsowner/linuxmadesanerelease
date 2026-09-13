@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Net;
@@ -546,10 +546,7 @@ public sealed class RemoteLmsSshTunnelService(
         private static string BuildRelayUrl(string hostname, string? path)
         {
             var returnPath = RemoteLmsTunnelAccessService.NormalizeReturnUrl(path);
-            return new UriBuilder(Uri.UriSchemeHttps, hostname)
-            {
-                Path = returnPath
-            }.Uri.ToString();
+            return new Uri(new UriBuilder(Uri.UriSchemeHttps, hostname).Uri, returnPath).ToString();
         }
     }
 }

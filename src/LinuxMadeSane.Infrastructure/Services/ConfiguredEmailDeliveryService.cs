@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Net;
@@ -48,7 +48,7 @@ public sealed class ConfiguredEmailDeliveryService(
 
         return settings.Provider switch
         {
-            MessagingEmailProvider.Smtp => await SendSmtpAsync(settings, sender, recipient, subject, htmlBody, cancellationToken),
+            MessagingEmailProvider.Smtp or MessagingEmailProvider.MailRelay => await SendSmtpAsync(settings, sender, recipient, subject, htmlBody, cancellationToken),
             MessagingEmailProvider.MicrosoftGraph => await SendGraphAsync(settings, recipient.Address, subject, htmlBody, cancellationToken),
             _ => new EmailDeliveryResult(false, false, "Choose an email provider first.")
         };

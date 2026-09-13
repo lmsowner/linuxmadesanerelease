@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Core.Models.MailRelay;
@@ -13,7 +13,10 @@ public sealed record MailRelaySetupRequest(
     string ApplicationName,
     string ApplicationUsername,
     bool AllowTailscale,
-    bool AllowTrustedLan);
+    bool AllowTrustedLan)
+{
+    public bool ConfigureLmsEmail { get; init; }
+}
 
 public sealed record MailRelayLegacySubmissionRequest(
     bool Enabled,

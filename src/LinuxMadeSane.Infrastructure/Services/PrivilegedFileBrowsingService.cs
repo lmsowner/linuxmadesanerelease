@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text;
@@ -175,7 +175,7 @@ public sealed class PrivilegedFileBrowsingService(
                     continue
                 if not is_directory and maximum_size is not None and info.st_size > int(maximum_size):
                     continue
-                if contains_text and (is_directory or is_link or not file_contains_text(full_path)):
+                if contains_text and (not stat.S_ISREG(info.st_mode) or not file_contains_text(full_path)):
                     continue
                 link_target = ""
                 if is_link:
@@ -951,30 +951,17 @@ public sealed class PrivilegedFileBrowsingService(
                 request.PrivateKey,
                 request.PrivateKeyPassphrase,
                 request.PreferStoredCredentials),
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
         using var client = sshConnectionFactory.CreateSshClient(host, credentials, ConnectTimeout, KeepAliveInterval);
-        client.Connect();
+        await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
 
         try
         {
-            var commandText = "sudo -n " + QuoteShellArgument(fileName) +
+            var commandText = "exec sudo -n " + QuoteShellArgument(fileName) +
                               string.Concat(arguments.Select(argument => " " + QuoteShellArgument(argument)));
             using var command = client.CreateCommand(commandText);
             command.CommandTimeout = CommandTimeout;
-            using var cancellationRegistration = cancellationToken.Register(
-                static state =>
-                {
-                    try
-                    {
-                        ((SshCommand)state!).CancelAsync();
-                    }
-                    catch
-                    {
-                    }
-                },
-                command);
-
-            var asyncResult = command.BeginExecute();
+            var execution = command.ExecuteAsync(cancellationToken);
             if (inputBytes is not null)
             {
                 using var input = command.CreateInputStream();
@@ -983,10 +970,17 @@ public sealed class PrivilegedFileBrowsingService(
                 input.Close();
             }
 
-            var outputTask = new StreamReader(command.OutputStream, Encoding.UTF8).ReadToEndAsync(cancellationToken);
-            var errorTask = new StreamReader(command.ExtendedOutputStream, Encoding.UTF8).ReadToEndAsync(cancellationToken);
-            await Task.Run(() => command.EndExecute(asyncResult), cancellationToken);
-            await Task.WhenAll(outputTask, errorTask);
+            var outputTask = Task.Run(async () =>
+            {
+                using var reader = new StreamReader(command.OutputStream, Encoding.UTF8);
+                return await reader.ReadToEndAsync(cancellationToken);
+            }, CancellationToken.None);
+            var errorTask = Task.Run(async () =>
+            {
+                using var reader = new StreamReader(command.ExtendedOutputStream, Encoding.UTF8);
+                return await reader.ReadToEndAsync(cancellationToken);
+            }, CancellationToken.None);
+            await Task.WhenAll(execution, outputTask, errorTask).ConfigureAwait(false);
 
             return new PrivilegedCommandResult(
                 command.ExitStatus ?? -1,

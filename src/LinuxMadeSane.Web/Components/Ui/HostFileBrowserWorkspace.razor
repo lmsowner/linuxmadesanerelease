@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @using LinuxMadeSane.Application.Contracts
@@ -101,6 +101,8 @@ else
                                  DetailPanelSizePx="@previewPanelSizePx"
                                  SidebarCollapsed="@foldersPaneCollapsed"
                                  DetailPanelFocused="@previewPanelFocused"
+                                 FolderSizes="@CachedFolderSizes"
+                                 LoadingFolderSizes="@loadingFolderSizePaths"
                                  NotConnectedTitle="Browser not connected"
                                  NotConnectedMessage="@NotConnectedMessage"
                                  BusyTitle="@browseBusyTitle"
@@ -113,6 +115,8 @@ else
                                  ItemSelectionToggled="ToggleItemSelectionAsync"
                                  ItemSelected="SelectItem"
                                  ContextMenuRequested="OpenContextMenuAsync"
+                                 FolderSizeRequested="CalculateFolderSizeAsync"
+                                 FolderSizeCancellationRequested="CancelFolderSizeAsync"
                                  DetailPanelSizeChanged="OnPreviewPanelSizeChangedAsync"
                                  SidebarCollapsedChanged="OnFoldersPaneCollapsedChangedAsync"
                                  DetailPanelFocusedChanged="OnPreviewPanelFocusedChangedAsync">
@@ -502,7 +506,35 @@ else
                                 }
                                 <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Owner: @FormatMetadataValue(item.OwnerName)</UiPill>
                                 <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Group: @FormatMetadataValue(item.GroupName)</UiPill>
-                                <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Size: @FormatBytes(item.SizeBytes)</UiPill>
+                                @if (item.ItemType != SftpItemType.Folder)
+                                {
+                                    <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Size: @FormatBytes(item.SizeBytes)</UiPill>
+                                }
+                                else if (TryGetCachedFolderSize(item, out var folderSizeBytes))
+                                {
+                                    <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Size: @SystemInfoValueFormatter.FormatDriveSize(folderSizeBytes)</UiPill>
+                                }
+                                else
+                                {
+                                    var isSizeLoading = IsFolderSizeLoading(item);
+                                    @if (isSizeLoading)
+                                    {
+                                        <UiCommandButton Label="Cancel"
+                                                         Title="@($"Cancel size calculation for {item.Name}")"
+                                                         HideIcon="true"
+                                                         Class="host-file-preview-get-size"
+                                                         OnClick="@(() => CancelFolderSizeAsync(item))" />
+                                    }
+                                    else
+                                    {
+                                        <UiCommandButton Label="Get size"
+                                                         Title="@($"Calculate space used by {item.Name}")"
+                                                         HideIcon="true"
+                                                         Class="host-file-preview-get-size"
+                                                         Disabled="@isBusy"
+                                                         OnClick="@(() => CalculateFolderSizeAsync(item))" />
+                                    }
+                                }
                                 <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Modified: @(item.LastModifiedUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "n/a")</UiPill>
                             </div>
                         </footer>
@@ -1179,6 +1211,8 @@ else
     private CancellationTokenSource? fileSearchCts;
     private CancellationTokenSource? previewCts;
     private CancellationTokenSource? operationMessageCts;
+    private readonly Dictionary<string, CancellationTokenSource> folderSizeRequests = new(StringComparer.Ordinal);
+    private readonly HashSet<string> loadingFolderSizePaths = new(StringComparer.Ordinal);
     private string? observedClipboardSignature;
     private string ownershipPermissionsStatusMessage = string.Empty;
     private string ownershipPermissionsStatusTone = "info";
@@ -1432,6 +1466,15 @@ else
     private IReadOnlyList<string> OwnershipPermissionOwnerOptions => BuildOwnershipPermissionOwnerOptions();
     private IReadOnlyList<string> OwnershipPermissionGroupOptions => BuildOwnershipPermissionGroupOptions();
     private FileBrowserWorkspaceState WorkspaceState => workspaceState ??= FileBrowserWorkspaceRegistry.GetOrCreate(workspaceId);
+    private IReadOnlyDictionary<string, long> CachedFolderSizes => browser is null
+        ? EmptyFolderSizes
+        : WorkspaceState.GetFolderSizes(
+            browser.Host.Id,
+            connectionUsername,
+            UsesSshTransport,
+            sudoModeEnabled);
+    private static readonly IReadOnlyDictionary<string, long> EmptyFolderSizes =
+        new Dictionary<string, long>(StringComparer.Ordinal);
     private bool OwnershipPermissionsHasMultipleTargets => ownershipPermissionsTargetItems.Count > 1;
     private bool OwnershipPermissionsHasFolderTargets => ownershipPermissionsTargetItems.Any(item => item.ItemType == SftpItemType.Folder);
     private string OwnershipPermissionsSubtitle => OwnershipPermissionsHasMultipleTargets
@@ -1514,9 +1557,19 @@ else
         fileSearchStatusTone = "info";
         liveFileSearchResults.Clear();
         liveFileSearchResultPaths.Clear();
-        fileSearchCts?.Cancel();
-        fileSearchCts?.Dispose();
+        var previousSearch = fileSearchCts;
         fileSearchCts = null;
+        isSearchingFiles = false;
+        if (previousSearch is not null)
+        {
+            await previousSearch.CancelAsync();
+        }
+        foreach (var folderSizeRequest in folderSizeRequests.Values.ToArray())
+        {
+            await folderSizeRequest.CancelAsync();
+        }
+        folderSizeRequests.Clear();
+        loadingFolderSizePaths.Clear();
         pathSuggestions = [];
         isPathSuggestionsLoading = false;
         pathSuggestionsRequestVersion = 0;
@@ -3263,10 +3316,9 @@ else
             return;
         }
 
-        fileSearchCts?.Cancel();
-        fileSearchCts?.Dispose();
         fileSearchCts = new CancellationTokenSource();
         var searchCancellation = fileSearchCts;
+        var searchToken = searchCancellation.Token;
 
         isSearchingFiles = true;
         fileSearchRootPath = ResolveBrowserPath(request.RootPath);
@@ -3282,6 +3334,11 @@ else
         {
             var progress = new Progress<FileSearchProgress>(update =>
             {
+                if (searchToken.IsCancellationRequested || fileSearchCts != searchCancellation)
+                {
+                    return;
+                }
+
                 if (update.Match is not null &&
                     liveFileSearchResultPaths.Add(update.Match.FullPath))
                 {
@@ -3300,7 +3357,14 @@ else
                 _ = InvokeAsync(StateHasChanged);
             });
 
-            fileSearchResponse = await SearchFilesInternalAsync(request, progress, searchCancellation.Token);
+            var response = await SearchFilesInternalAsync(request, progress, searchToken).WaitAsync(searchToken);
+            searchToken.ThrowIfCancellationRequested();
+            if (fileSearchCts != searchCancellation)
+            {
+                return;
+            }
+
+            fileSearchResponse = response;
             fileSearchStatusMessage = fileSearchResponse.Results.Count switch
             {
                 0 => "No files or folders matched that search.",
@@ -3318,23 +3382,13 @@ else
                 fileSearchStatusTone = "success";
             }
         }
-        catch (OperationCanceledException)
+        catch (Exception exception) when (exception is OperationCanceledException || searchToken.IsCancellationRequested)
         {
-            var resultCount = liveFileSearchResults.Count;
-            fileSearchResponse = new FileSearchResponse(
-                fileSearchRootPath,
-                liveFileSearchResults.ToArray(),
-                false);
-            fileSearchStatusMessage = resultCount switch
+            if (fileSearchCts != searchCancellation)
             {
-                0 => "Search cancelled.",
-                1 => "Search cancelled. 1 match found before cancellation.",
-                _ => $"Search cancelled. {resultCount} matches found before cancellation."
-            };
-            fileSearchStatusTone = "warning";
-        }
-        catch (Exception) when (searchCancellation.IsCancellationRequested)
-        {
+                return;
+            }
+
             var resultCount = liveFileSearchResults.Count;
             fileSearchResponse = new FileSearchResponse(
                 fileSearchRootPath,
@@ -3350,28 +3404,33 @@ else
         }
         catch (Exception exception)
         {
-            fileSearchStatusMessage = exception.Message;
-            fileSearchStatusTone = "error";
+            if (fileSearchCts == searchCancellation)
+            {
+                fileSearchStatusMessage = exception.Message;
+                fileSearchStatusTone = "error";
+            }
         }
         finally
         {
-            isSearchingFiles = false;
-            fileSearchCts?.Dispose();
-            fileSearchCts = null;
-            await InvokeAsync(StateHasChanged);
+            if (fileSearchCts == searchCancellation)
+            {
+                isSearchingFiles = false;
+                fileSearchCts = null;
+                await InvokeAsync(StateHasChanged);
+            }
+
+            searchCancellation.Dispose();
         }
     }
 
-    private Task CancelFileSearchAsync()
+    private async Task CancelFileSearchAsync()
     {
         if (fileSearchCts is not null && !fileSearchCts.IsCancellationRequested)
         {
             fileSearchStatusMessage = "Cancelling search...";
             fileSearchStatusTone = "warning";
-            fileSearchCts.Cancel();
+            await fileSearchCts.CancelAsync();
         }
-
-        return Task.CompletedTask;
     }
 
     private string BuildFileSearchStartMessage(FileSearchRequest request)
@@ -3432,29 +3491,44 @@ else
             return;
         }
 
-        showFileSearchDialog = false;
         var targetPath = ResolveBrowserPath(result.FullPath);
         var destinationPath = result.ItemType == SftpItemType.Folder
             ? targetPath
             : ResolveBrowserPath(result.ParentPath);
 
-        await LoadItemsAsync(destinationPath, preserveSessionOnFailure: canBrowse, updatePathInputOnSuccess: true);
-
-        if (result.ItemType == SftpItemType.Folder)
+        var secretHandle = ConnectionSecretStore.Clone(connectionSecretHandle);
+        var detachedBrowser = WorkspaceState.CreateDetachedBrowser(BuildDetachedSnapshot(secretHandle) with
         {
-            SetOperationMessage($"Opened {result.FullPath}.", "success");
-            return;
+            CurrentPath = destinationPath,
+            SelectedPath = result.ItemType == SftpItemType.Folder ? string.Empty : targetPath,
+            PreviewOpen = false,
+            PreviewFocused = false
+        });
+        var popupUrl = $"/file-browser-window/{detachedBrowser.BrowserId}?workspaceId={Uri.EscapeDataString(workspaceId)}";
+        if (HasScopedRoot)
+        {
+            popupUrl += $"&rootPath={Uri.EscapeDataString(EffectiveRootPath!)}&title={Uri.EscapeDataString(ResolvedExplorerTitle)}";
         }
 
-        var refreshedItem = FindItemByPath(items, targetPath);
-        if (refreshedItem is null)
+        var opened = false;
+        try
         {
-            return;
+            opened = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.openPopup", popupUrl, $"lms-file-browser-{detachedBrowser.BrowserId:N}");
         }
-
-        selectedItem = refreshedItem;
-        selectedPaths.Clear();
-        selectedPaths.Add(targetPath);
+        catch (JSException)
+        {
+            // Retain the search results and allow another attempt if the popup cannot open.
+        }
+        finally
+        {
+            if (!opened)
+            {
+                WorkspaceState.RemoveDetachedBrowser(detachedBrowser.BrowserId);
+                ConnectionSecretStore.Delete(secretHandle);
+                fileSearchStatusMessage = "Popup blocked. Allow popups for this app and try again.";
+                fileSearchStatusTone = "warning";
+            }
+        }
     }
 
     private async Task PreviewFileSearchResultAsync(FileSearchMatch result)
@@ -6259,7 +6333,113 @@ else
         }
     }
 
-    private async Task<long> EstimateDirectorySizeAsync(string rootPath)
+    private Task<long> EstimateDirectorySizeAsync(string rootPath) =>
+        EstimateDirectorySizeAsync(
+            browser!.Host,
+            BuildConnectionProfile(),
+            rootPath,
+            ignoreInaccessibleDirectories: true,
+            CancellationToken.None);
+
+    private async Task CalculateFolderSizeAsync(SftpItem item)
+    {
+        if (browser is null || item.ItemType != SftpItemType.Folder)
+        {
+            return;
+        }
+
+        var path = ResolveBrowserPath(item.FullPath);
+        if (TryGetCachedFolderSize(item, out _) || folderSizeRequests.ContainsKey(path))
+        {
+            return;
+        }
+
+        var host = browser.Host;
+        var username = connectionUsername;
+        var useSshTransport = UsesSshTransport;
+        var useSudo = sudoModeEnabled;
+        var profile = BuildConnectionProfile();
+        var cacheVersion = WorkspaceState.GetFolderSizeCacheVersion(host.Id);
+        var cancellation = new CancellationTokenSource();
+        folderSizeRequests[path] = cancellation;
+        loadingFolderSizePaths.Add(path);
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var sizeBytes = await EstimateDirectorySizeAsync(
+                host,
+                profile,
+                path,
+                ignoreInaccessibleDirectories: false,
+                cancellation.Token);
+            WorkspaceState.TrySetFolderSize(
+                host.Id,
+                path,
+                username,
+                useSshTransport,
+                useSudo,
+                sizeBytes,
+                cacheVersion);
+        }
+        catch (Exception) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            SetOperationMessage($"Could not calculate the size of {item.Name}: {exception.Message}", "warning");
+        }
+        finally
+        {
+            if (folderSizeRequests.TryGetValue(path, out var currentRequest) &&
+                ReferenceEquals(currentRequest, cancellation))
+            {
+                folderSizeRequests.Remove(path);
+                loadingFolderSizePaths.Remove(path);
+            }
+
+            cancellation.Dispose();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task CancelFolderSizeAsync(SftpItem item)
+    {
+        var path = ResolveBrowserPath(item.FullPath);
+        if (!folderSizeRequests.TryGetValue(path, out var cancellation) || cancellation.IsCancellationRequested)
+        {
+            return;
+        }
+
+        await cancellation.CancelAsync();
+    }
+
+    private bool TryGetCachedFolderSize(SftpItem item, out long sizeBytes)
+    {
+        if (browser is null)
+        {
+            sizeBytes = 0;
+            return false;
+        }
+
+        return WorkspaceState.TryGetFolderSize(
+            browser.Host.Id,
+            ResolveBrowserPath(item.FullPath),
+            connectionUsername,
+            UsesSshTransport,
+            sudoModeEnabled,
+            out sizeBytes);
+    }
+
+    private bool IsFolderSizeLoading(SftpItem item) =>
+        loadingFolderSizePaths.Contains(ResolveBrowserPath(item.FullPath));
+
+    private async Task<long> EstimateDirectorySizeAsync(
+        ManagedHost host,
+        ManagedHostConnectionProfile profile,
+        string rootPath,
+        bool ignoreInaccessibleDirectories,
+        CancellationToken cancellationToken)
     {
         long totalBytes = 0;
         var pending = new Stack<string>();
@@ -6267,13 +6447,18 @@ else
 
         while (pending.Count > 0)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var currentPath = pending.Pop();
             IReadOnlyList<SftpItem> children;
             try
             {
-                children = await ListItemsForPathAsync(currentPath);
+                children = await FileAccessService.ListItemsAsync(host, currentPath, profile, cancellationToken);
             }
-            catch
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch when (ignoreInaccessibleDirectories)
             {
                 continue;
             }
@@ -6312,8 +6497,27 @@ else
                 return;
             }
 
+            var completedJob = FileActionQueueService.GetJobs(workspaceId)
+                .FirstOrDefault(job => job.Id == changeEvent.JobId);
+            var handledDelete = completedJob is { Kind: FileActionKind.Delete } &&
+                completedJob.HostId == browser.Host.Id;
+            if (handledDelete)
+            {
+                foreach (var deletedItem in completedJob!.Items.Where(item =>
+                             item.Status is FileActionItemStatus.Succeeded or FileActionItemStatus.Ignored))
+                {
+                    WorkspaceState.InvalidateFolderSizes(
+                        completedJob.HostId,
+                        ResolveBrowserPath(deletedItem.SourcePath));
+                }
+            }
+
             if (!canBrowse || isBusy || isSearchingFiles)
             {
+                if (handledDelete)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
                 return;
             }
 
@@ -6322,6 +6526,10 @@ else
                     location.HostId == browser.Host.Id &&
                     string.Equals(ResolveBrowserPath(location.DirectoryPath), normalizedCurrentPath, StringComparison.Ordinal)))
             {
+                if (handledDelete)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
                 return;
             }
 
@@ -6414,10 +6622,17 @@ else
 
         if (fileSearchCts is not null)
         {
-            fileSearchCts.Cancel();
-            fileSearchCts.Dispose();
+            var searchCancellation = fileSearchCts;
             fileSearchCts = null;
+            await searchCancellation.CancelAsync();
         }
+
+        foreach (var folderSizeRequest in folderSizeRequests.Values.ToArray())
+        {
+            await folderSizeRequest.CancelAsync();
+        }
+        folderSizeRequests.Clear();
+        loadingFolderSizePaths.Clear();
 
         if (operationMessageCts is not null)
         {

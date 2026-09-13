@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text.Json;
@@ -28,7 +28,7 @@ public sealed class SqliteLocalAiEngineStore(LinuxMadeSaneDbContext dbContext) :
             return new LocalAiEngineSettings(
                 LocalAiRuntimeKind.Ollama,
                 "http://127.0.0.1:11434",
-                "qwen2.5-coder:1.5b",
+                "qwen3.5:4b",
                 "local-ollama",
                 false,
                 true,

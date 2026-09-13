@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Collections.Concurrent;
@@ -54,7 +54,131 @@ public sealed class FileBrowserWorkspaceState
 {
     private readonly Dictionary<Guid, DetachedFileBrowserState> detachedBrowsers = [];
     private readonly Dictionary<Guid, DetachedFileSearchState> detachedSearches = [];
+    private readonly Dictionary<FileBrowserFolderSizeCacheKey, long> folderSizes = [];
+    private readonly Dictionary<Guid, long> folderSizeCacheVersions = [];
     private readonly object syncRoot = new();
+
+    public IReadOnlyDictionary<string, long> GetFolderSizes(
+        Guid hostId,
+        string username,
+        bool useSshTransport,
+        bool useSudo)
+    {
+        lock (syncRoot)
+        {
+            return folderSizes
+                .Where(entry =>
+                    entry.Key.HostId == hostId &&
+                    string.Equals(entry.Key.Username, username.Trim(), StringComparison.Ordinal) &&
+                    entry.Key.UseSshTransport == useSshTransport &&
+                    entry.Key.UseSudo == useSudo)
+                .ToDictionary(entry => entry.Key.Path, entry => entry.Value, StringComparer.Ordinal);
+        }
+    }
+
+    public bool TryGetFolderSize(
+        Guid hostId,
+        string path,
+        string username,
+        bool useSshTransport,
+        bool useSudo,
+        out long sizeBytes)
+    {
+        lock (syncRoot)
+        {
+            return folderSizes.TryGetValue(
+                BuildFolderSizeCacheKey(hostId, path, username, useSshTransport, useSudo),
+                out sizeBytes);
+        }
+    }
+
+    public long GetFolderSizeCacheVersion(Guid hostId)
+    {
+        lock (syncRoot)
+        {
+            return folderSizeCacheVersions.GetValueOrDefault(hostId);
+        }
+    }
+
+    public bool TrySetFolderSize(
+        Guid hostId,
+        string path,
+        string username,
+        bool useSshTransport,
+        bool useSudo,
+        long sizeBytes,
+        long expectedCacheVersion)
+    {
+        lock (syncRoot)
+        {
+            if (folderSizeCacheVersions.GetValueOrDefault(hostId) != expectedCacheVersion)
+            {
+                return false;
+            }
+
+            folderSizes[BuildFolderSizeCacheKey(hostId, path, username, useSshTransport, useSudo)] = Math.Max(0, sizeBytes);
+            return true;
+        }
+    }
+
+    public int InvalidateFolderSizes(Guid hostId, string affectedDirectoryPath)
+    {
+        lock (syncRoot)
+        {
+            var affectedPath = NormalizeCachePath(affectedDirectoryPath);
+            var keys = folderSizes.Keys
+                .Where(key => key.HostId == hostId && PathsOverlap(key.Path, affectedPath))
+                .ToArray();
+            foreach (var key in keys)
+            {
+                folderSizes.Remove(key);
+            }
+
+            folderSizeCacheVersions[hostId] = folderSizeCacheVersions.GetValueOrDefault(hostId) + 1;
+            return keys.Length;
+        }
+    }
+
+    private static FileBrowserFolderSizeCacheKey BuildFolderSizeCacheKey(
+        Guid hostId,
+        string path,
+        string username,
+        bool useSshTransport,
+        bool useSudo) =>
+        new(hostId, NormalizeCachePath(path), username.Trim(), useSshTransport, useSudo);
+
+    private static bool PathsOverlap(string first, string second) =>
+        IsSameOrNestedPath(first, second) || IsSameOrNestedPath(second, first);
+
+    private static bool IsSameOrNestedPath(string candidate, string parent) =>
+        string.Equals(candidate, parent, StringComparison.Ordinal) ||
+        parent == "/" ||
+        candidate.StartsWith(parent + "/", StringComparison.Ordinal);
+
+    private static string NormalizeCachePath(string path)
+    {
+        var normalized = (path ?? string.Empty).Trim().Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(normalized) || normalized == "/")
+        {
+            return "/";
+        }
+
+        if (normalized == ".")
+        {
+            return ".";
+        }
+
+        var hasLeadingSlash = normalized.StartsWith('/');
+        var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0)
+        {
+            return hasLeadingSlash ? "/" : ".";
+        }
+
+        return hasLeadingSlash
+            ? "/" + string.Join('/', parts)
+            : string.Join('/', parts);
+    }
 
     public DetachedFileBrowserState CreateDetachedBrowser(DetachedFileBrowserSnapshot snapshot)
     {
@@ -235,6 +359,13 @@ public sealed class FileBrowserWorkspaceState
 
     public FileBrowserClipboardState? Clipboard { get; private set; }
 }
+
+public sealed record FileBrowserFolderSizeCacheKey(
+    Guid HostId,
+    string Path,
+    string Username,
+    bool UseSshTransport,
+    bool UseSudo);
 
 public sealed record DetachedFileBrowserSnapshot(
     Guid HostId,

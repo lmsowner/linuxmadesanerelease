@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Core.Enums;
@@ -11,4 +11,7 @@ public sealed record TerminalSession(
     TerminalSessionStatus Status,
     string WorkingDirectory,
     DateTimeOffset StartedAtUtc,
-    DateTimeOffset LastActivityUtc);
+    DateTimeOffset LastActivityUtc)
+{
+    public string Username { get; init; } = string.Empty;
+}

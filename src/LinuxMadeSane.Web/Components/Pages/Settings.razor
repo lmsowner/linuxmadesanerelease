@@ -1,4 +1,4 @@
-@* Copyright (c) Richard D. Kiernan.
+@* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @page "/settings"
@@ -13,6 +13,8 @@
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Models
 @using LinuxMadeSane.Core.Models.Shares
+@using LinuxMadeSane.Application.Contracts.MailRelay
+@using LinuxMadeSane.Core.Models.MailRelay
 @using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.AspNetCore.Components.Forms
 @inject ISecuritySettingsService SecuritySettingsService
@@ -20,14 +22,15 @@
 @inject ITrustedNetworkAccessService TrustedNetworkAccessService
 @inject TrustedNetworkAccessTrialService NetworkAccessTrialService
 @inject IFirewallManagementService FirewallService
+@inject IMailRelayService MailRelayService
 @inject NavigationManager Navigation
 @inject IHttpContextAccessor HttpContextAccessor
 @inject IJSRuntime JS
 
-<PageTitle>LMS Security | Linux Made Sane</PageTitle>
+<PageTitle>Security | Linux Made Sane</PageTitle>
 
 <div class="page-shell">
-    <UiHeroPanel Title="LMS Security" Compact="true" />
+    <UiHeroPanel Title="Security" Compact="true" />
 
     @if (HasAuthenticatedLmsUser)
     {
@@ -1047,6 +1050,10 @@
                                             <option value="@MessagingEmailProvider.Disabled">Disabled</option>
                                             <option value="@MessagingEmailProvider.Smtp">SMTP</option>
                                             <option value="@MessagingEmailProvider.MicrosoftGraph">Microsoft Graph</option>
+                                            @foreach (var relayDomain in configuredMailRelayDomains)
+                                            {
+                                                <option value="@MessagingEmailProvider.MailRelay">Mail Relay [@relayDomain.DomainName]</option>
+                                            }
                                         </UiSelectField>
                                     </div>
 
@@ -1091,6 +1098,19 @@
                                             <span class="meta-text">Stored password: @(messagingEditor.HasSmtpPassword ? "yes" : "no")</span>
                                         </div>
                                         <p class="meta-text">If the SMTP username belongs to an LMS Mail Relay user, LMS automatically uses the protected local relay connection and its pinned certificate. The host field is then only retained for compatibility.</p>
+                                    }
+                                    else if (messagingEditor.Provider == MessagingEmailProvider.MailRelay)
+                                    {
+                                        <p class="callout success">This uses the configured local Mail Relay. No SMTP host, port, username, or password is required here.</p>
+                                        <div class="field-row">
+                                            <UiSelectField TValue="string" @bind-Value="selectedMailRelayDomain" Label="Sending domain">
+                                                @foreach (var relayDomain in configuredMailRelayDomains)
+                                                {
+                                                    <option value="@relayDomain.DomainName">@relayDomain.DomainName</option>
+                                                }
+                                            </UiSelectField>
+                                            <span class="meta-text">The relay must have the dedicated LMS email client configured.</span>
+                                        </div>
                                     }
                                     else if (messagingEditor.Provider == MessagingEmailProvider.MicrosoftGraph)
                                     {
@@ -1361,6 +1381,9 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private TrustedNetworkEntryEditor networkEditor = new();
     private SecurityUserEditor userEditor = new();
     private SecurityMessagingSettingsEditor messagingEditor = new();
+    private MailRelayDashboardViewModel? mailRelayDashboard;
+    private IReadOnlyList<MailRelayDomain> configuredMailRelayDomains = [];
+    private string selectedMailRelayDomain = string.Empty;
     private FirewallAllowRuleEditor firewallEditor = new();
     private FirewallAllowRuleEditor firewallEditEditor = new();
     private FirewallStatusViewModel? firewallStatus;
@@ -1515,6 +1538,12 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     {
         page = await SecuritySettingsService.GetPageAsync();
         messagingEditor = await SecuritySettingsService.GetMessagingEditorAsync();
+        mailRelayDashboard = await MailRelayService.GetDashboardAsync();
+        configuredMailRelayDomains = mailRelayDashboard.Domains.Where(domain => domain.Enabled).ToArray();
+        selectedMailRelayDomain = configuredMailRelayDomains.FirstOrDefault(domain =>
+            messagingEditor.SenderAddress.EndsWith($"@{domain.DomainName}", StringComparison.OrdinalIgnoreCase))?.DomainName
+            ?? configuredMailRelayDomains.FirstOrDefault()?.DomainName
+            ?? string.Empty;
         localLinuxUsers = await LoadLocalLinuxUsersAsync();
         SyncSessionLifetimeEditors();
         SyncLinuxUsernameEditors();
@@ -2061,6 +2090,14 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         messagingMessageIsError = false;
         try
         {
+            if (messagingEditor.Provider == MessagingEmailProvider.MailRelay &&
+                !string.IsNullOrWhiteSpace(selectedMailRelayDomain))
+            {
+                var localPart = messagingEditor.SenderAddress.Split('@', 2)[0].Trim();
+                messagingEditor.SenderAddress = string.IsNullOrWhiteSpace(localPart)
+                    ? $"lms@{selectedMailRelayDomain}"
+                    : $"{localPart}@{selectedMailRelayDomain}";
+            }
             await SecuritySettingsService.SaveMessagingSettingsAsync(messagingEditor);
             messagingMessage = "Messaging settings saved.";
             await LoadAsync();
@@ -3152,6 +3189,7 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     {
         MessagingEmailProvider.Smtp => "SMTP",
         MessagingEmailProvider.MicrosoftGraph => "Graph",
+        MessagingEmailProvider.MailRelay => "Mail Relay",
         _ => "Off"
     };
 

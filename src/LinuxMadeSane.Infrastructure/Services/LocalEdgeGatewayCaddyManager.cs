@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Core.Abstractions;
@@ -11,7 +11,6 @@ namespace LinuxMadeSane.Infrastructure.Services;
 
 public sealed class LocalEdgeGatewayCaddyManager(ILinuxCommandRunner commandRunner) : IEdgeGatewayCaddyManager
 {
-    private const string ServiceName = "caddy";
     private const string MainConfigPath = "/etc/caddy/Caddyfile";
     private const string ManagedRootDirectory = "/etc/caddy/linuxmadesane";
     private const string ManagedConfigPath = "/etc/caddy/linuxmadesane/edge-gateway.caddy";
@@ -75,15 +74,18 @@ public sealed class LocalEdgeGatewayCaddyManager(ILinuxCommandRunner commandRunn
             await WriteTextAsync(ManagedConfigPath, caddyfile, cancellationToken);
             await WriteTextAsync(MainConfigPath, EnsureManagedImport(liveMainText, ManagedConfigPath), cancellationToken);
 
+            // The default systemd unit uses --force, which closes existing proxy streams
+            // even when only LMS authentication settings changed. Let Caddy skip
+            // an identical active configuration while still reconciling any drift.
             var reload = await commandRunner.RunAsync(
-                new LinuxCommandRequest("systemctl", ["reload", ServiceName], true, TimeSpan.FromMinutes(1), "Reload Caddy after Edge Gateway update"),
+                new LinuxCommandRequest("caddy", ["reload", "--config", MainConfigPath, "--adapter", "caddyfile"], true, TimeSpan.FromMinutes(1), "Apply Edge Gateway configuration to Caddy"),
                 dryRun: false,
                 cancellationToken);
             logs.Add(Map(reload, "Reload Caddy"));
 
             if (reload.ExitCode == 0)
             {
-                return new EdgeGatewayCaddyApplyResult(true, "Edge Gateway Caddy config applied and Caddy reloaded.", ManagedConfigPath, logs);
+                return new EdgeGatewayCaddyApplyResult(true, "Edge Gateway Caddy configuration is up to date.", ManagedConfigPath, logs);
             }
 
             if (!string.IsNullOrWhiteSpace(previousManagedText))

@@ -20,6 +20,8 @@ curl -fsSL https://bit.ly/4tCQKCN | sudo bash
 
 The public repository remains a safe public CE source/docs surface. It must not receive the public website project, Pro/Enterprise packages, portal packages, private manifests, license secrets, databases, local configuration, credentials, or proprietary implementation details.
 
+Each Community release is built by the website host from the pushed `main` commit. `VERSION` must be newer than the currently published version. The builder records the public source commit in the release manifest and inside the package, performs a cold-start smoke test, then publishes the verified tarball to the website download directory.
+
 Expected files for each release:
 
 ```text
