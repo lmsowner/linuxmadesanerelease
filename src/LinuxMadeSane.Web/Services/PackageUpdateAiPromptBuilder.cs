@@ -31,12 +31,14 @@ public static class PackageUpdateAiPromptBuilder
 
         var completionRequirement = pendingPackages.Count > 0
             ? "Do not stop after refreshing APT metadata or repairing APT. Continue until the package upgrade has run successfully. For a healthy package manager, run a non-interactive `apt-get upgrade -y` with `Dpkg::Options::=--force-confold`. Before reporting completion, verify each package listed below is installed at its current candidate version and is absent from `apt list --upgradable`. If APT reports that a package was kept back, resolve that package with a dependency-aware upgrade and verify it again."
-            : "Before reporting completion, verify that APT metadata refresh succeeds and `apt list --upgradable` confirms the current package state.";
+            : "Verify that `apt list --upgradable` confirms the current package state before reporting completion.";
 
         return $"""
 {objective}
 
 Inspect the active APT/dpkg transaction state and the recent LMS update log first. Do not start a second package transaction while one is running. If APT or dpkg is broken, finish interrupted configuration and repair dependencies before applying updates. Preserve existing local configuration files and use non-interactive APT commands. Do not perform an Ubuntu distribution release upgrade or update Linux Made Sane itself.
+
+After any package installation, run a final `apt-get update` and treat every actionable repository warning as unresolved. Package post-install scripts can recreate a duplicate repository definition. Keep one valid signed source, disable the duplicate, persist the package's repository preference so its next upgrade does not recreate that duplicate, then repeat `apt-get update`. Report success only after the final metadata refresh completes without actionable warnings.
 
 {completionRequirement}
 
