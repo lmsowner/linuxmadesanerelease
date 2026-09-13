@@ -17,7 +17,7 @@ public sealed partial class TerminalAiAssistantService(
 {
     private const int MaxTerminalOutputChars = 3200;
     private const int MaxCustomProviderTerminalOutputChars = 1200;
-    private const int MaxRequestChars = 1800;
+    private const int MaxRequestChars = 8_000;
     private const int MaxHistoryEntries = 12;
     private const int MaxHistoryRecapChars = 1800;
     private const int MaxHistoryEntryChars = 260;

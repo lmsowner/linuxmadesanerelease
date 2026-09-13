@@ -7,13 +7,15 @@ namespace LinuxMadeSane.Web.Services;
 
 public static class PackageUpdateAiPromptBuilder
 {
+    private const int MaxRecentLogCharacters = 4_000;
+
     public static string Build(
         string statusSummary,
         IReadOnlyList<string> recentLogLines,
         IReadOnlyList<HostUpgradeablePackage> pendingPackages,
         bool needsAttention)
     {
-        var recentLog = string.Join(Environment.NewLine, recentLogLines.TakeLast(80));
+        var recentLog = TrimRecentLog(string.Join(Environment.NewLine, recentLogLines.TakeLast(80)));
         var pendingPackageList = pendingPackages.Count == 0
             ? "No packages were pending when this session opened."
             : string.Join(
@@ -53,5 +55,16 @@ Recent Host update log:
 {recentLog}
 ```
 """;
+    }
+
+    private static string TrimRecentLog(string recentLog)
+    {
+        var normalized = recentLog.Trim();
+        if (normalized.Length <= MaxRecentLogCharacters)
+        {
+            return normalized;
+        }
+
+        return $"[earlier log lines omitted]{Environment.NewLine}{normalized[^MaxRecentLogCharacters..]}";
     }
 }

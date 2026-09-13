@@ -330,6 +330,9 @@
     [Parameter]
     public Func<string, CancellationToken, Task>? RunCommand { get; set; }
 
+    [Parameter]
+    public int AgentCommandLimit { get; set; } = DefaultMaxAgentCommands;
+
     private string promptText = string.Empty;
     private string panelInfo = string.Empty;
     private string panelError = string.Empty;
@@ -351,7 +354,7 @@
     private Task? providerContextLoadTask;
     private TaskCompletionSource<bool>? pendingApprovalSource;
     private TaskCompletionSource<string?>? pendingSecureInputSource;
-    private const int MaxAgentCommands = 8;
+    private const int DefaultMaxAgentCommands = 8;
     private const int MaxAgentRecoveryTurns = 4;
     private string selectedProviderKey = string.Empty;
     private string selectedModelId = string.Empty;
@@ -469,7 +472,8 @@ Selected terminal content:
             var commandCount = 0;
             var recoveryTurns = 0;
 
-            while (commandCount < MaxAgentCommands)
+            var commandLimit = Math.Clamp(AgentCommandLimit, 1, 32);
+            while (commandCount < commandLimit)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (isDisposed || Tab.Id != requestTabId)
@@ -563,7 +567,7 @@ Selected terminal content:
                 await InvokeAsync(StateHasChanged);
             }
 
-            agentStatus = $"Stopped after {MaxAgentCommands} commands. Send a follow-up to continue.";
+            agentStatus = $"Stopped after {commandLimit} commands. Send a follow-up to continue.";
         }
         catch (OperationCanceledException)
         {
