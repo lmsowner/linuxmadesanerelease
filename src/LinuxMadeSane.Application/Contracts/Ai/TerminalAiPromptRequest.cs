@@ -25,5 +25,7 @@ public sealed class TerminalAiPromptRequest
 
     public string Request { get; set; } = string.Empty;
 
+    public string ActiveGoal { get; set; } = string.Empty;
+
     public bool AllowInternetResearch { get; set; }
 }

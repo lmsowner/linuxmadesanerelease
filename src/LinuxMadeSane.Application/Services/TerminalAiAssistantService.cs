@@ -173,6 +173,7 @@ public sealed partial class TerminalAiAssistantService(
             ? "Unknown"
             : request.WorkingDirectory.Trim();
         var requestText = TrimRequestText(request.Request);
+        var activeGoal = TrimRequestText(request.ActiveGoal);
         var outputTail = TrimTerminalOutput(request.TerminalOutput, providerType);
 
         var builder = new StringBuilder();
@@ -216,7 +217,14 @@ public sealed partial class TerminalAiAssistantService(
             builder.AppendLine();
         }
 
-        if (!string.IsNullOrWhiteSpace(requestText))
+        if (!string.IsNullOrWhiteSpace(activeGoal))
+        {
+            builder.AppendLine("Active agent goal:");
+            builder.AppendLine(activeGoal);
+            builder.AppendLine("Keep this goal for every continuation. If the latest structured command result proves the goal and its verification requirements are complete, return the final result without another command. Do not repeat a successful check.");
+            builder.AppendLine();
+        }
+        else if (!string.IsNullOrWhiteSpace(requestText))
         {
             builder.AppendLine($"Operator request: {requestText}");
             builder.AppendLine();
