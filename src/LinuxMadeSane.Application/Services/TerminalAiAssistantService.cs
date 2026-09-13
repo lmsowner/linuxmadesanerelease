@@ -382,10 +382,7 @@ public sealed partial class TerminalAiAssistantService(
             return string.Empty;
         }
 
-        var inlineMatch = InlineBacktickCommandPattern().Match(assistantText);
-        return inlineMatch.Success
-            ? ExtractLikelyCommand(inlineMatch.Groups[1].Value)
-            : string.Empty;
+        return string.Empty;
     }
 
     private static string ExtractLikelyCommand(string value)
@@ -1074,9 +1071,6 @@ public sealed partial class TerminalAiAssistantService(
 
     [GeneratedRegex("```(?:bash|sh)?\\s*\\n([\\s\\S]*?)```", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SuggestedCommandPattern();
-
-    [GeneratedRegex("`([^`\\r\\n]+)`", RegexOptions.CultureInvariant)]
-    private static partial Regex InlineBacktickCommandPattern();
 
     [GeneratedRegex("\\x1B\\[[0-?]*[ -/]*[@-~]", RegexOptions.CultureInvariant)]
     private static partial Regex AnsiEscapePattern();
