@@ -401,6 +401,14 @@
                                 <strong>Why the newer Ubuntu exists but cannot be selected yet</strong>
                                 <span>Ubuntu can publish installation media before enabling its supported in-place LTS upgrade path. The live LTS feed currently says <code>Supported=0</code> for this next step.</span>
                                 <span>Changing to every stable release does not make this LTS upgrade path supported; it changes which Ubuntu release feed the server follows.</span>
+                                <span>Ubuntu's normal release feed may already offer the published release. LMS can switch to that feed, check again immediately, and show the guided upgrade if Ubuntu accepts the path.</span>
+                                <div class="updates-action-row">
+                                    <UiCommandButton Label="@GetAlternateReleaseFeedLabel()"
+                                                     Glyph="UiIconGlyph.Refresh"
+                                                     Variant="UiButtonVariant.PrimaryMuted"
+                                                     OnClick="(() => SetReleaseUpgradeChannelAsync(HostReleaseUpgradeChannel.AllStableReleases))"
+                                                     Disabled="@IsHostBusy" />
+                                </div>
                             </div>
                         }
                         else if (hostSnapshot.ReleaseUpgrade.CheckState == HostReleaseUpgradeCheckState.TemporarilyUnavailable)
@@ -458,6 +466,10 @@
                                     <p class="eyebrow">Guided upgrade</p>
                                     <h2>Upgrade @hostSnapshot.OperatingSystem.VersionId → @hostSnapshot.ReleaseUpgrade.TargetRelease</h2>
                                     <p class="meta-text">Ubuntu release upgrades are interactive. LMS opens its own Terminal so you can see package removals and answer configuration prompts instead of running a hidden background job.</p>
+                                    @if (IsNormalReleaseChannel && (hostSnapshot.ReleaseUpgrade.TargetRelease?.Contains("LTS", StringComparison.OrdinalIgnoreCase) ?? false))
+                                    {
+                                        <p class="meta-text">This release was offered through Ubuntu's normal feed. After the OS upgrade completes, return here and select <strong>Use LTS releases</strong> to put this server back on the LTS-only track.</p>
+                                    }
                                 </div>
                             </div>
 
@@ -945,6 +957,11 @@
         "never" => "Disabled",
         _ => "Unknown"
     };
+
+    private string GetAlternateReleaseFeedLabel() =>
+        string.IsNullOrWhiteSpace(hostSnapshot.ReleaseUpgrade.TargetRelease)
+            ? "Try Ubuntu's normal release feed"
+            : $"Try {hostSnapshot.ReleaseUpgrade.TargetRelease} through the normal feed";
 
     private sealed class ScheduleEditorModel
     {
