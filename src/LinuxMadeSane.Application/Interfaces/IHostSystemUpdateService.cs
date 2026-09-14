@@ -21,6 +21,13 @@ public interface IHostSystemUpdateService
     Task<HostSystemUpdateSnapshot> RepairAptAsync(
         CancellationToken cancellationToken = default);
 
+    Task<HostSystemUpdateSnapshot> CheckReleaseUpgradeAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<HostSystemUpdateSnapshot> SetReleaseUpgradeChannelAsync(
+        HostReleaseUpgradeChannel channel,
+        CancellationToken cancellationToken = default);
+
     Task<HostSystemUpdateSnapshot> StartReleaseUpgradeAsync(
         CancellationToken cancellationToken = default);
 

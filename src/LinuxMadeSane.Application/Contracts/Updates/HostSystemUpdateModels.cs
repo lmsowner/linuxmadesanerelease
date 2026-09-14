@@ -32,13 +32,35 @@ public sealed record HostUpgradeablePackage(
     string Suite,
     bool IsSecurity);
 
+public enum HostReleaseUpgradeCheckState
+{
+    NotChecked = 0,
+    ToolMissing = 1,
+    Available = 2,
+    NoRelease = 3,
+    Disabled = 4,
+    TemporarilyUnavailable = 5,
+    Failed = 6
+}
+
+public enum HostReleaseUpgradeChannel
+{
+    LtsOnly = 0,
+    AllStableReleases = 1
+}
+
 public sealed record HostOsReleaseUpgradeInfo(
     bool ToolAvailable,
     bool IsAvailable,
     string Summary,
     string Detail,
     string? TargetRelease,
-    bool CheckSucceeded = true);
+    bool CheckSucceeded = true,
+    HostReleaseUpgradeCheckState CheckState = HostReleaseUpgradeCheckState.NotChecked,
+    string UpgradeChannel = "unknown",
+    string Diagnostic = "",
+    DateTimeOffset? LastCheckedAtUtc = null,
+    bool IsChecking = false);
 
 public sealed record HostSystemUpdateJobStatus(
     HostSystemUpdateJobState State,

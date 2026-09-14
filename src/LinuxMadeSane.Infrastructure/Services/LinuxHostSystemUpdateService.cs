@@ -324,6 +324,127 @@ public sealed partial class LinuxHostSystemUpdateService(
         }
     }
 
+    public async Task<HostSystemUpdateSnapshot> CheckReleaseUpgradeAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (!await operationLock.WaitAsync(0, cancellationToken))
+        {
+            return GetSnapshot();
+        }
+
+        try
+        {
+            EnsureLinux();
+            BeginReleaseOperation(
+                "Checking for a new OS release…",
+                "Asking the Ubuntu release upgrader directly. Package repositories are checked separately.");
+
+            var release = await ReadReleaseUpgradeAsync(cancellationToken);
+            CompleteReleaseCheck(ReadOsRelease(), release, timeProvider.GetUtcNow());
+            return GetSnapshot();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            CompleteReleaseCheck(
+                ReadOsRelease(),
+                BuildReleaseCheckFailure("The OS release check was cancelled."),
+                timeProvider.GetUtcNow());
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "OS release upgrade check failed.");
+            var failed = BuildReleaseCheckFailure(ex.Message);
+            CompleteReleaseCheck(ReadOsRelease(), failed, timeProvider.GetUtcNow());
+            return GetSnapshot();
+        }
+        finally
+        {
+            operationLock.Release();
+        }
+    }
+
+    public async Task<HostSystemUpdateSnapshot> SetReleaseUpgradeChannelAsync(
+        HostReleaseUpgradeChannel channel,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await operationLock.WaitAsync(0, cancellationToken))
+        {
+            return GetSnapshot();
+        }
+
+        try
+        {
+            EnsureLinux();
+            var os = ReadOsRelease();
+            if (!os.Id.Equals("ubuntu", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Release upgrade tracks can only be configured automatically on Ubuntu.");
+            }
+
+            var prompt = channel == HostReleaseUpgradeChannel.LtsOnly ? "lts" : "normal";
+            var label = channel == HostReleaseUpgradeChannel.LtsOnly ? "LTS releases" : "every stable Ubuntu release";
+            BeginReleaseOperation(
+                $"Selecting {label}…",
+                "Updating Ubuntu's release-upgrade track, then checking it immediately.");
+
+            var result = await commandRunner.RunAsync(
+                new LinuxCommandRequest(
+                    "sed",
+                    [
+                        "-i",
+                        "-E",
+                        $"s/^[[:space:]]*Prompt[[:space:]]*=.*/Prompt={prompt}/",
+                        "/etc/update-manager/release-upgrades"
+                    ],
+                    RequiresSudo: true,
+                    Timeout: TimeSpan.FromSeconds(30),
+                    Description: "Configure Ubuntu release upgrade track"),
+                dryRun: false,
+                cancellationToken);
+            if (result.ExitCode != 0)
+            {
+                CompleteReleaseCheck(os, BuildReleaseCheckFailure(BuildFailureDetail(result)), timeProvider.GetUtcNow());
+                return GetSnapshot();
+            }
+
+            var configuredChannel = ReadReleaseUpgradeChannel();
+            if (!configuredChannel.Equals(prompt, StringComparison.OrdinalIgnoreCase))
+            {
+                CompleteReleaseCheck(
+                    os,
+                    BuildReleaseCheckFailure("Ubuntu's release-upgrades file did not contain a usable Prompt setting."),
+                    timeProvider.GetUtcNow());
+                return GetSnapshot();
+            }
+
+            var release = await ReadReleaseUpgradeAsync(cancellationToken);
+            CompleteReleaseCheck(os, release, timeProvider.GetUtcNow());
+            return GetSnapshot();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            CompleteReleaseCheck(
+                ReadOsRelease(),
+                BuildReleaseCheckFailure("The Ubuntu release track change was cancelled."),
+                timeProvider.GetUtcNow());
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ubuntu release upgrade track configuration failed.");
+            CompleteReleaseCheck(
+                ReadOsRelease(),
+                BuildReleaseCheckFailure(ex.Message),
+                timeProvider.GetUtcNow());
+            return GetSnapshot();
+        }
+        finally
+        {
+            operationLock.Release();
+        }
+    }
+
     public async Task<HostSystemUpdateSnapshot> StartReleaseUpgradeAsync(CancellationToken cancellationToken = default)
     {
         if (!await operationLock.WaitAsync(0, cancellationToken))
@@ -454,17 +575,25 @@ public sealed partial class LinuxHostSystemUpdateService(
             .ToArray();
     }
 
-    internal static HostOsReleaseUpgradeInfo ParseReleaseUpgradeCheck(string output, string error, bool toolAvailable)
+    internal static HostOsReleaseUpgradeInfo ParseReleaseUpgradeCheck(
+        string output,
+        string error,
+        bool toolAvailable,
+        string upgradeChannel = "unknown")
     {
+        var diagnostic = TrimForLog($"{output}\n{error}");
         if (!toolAvailable)
         {
             return new HostOsReleaseUpgradeInfo(
                 false,
                 false,
                 "Release upgrade tool not installed",
-                "Install ubuntu-release-upgrader-core (or your distro equivalent) to check for a new OS release.",
+                "Install ubuntu-release-upgrader-core, then run the check again.",
                 null,
-                false);
+                false,
+                HostReleaseUpgradeCheckState.ToolMissing,
+                upgradeChannel,
+                diagnostic);
         }
 
         var text = $"{output}\n{error}";
@@ -476,27 +605,70 @@ public sealed partial class LinuxHostSystemUpdateService(
                 true,
                 true,
                 $"New OS release {target} is available",
-                "Release upgrades change the OS version. Back up first, prefer a maintenance window, and expect a reboot.",
-                target);
+                "Complete the readiness steps below, then run Ubuntu's interactive upgrader in LMS Terminal.",
+                target,
+                true,
+                HostReleaseUpgradeCheckState.Available,
+                upgradeChannel,
+                diagnostic);
         }
 
-        if (text.Contains("No new release found", StringComparison.OrdinalIgnoreCase))
+        if (text.Contains("Prompt", StringComparison.OrdinalIgnoreCase) &&
+            text.Contains("set to never", StringComparison.OrdinalIgnoreCase))
         {
             return new HostOsReleaseUpgradeInfo(
                 true,
                 false,
-                "No newer OS release available",
-                "This host is on the latest supported release path reported by do-release-upgrade.",
-                null);
+                "Ubuntu release upgrades are disabled",
+                "This server is configured with Prompt=never. Select the recommended LTS track below and LMS will check again.",
+                null,
+                true,
+                HostReleaseUpgradeCheckState.Disabled,
+                "never",
+                diagnostic);
+        }
+
+        if (text.Contains("Release upgrade not possible right now", StringComparison.OrdinalIgnoreCase))
+        {
+            return new HostOsReleaseUpgradeInfo(
+                true,
+                false,
+                "Ubuntu has temporarily paused this upgrade",
+                "Canonical's release service is not offering this upgrade path right now. No local setting can bypass that hold safely; retry later.",
+                null,
+                false,
+                HostReleaseUpgradeCheckState.TemporarilyUnavailable,
+                upgradeChannel,
+                diagnostic);
+        }
+
+        if (text.Contains("No new release found", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("There is no development version of an LTS available", StringComparison.OrdinalIgnoreCase))
+        {
+            return new HostOsReleaseUpgradeInfo(
+                true,
+                false,
+                upgradeChannel.Equals("lts", StringComparison.OrdinalIgnoreCase)
+                    ? "No newer LTS release is being offered"
+                    : "No newer Ubuntu release is being offered",
+                "Ubuntu's release service did not offer a supported next release on the selected track. This can happen during a staged rollout; retry later or choose a different track.",
+                null,
+                true,
+                HostReleaseUpgradeCheckState.NoRelease,
+                upgradeChannel,
+                diagnostic);
         }
 
         return new HostOsReleaseUpgradeInfo(
             true,
             false,
             "Could not determine release upgrade status",
-            string.IsNullOrWhiteSpace(text) ? "do-release-upgrade returned no usable output." : text.Trim(),
+            "The Ubuntu release upgrader returned an unexpected result. The exact diagnostic and recovery commands are shown below.",
             null,
-            false);
+            false,
+            HostReleaseUpgradeCheckState.Failed,
+            upgradeChannel,
+            diagnostic);
     }
 
     private async Task<LinuxCommandResult> ApplySecurityUpdatesAsync(CancellationToken cancellationToken)
@@ -571,8 +743,96 @@ public sealed partial class LinuxHostSystemUpdateService(
         var toolMissing = result.ExitCode == 127 ||
                           result.StandardError.Contains("No such file", StringComparison.OrdinalIgnoreCase) ||
                           result.StandardError.Contains("not found", StringComparison.OrdinalIgnoreCase);
-        return ParseReleaseUpgradeCheck(result.StandardOutput, result.StandardError, !toolMissing || result.ExitCode == 0);
+        return ParseReleaseUpgradeCheck(
+                result.StandardOutput,
+                result.StandardError,
+                !toolMissing || result.ExitCode == 0,
+                ReadReleaseUpgradeChannel())
+            with { LastCheckedAtUtc = timeProvider.GetUtcNow() };
     }
+
+    internal static string ParseReleaseUpgradeChannel(string content)
+    {
+        foreach (var rawLine in content.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var line = rawLine.Trim();
+            if (line.StartsWith('#') || !line.StartsWith("Prompt", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=');
+            if (separator < 0)
+            {
+                continue;
+            }
+
+            var value = line[(separator + 1)..].Trim().ToLowerInvariant();
+            if (value is "lts" or "normal" or "never")
+            {
+                return value;
+            }
+        }
+
+        return "unknown";
+    }
+
+    private static string ReadReleaseUpgradeChannel()
+    {
+        try
+        {
+            const string path = "/etc/update-manager/release-upgrades";
+            return File.Exists(path) ? ParseReleaseUpgradeChannel(File.ReadAllText(path)) : "unknown";
+        }
+        catch
+        {
+            return "unknown";
+        }
+    }
+
+    private void CompleteReleaseCheck(
+        HostOsReleaseInfo os,
+        HostOsReleaseUpgradeInfo release,
+        DateTimeOffset checkedAtUtc)
+    {
+        lock (syncRoot)
+        {
+            snapshot = snapshot with
+            {
+                OperatingSystem = os,
+                ReleaseUpgrade = release with { LastCheckedAtUtc = checkedAtUtc, IsChecking = false }
+            };
+        }
+    }
+
+    private void BeginReleaseOperation(string summary, string detail)
+    {
+        lock (syncRoot)
+        {
+            snapshot = snapshot with
+            {
+                ReleaseUpgrade = snapshot.ReleaseUpgrade with
+                {
+                    Summary = summary,
+                    Detail = detail,
+                    IsChecking = true
+                }
+            };
+        }
+    }
+
+    private HostOsReleaseUpgradeInfo BuildReleaseCheckFailure(string diagnostic) =>
+        new(
+            true,
+            false,
+            "Could not check for a new OS release",
+            "The release upgrader did not complete. Retry the check or use the guided terminal command below.",
+            null,
+            false,
+            HostReleaseUpgradeCheckState.Failed,
+            ReadReleaseUpgradeChannel(),
+            diagnostic,
+            timeProvider.GetUtcNow());
 
     private async Task<LinuxCommandResult> RunAptAsync(
         IReadOnlyList<string> aptArguments,
