@@ -348,7 +348,7 @@
                             <ServiceMetricComponent TagName="div" Label="Current OS" Value="@hostSnapshot.OperatingSystem.PrettyName" />
                             <ServiceMetricComponent TagName="div" Label="Current version" Value="@(string.IsNullOrWhiteSpace(hostSnapshot.OperatingSystem.VersionId) ? "—" : hostSnapshot.OperatingSystem.VersionId)" />
                             <ServiceMetricComponent TagName="div" Label="Upgrade track" Value="@GetReleaseChannelLabel()" />
-                            <ServiceMetricComponent TagName="div" Label="Offered next" Value="@(hostSnapshot.ReleaseUpgrade.TargetRelease ?? (hostSnapshot.ReleaseUpgrade.LastCheckedAtUtc is null ? "Not checked" : "None"))" />
+                            <ServiceMetricComponent TagName="div" Label="Next release" Value="@(hostSnapshot.ReleaseUpgrade.TargetRelease ?? (hostSnapshot.ReleaseUpgrade.LastCheckedAtUtc is null ? "Not checked" : "None"))" />
                         </div>
 
                         <div class="updates-action-row">
@@ -392,7 +392,15 @@
                         {
                             <div class="updates-empty">
                                 <strong>Ubuntu did not offer an upgrade on this track.</strong>
-                                <span>This is a valid check result, not a failed check. Canonical stages LTS upgrades after the first point release and can temporarily pause rollout.</span>
+                                <span>Ubuntu's live feed does not list a newer release on the selected track. The exact release-upgrader output is available below.</span>
+                            </div>
+                        }
+                        else if (hostSnapshot.ReleaseUpgrade.CheckState == HostReleaseUpgradeCheckState.PublishedButUpgradeClosed)
+                        {
+                            <div class="updates-release-warning">
+                                <strong>Why the newer Ubuntu exists but cannot be selected yet</strong>
+                                <span>Ubuntu can publish installation media before enabling its supported in-place LTS upgrade path. The live LTS feed currently says <code>Supported=0</code> for this next step.</span>
+                                <span>Changing to every stable release does not make this LTS upgrade path supported; it changes which Ubuntu release feed the server follows.</span>
                             </div>
                         }
                         else if (hostSnapshot.ReleaseUpgrade.CheckState == HostReleaseUpgradeCheckState.TemporarilyUnavailable)
@@ -428,7 +436,7 @@
                         }
 
                         @if (!string.IsNullOrWhiteSpace(hostSnapshot.ReleaseUpgrade.Diagnostic) &&
-                             hostSnapshot.ReleaseUpgrade.CheckState is HostReleaseUpgradeCheckState.Failed or HostReleaseUpgradeCheckState.TemporarilyUnavailable)
+                             hostSnapshot.ReleaseUpgrade.CheckState is HostReleaseUpgradeCheckState.Failed or HostReleaseUpgradeCheckState.TemporarilyUnavailable or HostReleaseUpgradeCheckState.PublishedButUpgradeClosed or HostReleaseUpgradeCheckState.NoRelease)
                         {
                             <details class="updates-release-diagnostic">
                                 <summary>Exact release-check output</summary>
@@ -913,6 +921,7 @@
         HostReleaseUpgradeCheckState.NoRelease => "Checked",
         HostReleaseUpgradeCheckState.Disabled => "Checks disabled",
         HostReleaseUpgradeCheckState.TemporarilyUnavailable => "Rollout paused",
+        HostReleaseUpgradeCheckState.PublishedButUpgradeClosed => "Upgrade not open",
         HostReleaseUpgradeCheckState.Failed => "Check needs attention",
         HostReleaseUpgradeCheckState.ToolMissing => "Tool missing",
         _ => "Not checked"
@@ -922,7 +931,8 @@
     {
         HostReleaseUpgradeCheckState.Available or
         HostReleaseUpgradeCheckState.Disabled or
-        HostReleaseUpgradeCheckState.TemporarilyUnavailable => UiPillTone.Warning,
+        HostReleaseUpgradeCheckState.TemporarilyUnavailable or
+        HostReleaseUpgradeCheckState.PublishedButUpgradeClosed => UiPillTone.Warning,
         HostReleaseUpgradeCheckState.NoRelease => UiPillTone.Success,
         HostReleaseUpgradeCheckState.Failed => UiPillTone.Failure,
         _ => UiPillTone.Neutral

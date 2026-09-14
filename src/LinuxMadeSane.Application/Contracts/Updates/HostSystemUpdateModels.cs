@@ -40,7 +40,8 @@ public enum HostReleaseUpgradeCheckState
     NoRelease = 3,
     Disabled = 4,
     TemporarilyUnavailable = 5,
-    Failed = 6
+    Failed = 6,
+    PublishedButUpgradeClosed = 7
 }
 
 public enum HostReleaseUpgradeChannel

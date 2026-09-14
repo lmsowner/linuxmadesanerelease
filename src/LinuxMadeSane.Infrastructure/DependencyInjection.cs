@@ -66,6 +66,11 @@ public static class DependencyInjection
         services.AddSingleton<IStorageResizeExecutor>(serviceProvider => serviceProvider.GetRequiredService<StorageResizeQueue>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<StorageResizeQueue>());
         services.AddSingleton<LinuxHostSystemUpdateService>();
+        services.AddHttpClient(nameof(LinuxHostSystemUpdateService), client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(15);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("LinuxMadeSane-ReleaseCheck/1.0");
+        });
         services.AddSingleton<IHostSystemUpdateService>(serviceProvider =>
             serviceProvider.GetRequiredService<LinuxHostSystemUpdateService>());
         services.AddHostedService<HostSystemUpdateScheduleHostedService>();

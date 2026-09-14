@@ -17,7 +17,8 @@ public sealed partial class LinuxHostSystemUpdateService(
     ILocalSystemMaintenanceService maintenanceService,
     IServiceScopeFactory scopeFactory,
     TimeProvider timeProvider,
-    ILogger<LinuxHostSystemUpdateService> logger) : IHostSystemUpdateService
+    ILogger<LinuxHostSystemUpdateService> logger,
+    IHttpClientFactory? httpClientFactory = null) : IHostSystemUpdateService
 {
     private const int MaxLogLines = 200;
     private const string FailureStatusDetail = "See the Host update log below for details.";
@@ -25,6 +26,8 @@ public sealed partial class LinuxHostSystemUpdateService(
     private static readonly TimeSpan ApplyTimeout = TimeSpan.FromHours(2);
     private static readonly TimeSpan ReleaseCheckTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan ReleaseUpgradeTimeout = TimeSpan.FromHours(4);
+    private const string UbuntuStableReleaseFeed = "https://changelogs.ubuntu.com/meta-release";
+    private const string UbuntuLtsReleaseFeed = "https://changelogs.ubuntu.com/meta-release-lts";
     private static readonly string[] AptNetworkOptions =
     [
         "-o", "Acquire::http::Timeout=30",
@@ -743,13 +746,158 @@ public sealed partial class LinuxHostSystemUpdateService(
         var toolMissing = result.ExitCode == 127 ||
                           result.StandardError.Contains("No such file", StringComparison.OrdinalIgnoreCase) ||
                           result.StandardError.Contains("not found", StringComparison.OrdinalIgnoreCase);
-        return ParseReleaseUpgradeCheck(
+        var release = ParseReleaseUpgradeCheck(
                 result.StandardOutput,
                 result.StandardError,
                 !toolMissing || result.ExitCode == 0,
                 ReadReleaseUpgradeChannel())
             with { LastCheckedAtUtc = timeProvider.GetUtcNow() };
+
+        if (release.CheckState != HostReleaseUpgradeCheckState.NoRelease || httpClientFactory is null)
+        {
+            return release;
+        }
+
+        var os = ReadOsRelease();
+        if (!os.Id.Equals("ubuntu", StringComparison.OrdinalIgnoreCase))
+        {
+            return release;
+        }
+
+        var feedUrl = release.UpgradeChannel.Equals("lts", StringComparison.OrdinalIgnoreCase)
+            ? UbuntuLtsReleaseFeed
+            : UbuntuStableReleaseFeed;
+        try
+        {
+            var client = httpClientFactory.CreateClient(nameof(LinuxHostSystemUpdateService));
+            var metadata = await client.GetStringAsync(feedUrl, cancellationToken);
+            return ExplainNoReleaseWithUbuntuMetadata(os, release, metadata, feedUrl);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogInformation(ex, "Could not correlate Ubuntu release check with {FeedUrl}.", feedUrl);
+            return release with
+            {
+                Detail = $"{release.Detail} LMS could not independently read Ubuntu's live release feed during this check.",
+                Diagnostic = AppendDiagnostic(release.Diagnostic, $"Ubuntu release feed could not be read: {ex.Message}")
+            };
+        }
     }
+
+    internal static HostOsReleaseUpgradeInfo ExplainNoReleaseWithUbuntuMetadata(
+        HostOsReleaseInfo os,
+        HostOsReleaseUpgradeInfo release,
+        string metadata,
+        string feedUrl)
+    {
+        if (!TryParseUbuntuVersion(os.VersionId, out var currentVersion))
+        {
+            return release;
+        }
+
+        var newer = ParseUbuntuReleaseMetadata(metadata)
+            .Where(item => TryParseUbuntuVersion(item.Version, out var version) && version.CompareTo(currentVersion) > 0)
+            .OrderBy(item => ParseUbuntuVersionForSort(item.Version))
+            .ToArray();
+        var next = release.UpgradeChannel.Equals("normal", StringComparison.OrdinalIgnoreCase)
+            ? newer.FirstOrDefault(item => item.Supported) ?? newer.FirstOrDefault()
+            : newer.FirstOrDefault();
+        if (next is null)
+        {
+            return release with
+            {
+                Detail = "Ubuntu's live release feed does not list a newer release on the selected track.",
+                Diagnostic = AppendDiagnostic(release.Diagnostic, $"Ubuntu release feed checked: {feedUrl}\nNo newer release entry was listed.")
+            };
+        }
+
+        var feedDiagnostic = $"Ubuntu release feed: {feedUrl}\nNext release: {next.Version}\nSupported: {(next.Supported ? 1 : 0)}";
+        if (!next.Supported)
+        {
+            return release with
+            {
+                Summary = $"Ubuntu {next.Version} is published, but upgrades from {os.VersionId} are not open",
+                Detail = $"Canonical's live upgrade feed currently marks {next.Version} as Supported=0. Installation media can be available before Canonical enables the supported in-place upgrade path. Keep the current release fully updated and retry later.",
+                TargetRelease = next.Version,
+                CheckSucceeded = true,
+                CheckState = HostReleaseUpgradeCheckState.PublishedButUpgradeClosed,
+                Diagnostic = AppendDiagnostic(release.Diagnostic, feedDiagnostic)
+            };
+        }
+
+        return release with
+        {
+            Summary = $"Ubuntu {next.Version} upgrades are open, but this server was not offered one",
+            Detail = $"Canonical's live feed marks {next.Version} as supported. Fully update Ubuntu {os.VersionId}, reboot if required, and retry. The exact release-upgrader output is shown below if it still refuses the upgrade.",
+            TargetRelease = next.Version,
+            CheckSucceeded = false,
+            CheckState = HostReleaseUpgradeCheckState.Failed,
+            Diagnostic = AppendDiagnostic(release.Diagnostic, feedDiagnostic)
+        };
+    }
+
+    internal static IReadOnlyList<UbuntuReleaseMetadataEntry> ParseUbuntuReleaseMetadata(string metadata)
+    {
+        var entries = new List<UbuntuReleaseMetadataEntry>();
+        string? version = null;
+        bool? supported = null;
+
+        void AddEntry()
+        {
+            if (!string.IsNullOrWhiteSpace(version) && supported is not null)
+            {
+                entries.Add(new UbuntuReleaseMetadataEntry(version, supported.Value));
+            }
+
+            version = null;
+            supported = null;
+        }
+
+        foreach (var rawLine in metadata.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0)
+            {
+                AddEntry();
+                continue;
+            }
+
+            if (line.StartsWith("Version:", StringComparison.OrdinalIgnoreCase))
+            {
+                version = line["Version:".Length..].Trim();
+            }
+            else if (line.StartsWith("Supported:", StringComparison.OrdinalIgnoreCase))
+            {
+                supported = line["Supported:".Length..].Trim() == "1";
+            }
+        }
+
+        AddEntry();
+        return entries;
+    }
+
+    private static bool TryParseUbuntuVersion(string value, out Version version)
+    {
+        var match = UbuntuVersionRegex().Match(value ?? string.Empty);
+        if (match.Success &&
+            int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var year) &&
+            int.TryParse(match.Groups[2].Value, CultureInfo.InvariantCulture, out var month))
+        {
+            version = new Version(year, month);
+            return true;
+        }
+
+        version = new Version(0, 0);
+        return false;
+    }
+
+    private static Version ParseUbuntuVersionForSort(string value) =>
+        TryParseUbuntuVersion(value, out var version) ? version : new Version(int.MaxValue, int.MaxValue);
+
+    private static string AppendDiagnostic(string existing, string addition) =>
+        string.IsNullOrWhiteSpace(existing) ? addition : $"{existing.Trim()}\n\n{addition}";
+
+    internal sealed record UbuntuReleaseMetadataEntry(string Version, bool Supported);
 
     internal static string ParseReleaseUpgradeChannel(string content)
     {
@@ -1186,4 +1334,7 @@ public sealed partial class LinuxHostSystemUpdateService(
         @"New release\s+(?:['""](?<release>[^'""\r\n]+)['""]|(?<release>\S+))\s+available",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex NewReleaseRegex();
+
+    [GeneratedRegex(@"(?:^|\D)(\d{2,4})\.(\d{2})(?:\.\d+)?", RegexOptions.CultureInvariant)]
+    private static partial Regex UbuntuVersionRegex();
 }
