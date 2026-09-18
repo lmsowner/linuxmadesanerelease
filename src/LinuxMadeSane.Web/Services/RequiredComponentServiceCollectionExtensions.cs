@@ -19,6 +19,7 @@ internal static class RequiredComponentServiceCollectionExtensions
         services.AddHostedService<FileThumbnailCacheCleanupService>();
         services.AddScoped<EmailMfaAuthenticationService>();
         services.AddScoped<LocalAccessRecoveryService>();
+        services.AddSingleton<TemporarySetupAuthorizationService>();
         services.AddSingleton<DesktopHelperSetupService>();
         return services;
     }

@@ -64,7 +64,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
                 var authReturnMatcherName = BuildAuthReturnMatcherName(route);
                 builder.AppendLine($"    @{authMatcherName} {{");
                 builder.AppendLine($"        host {route.Hostname}");
-                builder.AppendLine($"        path {EdgeGatewayAuthenticationPaths.Login} {EdgeGatewayAuthenticationPaths.ApiPrefix}/* /InitialSetup /initial-setup /auth/initial-setup/*");
+                builder.AppendLine($"        path {EdgeGatewayAuthenticationPaths.Login} {EdgeGatewayAuthenticationPaths.ApiPrefix}/* /setup /InitialSetup /initial-setup /auth/setup/* /auth/initial-setup/*");
                 builder.AppendLine("    }");
                 builder.AppendLine($"    handle @{authMatcherName} {{");
                 builder.AppendLine($"        reverse_proxy 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");

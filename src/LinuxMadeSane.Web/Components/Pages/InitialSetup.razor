@@ -3,13 +3,16 @@
 
 @page "/InitialSetup"
 @page "/initial-setup"
+@page "/setup"
 @layout AuthLayout
 @using LinuxMadeSane.Application.Contracts.Security
 @using LinuxMadeSane.Application.Interfaces
 @inject ISecuritySettingsService SecuritySettingsService
 @inject NavigationManager Navigation
+@inject IHttpContextAccessor HttpContextAccessor
+@inject TemporarySetupAuthorizationService SetupAuthorization
 
-<PageTitle>Initial Setup | Linux Made Sane</PageTitle>
+<PageTitle>@(IsSetupRoute ? "Setup | Linux Made Sane" : "Initial Setup | Linux Made Sane")</PageTitle>
 
 <div class="initial-setup-shell">
     <section class="initial-setup-showcase">
@@ -19,8 +22,8 @@
     <section class="initial-setup-panel">
         <div class="initial-setup-heading">
             <p class="eyebrow">Linux Made Sane</p>
-            <h1>First access.</h1>
-            <p>Create the first LMS login, prove the MFA code works, then LMS turns authentication on for the built-in interfaces.</p>
+            <h1>@(IsSetupRoute ? "Initial setup." : "First access.")</h1>
+            <p>@(IsSetupRoute ? "Enter the Temporary Setup Code printed by the command-line installer, then create the first LMS login." : "Create the first LMS login, prove the MFA code works, then LMS turns authentication on for the built-in interfaces.")</p>
         </div>
 
         @if (!string.IsNullOrWhiteSpace(Error))
@@ -28,7 +31,27 @@
             <p class="initial-setup-callout error">@Error</p>
         }
 
-        @if (setupState is null)
+        @if (IsSetupRoute && !IsSetupAuthorized)
+        {
+            <div class="initial-setup-card">
+                <h2>Enter your Temporary Setup Code</h2>
+                <p>This one-time code is printed only after a fresh command-line installation. It expires when used or when its lifetime ends.</p>
+                <form method="post" action="/auth/setup/authorize" class="initial-setup-form">
+                    <label class="initial-setup-field">
+                        <span>Temporary Setup Code</span>
+                        <input name="temporarySetupCode"
+                               type="text"
+                               inputmode="text"
+                               autocomplete="one-time-code"
+                               placeholder="ABCD-1234-EFGH-5678"
+                               required />
+                    </label>
+                    <button class="initial-setup-primary" type="submit">Continue setup</button>
+                </form>
+                <p class="initial-setup-footnote">If the code has expired, run the installer again from the Linux command line to mint a new one.</p>
+            </div>
+        }
+        else if (setupState is null)
         {
             <p class="initial-setup-callout">Loading setup state...</p>
         }
@@ -142,6 +165,12 @@
     private InitialSetupViewModel? setupState;
     private SecurityUserProvisioningViewModel? provisioning;
 
+    private bool IsSetupRoute =>
+        new Uri(Navigation.Uri).AbsolutePath.Equals("/setup", StringComparison.OrdinalIgnoreCase);
+
+    private bool IsSetupAuthorized =>
+        HttpContextAccessor.HttpContext is { } context && SetupAuthorization.IsAuthorized(context.Request);
+
     private string NormalizedReturnUrl => NormalizeReturnUrl(ReturnUrl);
 
     private string LinuxUsernameValue =>
@@ -151,6 +180,17 @@
 
     protected override async Task OnInitializedAsync()
     {
+        if (!IsSetupRoute && !IsSetupAuthorized)
+        {
+            Navigation.NavigateTo("/setup", forceLoad: true);
+            return;
+        }
+
+        if (IsSetupRoute && !IsSetupAuthorized)
+        {
+            return;
+        }
+
         setupState = await SecuritySettingsService.GetInitialSetupAsync();
         if (setupState.CanVerify)
         {

@@ -16,6 +16,7 @@ public sealed class LocalAccessRecoveryService(
     ILogger<LocalAccessRecoveryService> logger)
 {
     private const string Purpose = "linux-made-sane-local-access-recovery";
+    private const string TemporarySetupPurpose = "linux-made-sane-temporary-setup";
     private const int CurrentVersion = 1;
     private const int MaximumAttempts = 5;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -37,7 +38,7 @@ public sealed class LocalAccessRecoveryService(
         try
         {
             var challenge = await ReadChallengeAsync(cancellationToken);
-            if (!ChallengeCanBeUsed(challenge, challengeId))
+            if (!ChallengeCanBeUsed(challenge, challengeId, requireChallengeId: true, temporarySetupOnly: false))
             {
                 if (challenge is not null && IsExpired(challenge))
                 {
@@ -55,6 +56,75 @@ public sealed class LocalAccessRecoveryService(
         }
     }
 
+    public async Task<bool> HasActiveTemporarySetupAsync(CancellationToken cancellationToken = default)
+    {
+        await Gate.WaitAsync(cancellationToken);
+        try
+        {
+            if ((await securityUserStore.ListAsync(cancellationToken)).Count != 0)
+            {
+                return false;
+            }
+
+            var challenge = await ReadChallengeAsync(cancellationToken);
+            if (!ChallengeCanBeUsed(challenge, null, requireChallengeId: false, temporarySetupOnly: true))
+            {
+                if (challenge is not null && IsExpired(challenge))
+                {
+                    DeleteChallengeFile();
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+        finally
+        {
+            Gate.Release();
+        }
+    }
+
+    public async Task<TemporarySetupCodeResult> ConsumeTemporarySetupCodeAsync(
+        string? temporarySetupCode,
+        CancellationToken cancellationToken = default)
+    {
+        await Gate.WaitAsync(cancellationToken);
+        try
+        {
+            if ((await securityUserStore.ListAsync(cancellationToken)).Count != 0)
+            {
+                return TemporarySetupCodeResult.Failure("Initial setup is no longer available.");
+            }
+
+            var challenge = await ReadChallengeAsync(cancellationToken);
+            if (!ChallengeCanBeUsed(challenge, null, requireChallengeId: false, temporarySetupOnly: true))
+            {
+                if (challenge is not null && IsExpired(challenge))
+                {
+                    DeleteChallengeFile();
+                }
+
+                return TemporarySetupCodeResult.Failure("The Temporary Setup Code has expired. Re-run the installer from the command line to mint a new one.");
+            }
+
+            var normalizedCode = NormalizeRecoveryCode(temporarySetupCode);
+            if (string.IsNullOrWhiteSpace(normalizedCode) || !RecoveryCodeMatches(challenge!, normalizedCode))
+            {
+                await RecordFailedAttemptAsync(challenge!, cancellationToken);
+                return TemporarySetupCodeResult.Failure("The Temporary Setup Code was not accepted.");
+            }
+
+            DeleteChallengeFile();
+            logger.LogInformation("Temporary LMS setup code was consumed.");
+            return TemporarySetupCodeResult.Success();
+        }
+        finally
+        {
+            Gate.Release();
+        }
+    }
+
     public async Task<LocalAccessRecoveryResult> RecoverAsync(
         string? email,
         string? challengeId,
@@ -65,7 +135,7 @@ public sealed class LocalAccessRecoveryService(
         try
         {
             var challenge = await ReadChallengeAsync(cancellationToken);
-            if (!ChallengeCanBeUsed(challenge, challengeId))
+            if (!ChallengeCanBeUsed(challenge, challengeId, requireChallengeId: true, temporarySetupOnly: false))
             {
                 if (challenge is not null && IsExpired(challenge))
                 {
@@ -200,13 +270,18 @@ public sealed class LocalAccessRecoveryService(
 
     private static bool ChallengeCanBeUsed(
         LocalAccessRecoveryChallenge? challenge,
-        string? challengeId) =>
+        string? challengeId,
+        bool requireChallengeId,
+        bool temporarySetupOnly) =>
         challenge is not null &&
         challenge.Version == CurrentVersion &&
-        string.Equals(challenge.Purpose, Purpose, StringComparison.Ordinal) &&
+        (string.Equals(challenge.Purpose, Purpose, StringComparison.Ordinal) ||
+         string.Equals(challenge.Purpose, TemporarySetupPurpose, StringComparison.Ordinal)) &&
+        (!temporarySetupOnly || string.Equals(challenge.Purpose, TemporarySetupPurpose, StringComparison.Ordinal) ||
+         string.Equals(challenge.Purpose, Purpose, StringComparison.Ordinal)) &&
         !string.IsNullOrWhiteSpace(challenge.Salt) &&
         !string.IsNullOrWhiteSpace(challenge.CodeHash) &&
-        string.Equals(challenge.ChallengeId, (challengeId ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase) &&
+        (!requireChallengeId || string.Equals(challenge.ChallengeId, (challengeId ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase)) &&
         challenge.Attempts < MaximumAttempts &&
         !IsExpired(challenge);
 
@@ -273,4 +348,11 @@ public sealed record LocalAccessRecoveryResult(
 
     public static LocalAccessRecoveryResult Failure(string errorMessage) =>
         new(false, null, errorMessage);
+}
+
+public sealed record TemporarySetupCodeResult(bool Succeeded, string ErrorMessage)
+{
+    public static TemporarySetupCodeResult Success() => new(true, string.Empty);
+
+    public static TemporarySetupCodeResult Failure(string message) => new(false, message);
 }
