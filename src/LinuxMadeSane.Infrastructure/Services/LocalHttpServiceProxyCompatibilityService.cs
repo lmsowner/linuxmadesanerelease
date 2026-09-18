@@ -50,7 +50,8 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
             var fallbackEndpoint = endpoint with
             {
                 Scheme = selected.Candidate.Scheme,
-                Url = BuildEndpointUrl(selected.Candidate.Scheme, endpoint.Host, endpoint.Port)
+                Port = selected.Candidate.Port,
+                Url = BuildEndpointUrl(selected.Candidate.Scheme, endpoint.Host, selected.Candidate.Port)
             };
             profile = new LocalHttpServiceProxyProfile(
                 fallbackEndpoint,
@@ -67,7 +68,8 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
             var selectedEndpoint = endpoint with
             {
                 Scheme = selected.Candidate.Scheme,
-                Url = BuildEndpointUrl(selected.Candidate.Scheme, endpoint.Host, endpoint.Port)
+                Port = selected.Candidate.Port,
+                Url = BuildEndpointUrl(selected.Candidate.Scheme, endpoint.Host, selected.Candidate.Port)
             };
             profile = new LocalHttpServiceProxyProfile(
                 selectedEndpoint,
@@ -75,10 +77,11 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
                 selected.Candidate.StripForwardedFor,
                 $"Compatibility probe returned HTTP {selected.StatusCode}.");
             logger.LogInformation(
-                "Selected proxy compatibility profile for {EndpointHost}:{EndpointPort}: scheme={Scheme}, publicHostHeader={UsePublicHostHeader}, stripForwardedFor={StripForwardedFor}, status={StatusCode}.",
+                "Selected proxy compatibility profile for {EndpointHost}:{EndpointPort}: scheme={Scheme}, port={SelectedPort}, publicHostHeader={UsePublicHostHeader}, stripForwardedFor={StripForwardedFor}, status={StatusCode}.",
                 endpoint.Host,
                 endpoint.Port,
                 selected.Candidate.Scheme,
+                selected.Candidate.Port,
                 selected.Candidate.UsePublicHostHeader,
                 selected.Candidate.StripForwardedFor,
                 selected.StatusCode);
@@ -100,10 +103,10 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
         {
             using var request = new HttpRequestMessage(
                 HttpMethod.Get,
-                BuildEndpointUrl(candidate.Scheme, endpoint.Host, endpoint.Port));
+                BuildEndpointUrl(candidate.Scheme, endpoint.Host, candidate.Port));
             request.Headers.Host = candidate.UsePublicHostHeader
                 ? publicHostname
-                : FormatHostHeader(endpoint.Host, endpoint.Port);
+                : FormatHostHeader(endpoint.Host, candidate.Port);
             request.Headers.UserAgent.ParseAdd("LinuxMadeSane-OnDemand-Probe/1.0");
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
             request.Headers.TryAddWithoutValidation("X-Forwarded-Proto", "https");
@@ -123,7 +126,7 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
                 candidate,
                 true,
                 (int)response.StatusCode,
-                Score(response.StatusCode, contentSample, candidate));
+                Score(response, contentSample, candidate, endpoint, publicHostname));
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -164,12 +167,14 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
         var order = 0;
         foreach (var scheme in schemes)
         {
+            var port = ResolvePort(endpoint, scheme);
             foreach (var stripForwardedFor in forwardedForModes)
             {
                 foreach (var usePublicHostHeader in hostHeaders)
                 {
                     yield return new ProbeCandidate(
                         scheme,
+                        port,
                         usePublicHostHeader,
                         stripForwardedFor,
                         scheme == discoveredScheme,
@@ -179,9 +184,14 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
         }
     }
 
-    private static int Score(HttpStatusCode statusCode, string contentSample, ProbeCandidate candidate)
+    private static int Score(
+        HttpResponseMessage response,
+        string contentSample,
+        ProbeCandidate candidate,
+        LocalHttpServiceEndpoint endpoint,
+        string publicHostname)
     {
-        var status = (int)statusCode;
+        var status = (int)response.StatusCode;
         var score = status switch
         {
             >= 200 and <= 299 => 1_000,
@@ -219,7 +229,37 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
             score += 2;
         }
 
+        if (status is >= 300 and <= 399 && response.Headers.Location is { } location)
+        {
+            if (!location.IsAbsoluteUri ||
+                location.Host.Equals(publicHostname, StringComparison.OrdinalIgnoreCase))
+            {
+                score += 100;
+            }
+            else if (location.Host.Equals(endpoint.Host, StringComparison.OrdinalIgnoreCase))
+            {
+                // An internal absolute redirect would send the browser around the
+                // authenticated public route. Prefer a profile that stays proxied.
+                score -= 400;
+            }
+        }
+
         return score;
+    }
+
+    private static int ResolvePort(LocalHttpServiceEndpoint endpoint, string scheme)
+    {
+        if (scheme.Equals(endpoint.Scheme, StringComparison.OrdinalIgnoreCase))
+        {
+            return endpoint.Port;
+        }
+
+        return (endpoint.Scheme.ToLowerInvariant(), endpoint.Port, scheme.ToLowerInvariant()) switch
+        {
+            ("http", 80, "https") => 443,
+            ("https", 443, "http") => 80,
+            _ => endpoint.Port
+        };
     }
 
     private static async Task<string> ReadResponseSampleAsync(
@@ -293,6 +333,7 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
     private sealed record CacheEntry(LocalHttpServiceProxyProfile Profile, DateTimeOffset ExpiresAtUtc);
     private sealed record ProbeCandidate(
         string Scheme,
+        int Port,
         bool UsePublicHostHeader,
         bool StripForwardedFor,
         bool IsDiscoveredScheme,

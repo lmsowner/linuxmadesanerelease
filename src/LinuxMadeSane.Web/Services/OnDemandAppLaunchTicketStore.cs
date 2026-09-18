@@ -53,9 +53,10 @@ public sealed class OnDemandAppLaunchTicketStore(TimeProvider timeProvider)
         }
 
         var key = HashToken(token.Trim());
-        if (!tickets.TryRemove(key, out var ticket) ||
+        if (!tickets.TryGetValue(key, out var ticket) ||
             ticket.ExpiresUtc <= timeProvider.GetUtcNow() ||
-            !ticket.ExpectedHost.Equals(NormalizeHost(requestHost), StringComparison.OrdinalIgnoreCase))
+            !ticket.ExpectedHost.Equals(NormalizeHost(requestHost), StringComparison.OrdinalIgnoreCase) ||
+            !tickets.TryRemove(new KeyValuePair<string, LaunchTicket>(key, ticket)))
         {
             return null;
         }

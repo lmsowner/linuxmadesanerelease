@@ -62,7 +62,7 @@
                     Class="page-tab-control edge-tabs"
                     PanelClass="page-tab-panel edge-tab-panel">
             <ChildContent>
-                @if (OnDemandAppsAvailable)
+                @if (ShowOnDemandAppsTab)
                 {
                     <TabPage Value="@OnDemandAppsTabValue" Title="On-Demand Apps">
                         <OnDemandAppsPanel />
@@ -1354,6 +1354,11 @@
 
     private bool OnDemandAppsAvailable => onDemandAppsAvailability?.IsAvailable == true;
 
+    private bool ShowOnDemandAppsTab =>
+        OnDemandAppsAvailable ||
+        activeTab == OnDemandAppsTabValue ||
+        Tab == OnDemandAppsTabValue;
+
     private bool CanCreateAppForDomain(string domainName) =>
         CloudflareDomains.Any(domain =>
             domain.DomainName.Equals(domainName, StringComparison.OrdinalIgnoreCase) &&
@@ -1513,13 +1518,12 @@
 
         SyncRouteDomainExpansionState();
 
-        if (!OnDemandAppsAvailable && activeTab == OnDemandAppsTabValue)
-        {
-            activeTab = PublishedAppsTabValue;
-        }
-        else if (isFirstLoad && OnDemandAppsAvailable && string.IsNullOrWhiteSpace(Tab))
+        if (isFirstLoad && OnDemandAppsAvailable && string.IsNullOrWhiteSpace(Tab))
         {
             activeTab = OnDemandAppsTabValue;
+            Navigation.NavigateTo(
+                Navigation.GetUriWithQueryParameter("tab", OnDemandAppsTabValue),
+                replace: true);
         }
     }
 
@@ -1545,9 +1549,7 @@
     private Task HandleTabChangedAsync(string? value)
     {
         var selectedTab = string.IsNullOrWhiteSpace(value) ? PublishedAppsTabValue : value;
-        activeTab = selectedTab == OnDemandAppsTabValue && !OnDemandAppsAvailable
-            ? PublishedAppsTabValue
-            : selectedTab;
+        activeTab = selectedTab;
         var tabQueryValue = activeTab == PublishedAppsTabValue ? null : activeTab;
         Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("tab", tabQueryValue), replace: true);
         return Task.CompletedTask;

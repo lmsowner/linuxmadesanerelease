@@ -38,9 +38,10 @@
     };
 
     window.lmsOnDemandApps = {
-        openTracked(anchor) {
+        openTracked(anchor, event) {
+            event?.preventDefault();
             if (!anchor?.href || typeof window.crypto?.randomUUID !== "function") {
-                return true;
+                return false;
             }
 
             const lease = window.crypto.randomUUID();
@@ -48,7 +49,8 @@
             url.searchParams.set("lease", lease);
             const popup = window.open(url.toString(), "_blank");
             if (!popup) {
-                return true;
+                window.alert("The app window was blocked. Allow pop-ups for LMS, then open the app again.");
+                return false;
             }
 
             try {
