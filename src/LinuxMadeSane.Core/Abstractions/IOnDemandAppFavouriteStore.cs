@@ -1,10 +1,29 @@
 // Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using LinuxMadeSane.Core.Models.Cloudflare;
+
 namespace LinuxMadeSane.Core.Abstractions;
 
 public interface IOnDemandAppFavouriteStore
 {
-    Task<IReadOnlySet<string>> GetAsync(string userId, CancellationToken cancellationToken = default);
-    Task SetAsync(string userId, string serviceKey, bool isFavourite, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<OnDemandAppFavourite>> ListAsync(
+        string userId,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<OnDemandAppFavourite>> ListAllAsync(CancellationToken cancellationToken = default);
+
+    Task SaveAsync(
+        string userId,
+        OnDemandAppFavourite favourite,
+        CancellationToken cancellationToken = default);
+
+    Task RemoveAsync(
+        string userId,
+        string serviceKey,
+        CancellationToken cancellationToken = default);
+
+    Task RefreshEndpointsAsync(
+        IReadOnlyList<LocalHttpServiceEndpoint> endpoints,
+        CancellationToken cancellationToken = default);
 }

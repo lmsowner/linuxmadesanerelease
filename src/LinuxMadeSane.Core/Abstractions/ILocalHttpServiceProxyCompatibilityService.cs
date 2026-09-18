@@ -10,5 +10,6 @@ public interface ILocalHttpServiceProxyCompatibilityService
     Task<LocalHttpServiceProxyProfile> SelectAsync(
         LocalHttpServiceEndpoint endpoint,
         string publicHostname,
+        OnDemandAppProxyPreferences preferences,
         CancellationToken cancellationToken = default);
 }

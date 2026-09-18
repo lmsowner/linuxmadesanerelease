@@ -190,6 +190,21 @@ public sealed class HttpServiceDiscoveryCoordinator(
         {
             await using var scope = scopeFactory.CreateAsyncScope();
             var discovery = scope.ServiceProvider.GetRequiredService<ILocalHttpServiceDiscoveryService>();
+            var favourites = scope.ServiceProvider.GetService<IOnDemandAppFavouriteStore>();
+            if (favourites is not null)
+            {
+                var savedEndpoints = (await favourites.ListAllAsync(cancellationToken))
+                    .Select(static favourite => favourite.Endpoint)
+                    .OfType<LocalHttpServiceEndpoint>();
+                request = request with
+                {
+                    PreferredEndpoints = (request.PreferredEndpoints ?? [])
+                        .Concat(savedEndpoints)
+                        .DistinctBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase)
+                        .ToArray()
+                };
+            }
+
             var progress = new Progress<LocalHttpServiceDiscoveryProgressUpdate>(update =>
             {
                 lock (stateGate)
@@ -204,6 +219,11 @@ public sealed class HttpServiceDiscoveryCoordinator(
                 }
             });
             var services = await discovery.DiscoverAsync(request, progress, cancellationToken);
+            if (favourites is not null)
+            {
+                await favourites.RefreshEndpointsAsync(services, cancellationToken);
+            }
+
             var completed = timeProvider.GetUtcNow();
             lock (stateGate)
             {

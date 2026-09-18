@@ -139,6 +139,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             0));
 
         var existing = await ReadCacheAsync(cancellationToken);
+        var preferredHosts = BuildPreferredProbeHosts(request.PreferredEndpoints ?? []);
         var hosts = new List<HttpProbeHost>();
         if (request.IncludeLocalhost)
         {
@@ -165,8 +166,9 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         // so its title and favicon can be refreshed.
         hosts.AddRange(BuildCachedProbeHosts(existing, requestedScopes));
         hosts = MergeProbeHosts(hosts).ToList();
+        var orderedHosts = preferredHosts.Concat(hosts).ToArray();
 
-        var totalProbeCount = hosts.Count;
+        var totalProbeCount = orderedHosts.Length;
         progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
             totalProbeCount == 0
                 ? "No HTTP/S scan targets were available."
@@ -176,7 +178,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             0));
 
         var discovered = await ProbeHostsAsync(
-            hosts,
+            orderedHosts,
             progress,
             PublishActiveEndpoint,
             cancellationToken);
@@ -219,7 +221,13 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             Timeout = Timeout.InfiniteTimeSpan
         };
 
-        var tasks = hosts.Select(host => ProbeHostAsync(
+        await ProbeBatchAsync(hosts.Where(static host => host.IsPreferred));
+        await ProbeBatchAsync(hosts.Where(static host => !host.IsPreferred));
+        return results.Values.ToArray();
+
+        async Task ProbeBatchAsync(IEnumerable<HttpProbeHost> batch)
+        {
+            await Task.WhenAll(batch.Select(host => ProbeHostAsync(
                 client,
                 hostConcurrency,
                 tcpConcurrency,
@@ -229,11 +237,8 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                 progress,
                 progressState,
                 endpointDiscovered,
-                cancellationToken))
-            .ToArray();
-
-        await Task.WhenAll(tasks);
-        return results.Values.ToArray();
+                cancellationToken)));
+        }
     }
 
     internal static HttpClientHandler CreateDiscoveryHttpHandler() => new()
@@ -660,6 +665,33 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     endpoint.Scope.Equals("Docker", StringComparison.OrdinalIgnoreCase),
                     IsKnownLive: true,
                     ResolveHostName: probeAddress is not null && IPAddress.TryParse(endpoint.Host, out _));
+            })
+            .ToArray();
+
+    private static IReadOnlyList<HttpProbeHost> BuildPreferredProbeHosts(
+        IReadOnlyList<LocalHttpServiceEndpoint> preferred) =>
+        preferred
+            .Where(static endpoint => endpoint.Port is > 0 and <= 65535)
+            .DistinctBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase)
+            .Select(endpoint =>
+            {
+                var probeHost = !string.IsNullOrWhiteSpace(endpoint.IpAddress)
+                    ? endpoint.IpAddress
+                    : endpoint.Host;
+                _ = IPAddress.TryParse(probeHost, out var probeAddress);
+                return new HttpProbeHost(
+                    endpoint.Host,
+                    probeAddress,
+                    probeHost!,
+                    endpoint.Scope,
+                    endpoint.IpAddress,
+                    endpoint.DisplayName,
+                    [endpoint.Port],
+                    endpoint.Scope.Equals("Localhost", StringComparison.OrdinalIgnoreCase) ||
+                    endpoint.Scope.Equals("Docker", StringComparison.OrdinalIgnoreCase),
+                    IsKnownLive: true,
+                    ResolveHostName: false,
+                    IsPreferred: true);
             })
             .ToArray();
 
@@ -1751,7 +1783,8 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         IReadOnlyList<int> Ports,
         bool IsLocalhostProbe,
         bool IsKnownLive,
-        bool ResolveHostName);
+        bool ResolveHostName,
+        bool IsPreferred = false);
 
     private sealed class HttpDiscoveryProgressState(int totalProbeCount)
     {

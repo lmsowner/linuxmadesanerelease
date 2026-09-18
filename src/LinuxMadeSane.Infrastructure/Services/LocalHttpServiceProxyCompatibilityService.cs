@@ -24,17 +24,19 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
     public async Task<LocalHttpServiceProxyProfile> SelectAsync(
         LocalHttpServiceEndpoint endpoint,
         string publicHostname,
+        OnDemandAppProxyPreferences preferences,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(publicHostname);
+        ArgumentNullException.ThrowIfNull(preferences);
 
-        var key = LocalHttpServiceDiscoveryRanking.StableKey(endpoint);
+        var key = BuildCacheKey(endpoint, preferences);
         if (cache.TryGetValue(key, out var cached) && cached.ExpiresAtUtc > timeProvider.GetUtcNow())
         {
             return cached.Profile;
         }
 
-        var candidates = BuildCandidates(endpoint).ToArray();
+        var candidates = BuildCandidates(endpoint, preferences).ToArray();
         var probes = await Task.WhenAll(candidates.Select(candidate =>
             ProbeAsync(endpoint, publicHostname.Trim(), candidate, cancellationToken)));
         var selected = probes
@@ -45,7 +47,16 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
         LocalHttpServiceProxyProfile profile;
         if (!selected.Responded)
         {
-            profile = DefaultProfile(endpoint, "No compatibility probe received an HTTP response; retained the discovered settings.");
+            var fallbackEndpoint = endpoint with
+            {
+                Scheme = selected.Candidate.Scheme,
+                Url = BuildEndpointUrl(selected.Candidate.Scheme, endpoint.Host, endpoint.Port)
+            };
+            profile = new LocalHttpServiceProxyProfile(
+                fallbackEndpoint,
+                selected.Candidate.UsePublicHostHeader,
+                selected.Candidate.StripForwardedFor,
+                "No compatibility probe received an HTTP response; retained the selected favourite settings.");
             logger.LogWarning(
                 "No proxy compatibility probe succeeded for discovered endpoint {EndpointHost}:{EndpointPort}; retaining discovered scheme and conservative headers.",
                 endpoint.Host,
@@ -124,19 +135,47 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
         }
     }
 
-    private static IEnumerable<ProbeCandidate> BuildCandidates(LocalHttpServiceEndpoint endpoint)
+    private static IEnumerable<ProbeCandidate> BuildCandidates(
+        LocalHttpServiceEndpoint endpoint,
+        OnDemandAppProxyPreferences preferences)
     {
         var discoveredScheme = endpoint.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
             ? Uri.UriSchemeHttps
             : Uri.UriSchemeHttp;
         var alternateScheme = discoveredScheme == Uri.UriSchemeHttps ? Uri.UriSchemeHttp : Uri.UriSchemeHttps;
-        var order = 0;
-        foreach (var scheme in new[] { discoveredScheme, alternateScheme })
+        string[] schemes = preferences.Scheme switch
         {
-            yield return new ProbeCandidate(scheme, UsePublicHostHeader: false, StripForwardedFor: true, Order: order++);
-            yield return new ProbeCandidate(scheme, UsePublicHostHeader: true, StripForwardedFor: true, Order: order++);
-            yield return new ProbeCandidate(scheme, UsePublicHostHeader: false, StripForwardedFor: false, Order: order++);
-            yield return new ProbeCandidate(scheme, UsePublicHostHeader: true, StripForwardedFor: false, Order: order++);
+            OnDemandAppSchemePreference.Http => [Uri.UriSchemeHttp],
+            OnDemandAppSchemePreference.Https => [Uri.UriSchemeHttps],
+            _ => new[] { discoveredScheme, alternateScheme }
+        };
+        bool[] hostHeaders = preferences.HostHeader switch
+        {
+            OnDemandAppHostHeaderPreference.Upstream => [false],
+            OnDemandAppHostHeaderPreference.Public => [true],
+            _ => new[] { false, true }
+        };
+        bool[] forwardedForModes = preferences.ForwardedFor switch
+        {
+            OnDemandAppForwardedForPreference.Strip => [true],
+            OnDemandAppForwardedForPreference.Preserve => [false],
+            _ => new[] { true, false }
+        };
+        var order = 0;
+        foreach (var scheme in schemes)
+        {
+            foreach (var stripForwardedFor in forwardedForModes)
+            {
+                foreach (var usePublicHostHeader in hostHeaders)
+                {
+                    yield return new ProbeCandidate(
+                        scheme,
+                        usePublicHostHeader,
+                        stripForwardedFor,
+                        scheme == discoveredScheme,
+                        order++);
+                }
+            }
         }
     }
 
@@ -165,7 +204,7 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
         }
 
         // When responses are equivalent, prefer the least surprising proxy behaviour.
-        if (candidate.Order < 4)
+        if (candidate.IsDiscoveredScheme)
         {
             score += 8;
         }
@@ -239,11 +278,25 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
         return $"{formattedHost}:{port}";
     }
 
-    private static LocalHttpServiceProxyProfile DefaultProfile(LocalHttpServiceEndpoint endpoint, string reason) =>
-        new(endpoint, UsePublicHostHeader: false, StripForwardedFor: true, reason);
+    private static string BuildCacheKey(
+        LocalHttpServiceEndpoint endpoint,
+        OnDemandAppProxyPreferences preferences) =>
+        string.Join('|',
+            LocalHttpServiceDiscoveryRanking.StableKey(endpoint),
+            endpoint.Host.Trim().ToLowerInvariant(),
+            endpoint.Scheme.Trim().ToLowerInvariant(),
+            preferences.TargetAddress,
+            preferences.Scheme,
+            preferences.HostHeader,
+            preferences.ForwardedFor);
 
     private sealed record CacheEntry(LocalHttpServiceProxyProfile Profile, DateTimeOffset ExpiresAtUtc);
-    private sealed record ProbeCandidate(string Scheme, bool UsePublicHostHeader, bool StripForwardedFor, int Order);
+    private sealed record ProbeCandidate(
+        string Scheme,
+        bool UsePublicHostHeader,
+        bool StripForwardedFor,
+        bool IsDiscoveredScheme,
+        int Order);
     private sealed record ProbeResult(
         ProbeCandidate Candidate,
         bool Responded,

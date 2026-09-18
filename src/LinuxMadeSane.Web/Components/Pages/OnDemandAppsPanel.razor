@@ -18,7 +18,7 @@
         <div>
             <p class="eyebrow">Published server access</p>
             <h2>On-Demand Apps</h2>
-            <p class="meta-text">Discover web apps on this network, then open a favourite through a temporary LMS-authenticated address.</p>
+            <p class="meta-text">Discover web apps on this network, then open a favourite through a temporary LMS-authenticated address. Right-click an app to save its connection defaults.</p>
         </div>
         <div class="on-demand-apps-scan-controls">
             <UiCheckboxField @bind-Value="includeDocker" Label="Docker" Compact="true" />
@@ -85,8 +85,11 @@
             @foreach (var service in SortedServices)
             {
                 var key = LocalHttpServiceDiscoveryRanking.StableKey(service);
-                var isFavourite = favouriteKeys.Contains(key);
-                <article class="on-demand-app @(isFavourite ? "is-favourite" : null)">
+                var isFavourite = favouriteProfiles.ContainsKey(key);
+                <article class="on-demand-app @(isFavourite ? "is-favourite" : null)"
+                         @oncontextmenu="@(_ => OpenFavouriteSettings(service))"
+                         @oncontextmenu:preventDefault="true"
+                         @oncontextmenu:stopPropagation="true">
                     <EdgeGatewayHttpServiceLookupStamp Service="service"
                                                        Href="@(CanOpen ? BuildOpenUrl(key) : null)"
                                                        Target="_blank"
@@ -99,11 +102,82 @@
                             aria-label="@(isFavourite ? $"Remove {LocalHttpServiceDiscoveryRanking.PickerLabel(service)} from favourites" : $"Add {LocalHttpServiceDiscoveryRanking.PickerLabel(service)} to favourites")"
                             aria-pressed="@(isFavourite ? "true" : "false")"
                             disabled="@(string.IsNullOrWhiteSpace(userId) || favouriteChangeInProgress.Contains(key))"
-                            @onclick="@(() => ToggleFavouriteAsync(key))">@(isFavourite ? "★" : "☆")</button>
+                            @onclick="@(() => ToggleFavouriteAsync(service))">@(isFavourite ? "★" : "☆")</button>
+                    @if (isFavourite)
+                    {
+                        <button type="button"
+                                class="on-demand-app-settings"
+                                title="Favourite connection settings"
+                                aria-label="Configure connection settings for @LocalHttpServiceDiscoveryRanking.PickerLabel(service)"
+                                @onclick="@(() => OpenFavouriteSettings(service))">⚙</button>
+                    }
                 </article>
             }
         </div>
     }
+
+    <UiModal IsOpen="@showFavouriteSettings"
+             Title="Favourite connection settings"
+             Subtitle="@favouriteSettingsTitle"
+             Class="on-demand-favourite-settings-modal"
+             OnClose="CloseFavouriteSettings">
+        <ChildContent>
+            @if (favouriteSettingsService is not null)
+            {
+                <p class="meta-text">These settings apply only to this saved favourite. Automatic header choices are still tested against the real service before the temporary route is created.</p>
+                <div class="on-demand-favourite-settings-grid">
+                    <UiSelectField TValue="OnDemandAppTargetAddressPreference"
+                                   @bind-Value="favouriteSettingsEditor.TargetAddress"
+                                   Label="Connect using"
+                                   Helper="The discovered IP avoids DNS selecting another interface or an external address."
+                                   Compact="true">
+                        <option value="@OnDemandAppTargetAddressPreference.DiscoveredIp">Discovered IP (recommended)</option>
+                        <option value="@OnDemandAppTargetAddressPreference.DiscoveredHostname">Discovered hostname</option>
+                    </UiSelectField>
+                    <UiSelectField TValue="OnDemandAppSchemePreference"
+                                   @bind-Value="favouriteSettingsEditor.Scheme"
+                                   Label="Protocol"
+                                   Compact="true">
+                        <option value="@OnDemandAppSchemePreference.Automatic">Automatic</option>
+                        <option value="@OnDemandAppSchemePreference.Http">HTTP</option>
+                        <option value="@OnDemandAppSchemePreference.Https">HTTPS</option>
+                    </UiSelectField>
+                    <UiSelectField TValue="OnDemandAppHostHeaderPreference"
+                                   @bind-Value="favouriteSettingsEditor.HostHeader"
+                                   Label="Host header"
+                                   Compact="true">
+                        <option value="@OnDemandAppHostHeaderPreference.Automatic">Automatic</option>
+                        <option value="@OnDemandAppHostHeaderPreference.Upstream">Target address</option>
+                        <option value="@OnDemandAppHostHeaderPreference.Public">Temporary public address</option>
+                    </UiSelectField>
+                    <UiSelectField TValue="OnDemandAppForwardedForPreference"
+                                   @bind-Value="favouriteSettingsEditor.ForwardedFor"
+                                   Label="Client IP header"
+                                   Compact="true">
+                        <option value="@OnDemandAppForwardedForPreference.Automatic">Automatic</option>
+                        <option value="@OnDemandAppForwardedForPreference.Strip">Strip X-Forwarded-For</option>
+                        <option value="@OnDemandAppForwardedForPreference.Preserve">Forward client IP</option>
+                    </UiSelectField>
+                </div>
+                <div class="on-demand-favourite-endpoint">
+                    <span>Discovered IP</span><strong>@(favouriteSettingsService.IpAddress ?? "Unavailable")</strong>
+                    <span>Discovered hostname</span><strong>@favouriteSettingsService.Host</strong>
+                    <span>Port</span><strong>@favouriteSettingsService.Port</strong>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(favouriteSettingsMessage))
+                {
+                    <p class="meta-text on-demand-apps-message">@favouriteSettingsMessage</p>
+                }
+            }
+        </ChildContent>
+        <Footer>
+            <UiCommandButton Label="Save favourite settings"
+                             Glyph="UiIconGlyph.Save"
+                             Variant="UiButtonVariant.Primary"
+                             Disabled="@isSavingFavouriteSettings"
+                             OnClick="SaveFavouriteSettingsAsync" />
+        </Footer>
+    </UiModal>
 </div>
 
 @code {
@@ -112,7 +186,7 @@
     private readonly CancellationTokenSource lifetime = new();
     private readonly HashSet<string> favouriteChangeInProgress = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<LocalHttpServiceEndpoint> services = [];
-    private IReadOnlySet<string> favouriteKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, OnDemandAppFavourite> favouriteProfiles = new(StringComparer.OrdinalIgnoreCase);
     private OnDemandAppsAvailability? availability;
     private string userId = string.Empty;
     private string message = string.Empty;
@@ -121,18 +195,24 @@
     private bool includeLan = true;
     private bool includeTailnet;
     private bool isScanning;
+    private bool showFavouriteSettings;
+    private bool isSavingFavouriteSettings;
     private int probedCount;
     private int totalProbeCount;
     private int foundCount;
     private int refreshIntervalMinutes = 180;
     private DateTimeOffset? observedCompletionUtc;
+    private LocalHttpServiceEndpoint? favouriteSettingsService;
+    private FavouriteSettingsEditor favouriteSettingsEditor = new();
+    private string favouriteSettingsTitle = string.Empty;
+    private string favouriteSettingsMessage = string.Empty;
 
     private bool CanOpen => availability?.IsAvailable == true && !string.IsNullOrWhiteSpace(userId);
 
     private IEnumerable<LocalHttpServiceEndpoint> SortedServices => services
         .Where(service => !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(service))
         .DistinctBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase)
-        .OrderByDescending(service => favouriteKeys.Contains(LocalHttpServiceDiscoveryRanking.StableKey(service)))
+        .OrderByDescending(service => favouriteProfiles.ContainsKey(LocalHttpServiceDiscoveryRanking.StableKey(service)))
         .ThenBy(LocalHttpServiceDiscoveryRanking.PresentationRank)
         .ThenBy(LocalHttpServiceDiscoveryRanking.PickerLabel, StringComparer.OrdinalIgnoreCase)
         .ThenBy(service => service.Host, StringComparer.OrdinalIgnoreCase)
@@ -162,20 +242,21 @@
 
         try
         {
-            services = await HttpServiceDiscovery.GetCachedAsync(lifetime.Token);
-            message = services.Count == 0
-                ? "No cached apps yet. Run Scan to discover them."
-                : $"Showing {VisibleServiceCount} cached app(s).";
-
             if (AuthenticationStateTask is not null)
             {
                 var authenticationState = await AuthenticationStateTask;
                 userId = authenticationState.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
                 if (!string.IsNullOrWhiteSpace(userId))
                 {
-                    favouriteKeys = await OnDemandApps.GetFavouritesAsync(userId, lifetime.Token);
+                    favouriteProfiles = (await OnDemandApps.GetFavouritesAsync(userId, lifetime.Token))
+                        .ToDictionary(item => item.ServiceKey, StringComparer.OrdinalIgnoreCase);
                 }
             }
+
+            SetServices(await HttpServiceDiscovery.GetCachedAsync(lifetime.Token));
+            message = services.Count == 0
+                ? "No cached apps yet. Run Scan to discover them."
+                : $"Showing {VisibleServiceCount} cached app(s).";
 
             await RefreshBackgroundStateAsync();
             _ = ObserveBackgroundDiscoveryAsync();
@@ -267,7 +348,7 @@
 
         if (background.IsActive)
         {
-            services = await HttpServiceDiscovery.GetCachedAsync(lifetime.Token);
+            SetServices(await HttpServiceDiscovery.GetCachedAsync(lifetime.Token));
             message = "Discovery is running in the background. Cached apps remain available while results arrive.";
         }
         else if (!string.IsNullOrWhiteSpace(background.Error))
@@ -277,15 +358,16 @@
         else if (background.CompletedUtc.HasValue && background.CompletedUtc != observedCompletionUtc)
         {
             observedCompletionUtc = background.CompletedUtc;
-            services = await HttpServiceDiscovery.GetCachedAsync(lifetime.Token);
+            SetServices(await HttpServiceDiscovery.GetCachedAsync(lifetime.Token));
             message = VisibleServiceCount == 0
                 ? "Background discovery completed. No HTTP/S apps responded."
                 : $"Background discovery completed. {VisibleServiceCount} app(s) are cached.";
         }
     }
 
-    private async Task ToggleFavouriteAsync(string serviceKey)
+    private async Task ToggleFavouriteAsync(LocalHttpServiceEndpoint service)
     {
+        var serviceKey = LocalHttpServiceDiscoveryRanking.StableKey(service);
         if (string.IsNullOrWhiteSpace(userId) || !favouriteChangeInProgress.Add(serviceKey))
         {
             return;
@@ -293,19 +375,21 @@
 
         try
         {
-            var isFavourite = !favouriteKeys.Contains(serviceKey);
-            await OnDemandApps.SetFavouriteAsync(userId, serviceKey, isFavourite, lifetime.Token);
-            var updated = favouriteKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (isFavourite)
+            if (favouriteProfiles.ContainsKey(serviceKey))
             {
-                updated.Add(serviceKey);
+                await OnDemandApps.RemoveFavouriteAsync(userId, serviceKey, lifetime.Token);
+                favouriteProfiles.Remove(serviceKey);
             }
             else
             {
-                updated.Remove(serviceKey);
+                var preferences = new OnDemandAppProxyPreferences();
+                await OnDemandApps.SaveFavouriteAsync(userId, service, preferences, lifetime.Token);
+                favouriteProfiles[serviceKey] = new OnDemandAppFavourite(
+                    serviceKey,
+                    service,
+                    preferences,
+                    DateTimeOffset.UtcNow);
             }
-
-            favouriteKeys = updated;
         }
         catch (Exception exception)
         {
@@ -315,6 +399,74 @@
         {
             favouriteChangeInProgress.Remove(serviceKey);
         }
+    }
+
+    private void OpenFavouriteSettings(LocalHttpServiceEndpoint service)
+    {
+        if (string.IsNullOrWhiteSpace(userId))
+        {
+            message = "Sign in with an LMS account to save favourite settings.";
+            return;
+        }
+
+        var key = LocalHttpServiceDiscoveryRanking.StableKey(service);
+        var preferences = favouriteProfiles.TryGetValue(key, out var favourite)
+            ? favourite.ProxyPreferences
+            : new OnDemandAppProxyPreferences();
+        favouriteSettingsService = service;
+        favouriteSettingsEditor = FavouriteSettingsEditor.From(preferences);
+        favouriteSettingsTitle = LocalHttpServiceDiscoveryRanking.PickerLabel(service);
+        favouriteSettingsMessage = string.Empty;
+        showFavouriteSettings = true;
+    }
+
+    private async Task SaveFavouriteSettingsAsync()
+    {
+        if (favouriteSettingsService is null || string.IsNullOrWhiteSpace(userId) || isSavingFavouriteSettings)
+        {
+            return;
+        }
+
+        isSavingFavouriteSettings = true;
+        favouriteSettingsMessage = string.Empty;
+        try
+        {
+            var preferences = favouriteSettingsEditor.ToPreferences();
+            await OnDemandApps.SaveFavouriteAsync(userId, favouriteSettingsService, preferences, lifetime.Token);
+            var key = LocalHttpServiceDiscoveryRanking.StableKey(favouriteSettingsService);
+            favouriteProfiles[key] = new OnDemandAppFavourite(
+                key,
+                favouriteSettingsService,
+                preferences,
+                DateTimeOffset.UtcNow);
+            showFavouriteSettings = false;
+            message = $"Saved connection settings for {LocalHttpServiceDiscoveryRanking.PickerLabel(favouriteSettingsService)}.";
+        }
+        catch (Exception exception)
+        {
+            favouriteSettingsMessage = $"Favourite settings could not be saved: {exception.Message}";
+        }
+        finally
+        {
+            isSavingFavouriteSettings = false;
+        }
+    }
+
+    private void CloseFavouriteSettings()
+    {
+        showFavouriteSettings = false;
+        favouriteSettingsMessage = string.Empty;
+    }
+
+    private void SetServices(IReadOnlyList<LocalHttpServiceEndpoint> cached)
+    {
+        services = favouriteProfiles.Values
+            .Select(item => item.Endpoint)
+            .OfType<LocalHttpServiceEndpoint>()
+            .Concat(cached)
+            .GroupBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.Last())
+            .ToArray();
     }
 
     private int VisibleServiceCount => SortedServices.Count();
@@ -345,5 +497,24 @@
     {
         lifetime.Cancel();
         lifetime.Dispose();
+    }
+
+    private sealed class FavouriteSettingsEditor
+    {
+        public OnDemandAppTargetAddressPreference TargetAddress { get; set; } = OnDemandAppTargetAddressPreference.DiscoveredIp;
+        public OnDemandAppSchemePreference Scheme { get; set; } = OnDemandAppSchemePreference.Automatic;
+        public OnDemandAppHostHeaderPreference HostHeader { get; set; } = OnDemandAppHostHeaderPreference.Automatic;
+        public OnDemandAppForwardedForPreference ForwardedFor { get; set; } = OnDemandAppForwardedForPreference.Automatic;
+
+        public static FavouriteSettingsEditor From(OnDemandAppProxyPreferences preferences) => new()
+        {
+            TargetAddress = preferences.TargetAddress,
+            Scheme = preferences.Scheme,
+            HostHeader = preferences.HostHeader,
+            ForwardedFor = preferences.ForwardedFor
+        };
+
+        public OnDemandAppProxyPreferences ToPreferences() =>
+            new(TargetAddress, Scheme, HostHeader, ForwardedFor);
     }
 }

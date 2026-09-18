@@ -82,21 +82,35 @@ public sealed class OnDemandAppService(
             domain.DomainName);
     }
 
-    public Task<IReadOnlySet<string>> GetFavouritesAsync(
+    public Task<IReadOnlyList<OnDemandAppFavourite>> GetFavouritesAsync(
         string userId,
         CancellationToken cancellationToken = default) =>
-        favourites.GetAsync(userId, cancellationToken);
+        favourites.ListAsync(userId, cancellationToken);
 
-    public Task SetFavouriteAsync(
+    public Task SaveFavouriteAsync(
+        string userId,
+        LocalHttpServiceEndpoint endpoint,
+        OnDemandAppProxyPreferences proxyPreferences,
+        CancellationToken cancellationToken = default) =>
+        favourites.SaveAsync(
+            userId,
+            new OnDemandAppFavourite(
+                LocalHttpServiceDiscoveryRanking.StableKey(endpoint),
+                endpoint,
+                proxyPreferences,
+                timeProvider.GetUtcNow()),
+            cancellationToken);
+
+    public Task RemoveFavouriteAsync(
         string userId,
         string serviceKey,
-        bool isFavourite,
         CancellationToken cancellationToken = default) =>
-        favourites.SetAsync(userId, serviceKey, isFavourite, cancellationToken);
+        favourites.RemoveAsync(userId, serviceKey, cancellationToken);
 
     public async Task<OnDemandAppLaunch> OpenAsync(
         string serviceKey,
         Guid leaseId,
+        string userId,
         string userEmail,
         string publicHost,
         bool isHttps,
@@ -107,6 +121,7 @@ public sealed class OnDemandAppService(
             throw new InvalidOperationException("A valid browser lease is required.");
         }
 
+        var normalizedUserId = NormalizeRequired(userId, "An authenticated LMS account is required.");
         var normalizedEmail = NormalizeRequired(userEmail, "An authenticated LMS account is required.");
         var availability = await GetAvailabilityAsync(publicHost, isHttps, cancellationToken);
         if (!availability.IsAvailable)
@@ -115,14 +130,24 @@ public sealed class OnDemandAppService(
         }
 
         var normalizedServiceKey = NormalizeRequired(serviceKey, "Select a discovered app first.").ToLowerInvariant();
+        var favourite = (await favourites.ListAsync(normalizedUserId, cancellationToken)).FirstOrDefault(item =>
+            item.ServiceKey.Equals(normalizedServiceKey, StringComparison.OrdinalIgnoreCase));
         var endpoint = (await discovery.GetCachedAsync(cancellationToken)).FirstOrDefault(item =>
             LocalHttpServiceDiscoveryRanking.StableKey(item).Equals(normalizedServiceKey, StringComparison.OrdinalIgnoreCase) &&
             !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(item) &&
-            item.Exposure != DiscoveryExposure.UnsafeToExpose);
+            item.Exposure != DiscoveryExposure.UnsafeToExpose) ?? favourite?.Endpoint;
         if (endpoint is null)
         {
-            throw new InvalidOperationException("That app is no longer present in the LMS discovery cache. Run discovery again.");
+            throw new InvalidOperationException("That app has no saved endpoint. Run discovery again to refresh the favourite.");
         }
+
+        if (LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(endpoint) || endpoint.Exposure == DiscoveryExposure.UnsafeToExpose)
+        {
+            throw new InvalidOperationException("That saved app is not currently safe to expose. Run discovery again.");
+        }
+
+        var proxyPreferences = favourite?.ProxyPreferences ?? new OnDemandAppProxyPreferences();
+        endpoint = ApplyTargetAddressPreference(endpoint, proxyPreferences.TargetAddress);
 
         await RouteMutationLock.WaitAsync(cancellationToken);
         try
@@ -169,7 +194,7 @@ public sealed class OnDemandAppService(
             }
 
             var hostname = $"ondemand-{leaseId:N}"[..21] + $".{availability.DomainName}";
-            var proxyProfile = await proxyCompatibility.SelectAsync(endpoint, hostname, cancellationToken);
+            var proxyProfile = await proxyCompatibility.SelectAsync(endpoint, hostname, proxyPreferences, cancellationToken);
             endpoint = proxyProfile.Endpoint;
             var editor = new EdgeGatewayRouteEditor
             {
@@ -209,6 +234,26 @@ public sealed class OnDemandAppService(
         {
             RouteMutationLock.Release();
         }
+    }
+
+    private static LocalHttpServiceEndpoint ApplyTargetAddressPreference(
+        LocalHttpServiceEndpoint endpoint,
+        OnDemandAppTargetAddressPreference preference)
+    {
+        var targetHost = preference == OnDemandAppTargetAddressPreference.DiscoveredIp &&
+                         !string.IsNullOrWhiteSpace(endpoint.IpAddress)
+            ? endpoint.IpAddress.Trim()
+            : endpoint.Host.Trim();
+        if (targetHost.Equals(endpoint.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            return endpoint;
+        }
+
+        return endpoint with
+        {
+            Host = targetHost,
+            Url = new UriBuilder(endpoint.Scheme, targetHost, endpoint.Port, "/").Uri.AbsoluteUri
+        };
     }
 
     public async Task<bool> TouchAsync(
