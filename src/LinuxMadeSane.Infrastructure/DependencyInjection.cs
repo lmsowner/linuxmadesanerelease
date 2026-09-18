@@ -54,6 +54,19 @@ public static class DependencyInjection
         services.AddHttpClient<ICloudflareClient, CloudflareClient>();
         services.AddHttpClient<IPublicDnsPropagationService, PublicDnsPropagationService>(client =>
             client.Timeout = TimeSpan.FromSeconds(5));
+        services.AddHttpClient(LocalHttpServiceProxyCompatibilityService.HttpClientName, client =>
+            client.Timeout = Timeout.InfiniteTimeSpan)
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                UseProxy = false,
+                ConnectTimeout = TimeSpan.FromSeconds(4),
+                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+                {
+                    RemoteCertificateValidationCallback = static (_, _, _, _) => true
+                }
+            });
+        services.AddSingleton<ILocalHttpServiceProxyCompatibilityService, LocalHttpServiceProxyCompatibilityService>();
         services.AddDbContext<LinuxMadeSaneDbContext>(options => options
             .UseSqlite(connectionString)
             .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.CommandExecuted)));

@@ -13,6 +13,7 @@ namespace LinuxMadeSane.Application.Services.EdgeGateway;
 
 public sealed class OnDemandAppService(
     ILocalHttpServiceDiscoveryService discovery,
+    ILocalHttpServiceProxyCompatibilityService proxyCompatibility,
     IOnDemandAppFavouriteStore favourites,
     IEdgeGatewayStore routes,
     IEdgeGatewayService gateway,
@@ -154,6 +155,8 @@ public sealed class OnDemandAppService(
             }
 
             var hostname = $"ondemand-{leaseId:N}"[..21] + $".{availability.DomainName}";
+            var proxyProfile = await proxyCompatibility.SelectAsync(endpoint, hostname, cancellationToken);
+            endpoint = proxyProfile.Endpoint;
             var editor = new EdgeGatewayRouteEditor
             {
                 Enabled = true,
@@ -167,8 +170,8 @@ public sealed class OnDemandAppService(
                 TargetPort = endpoint.Port,
                 AuthMode = EdgeGatewayAuthMode.RequireMfa,
                 AllowedUsers = normalizedEmail,
-                StripForwardedFor = true,
-                UsePublicHostHeader = false,
+                StripForwardedFor = proxyProfile.StripForwardedFor,
+                UsePublicHostHeader = proxyProfile.UsePublicHostHeader,
                 SkipUpstreamTlsVerification = endpoint.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase),
                 Notes = BuildRouteNote(leaseId)
             };
