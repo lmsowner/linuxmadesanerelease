@@ -23,9 +23,9 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private const int MaxConcurrentHostChecks = 32;
     private const int MaxConcurrentTcpLivenessChecks = 256;
     private const int MaxConcurrentProbes = 64;
-    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan EnrichmentTimeout = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan FaviconRequestTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan EnrichmentTimeout = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan FaviconRequestTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromMilliseconds(1200);
     private static readonly TimeSpan ReverseLookupTimeout = TimeSpan.FromMilliseconds(500);
     private static readonly int[] CommonHomelabPorts =
@@ -186,12 +186,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         using var hostConcurrency = new SemaphoreSlim(MaxConcurrentHostChecks);
         using var tcpConcurrency = new SemaphoreSlim(MaxConcurrentTcpLivenessChecks);
         using var serviceConcurrency = new SemaphoreSlim(MaxConcurrentProbes);
-        using var handler = new HttpClientHandler
-        {
-            AllowAutoRedirect = false,
-            UseProxy = false,
-            ServerCertificateCustomValidationCallback = static (_, _, _, _) => true
-        };
+        using var handler = CreateDiscoveryHttpHandler();
         using var client = new HttpClient(handler)
         {
             Timeout = Timeout.InfiniteTimeSpan
@@ -212,6 +207,15 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         await Task.WhenAll(tasks);
         return results.Values.ToArray();
     }
+
+    internal static HttpClientHandler CreateDiscoveryHttpHandler() => new()
+    {
+        AllowAutoRedirect = false,
+        UseProxy = false,
+        // Discovery must inspect internal appliances that routinely use self-signed, expired or
+        // hostname-mismatched certificates. This client never carries LMS credentials.
+        ServerCertificateCustomValidationCallback = static (_, _, _, _) => true
+    };
 
     private static async Task ProbeHostAsync(
         HttpClient client,
