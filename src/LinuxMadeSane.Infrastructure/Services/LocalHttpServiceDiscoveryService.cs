@@ -30,7 +30,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private static readonly TimeSpan ReverseLookupTimeout = TimeSpan.FromMilliseconds(500);
     private static readonly int[] CommonHomelabPorts =
     [
-        80, 81, 443, 1880, 1984, 2283, 3000, 3001, 5000, 5001, 5380, 5601,
+        80, 81, 443, 1880, 1984, 2283, 3000, 3001, 5000, 5001, 5221, 5222, 5380, 5601,
         6767, 6789, 7125, 7443, 7745, 7878, 8000, 8006, 8043, 8080, 8083,
         8096, 8111, 8112, 8123, 8200, 8384, 8443, 8686, 8787, 8920, 8971,
         8989, 9000, 9001, 9090, 9091, 9443, 9696, 10000, 10443, 11443, 15672,
