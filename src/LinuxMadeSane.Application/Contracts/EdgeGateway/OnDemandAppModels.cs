@@ -15,3 +15,5 @@ public sealed record OnDemandAppLaunch(
     string Hostname,
     string Url,
     DateTimeOffset StaleAfterUtc);
+
+public sealed record OnDemandAppLaunchProgress(string Message);

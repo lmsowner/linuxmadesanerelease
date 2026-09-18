@@ -114,7 +114,8 @@ public sealed class OnDemandAppService(
         string userEmail,
         string publicHost,
         bool isHttps,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<OnDemandAppLaunchProgress>? progress = null)
     {
         if (leaseId == Guid.Empty)
         {
@@ -123,6 +124,7 @@ public sealed class OnDemandAppService(
 
         var normalizedUserId = NormalizeRequired(userId, "An authenticated LMS account is required.");
         var normalizedEmail = NormalizeRequired(userEmail, "An authenticated LMS account is required.");
+        Report(progress, "Checking the published LMS address and Edge Gateway relay.");
         var availability = await GetAvailabilityAsync(publicHost, isHttps, cancellationToken);
         if (!availability.IsAvailable)
         {
@@ -130,6 +132,7 @@ public sealed class OnDemandAppService(
         }
 
         var normalizedServiceKey = NormalizeRequired(serviceKey, "Select a discovered app first.").ToLowerInvariant();
+        Report(progress, "Loading the discovered app and its saved connection settings.");
         var favourite = (await favourites.ListAsync(normalizedUserId, cancellationToken)).FirstOrDefault(item =>
             item.ServiceKey.Equals(normalizedServiceKey, StringComparison.OrdinalIgnoreCase));
         var endpoint = (await discovery.GetCachedAsync(cancellationToken)).FirstOrDefault(item =>
@@ -149,6 +152,7 @@ public sealed class OnDemandAppService(
         var proxyPreferences = favourite?.ProxyPreferences ?? new OnDemandAppProxyPreferences();
         endpoint = ApplyTargetAddressPreference(endpoint, proxyPreferences.TargetAddress);
 
+        Report(progress, "Waiting for the Edge Gateway route manager.");
         await RouteMutationLock.WaitAsync(cancellationToken);
         try
         {
@@ -163,6 +167,7 @@ public sealed class OnDemandAppService(
 
                 if (IsDirectZoneHostname(existingLease.Hostname, availability.DomainName))
                 {
+                    Report(progress, "Refreshing the existing Cloudflare, tunnel and Caddy route.");
                     var existingProvision = await gateway.ProvisionCloudflareRouteAsync(
                         existingLease.Id,
                         replaceExistingDnsRecord: false,
@@ -172,7 +177,9 @@ public sealed class OnDemandAppService(
                         throw new InvalidOperationException($"The temporary app address could not be verified: {existingProvision.Summary}");
                     }
 
+                    Report(progress, $"Waiting for {existingLease.Hostname} to become reachable.");
                     await EnsurePublicAddressReadyAsync(existingLease.Id, existingLease.Hostname, cancellationToken);
+                    Report(progress, "The temporary authenticated address is ready.");
                     return BuildLaunch(existingLease, leaseId);
                 }
 
@@ -194,8 +201,10 @@ public sealed class OnDemandAppService(
             }
 
             var hostname = $"ondemand-{leaseId:N}"[..21] + $".{availability.DomainName}";
+            Report(progress, "Testing HTTP/S, address and proxy header combinations.");
             var proxyProfile = await proxyCompatibility.SelectAsync(endpoint, hostname, proxyPreferences, cancellationToken);
             endpoint = proxyProfile.Endpoint;
+            Report(progress, $"Selected {endpoint.Scheme.ToUpperInvariant()} to {endpoint.Host}:{endpoint.Port}.");
             var editor = new EdgeGatewayRouteEditor
             {
                 Enabled = true,
@@ -215,7 +224,9 @@ public sealed class OnDemandAppService(
                 Notes = BuildRouteNote(leaseId)
             };
 
+            Report(progress, $"Creating the authenticated address {hostname}.");
             var routeId = await gateway.SaveRouteAsync(editor, cancellationToken);
+            Report(progress, "Updating Cloudflare DNS, tunnel ingress and Caddy.");
             var provisioned = await gateway.ProvisionCloudflareRouteAsync(routeId, replaceExistingDnsRecord: false, cancellationToken);
             if (!provisioned.Success)
             {
@@ -224,10 +235,12 @@ public sealed class OnDemandAppService(
                 throw new InvalidOperationException($"The temporary app address could not be published: {provisioned.Summary}");
             }
 
+            Report(progress, $"Waiting for {hostname} to become reachable.");
             await EnsurePublicAddressReadyAsync(routeId, hostname, cancellationToken);
 
             var route = await routes.GetRouteAsync(routeId, cancellationToken) ??
                         throw new InvalidOperationException("The temporary app route was not saved.");
+            Report(progress, "The temporary authenticated address is ready.");
             return BuildLaunch(route, leaseId);
         }
         finally
@@ -431,6 +444,9 @@ public sealed class OnDemandAppService(
 
     private static string NormalizeRequired(string value, string message) =>
         string.IsNullOrWhiteSpace(value) ? throw new InvalidOperationException(message) : value.Trim();
+
+    private static void Report(IProgress<OnDemandAppLaunchProgress>? progress, string message) =>
+        progress?.Report(new OnDemandAppLaunchProgress(message));
 
     private static OnDemandAppsAvailability Unavailable(string message) => new(false, message);
 }
