@@ -963,13 +963,17 @@ else
 
     private static IReadOnlyList<LocalHttpServiceEndpoint> SortLocalServiceSuggestions(IEnumerable<LocalHttpServiceEndpoint> services) =>
         services
+            .Where(service => !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(service))
             .DistinctBy(BuildLocalServiceKey, StringComparer.OrdinalIgnoreCase)
-            .OrderBy(service => service.Scope switch
+            .OrderBy(LocalHttpServiceDiscoveryRanking.PresentationRank)
+            .ThenBy(service => service.Title ?? service.DisplayName ?? service.ServiceName ?? service.Host, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(service => service.Scope switch
             {
-                "Localhost" => 0,
-                "LAN" => 1,
-                "Tailnet" => 2,
-                _ => 3
+                "Docker" => 0,
+                "Localhost" => 1,
+                "LAN" => 2,
+                "Tailnet" => 3,
+                _ => 4
             })
             .ThenBy(service => service.Host, StringComparer.OrdinalIgnoreCase)
             .ThenBy(service => service.Port)
@@ -1597,7 +1601,7 @@ else
 
     private async Task LoadCachedLocalServicesAsync()
     {
-        localServiceSuggestions = await LocalHttpServiceDiscovery.GetCachedAsync();
+        localServiceSuggestions = SortLocalServiceSuggestions(await LocalHttpServiceDiscovery.GetCachedAsync());
         localServiceDiscoveryMessage = localServiceSuggestions.Count == 0
             ? "No cached HTTP/S services yet. Run Scan to search localhost and private LAN services."
             : $"Showing {localServiceSuggestions.Count} cached HTTP/S service(s). Run Scan to refresh.";

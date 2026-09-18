@@ -23,6 +23,7 @@
 @inject TrustedNetworkAccessTrialService NetworkAccessTrialService
 @inject IFirewallManagementService FirewallService
 @inject IMailRelayService MailRelayService
+@inject PasskeyAuthenticationService PasskeyAuthenticationService
 @inject NavigationManager Navigation
 @inject IHttpContextAccessor HttpContextAccessor
 @inject IJSRuntime JS
@@ -32,8 +33,9 @@
 <div class="page-shell">
     <UiHeroPanel Title="Security" Compact="true" />
 
-    @if (HasAuthenticatedLmsUser)
+    @if (HasAuthenticatedLmsUser && currentUserPasskeyStateLoaded)
     {
+        var hasCurrentAccountPasskey = CurrentAccountHasPasskey;
         <section class="surface-card security-current-passkey-panel" data-current-user-passkey-action>
             <div class="security-current-passkey-copy">
                 <span class="security-current-passkey-icon" aria-hidden="true">
@@ -41,11 +43,13 @@
                 </span>
                 <div>
                     <p class="eyebrow">Your sign-in security</p>
-                    <h2>Set up a passkey</h2>
-                    <p>Add a passkey only for the currently signed-in LMS account, <strong>@CurrentAccountEmail</strong>. Other accounts cannot be selected from this workflow.</p>
+                    <h2>@(hasCurrentAccountPasskey ? "Passkey enabled" : "Set up a passkey")</h2>
+                    <p>@(hasCurrentAccountPasskey
+                        ? $"A passkey is configured for the currently signed-in LMS account, {CurrentAccountEmail}. You can add another device or manage the existing passkeys."
+                        : $"Add a passkey only for the currently signed-in LMS account, {CurrentAccountEmail}. Other accounts cannot be selected from this workflow.")</p>
                 </div>
             </div>
-            <UiCommandButton Label="Set up passkey"
+            <UiCommandButton Label="@(hasCurrentAccountPasskey ? "Manage passkeys" : "Set up passkey")"
                              Glyph="UiIconGlyph.Key"
                              Href="@CurrentAccountPasskeySetupHref"
                              data-enhance-nav="false" />
@@ -999,6 +1003,14 @@
                                                                      Variant="UiButtonVariant.Action"
                                                                      OnClick="@(() => ToggleUserAsync(user))" />
                                                     <UiCommandButton Label="Reset OTP" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Action" OnClick="@(() => ResetUserOtpAsync(user))" />
+                                                    @if (CanManagePasskeyForUser(user))
+                                                    {
+                                                        <UiCommandButton Label="Add Passkey"
+                                                                         Glyph="UiIconGlyph.Key"
+                                                                         Variant="UiButtonVariant.Action"
+                                                                         Href="@BuildPasskeySetupHref(user.Id)"
+                                                                         data-enhance-nav="false" />
+                                                    }
                                                     <UiCommandButton Label="Delete" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" OnClick="@(() => DeleteUserAsync(user))" />
                                                 </td>
                                             </tr>
@@ -1389,6 +1401,8 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private FirewallStatusViewModel? firewallStatus;
     private SecurityUserProvisioningViewModel? provisioningResult;
     private bool isLoaded;
+    private bool currentUserPasskeyStateLoaded;
+    private IReadOnlyList<SecurityPasskeyCredential> currentUserPasskeys = [];
     private bool isSavingNetwork;
     private bool isSavingUser;
     private bool isSavingMessaging;
@@ -1443,13 +1457,33 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private bool HasAdministratorAccess =>
         HasAuthenticatedLmsUser || currentAccess.IsTrusted || circuitAccessAlreadyAuthorized;
 
+    private bool IsLocalAdministratorSession =>
+        !HasAuthenticatedLmsUser && (currentAccess.IsTrusted || circuitAccessAlreadyAuthorized);
+
     private string CurrentAccountEmail =>
         currentPrincipal?.FindFirstValue(ClaimTypes.Email) ??
         currentPrincipal?.Identity?.Name ??
         "the current account";
 
+    private bool CurrentAccountHasPasskey =>
+        currentUserPasskeys.Count > 0 || currentPrincipal?.HasClaim("amr", "passkey") == true;
+
     private static string CurrentAccountPasskeySetupHref =>
         $"/auth/setup-passkey?returnUrl={Uri.EscapeDataString("/settings")}";
+
+    private string BuildPasskeySetupHref(Guid userId) =>
+        $"/auth/setup-passkey?target={userId:D}&returnUrl={Uri.EscapeDataString("/settings?tab=remote-access-users")}";
+
+    private bool CanManagePasskeyForUser(SecurityUserViewModel user)
+    {
+        if (IsLocalAdministratorSession)
+        {
+            return true;
+        }
+
+        return Guid.TryParse(currentPrincipal?.FindFirstValue(ClaimTypes.NameIdentifier), out var currentUserId) &&
+               currentUserId == user.Id;
+    }
 
     private bool IsNetworkTrialActive => activeNetworkTrialId.HasValue;
 
@@ -1537,6 +1571,7 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private async Task LoadAsync()
     {
         page = await SecuritySettingsService.GetPageAsync();
+        await LoadCurrentUserPasskeysAsync();
         messagingEditor = await SecuritySettingsService.GetMessagingEditorAsync();
         mailRelayDashboard = await MailRelayService.GetDashboardAsync();
         configuredMailRelayDomains = mailRelayDashboard.Domains.Where(domain => domain.Enabled).ToArray();
@@ -1567,6 +1602,27 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
             // Interactive Server circuits often lose HttpContext after the page/circuit was already
             // admitted by middleware. Do not reclassify that as "not an administrator".
             circuitAccessAlreadyAuthorized = true;
+        }
+    }
+
+    private async Task LoadCurrentUserPasskeysAsync()
+    {
+        currentUserPasskeyStateLoaded = false;
+        currentUserPasskeys = [];
+        if (!Guid.TryParse(currentPrincipal?.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+        {
+            return;
+        }
+
+        try
+        {
+            currentUserPasskeys = await PasskeyAuthenticationService.ListForUserAsync(userId, CancellationToken.None);
+            currentUserPasskeyStateLoaded = true;
+        }
+        catch
+        {
+            // Do not tell a signed-in user to create a duplicate passkey when the
+            // credential lookup is temporarily unavailable.
         }
     }
 

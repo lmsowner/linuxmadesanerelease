@@ -11,4 +11,8 @@ public interface IEdgeGatewayTemporaryIpApprovalStore
     Task SaveAsync(
         EdgeGatewayTemporaryIpApprovalConfiguration configuration,
         CancellationToken cancellationToken = default);
+
+    Task ResetTransientStateAsync(
+        DateTimeOffset resetAtUtc,
+        CancellationToken cancellationToken = default);
 }

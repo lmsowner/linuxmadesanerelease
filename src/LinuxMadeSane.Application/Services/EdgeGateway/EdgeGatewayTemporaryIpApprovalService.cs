@@ -207,6 +207,10 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
             {
                 ApprovalTokenHash = string.Empty,
                 ApprovedUtc = now,
+                // The previous request was successfully approved. If this grant later
+                // expires, the next denied request must be able to send a fresh email
+                // immediately instead of being blocked by the pre-approval cooldown.
+                LastEmailSentUtc = null,
                 UpdatedUtc = now,
                 LastEmailStatus = "Approved."
             };
@@ -224,6 +228,42 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
                 BuildRequestedUrl(route.Hostname, route.TargetPathPrefix),
                 grant.IdleExpiresAtUtc,
                 grant.ExpiresAtUtc);
+        }
+        finally
+        {
+            sync.Release();
+        }
+    }
+
+    public async Task<bool> ReleaseAsync(
+        Guid requestId,
+        CancellationToken cancellationToken = default)
+    {
+        if (requestId == Guid.Empty)
+        {
+            return false;
+        }
+
+        await sync.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await approvalStore.LoadAsync(cancellationToken);
+            if (!state.Requests.Any(request => request.Id == requestId))
+            {
+                return false;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            await approvalStore.SaveAsync(
+                state with
+                {
+                    Requests = state.Requests
+                        .Where(request => request.Id != requestId)
+                        .ToArray(),
+                    UpdatedAtUtc = now
+                },
+                cancellationToken);
+            return true;
         }
         finally
         {
@@ -299,15 +339,17 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
         EdgeGatewayTemporaryIpApprovalConfiguration state,
         DateTimeOffset now)
     {
-        var requests = state.Requests
-            .Where(request =>
-                request.CreatedUtc.AddDays(1) > now ||
-                request.ApprovedUtc is not null && request.ApprovedUtc.Value.AddDays(1) > now)
-            .ToArray();
-        var grants = state.Grants
+        var activeGrants = state.Grants
             .Where(grant => grant.ExpiresAtUtc > now && grant.IdleExpiresAtUtc > now)
             .ToArray();
-        return state with { Requests = requests, Grants = grants };
+        var requests = state.Requests
+            .Where(request =>
+                (request.CreatedUtc.AddDays(1) > now ||
+                 request.ApprovedUtc is not null && request.ApprovedUtc.Value.AddDays(1) > now) &&
+                (request.ApprovedUtc is null || activeGrants.Any(grant =>
+                    IsSameRouteAndIp(grant, request.RouteId, request.SourceIp))))
+            .ToArray();
+        return state with { Requests = requests, Grants = activeGrants };
     }
 
     private async Task<IReadOnlyList<string>> ResolveApprovalRecipientsAsync(

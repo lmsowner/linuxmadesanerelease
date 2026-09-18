@@ -3,7 +3,7 @@
 
 window.lmsPasskeys = window.lmsPasskeys || {};
 
-window.lmsPasskeys.enroll = async (friendlyName) => {
+window.lmsPasskeys.enroll = async (friendlyName, targetUserId) => {
     if (!window.PublicKeyCredential) {
         return {
             succeeded: false,
@@ -20,7 +20,8 @@ window.lmsPasskeys.enroll = async (friendlyName) => {
 
     try {
         const optionsResponse = await postJson("/api/passkeys/enroll/options", {
-            friendlyName
+            friendlyName,
+            targetUserId: targetUserId || null
         });
         if (!optionsResponse.succeeded) {
             return {
@@ -69,10 +70,12 @@ document.addEventListener("click", async event => {
     const enrollment = enrollButton.closest("[data-passkey-enrollment]");
     const friendlyNameInput = enrollment?.querySelector("[data-passkey-friendly-name]");
     const returnUrlInput = enrollment?.querySelector("[data-return-url]");
+    const targetUserIdInput = enrollment?.querySelector("[data-target-user-id]");
     const status = enrollment?.querySelector("[data-passkey-status]");
 
     if (!(friendlyNameInput instanceof HTMLInputElement) ||
-        !(returnUrlInput instanceof HTMLInputElement)) {
+        !(returnUrlInput instanceof HTMLInputElement) ||
+        !(targetUserIdInput instanceof HTMLInputElement)) {
         return;
     }
 
@@ -91,7 +94,9 @@ document.addEventListener("click", async event => {
     setStatus("Waiting for your browser to create the passkey...");
 
     try {
-        const result = await window.lmsPasskeys.enroll(friendlyNameInput.value.trim() || "This device");
+        const result = await window.lmsPasskeys.enroll(
+            friendlyNameInput.value.trim() || "This device",
+            targetUserIdInput.value);
         if (!result.succeeded) {
             setStatus(result.message || "Passkey setup failed.", true);
             return;

@@ -157,7 +157,11 @@ window.lmsFilePreview = (() => {
         const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
         const pdfDocument = await loadingTask.promise;
         const eventBus = new pdfjsViewer.EventBus();
-        const linkService = new pdfjsViewer.PDFLinkService({ eventBus });
+        const linkService = new pdfjsViewer.PDFLinkService({
+            eventBus,
+            externalLinkTarget: pdfjsViewer.LinkTarget?.BLANK ?? 2,
+            externalLinkRel: "noopener noreferrer nofollow"
+        });
         const pdfViewer = new pdfjsViewer.PDFViewer({
             container: wrapper,
             viewer,

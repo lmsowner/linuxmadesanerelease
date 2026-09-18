@@ -113,6 +113,7 @@ public static class DependencyInjection
         services.AddScoped<IHostUpdateScheduleStore, SqliteHostUpdateScheduleStore>();
         services.AddScoped<IEdgeGatewaySettingsStore, SqliteEdgeGatewaySettingsStore>();
         services.AddScoped<IEdgeGatewayTemporaryIpApprovalStore, SqliteEdgeGatewayTemporaryIpApprovalStore>();
+        services.AddHostedService<EdgeGatewayTemporaryIpApprovalStartupResetHostedService>();
         services.AddScoped<IMessagingEmailSettingsStore, SqliteMessagingEmailSettingsStore>();
         services.AddScoped<IEmailDeliveryService, ConfiguredEmailDeliveryService>();
         services.AddHttpClient(nameof(ConfiguredEmailDeliveryService));

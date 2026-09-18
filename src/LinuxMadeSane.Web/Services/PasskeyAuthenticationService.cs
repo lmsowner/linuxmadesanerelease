@@ -49,6 +49,11 @@ public sealed class PasskeyAuthenticationService(
             : await passkeyStore.ListByUserAsync(user.Id, cancellationToken);
     }
 
+    public Task<IReadOnlyList<SecurityPasskeyCredential>> ListForUserAsync(
+        Guid userId,
+        CancellationToken cancellationToken) =>
+        passkeyStore.ListByUserAsync(userId, cancellationToken);
+
     public async Task<bool> ShouldOfferPasskeySetupAsync(Guid userId, CancellationToken cancellationToken)
     {
         var user = await userStore.GetAsync(userId, cancellationToken);
@@ -99,13 +104,39 @@ public sealed class PasskeyAuthenticationService(
             return PasskeyOptionsResult.Fail("Verify with your authenticator code, or sign in with a passkey again, before adding a passkey.");
         }
 
-        return await BuildRegistrationOptionsForUserAsync(user, friendlyName, request, cancellationToken);
+        return await BuildRegistrationOptionsForUserAsync(
+            user,
+            friendlyName,
+            request,
+            administratorEnrollment: false,
+            cancellationToken);
+    }
+
+    public async Task<PasskeyOptionsResult> BuildAdministratorRegistrationOptionsAsync(
+        Guid targetUserId,
+        string friendlyName,
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        var user = await userStore.GetAsync(targetUserId, cancellationToken);
+        if (user is null || !user.IsEnabled)
+        {
+            return PasskeyOptionsResult.Fail("The selected LMS account is not available.");
+        }
+
+        return await BuildRegistrationOptionsForUserAsync(
+            user,
+            friendlyName,
+            request,
+            administratorEnrollment: true,
+            cancellationToken);
     }
 
     private async Task<PasskeyOptionsResult> BuildRegistrationOptionsForUserAsync(
         SecurityUser user,
         string friendlyName,
         HttpRequest request,
+        bool administratorEnrollment,
         CancellationToken cancellationToken)
     {
         var fido = BuildFido(request);
@@ -138,7 +169,7 @@ public sealed class PasskeyAuthenticationService(
 
         memoryCache.Set(
             $"{RegistrationStatePrefix}{stateId}",
-            new PasskeyRegistrationState(user.Id, displayName, credentialOptions),
+            new PasskeyRegistrationState(user.Id, displayName, credentialOptions, administratorEnrollment),
             TimeSpan.FromMinutes(5));
 
         return new PasskeyOptionsResult(true, null, stateId, SerializeCredentialOptions(credentialOptions));
@@ -151,6 +182,38 @@ public sealed class PasskeyAuthenticationService(
         HttpRequest request,
         CancellationToken cancellationToken)
     {
+        return await CompleteRegistrationCoreAsync(
+            principal,
+            stateId,
+            credentialJson,
+            request,
+            administratorEnrollment: false,
+            cancellationToken);
+    }
+
+    public async Task<PasskeyOperationResult> CompleteAdministratorRegistrationAsync(
+        string stateId,
+        string credentialJson,
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        return await CompleteRegistrationCoreAsync(
+            null,
+            stateId,
+            credentialJson,
+            request,
+            administratorEnrollment: true,
+            cancellationToken);
+    }
+
+    private async Task<PasskeyOperationResult> CompleteRegistrationCoreAsync(
+        ClaimsPrincipal? principal,
+        string stateId,
+        string credentialJson,
+        HttpRequest request,
+        bool administratorEnrollment,
+        CancellationToken cancellationToken)
+    {
         if (!memoryCache.TryGetValue<PasskeyRegistrationState>(
                 $"{RegistrationStatePrefix}{stateId}",
                 out var state) ||
@@ -159,14 +222,24 @@ public sealed class PasskeyAuthenticationService(
             return new PasskeyOperationResult(false, "The passkey setup request has expired.");
         }
 
-        var targetUser = await ResolvePrincipalUserAsync(principal, cancellationToken);
+        if (state.AdministratorEnrollment != administratorEnrollment)
+        {
+            memoryCache.Remove($"{RegistrationStatePrefix}{stateId}");
+            return new PasskeyOperationResult(false, "The passkey setup context was not valid.");
+        }
+
+        var targetUser = administratorEnrollment
+            ? await userStore.GetAsync(state.UserId, cancellationToken)
+            : await ResolvePrincipalUserAsync(principal!, cancellationToken);
         if (targetUser is null || !targetUser.IsEnabled)
         {
             memoryCache.Remove($"{RegistrationStatePrefix}{stateId}");
-            return new PasskeyOperationResult(false, "Sign in before completing passkey setup.");
+            return new PasskeyOperationResult(false, administratorEnrollment
+                ? "The selected LMS account is no longer available."
+                : "Sign in before completing passkey setup.");
         }
 
-        if (targetUser.Id != state.UserId)
+        if (!administratorEnrollment && targetUser.Id != state.UserId)
         {
             memoryCache.Remove($"{RegistrationStatePrefix}{stateId}");
             logger.LogWarning(
@@ -377,7 +450,8 @@ public sealed class PasskeyAuthenticationService(
     private sealed record PasskeyRegistrationState(
         Guid UserId,
         string FriendlyName,
-        CredentialCreateOptions Options);
+        CredentialCreateOptions Options,
+        bool AdministratorEnrollment);
 
     private sealed record PasskeyAssertionState(AssertionOptions Options);
 }

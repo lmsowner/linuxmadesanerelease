@@ -15,4 +15,8 @@ public interface IEdgeGatewayTemporaryIpApprovalService
     Task<EdgeGatewayTemporaryIpApprovalCompletionResult> ApproveAsync(
         string token,
         CancellationToken cancellationToken = default);
+
+    Task<bool> ReleaseAsync(
+        Guid requestId,
+        CancellationToken cancellationToken = default);
 }

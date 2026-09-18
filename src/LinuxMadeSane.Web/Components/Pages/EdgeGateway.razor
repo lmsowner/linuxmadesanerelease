@@ -15,6 +15,8 @@
 @using LinuxMadeSane.Core.Models.EdgeGateway
 @inject IEdgeGatewayService EdgeGatewayService
 @inject EdgeGatewayOptions EdgeGatewayOptions
+@inject IEdgeGatewayTemporaryIpApprovalStore TemporaryIpApprovalStore
+@inject IEdgeGatewayTemporaryIpApprovalService TemporaryIpApprovalService
 @inject ILocalHttpServiceDiscoveryService HttpServiceDiscovery
 @inject ISecurityUserStore SecurityUserStore
 @inject EdgeGatewayServerPublishingService ServerPublishing
@@ -651,6 +653,87 @@
                             </div>
                         }
 
+                        <section class="surface-subcard edge-approval-status-card">
+                            <div class="table-header">
+                                <div>
+                                    <p class="eyebrow">Email approval</p>
+                                    <h2>Temporary access status</h2>
+                                    <p class="meta-text">This shows why a source IP is waiting, throttled, approved, or locked out. Approval tokens and links are never shown here.</p>
+                                </div>
+                                <UiCommandButton Label="Refresh approval status"
+                                                 Glyph="UiIconGlyph.Refresh"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Disabled="@isDashboardLoading"
+                                                 OnClick="RefreshApprovalStatusAsync" />
+                            </div>
+
+                            @if (ApprovalRequests.Count == 0 && ApprovalGrants.Count == 0)
+                            {
+                                <p class="meta-text">No temporary approval requests or active grants are recorded.</p>
+                            }
+                            else
+                            {
+                                var now = DateTimeOffset.UtcNow;
+                                @if (ApprovalRequests.Count > 0)
+                                {
+                                    <div class="edge-approval-list">
+                                        @foreach (var request in ApprovalRequests)
+                                        {
+                                            <article class="edge-approval-item">
+                                                <div class="edge-approval-item-header">
+                                                    <div>
+                                                        <strong>@request.RouteName</strong>
+                                                        <span><code>@request.PublicHostname</code> · <code>@request.SourceIp</code></span>
+                                                    </div>
+                                                    <UiPill Tone="@GetApprovalRequestTone(request, now)">@GetApprovalRequestState(request, now)</UiPill>
+                                                </div>
+                                                <div class="edge-approval-item-details">
+                                                    <span><strong>Last request</strong> @FormatApprovalTimestamp(request.UpdatedUtc)</span>
+                                                    <span><strong>Email attempts</strong> @request.EmailSendCount / @EdgeGatewayOptions.TemporaryIpApprovalMaxEmailsPerDay per day</span>
+                                                    <span><strong>Last email</strong> @(request.LastEmailSentUtc is null ? "Not recorded" : FormatApprovalTimestamp(request.LastEmailSentUtc.Value))</span>
+                                                    <span><strong>Result</strong> @(string.IsNullOrWhiteSpace(request.LastEmailStatus) ? "No result recorded" : request.LastEmailStatus)</span>
+                                                </div>
+                                                @if (CanReleaseApprovalRequest(request, now))
+                                                {
+                                                    <div class="edge-approval-item-actions">
+                                                        <UiCommandButton Label="@(releasingApprovalRequestId == request.Id ? "Releasing..." : "Release lockout")"
+                                                                         Glyph="UiIconGlyph.Unlock"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         Disabled="@(isDashboardLoading || releasingApprovalRequestId.HasValue)"
+                                                                         OnClick="@(() => ReleaseApprovalLockoutAsync(request.Id))" />
+                                                    </div>
+                                                }
+                                            </article>
+                                        }
+                                    </div>
+                                }
+
+                                @if (ApprovalGrants.Count > 0)
+                                {
+                                    <div class="edge-approval-list edge-approval-grant-list">
+                                        <p class="eyebrow">Active grants</p>
+                                        @foreach (var grant in ApprovalGrants)
+                                        {
+                                            <article class="edge-approval-item">
+                                                <div class="edge-approval-item-header">
+                                                    <div>
+                                                        <strong>@grant.RouteName</strong>
+                                                        <span><code>@grant.PublicHostname</code> · <code>@grant.SourceIp</code></span>
+                                                    </div>
+                                                    <UiPill Tone="UiPillTone.Success">Allowed</UiPill>
+                                                </div>
+                                                <div class="edge-approval-item-details">
+                                                    <span><strong>Approved</strong> @FormatApprovalTimestamp(grant.ApprovedUtc)</span>
+                                                    <span><strong>Idle expiry</strong> @FormatApprovalTimestamp(grant.IdleExpiresAtUtc)</span>
+                                                    <span><strong>Maximum expiry</strong> @FormatApprovalTimestamp(grant.ExpiresAtUtc)</span>
+                                                </div>
+                                            </article>
+                                        }
+                                    </div>
+                                }
+                            }
+                        </section>
+
                         @if (dashboard.AuditEntries.Count > 0)
                         {
                             <div class="edge-audit-table">
@@ -918,10 +1001,10 @@
                 }
                 else
                 {
-                    <div class="edge-http-service-list" role="list">
+                    <div class="edge-http-service-list edge-http-service-stamp-list" role="list">
                         @foreach (var service in httpServiceSuggestions)
                         {
-                            <HttpServiceLookupRow Service="service" OnUse="SelectHttpServiceAsync" />
+                            <EdgeGatewayHttpServiceLookupStamp Service="service" OnUse="SelectHttpServiceAsync" />
                         }
                     </div>
                 }
@@ -982,7 +1065,7 @@
              Title="Reset Edge Gateway settings"
              Subtitle="Remove the live Cloudflare footprint, local routes, token, and relay setup for this LMS host."
              Class="edge-reset-modal"
-             CloseOnBackdrop="@(!isResettingEdgeGatewaySetup)"
+             CloseOnBackdrop="false"
              OnClose="CloseResetSetupModal">
         <ChildContent>
             <div class="edge-reset-body">
@@ -1016,7 +1099,7 @@
              Title="Delete relay"
              Subtitle="Remove the Cloudflare relay wildcard for this zone."
              Class="edge-delete-relay-modal"
-             CloseOnBackdrop="@(!isDeletingRelay)"
+             CloseOnBackdrop="false"
              OnClose="CloseRelayDeleteDialog">
         <ChildContent>
             @if (relayPendingDelete is not null)
@@ -1061,7 +1144,7 @@
              Title="Delete service"
              Subtitle="Remove this Edge Gateway route and regenerate the local Caddy config."
              Class="edge-delete-route-modal"
-             CloseOnBackdrop="@(!isDeletingRoute)"
+             CloseOnBackdrop="false"
              OnClose="CloseRouteDeleteDialog">
         <ChildContent>
             @if (routePendingDelete is not null)
@@ -1115,6 +1198,7 @@
     private readonly HashSet<string> expandedRouteDomains = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> knownRouteDomains = new(StringComparer.OrdinalIgnoreCase);
     private EdgeGatewayDashboardViewModel? dashboard;
+    private EdgeGatewayTemporaryIpApprovalConfiguration temporaryIpApprovalState = EdgeGatewayTemporaryIpApprovalConfiguration.Empty;
     private EdgeGatewayRouteEditor routeEditor = new();
     private EdgeGatewayDiagnosticResult? lastDiagnostic;
     private EdgeGatewayCloudflareSetupResult? cloudflareSetupResult;
@@ -1134,6 +1218,7 @@
     private int httpServiceScanTotalCount;
     private bool isDisposed;
     private bool isDashboardLoading;
+    private Guid? releasingApprovalRequestId;
     private bool showRouteModal;
     private bool isHttpServicePickerOpen;
     private bool isDiscoveringHttpServices;
@@ -1215,6 +1300,20 @@
         ?? [];
     private IReadOnlyList<EdgeGatewayCloudflareDomainOption> CloudflareDomains =>
         dashboard?.Cloudflare.Domains ?? [];
+
+    private IReadOnlyList<EdgeGatewayTemporaryIpApprovalRequest> ApprovalRequests =>
+        temporaryIpApprovalState.Requests
+            .Where(request => request.ApprovedUtc is null || ApprovalGrants.Any(grant =>
+                grant.RouteId == request.RouteId &&
+                grant.SourceIp.Equals(request.SourceIp, StringComparison.OrdinalIgnoreCase)))
+            .OrderByDescending(request => request.UpdatedUtc)
+            .ToArray();
+
+    private IReadOnlyList<EdgeGatewayTemporaryIpApprovalGrant> ApprovalGrants =>
+        temporaryIpApprovalState.Grants
+            .Where(grant => grant.ExpiresAtUtc > DateTimeOffset.UtcNow && grant.IdleExpiresAtUtc > DateTimeOffset.UtcNow)
+            .OrderByDescending(grant => grant.LastSeenUtc)
+            .ToArray();
 
     private static IReadOnlyList<UiIdentityTokenPickerItem> CountryOptions =>
         TemporaryIpApprovalSelectionOptions.CountryOptions;
@@ -1337,13 +1436,15 @@
         var dashboardTask = EdgeGatewayService.GetDashboardAsync(cancellationToken);
         var settingsTask = EdgeGatewayService.GetSettingsEditorAsync(cancellationToken);
         var usersTask = SecurityUserStore.ListAsync(cancellationToken);
-        await Task.WhenAll(dashboardTask, settingsTask, usersTask);
-        return new EdgeGatewayDashboardSnapshot(await dashboardTask, await settingsTask, await usersTask);
+        var approvalTask = TemporaryIpApprovalStore.LoadAsync(cancellationToken);
+        await Task.WhenAll(dashboardTask, settingsTask, usersTask, approvalTask);
+        return new EdgeGatewayDashboardSnapshot(await dashboardTask, await settingsTask, await usersTask, await approvalTask);
     }
 
     private void ApplyDashboardSnapshot(EdgeGatewayDashboardSnapshot snapshot)
     {
         dashboard = snapshot.Dashboard;
+        temporaryIpApprovalState = snapshot.TemporaryIpApprovalState;
         edgeSettingsEditor = snapshot.SettingsEditor;
         approvalRecipientOptions = TemporaryIpApprovalSelectionOptions.BuildUserOptions(snapshot.SecurityUsers);
         relayNamespaceUnlocked = false;
@@ -1391,6 +1492,104 @@
         activeTab = string.IsNullOrWhiteSpace(value) ? PublishedAppsTabValue : value;
         return Task.CompletedTask;
     }
+
+    private Task RefreshApprovalStatusAsync() => LoadAsync();
+
+    private string GetApprovalRequestState(
+        EdgeGatewayTemporaryIpApprovalRequest request,
+        DateTimeOffset now)
+    {
+        if (request.ApprovedUtc is not null)
+        {
+            return HasActiveApprovalGrant(request, now)
+                ? "Approved · active"
+                : "Approved · grant expired";
+        }
+
+        if (request.EmailSendCount >= EdgeGatewayOptions.TemporaryIpApprovalMaxEmailsPerDay &&
+            request.CreatedUtc.AddDays(1) > now)
+        {
+            return "Locked · daily email limit";
+        }
+
+        if (request.LastEmailSentUtc is { } lastEmailSentUtc &&
+            lastEmailSentUtc.AddMinutes(EdgeGatewayOptions.TemporaryIpApprovalEmailCooldownMinutes) > now)
+        {
+            return $"Waiting · email cooldown ({FormatApprovalDuration(lastEmailSentUtc.AddMinutes(EdgeGatewayOptions.TemporaryIpApprovalEmailCooldownMinutes) - now)})";
+        }
+
+        return string.IsNullOrWhiteSpace(request.LastEmailStatus)
+            ? "No email result recorded"
+            : "Ready · email can be retried";
+    }
+
+    private bool CanReleaseApprovalRequest(
+        EdgeGatewayTemporaryIpApprovalRequest request,
+        DateTimeOffset now) =>
+        !HasActiveApprovalGrant(request, now);
+
+    private bool HasActiveApprovalGrant(
+        EdgeGatewayTemporaryIpApprovalRequest request,
+        DateTimeOffset now) =>
+        ApprovalGrants.Any(grant =>
+            grant.RouteId == request.RouteId &&
+            grant.SourceIp.Equals(request.SourceIp, StringComparison.OrdinalIgnoreCase) &&
+            grant.ExpiresAtUtc > now &&
+            grant.IdleExpiresAtUtc > now);
+
+    private async Task ReleaseApprovalLockoutAsync(Guid requestId)
+    {
+        if (releasingApprovalRequestId.HasValue)
+        {
+            return;
+        }
+
+        releasingApprovalRequestId = requestId;
+        userMessage = string.Empty;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var released = await TemporaryIpApprovalService.ReleaseAsync(requestId);
+            userMessage = released
+                ? "Temporary approval lockout released. The next request can send a fresh approval email."
+                : "That approval request no longer exists. Refresh the status panel.";
+            await LoadAsync();
+        }
+        catch (Exception exception)
+        {
+            userMessage = exception.Message;
+        }
+        finally
+        {
+            releasingApprovalRequestId = null;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private UiPillTone GetApprovalRequestTone(
+        EdgeGatewayTemporaryIpApprovalRequest request,
+        DateTimeOffset now)
+    {
+        var state = GetApprovalRequestState(request, now);
+        return state.StartsWith("Approved", StringComparison.Ordinal)
+            ? UiPillTone.Success
+            : state.StartsWith("Locked", StringComparison.Ordinal)
+                ? UiPillTone.Failure
+                : state.StartsWith("Waiting", StringComparison.Ordinal)
+                    ? UiPillTone.Warning
+                    : UiPillTone.Neutral;
+    }
+
+    private static string FormatApprovalDuration(TimeSpan duration)
+    {
+        var totalMinutes = Math.Max(0, (int)Math.Ceiling(duration.TotalMinutes));
+        return totalMinutes >= 60
+            ? $"{totalMinutes / 60}h {totalMinutes % 60}m"
+            : $"{totalMinutes}m";
+    }
+
+    private static string FormatApprovalTimestamp(DateTimeOffset timestamp) =>
+        timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
 
     private void SyncRouteDomainExpansionState()
     {
@@ -1592,7 +1791,7 @@
 
     private async Task LoadCachedHttpServicesAsync()
     {
-        httpServiceSuggestions = await HttpServiceDiscovery.GetCachedAsync();
+        httpServiceSuggestions = SortHttpServiceSuggestions(await HttpServiceDiscovery.GetCachedAsync());
         httpServiceDiscoveryMessage = httpServiceSuggestions.Count == 0
             ? "No cached HTTP/S services yet. Run Scan to search localhost and private LAN services."
             : $"Showing {httpServiceSuggestions.Count} cached HTTP/S service(s). Run Scan to refresh.";
@@ -2399,13 +2598,17 @@
 
     private static IReadOnlyList<LocalHttpServiceEndpoint> SortHttpServiceSuggestions(IEnumerable<LocalHttpServiceEndpoint> services) =>
         services
+            .Where(service => !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(service))
             .DistinctBy(BuildHttpServiceKey, StringComparer.OrdinalIgnoreCase)
-            .OrderBy(service => service.Scope switch
+            .OrderBy(LocalHttpServiceDiscoveryRanking.PresentationRank)
+            .ThenBy(service => service.Title ?? service.DisplayName ?? service.ServiceName ?? service.Host, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(service => service.Scope switch
             {
-                "Localhost" => 0,
-                "LAN" => 1,
-                "Tailnet" => 2,
-                _ => 3
+                "Docker" => 0,
+                "Localhost" => 1,
+                "LAN" => 2,
+                "Tailnet" => 3,
+                _ => 4
             })
             .ThenBy(service => service.Host, StringComparer.OrdinalIgnoreCase)
             .ThenBy(service => service.Port)
@@ -2887,5 +3090,6 @@
     private sealed record EdgeGatewayDashboardSnapshot(
         EdgeGatewayDashboardViewModel Dashboard,
         EdgeGatewaySettingsEditor SettingsEditor,
-        IReadOnlyList<SecurityUser> SecurityUsers);
+        IReadOnlyList<SecurityUser> SecurityUsers,
+        EdgeGatewayTemporaryIpApprovalConfiguration TemporaryIpApprovalState);
 }

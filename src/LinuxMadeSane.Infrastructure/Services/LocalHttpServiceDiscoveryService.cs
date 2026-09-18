@@ -17,18 +17,39 @@ namespace LinuxMadeSane.Infrastructure.Services;
 
 public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscoveryService
 {
-    private const int MaxConcurrentProbes = 96;
-    private const int MaxLanCandidates = 512;
     private const int MaxTailnetPeersToProbe = 96;
     private const int MaxDockerPublishedPortsToProbe = 128;
+    private const int MaxFaviconBytes = 32_768;
+    private const int MaxConcurrentHostChecks = 32;
+    private const int MaxConcurrentTcpLivenessChecks = 256;
+    private const int MaxConcurrentProbes = 64;
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromMilliseconds(1400);
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromMilliseconds(420);
+    private static readonly TimeSpan LanConnectTimeout = TimeSpan.FromMilliseconds(180);
     private static readonly TimeSpan ReverseLookupTimeout = TimeSpan.FromMilliseconds(280);
-    private static readonly int[] CommonHttpPorts =
+    private static readonly int[] CommonHomelabPorts =
     [
-        80, 443, 3000, 3001, 5000, 5001, 5080, 7000, 7126, 8000, 8080, 8081, 8123, 8443, 8888, 9000, 9090, 9443, 10000,
-        11434, 32400
+        80, 81, 443, 1880, 1984, 2283, 3000, 3001, 5000, 5001, 5380, 5601,
+        6767, 6789, 7125, 7443, 7745, 7878, 8000, 8006, 8043, 8080, 8083,
+        8096, 8111, 8112, 8123, 8200, 8384, 8443, 8686, 8787, 8920, 8971,
+        8989, 9000, 9001, 9090, 9091, 9443, 9696, 10000, 10443, 11443, 15672,
+        18080, 19999, 32400
     ];
+    private static readonly HashSet<int> CommonHomelabPortSet = new(CommonHomelabPorts);
+    private static readonly int[] ExpandedPorts =
+    [
+        82, 88, 800, 808, 8008, 8009, 2342, 5080, 7000, 7126, 8081, 8888, 11434, 50000, 50001
+    ];
+    private static readonly int[] HostLivenessPorts =
+    [
+        80, 443, 8080, 8123, 8443, 9443, 5000, 5001, 3000, 8006, 8096, 9000, 9090, 10000, 32400, 22, 53, 139, 445
+    ];
+    private static readonly HashSet<int> HostLivenessPortSet = new(HostLivenessPorts);
+    private static readonly HashSet<int> HttpsPreferredPorts =
+    [
+        443, 5001, 7443, 8043, 8443, 8920, 9443, 10443
+    ];
+    private static readonly int[] HttpsConventionPorts = BuildHttpsConventionPorts();
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true
@@ -36,6 +57,12 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private static readonly Regex TitleRegex = new(
         "<title[^>]*>\\s*(?<title>.*?)\\s*</title>",
         RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+    private static readonly Regex FaviconLinkTagRegex = new(
+        "<link[^>]+rel\\s*=\\s*[\\\"']?(?:shortcut\\s+)?(?:apple-touch-)?icon[\\\"']?[^>]*>",
+        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+    private static readonly Regex FaviconHrefRegex = new(
+        "href\\s*=\\s*[\\\"'](?<href>[^\\\"']+)[\\\"']",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly HttpServiceDiscoveryStorageSettings storageSettings;
     private readonly ILinuxCommandRunner commandRunner;
@@ -109,11 +136,11 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             hosts.AddRange(await BuildTailnetProbeHostsAsync(cancellationToken));
         }
 
-        var totalProbeCount = hosts.Sum(host => host.Ports.Count);
+        var totalProbeCount = hosts.Count;
         progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
             totalProbeCount == 0
                 ? "No HTTP/S scan targets were available."
-                : $"Scanning {totalProbeCount} host/port combination(s)...",
+                : $"Checking {totalProbeCount} local discovery target(s) for live HTTP/S services...",
             0,
             totalProbeCount,
             0));
@@ -149,9 +176,11 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             return [];
         }
 
-        var progressState = new HttpDiscoveryProgressState(hosts.Sum(host => host.Ports.Count));
+        var progressState = new HttpDiscoveryProgressState(hosts.Count);
         var results = new ConcurrentDictionary<string, LocalHttpServiceEndpoint>(StringComparer.OrdinalIgnoreCase);
-        using var concurrency = new SemaphoreSlim(MaxConcurrentProbes);
+        using var hostConcurrency = new SemaphoreSlim(MaxConcurrentHostChecks);
+        using var tcpConcurrency = new SemaphoreSlim(MaxConcurrentTcpLivenessChecks);
+        using var serviceConcurrency = new SemaphoreSlim(MaxConcurrentProbes);
         using var handler = new HttpClientHandler
         {
             AllowAutoRedirect = false,
@@ -163,25 +192,93 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             Timeout = Timeout.InfiniteTimeSpan
         };
 
-        var tasks = hosts
-            .SelectMany(host => host.Ports.Select(port => ProbePortAsync(
+        var tasks = hosts.Select(host => ProbeHostAsync(
                 client,
-                concurrency,
+                hostConcurrency,
+                tcpConcurrency,
+                serviceConcurrency,
                 results,
                 host,
-                port,
                 progress,
                 progressState,
-                cancellationToken)))
+                cancellationToken))
             .ToArray();
 
         await Task.WhenAll(tasks);
         return results.Values.ToArray();
     }
 
+    private static async Task ProbeHostAsync(
+        HttpClient client,
+        SemaphoreSlim hostConcurrency,
+        SemaphoreSlim tcpConcurrency,
+        SemaphoreSlim serviceConcurrency,
+        ConcurrentDictionary<string, LocalHttpServiceEndpoint> results,
+        HttpProbeHost host,
+        IProgress<LocalHttpServiceDiscoveryProgressUpdate>? progress,
+        HttpDiscoveryProgressState progressState,
+        CancellationToken cancellationToken)
+    {
+        await hostConcurrency.WaitAsync(cancellationToken);
+        IReadOnlyList<int> openPorts = [];
+        try
+        {
+            if (host.IsLocalhostProbe || host.ProbeAddress is null)
+            {
+                openPorts = host.Ports;
+            }
+            else if (host.IsKnownLive || await IsLanHostReachableAsync(host.ProbeAddress, host.Ports, tcpConcurrency, cancellationToken))
+            {
+                openPorts = await FindOpenTcpPortsAsync(host.ProbeAddress, host.Ports, tcpConcurrency, cancellationToken);
+            }
+
+            var checkedCount = progressState.IncrementProbedCount();
+            progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
+                $"Checked {checkedCount} of {progressState.TotalProbeCount} host(s); {openPorts.Count} open HTTP/S candidate port(s) at {host.ProbeHost}.",
+                checkedCount,
+                progressState.TotalProbeCount,
+                progressState.FoundCount));
+        }
+        finally
+        {
+            hostConcurrency.Release();
+        }
+
+        if (openPorts.Count == 0)
+        {
+            return;
+        }
+
+        var priorityPorts = openPorts.Where(CommonHomelabPortSet.Contains).ToArray();
+        var remainingPorts = openPorts.Where(port => !CommonHomelabPortSet.Contains(port)).ToArray();
+        await ProbePortSetAsync(client, serviceConcurrency, results, host, priorityPorts, progress, progressState, cancellationToken);
+        await ProbePortSetAsync(client, serviceConcurrency, results, host, remainingPorts, progress, progressState, cancellationToken);
+    }
+
+    private static async Task ProbePortSetAsync(
+        HttpClient client,
+        SemaphoreSlim serviceConcurrency,
+        ConcurrentDictionary<string, LocalHttpServiceEndpoint> results,
+        HttpProbeHost host,
+        IReadOnlyList<int> ports,
+        IProgress<LocalHttpServiceDiscoveryProgressUpdate>? progress,
+        HttpDiscoveryProgressState progressState,
+        CancellationToken cancellationToken)
+    {
+        await Task.WhenAll(ports.Select(port => ProbePortAsync(
+            client,
+            serviceConcurrency,
+            results,
+            host,
+            port,
+            progress,
+            progressState,
+            cancellationToken)));
+    }
+
     private static async Task ProbePortAsync(
         HttpClient client,
-        SemaphoreSlim concurrency,
+        SemaphoreSlim serviceConcurrency,
         ConcurrentDictionary<string, LocalHttpServiceEndpoint> results,
         HttpProbeHost host,
         int port,
@@ -189,66 +286,141 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         HttpDiscoveryProgressState progressState,
         CancellationToken cancellationToken)
     {
-        await concurrency.WaitAsync(cancellationToken);
+        await serviceConcurrency.WaitAsync(cancellationToken);
         try
         {
-            if (!host.IsLocalhostProbe &&
-                (host.ProbeAddress is null || !await CanOpenTcpAsync(host.ProbeAddress, port, cancellationToken)))
-            {
-                return;
-            }
-
-            foreach (var scheme in new[] { Uri.UriSchemeHttps, Uri.UriSchemeHttp })
+            foreach (var scheme in GuessSchemes(port))
             {
                 var endpoint = await TryProbeAsync(client, host, scheme, port, cancellationToken);
-                if (endpoint is null)
+                if (endpoint is null || !results.TryAdd(BuildEndpointKey(endpoint), endpoint))
                 {
                     continue;
                 }
 
-                if (results.TryAdd(BuildEndpointKey(endpoint), endpoint))
-                {
-                    var foundCount = progressState.IncrementFoundCount();
-                    progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
-                        $"Found {FormatEndpointForProgress(endpoint)}",
-                        progressState.ProbedCount,
-                        progressState.TotalProbeCount,
-                        foundCount,
-                        endpoint));
-                }
+                var foundCount = progressState.IncrementFoundCount();
+                progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
+                    $"Found {FormatEndpointForProgress(endpoint)}",
+                    progressState.ProbedCount,
+                    progressState.TotalProbeCount,
+                    foundCount,
+                    endpoint));
             }
         }
         finally
         {
-            var probedCount = progressState.IncrementProbedCount();
-            if (ShouldReportProbeProgress(probedCount, progressState.TotalProbeCount))
-            {
-                progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
-                    $"Checked {probedCount} of {progressState.TotalProbeCount} host/port combination(s).",
-                    probedCount,
-                    progressState.TotalProbeCount,
-                    progressState.FoundCount));
-            }
-
-            concurrency.Release();
+            serviceConcurrency.Release();
         }
     }
 
-    private static async Task<bool> CanOpenTcpAsync(IPAddress address, int port, CancellationToken cancellationToken)
+    private static async Task<bool> IsLanHostReachableAsync(
+        IPAddress address,
+        IReadOnlyList<int> candidatePorts,
+        SemaphoreSlim tcpConcurrency,
+        CancellationToken cancellationToken)
     {
-        using var client = new TcpClient(address.AddressFamily);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(ConnectTimeout);
+        if (await CanPingAsync(address, cancellationToken))
+        {
+            return true;
+        }
+
+        var commonPorts = candidatePorts.Where(HostLivenessPortSet.Contains).ToArray();
+        if (commonPorts.Length > 0 && await CanOpenAnyTcpAsync(address, commonPorts, tcpConcurrency, cancellationToken, LanConnectTimeout))
+        {
+            return true;
+        }
+
+        var remainingPorts = candidatePorts.Where(port => !HostLivenessPortSet.Contains(port)).ToArray();
+        return remainingPorts.Length > 0 &&
+               await CanOpenAnyTcpAsync(address, remainingPorts, tcpConcurrency, cancellationToken, LanConnectTimeout);
+    }
+
+    private static async Task<bool> CanPingAsync(IPAddress address, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var ping = new Ping();
+            var reply = await ping.SendPingAsync(address, 180);
+            return reply.Status == IPStatus.Success;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> CanOpenAnyTcpAsync(
+        IPAddress address,
+        IReadOnlyList<int> ports,
+        SemaphoreSlim tcpConcurrency,
+        CancellationToken cancellationToken,
+        TimeSpan timeout)
+    {
+        using var found = new CancellationTokenSource();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, found.Token);
+        var tasks = ports.Select(async port =>
+        {
+            if (await CanOpenTcpAsync(address, port, tcpConcurrency, linked.Token, timeout))
+            {
+                found.Cancel();
+                return true;
+            }
+
+            return false;
+        }).ToArray();
 
         try
         {
-            await client.ConnectAsync(address, port, timeout.Token);
+            return (await Task.WhenAll(tasks)).Any(value => value);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return true;
+        }
+    }
+
+    private static async Task<bool> CanOpenTcpAsync(
+        IPAddress address,
+        int port,
+        SemaphoreSlim tcpConcurrency,
+        CancellationToken cancellationToken,
+        TimeSpan connectTimeout)
+    {
+        await tcpConcurrency.WaitAsync(cancellationToken);
+        using var client = new TcpClient(address.AddressFamily);
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(connectTimeout);
+
+        try
+        {
+            await client.ConnectAsync(address, port, timeoutSource.Token);
             return true;
         }
         catch
         {
             return false;
         }
+        finally
+        {
+            tcpConcurrency.Release();
+        }
+    }
+
+    private static async Task<IReadOnlyList<int>> FindOpenTcpPortsAsync(
+        IPAddress address,
+        IReadOnlyList<int> ports,
+        SemaphoreSlim tcpConcurrency,
+        CancellationToken cancellationToken)
+    {
+        var open = new ConcurrentBag<int>();
+        await Task.WhenAll(ports.Distinct().Select(async port =>
+        {
+            if (await CanOpenTcpAsync(address, port, tcpConcurrency, cancellationToken, ConnectTimeout))
+            {
+                open.Add(port);
+            }
+        }));
+
+        return ports.Where(open.Contains).Distinct().ToArray();
     }
 
     private static async Task<LocalHttpServiceEndpoint?> TryProbeAsync(
@@ -272,7 +444,9 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                 HttpCompletionOption.ResponseHeadersRead,
                 timeout.Token);
 
-            var title = await TryReadTitleAsync(response, timeout.Token);
+            var page = await TryReadPageMetadataAsync(response, timeout.Token);
+            var title = page.Title;
+            var faviconDataUrl = await TryReadFaviconAsync(client, probeUrl, page.Sample, timeout.Token);
             var targetHost = host.TargetHost;
             if (host.ResolveHostName && host.ProbeAddress is not null)
             {
@@ -290,7 +464,14 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                 host.Scope,
                 host.IpAddress,
                 host.DisplayName,
-                DateTimeOffset.UtcNow);
+                DateTimeOffset.UtcNow,
+                faviconDataUrl,
+                Confidence: BuildPresentationConfidence(title, faviconDataUrl, (int)response.StatusCode),
+                ServiceName: BuildPresentationName(title, host.DisplayName, response.Headers.Server.ToString()),
+                ServiceKind: "unknown",
+                Exposure: DiscoveryExposure.RequiresManualConfirmation,
+                Fingerprint: $"http:{scheme}:{targetHost}:{port}",
+                Evidence: BuildPresentationEvidence(title, response.Headers.Server.ToString(), host.Scope));
         }
         catch
         {
@@ -314,6 +495,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     "Local LMS host",
                     ports,
                     IsLocalhostProbe: true,
+                    IsKnownLive: true,
                     ResolveHostName: false)
             ];
     }
@@ -327,6 +509,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         }
 
         var neighbours = await LoadLanNeighbourEntriesAsync(cancellationToken);
+        var advertisements = await LocalNetworkServiceAdvertisementDiscovery.DiscoverAsync(cancellationToken);
         var candidates = new List<(IPAddress Address, string SourceLabel, bool IsNeighbour)>();
 
         foreach (var plan in plans)
@@ -345,18 +528,8 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                 candidates.Add((address, $"{plan.SubnetLabel} known neighbour", true));
             }
 
-            var neighbourBlocks = neighbourAddresses
-                .Select(FormatSlash24Block)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var localBlock = FormatSlash24Block(plan.LocalAddress);
-            var includeFullSubnet = plan.PrefixLength >= 24;
             var subnetAddresses = SshHostDiscoveryService.BuildLanCandidateAddresses(plan.LocalAddress, plan.PrefixLength)
-                .Where(address =>
-                    includeFullSubnet ||
-                    FormatSlash24Block(address).Equals(localBlock, StringComparison.OrdinalIgnoreCase) ||
-                    neighbourBlocks.Contains(FormatSlash24Block(address)))
                 .OrderBy(AddressToUInt32)
-                .Take(MaxLanCandidates)
                 .ToArray();
 
             foreach (var address in subnetAddresses)
@@ -365,11 +538,10 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             }
         }
 
-        return candidates
+        var subnetHosts = candidates
             .GroupBy(candidate => candidate.Address.ToString(), StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(group => group.Any(candidate => candidate.IsNeighbour))
             .ThenBy(group => AddressToUInt32(IPAddress.Parse(group.Key)))
-            .Take(MaxLanCandidates)
             .Select(group =>
             {
                 var item = group.First();
@@ -380,10 +552,43 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     ipAddress,
                     "LAN",
                     ipAddress,
-                    item.SourceLabel,
-                    CommonHttpPorts,
+                    group.Any(candidate => candidate.IsNeighbour) ? "Known LAN neighbour" : "LAN candidate",
+                    BuildBaseScanPorts(),
                     IsLocalhostProbe: false,
+                    IsKnownLive: group.Any(candidate => candidate.IsNeighbour),
                     ResolveHostName: true);
+            })
+            .ToArray();
+
+        var advertisedHosts = advertisements
+            .Select(advertisement => new HttpProbeHost(
+                advertisement.Host,
+                advertisement.Address,
+                advertisement.Host,
+                advertisement.Scope,
+                advertisement.Address?.ToString(),
+                advertisement.DisplayName,
+                BuildBaseScanPorts().Concat([advertisement.Port]).Distinct().ToArray(),
+                IsLocalhostProbe: false,
+                IsKnownLive: true,
+                ResolveHostName: false))
+            .ToArray();
+
+        return subnetHosts
+            .Concat(advertisedHosts)
+            .GroupBy(host => host.ProbeHost, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var first = group
+                    .OrderByDescending(host => !string.IsNullOrWhiteSpace(host.DisplayName))
+                    .ThenBy(host => host.Scope.Equals("LAN", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+                    .First();
+                return first with
+                {
+                    Ports = group.SelectMany(host => host.Ports).Distinct().Order().ToArray(),
+                    DisplayName = group.Select(host => host.DisplayName).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? first.DisplayName,
+                    IsKnownLive = group.Any(host => host.IsKnownLive)
+                };
             })
             .ToArray();
     }
@@ -409,8 +614,9 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     "Tailnet",
                     peer.IpAddress,
                     peer.DisplayName,
-                    CommonHttpPorts,
+                    BuildBaseScanPorts(),
                     IsLocalhostProbe: false,
+                    IsKnownLive: true,
                     ResolveHostName: false);
             })
             .ToArray();
@@ -511,6 +717,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     displayName,
                     group.Select(port => port.HostPort).Distinct().Order().ToArray(),
                     IsLocalhostProbe: true,
+                    IsKnownLive: true,
                     ResolveHostName: false);
             })
             .ToArray();
@@ -815,7 +1022,14 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     continue;
                 }
 
-                var prefixLength = Math.Clamp(unicastAddress.PrefixLength, 1, 30);
+                // Match the HA scanner's safety boundary: a /16 is already 65,534 hosts;
+                // blindly expanding a /8 or /12 would turn a picker scan into a network sweep.
+                if (unicastAddress.PrefixLength is < 16 or > 30)
+                {
+                    continue;
+                }
+
+                var prefixLength = unicastAddress.PrefixLength;
                 plans.Add(new LanScanPlan(
                     networkInterface.Name,
                     FormatSubnet(unicastAddress.Address, prefixLength),
@@ -884,12 +1098,6 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private static uint AddressToUInt32(IPAddress address) =>
         BinaryPrimitives.ReadUInt32BigEndian(address.GetAddressBytes());
 
-    private static string FormatSlash24Block(IPAddress address)
-    {
-        var bytes = address.GetAddressBytes();
-        return $"{bytes[0]}.{bytes[1]}.{bytes[2]}.0/24";
-    }
-
     private static bool IsUsableNeighbourState(string state) =>
         !string.Equals(state, "FAILED", StringComparison.OrdinalIgnoreCase) &&
         !string.Equals(state, "INCOMPLETE", StringComparison.OrdinalIgnoreCase) &&
@@ -901,7 +1109,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         return trimmed.Length == 0 ? null : trimmed;
     }
 
-    private static async Task<string?> TryReadTitleAsync(
+    private static async Task<(string? Title, string? Sample)> TryReadPageMetadataAsync(
         HttpResponseMessage response,
         CancellationToken cancellationToken)
     {
@@ -910,7 +1118,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             (!mediaType.Contains("html", StringComparison.OrdinalIgnoreCase) &&
              !mediaType.Contains("text", StringComparison.OrdinalIgnoreCase)))
         {
-            return null;
+            return (null, null);
         }
 
         try
@@ -920,23 +1128,153 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
             if (bytesRead <= 0)
             {
-                return null;
+                return (null, null);
             }
 
             var sample = Encoding.UTF8.GetString(buffer, 0, bytesRead);
             var match = TitleRegex.Match(sample);
             if (!match.Success)
             {
-                return null;
+                return (null, sample);
             }
 
             var title = WebUtility.HtmlDecode(match.Groups["title"].Value);
-            return string.Join(' ', title.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            return (string.Join(' ', title.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)), sample);
         }
         catch
         {
-            return null;
+            return (null, null);
         }
+    }
+
+    private static async Task<string?> TryReadFaviconAsync(
+        HttpClient client,
+        string baseUrl,
+        string? pageHtml,
+        CancellationToken cancellationToken)
+    {
+        foreach (var faviconUrl in BuildFaviconCandidateUrls(baseUrl, pageHtml))
+        {
+            try
+            {
+                using var response = await client.GetAsync(
+                    faviconUrl,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                if (response.Content.Headers.ContentLength is > MaxFaviconBytes)
+                {
+                    continue;
+                }
+
+                var bytes = await ReadLimitedBytesAsync(response.Content, MaxFaviconBytes, cancellationToken);
+                if (bytes.Length == 0 || bytes.Length > MaxFaviconBytes || !LooksLikeImage(bytes))
+                {
+                    continue;
+                }
+
+                var mediaType = response.Content.Headers.ContentType?.MediaType;
+                if (string.IsNullOrWhiteSpace(mediaType) ||
+                    !mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                {
+                    mediaType = GuessFaviconMediaType(faviconUrl, bytes);
+                }
+
+                return $"data:{mediaType};base64,{Convert.ToBase64String(bytes)}";
+            }
+            catch
+            {
+                // A favicon is presentation-only. Keep the discovered service when it is absent.
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> BuildFaviconCandidateUrls(string baseUrl, string? pageHtml)
+    {
+        yield return $"{baseUrl.TrimEnd('/')}/favicon.ico";
+        yield return $"{baseUrl.TrimEnd('/')}/apple-touch-icon.png";
+
+        if (string.IsNullOrWhiteSpace(pageHtml) || !Uri.TryCreate(baseUrl, UriKind.Absolute, out var baseUri))
+        {
+            yield break;
+        }
+
+        foreach (Match linkMatch in FaviconLinkTagRegex.Matches(pageHtml))
+        {
+            var hrefMatch = FaviconHrefRegex.Match(linkMatch.Value);
+            if (!hrefMatch.Success ||
+                !Uri.TryCreate(baseUri, WebUtility.HtmlDecode(hrefMatch.Groups["href"].Value), out var faviconUri) ||
+                !faviconUri.Scheme.Equals(baseUri.Scheme, StringComparison.OrdinalIgnoreCase) ||
+                !faviconUri.Host.Equals(baseUri.Host, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            yield return faviconUri.ToString();
+        }
+    }
+
+    private static async Task<byte[]> ReadLimitedBytesAsync(
+        HttpContent content,
+        int maximumBytes,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+        await using var buffer = new MemoryStream();
+        var chunk = new byte[4096];
+        while (buffer.Length <= maximumBytes)
+        {
+            var bytesRead = await stream.ReadAsync(chunk.AsMemory(0, chunk.Length), cancellationToken);
+            if (bytesRead == 0)
+            {
+                break;
+            }
+
+            await buffer.WriteAsync(chunk.AsMemory(0, bytesRead), cancellationToken);
+            if (buffer.Length > maximumBytes)
+            {
+                return [];
+            }
+        }
+
+        return buffer.ToArray();
+    }
+
+    private static bool LooksLikeImage(byte[] bytes) =>
+        (bytes.Length >= 8 &&
+         bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 &&
+         bytes[4] == 0x0D && bytes[5] == 0x0A && bytes[6] == 0x1A && bytes[7] == 0x0A) ||
+        (bytes.Length >= 6 &&
+         (Encoding.ASCII.GetString(bytes, 0, 6) == "GIF87a" || Encoding.ASCII.GetString(bytes, 0, 6) == "GIF89a")) ||
+        (bytes.Length >= 4 && bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0x01 && bytes[3] == 0x00) ||
+        (bytes.Length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) ||
+        (bytes.Length >= 4 && Encoding.ASCII.GetString(bytes, 0, 4).Equals("<svg", StringComparison.OrdinalIgnoreCase));
+
+    private static string GuessFaviconMediaType(string faviconUrl, byte[] bytes)
+    {
+        if (bytes.Length >= 8 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47)
+        {
+            return "image/png";
+        }
+
+        if (bytes.Length >= 6 &&
+            (Encoding.ASCII.GetString(bytes, 0, 6) == "GIF87a" || Encoding.ASCII.GetString(bytes, 0, 6) == "GIF89a"))
+        {
+            return "image/gif";
+        }
+
+        if (bytes.Length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF)
+        {
+            return "image/jpeg";
+        }
+
+        return faviconUrl.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? "image/png" : "image/x-icon";
     }
 
     private async Task<IReadOnlyList<LocalHttpServiceEndpoint>> ReadCacheAsync(CancellationToken cancellationToken)
@@ -984,6 +1322,9 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         if (request.IncludeLan)
         {
             scopes.Add("LAN");
+            scopes.Add("SSDP");
+            scopes.Add("mDNS");
+            scopes.Add("WS-Discovery");
         }
 
         if (request.IncludeTailnet)
@@ -1002,11 +1343,6 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private static string BuildEndpointKey(LocalHttpServiceEndpoint endpoint) =>
         $"{endpoint.Scope}|{endpoint.Scheme}|{endpoint.Host}|{endpoint.Port}";
 
-    private static bool ShouldReportProbeProgress(int probedCount, int totalProbeCount) =>
-        totalProbeCount == 0 ||
-        probedCount == totalProbeCount ||
-        probedCount % 20 == 0;
-
     private static string FormatEndpointForProgress(LocalHttpServiceEndpoint endpoint)
     {
         var name = !string.IsNullOrWhiteSpace(endpoint.Title)
@@ -1020,8 +1356,90 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             : $"{endpoint.Host}:{endpoint.Port} ({name})";
     }
 
+    private static int BuildPresentationConfidence(string? title, string? faviconDataUrl, int statusCode)
+    {
+        if (statusCode is >= 400 or >= 300 and <= 399)
+        {
+            return 20;
+        }
+
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            return 70;
+        }
+
+        return string.IsNullOrWhiteSpace(faviconDataUrl) ? 45 : 55;
+    }
+
+    private static string BuildPresentationName(string? title, string? displayName, string? serverHeader) =>
+        FirstNonBlank(title, displayName, serverHeader) ?? "Unknown";
+
+    private static string? FirstNonBlank(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
+
+    private static IReadOnlyList<string> BuildPresentationEvidence(string? title, string? serverHeader, string scope) =>
+        new[]
+        {
+            string.IsNullOrWhiteSpace(title) ? null : $"Page title: {title.Trim()}.",
+            string.IsNullOrWhiteSpace(serverHeader) ? null : $"Server header: {serverHeader.Trim()}.",
+            $"Discovery scope: {scope}."
+        }
+        .Where(value => !string.IsNullOrWhiteSpace(value))
+        .Cast<string>()
+        .ToArray();
+
     private static string BuildUrl(string scheme, string host, int port) =>
         new UriBuilder(scheme, FormatHostForUri(host), port).Uri.ToString().TrimEnd('/');
+
+    private static IReadOnlyList<int> BuildBaseScanPorts()
+    {
+        var ports = new List<int>(CommonHomelabPorts.Length + HttpsConventionPorts.Length + ExpandedPorts.Length);
+
+        void AddRange(IEnumerable<int> values)
+        {
+            foreach (var port in values)
+            {
+                if (port is > 0 and <= 65535 && !ports.Contains(port))
+                {
+                    ports.Add(port);
+                }
+            }
+        }
+
+        AddRange(CommonHomelabPorts);
+        AddRange(HttpsConventionPorts);
+        AddRange(ExpandedPorts);
+        return ports;
+    }
+
+    private static int[] BuildHttpsConventionPorts()
+    {
+        var ports = new List<int>(64);
+        for (var thousands = 1; thousands <= 64; thousands++)
+        {
+            var port = thousands * 1000 + 443;
+            if (port is > 0 and <= 65535)
+            {
+                ports.Add(port);
+            }
+        }
+
+        return ports.ToArray();
+    }
+
+    private static IEnumerable<string> GuessSchemes(int port)
+    {
+        if (port == 443 || HttpsPreferredPorts.Contains(port) || port % 1000 == 443)
+        {
+            yield return Uri.UriSchemeHttps;
+            yield return Uri.UriSchemeHttp;
+        }
+        else
+        {
+            yield return Uri.UriSchemeHttp;
+            yield return Uri.UriSchemeHttps;
+        }
+    }
 
     private static string FormatHostForUri(string host) =>
         IPAddress.TryParse(host, out var address) && address.AddressFamily == AddressFamily.InterNetworkV6
@@ -1031,7 +1449,18 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private static IReadOnlyList<LocalHttpServiceEndpoint> SortEndpoints(IEnumerable<LocalHttpServiceEndpoint> endpoints) =>
         endpoints
             .DistinctBy(BuildEndpointKey, StringComparer.OrdinalIgnoreCase)
-            .OrderBy(endpoint => endpoint.Scope switch
+            .OrderBy(endpoint => LocalHttpServiceDiscoveryRanking.PresentationRank(endpoint))
+            .ThenBy(endpoint => LocalHttpServiceDiscoveryRanking.IsUnknownLabel(endpoint.ServiceName) ? 1 : 0)
+            .ThenBy(endpoint => endpoint.Exposure switch
+            {
+                DiscoveryExposure.Publishable => 0,
+                DiscoveryExposure.RequiresManualConfirmation => 1,
+                DiscoveryExposure.InternalOnly => 2,
+                DiscoveryExposure.UnsafeToExpose => 3,
+                _ => 4
+            })
+            .ThenByDescending(endpoint => endpoint.Confidence)
+            .ThenBy(endpoint => endpoint.Scope switch
             {
                 "Docker" => 0,
                 "Localhost" => 1,
@@ -1053,6 +1482,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         string? DisplayName,
         IReadOnlyList<int> Ports,
         bool IsLocalhostProbe,
+        bool IsKnownLive,
         bool ResolveHostName);
 
     private sealed class HttpDiscoveryProgressState(int totalProbeCount)

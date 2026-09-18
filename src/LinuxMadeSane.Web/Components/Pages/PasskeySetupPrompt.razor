@@ -6,6 +6,7 @@
 @using LinuxMadeSane.Core.Models
 @using LinuxMadeSane.Web.Services
 @inject PasskeyAuthenticationService PasskeyAuthenticationService
+@inject LinuxMadeSane.Core.Abstractions.ISecurityUserStore SecurityUserStore
 
 <PageTitle>Passkeys | Linux Made Sane</PageTitle>
 
@@ -17,8 +18,10 @@
     <section class="auth-passkey-panel">
         <div class="auth-passkey-heading">
             <p class="eyebrow">Linux Made Sane</p>
-            <h1>Your passkeys.</h1>
-            <p>Use your device unlock for phishing-resistant LMS sign-in instead of typing an authenticator code.</p>
+            <h1>@(IsAdministratorEnrollment ? "Add a passkey." : "Your passkeys.")</h1>
+            <p>@(IsAdministratorEnrollment
+                ? $"Create a passkey for {TargetAccountEmail} so that account can use device authentication to sign in."
+                : "Use your device unlock for phishing-resistant LMS sign-in instead of typing an authenticator code.")</p>
         </div>
 
         @if (!string.IsNullOrWhiteSpace(Error))
@@ -26,7 +29,7 @@
             <p class="callout auth-passkey-status error">@Error</p>
         }
 
-        @if (IsAuthenticated)
+        @if (targetUser is not null)
         {
             <section class="auth-passkey-overview @(passkeys.Count == 0 ? "missing" : "configured")">
                 <span class="auth-passkey-overview-icon" aria-hidden="true">
@@ -55,8 +58,13 @@
             {
                 <div class="auth-passkey-card" data-passkey-enrollment>
                     <input type="hidden" value="@NormalizedReturnUrl" data-return-url />
+                    <input type="hidden" value="@targetUser.Id" data-target-user-id />
 
-                    <h2>@(passkeys.Count == 0 ? "Set up your first passkey" : "Add another passkey")</h2>
+                    <h2>@(passkeys.Count == 0 ? "Set up the first passkey" : "Add another passkey")</h2>
+                    @if (IsAdministratorEnrollment)
+                    {
+                        <p class="meta-text">Local administrator setup for <strong>@TargetAccountEmail</strong>.</p>
+                    }
                     <label class="auth-passkey-field">
                         <span>Device name</span>
                         <input type="text"
@@ -120,6 +128,9 @@
     [SupplyParameterFromQuery]
     public string? ReturnUrl { get; set; }
 
+    [SupplyParameterFromQuery(Name = "target")]
+    public Guid? TargetUserId { get; set; }
+
     [SupplyParameterFromQuery]
     public string? Error { get; set; }
 
@@ -128,15 +139,18 @@
 
     private IReadOnlyList<SecurityPasskeyCredential> passkeys = [];
     private bool CanEnroll { get; set; }
+    private SecurityUser? targetUser;
+    private bool isTrustedLocalAdministrator;
 
     private bool IsAuthenticated => HttpContext?.User?.Identity?.IsAuthenticated == true;
 
+    private bool IsAdministratorEnrollment => isTrustedLocalAdministrator && targetUser is not null;
+
+    private string TargetAccountEmail => targetUser?.Email ?? "this LMS account";
+
     private bool IsSignedInWithPasskey => HttpContext?.User?.HasClaim("amr", "passkey") == true;
 
-    private string AuthenticatedEmail =>
-        HttpContext?.User?.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value ??
-        HttpContext?.User?.Identity?.Name ??
-        "this LMS account";
+    private string AuthenticatedEmail => TargetAccountEmail;
 
     private string CurrentHostname => HttpContext?.Request.Host.Host ?? "this hostname";
 
@@ -161,15 +175,39 @@
 
     protected override async Task OnInitializedAsync()
     {
-        if (HttpContext?.User?.Identity?.IsAuthenticated != true)
+        var context = HttpContext;
+        var principal = context?.User;
+        isTrustedLocalAdministrator = principal?.Identity?.IsAuthenticated != true &&
+            context?.Items.TryGetValue("LmsTrustedNetworkAccess", out var access) == true &&
+            access is TrustedNetworkAccessResult { IsTrusted: true };
+
+        var authenticatedUserId = Guid.TryParse(
+            principal?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value,
+            out var parsedUserId)
+            ? parsedUserId
+            : (Guid?)null;
+        var requestedUserId = TargetUserId ?? authenticatedUserId;
+        if (!requestedUserId.HasValue ||
+            (!isTrustedLocalAdministrator && requestedUserId != authenticatedUserId))
         {
+            Error = "You can only add a passkey to your own LMS account unless you are using trusted local administration.";
             return;
         }
 
-        passkeys = await PasskeyAuthenticationService.ListForPrincipalAsync(
-            HttpContext.User,
-            HttpContext.RequestAborted);
-        CanEnroll = PasskeyAuthenticationService.HasFreshStrongMfaSession(HttpContext.User);
+        targetUser = await SecurityUserStore.GetAsync(
+            requestedUserId.Value,
+            context?.RequestAborted ?? CancellationToken.None);
+        if (targetUser is null || !targetUser.IsEnabled)
+        {
+            Error = "The selected LMS account is not available.";
+            return;
+        }
+
+        passkeys = await PasskeyAuthenticationService.ListForUserAsync(
+            targetUser.Id,
+            context?.RequestAborted ?? CancellationToken.None);
+        CanEnroll = isTrustedLocalAdministrator ||
+                    principal is not null && PasskeyAuthenticationService.HasFreshStrongMfaSession(principal);
     }
 
     private static string FormatPasskeyUsage(SecurityPasskeyCredential passkey) =>

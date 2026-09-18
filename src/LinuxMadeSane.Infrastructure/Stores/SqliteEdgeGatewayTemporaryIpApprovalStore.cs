@@ -49,6 +49,33 @@ public sealed class SqliteEdgeGatewayTemporaryIpApprovalStore(LinuxMadeSaneDbCon
         await transaction.CommitAsync(cancellationToken);
     }
 
+    public async Task ResetTransientStateAsync(
+        DateTimeOffset resetAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var state = await LoadAsync(cancellationToken);
+        var resetRequests = state.Requests
+            .Select(request => request with
+            {
+                LastEmailSentUtc = null,
+                ApprovalTokenHash = string.Empty,
+                ApprovalTokenExpiresAtUtc = null,
+                ApprovedUtc = null,
+                UpdatedUtc = resetAtUtc,
+                LastEmailStatus = "Approval state reset after LMS restart."
+            })
+            .ToArray();
+
+        await SaveAsync(
+            state with
+            {
+                Requests = resetRequests,
+                Grants = [],
+                UpdatedAtUtc = resetAtUtc
+            },
+            cancellationToken);
+    }
+
     private static EdgeGatewayTemporaryIpApprovalConfiguration Normalize(
         EdgeGatewayTemporaryIpApprovalConfiguration? configuration)
     {
