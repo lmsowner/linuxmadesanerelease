@@ -17,6 +17,7 @@
 @inject ILocalSystemMaintenanceService SystemMaintenance
 @inject IConfigurationSummaryService ConfigurationSummaryService
 @inject IJSRuntime JSRuntime
+@inject NavigationManager Navigation
 
 <PageTitle>@(IsOverview ? "Overview" : "System Info") | Linux Made Sane</PageTitle>
 
@@ -746,6 +747,10 @@
 @code {
     [Parameter] public bool IsOverview { get; set; }
 
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "tab")]
+    public string? RequestedTab { get; set; }
+
     private readonly string currentInstanceLabel = BuildCurrentInstanceLabel();
 
     private static string BuildCurrentInstanceLabel()
@@ -787,6 +792,18 @@
     private readonly SemaphoreSlim refreshGate = new(1, 1);
     private string activeTab = "overview";
     private static readonly int[] PollIntervalsSeconds = [0, 1, 2, 5, 10, 30];
+    private static readonly IReadOnlySet<string> SupportedTabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "overview",
+        "on-demand-apps",
+        "cpu",
+        "memory",
+        "network",
+        "configuration",
+        "disk",
+        "drive-usage",
+        "processes"
+    };
     private int pollPresetIndex = 2;
     private int pollingGeneration;
     private string processFilter = string.Empty;
@@ -839,6 +856,11 @@
         StartPolling();
     }
 
+    protected override void OnParametersSet()
+    {
+        activeTab = NormalizeTab(RequestedTab);
+    }
+
     private async Task RefreshSnapshotAsync(CancellationToken cancellationToken)
     {
         if (!await refreshGate.WaitAsync(0, cancellationToken))
@@ -886,7 +908,11 @@
 
     private async Task SetActiveTabAsync(string? value)
     {
-        activeTab = string.IsNullOrWhiteSpace(value) ? "overview" : value;
+        activeTab = NormalizeTab(value);
+        var tabQueryValue = activeTab == "overview" ? null : activeTab;
+        var selectedTabUri = Navigation.GetUriWithQueryParameter("tab", tabQueryValue);
+        Navigation.NavigateTo(selectedTabUri, replace: true);
+
         if (activeTab == "drive-usage" && driveUsage is null && !isDriveUsageBusy)
         {
             await LoadDriveUsageAsync("/");
@@ -896,6 +922,19 @@
         {
             await RefreshConfigurationAsync();
         }
+    }
+
+    private string NormalizeTab(string? value)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalized) ||
+            !SupportedTabs.Contains(normalized) ||
+            (!IsOverview && normalized == "on-demand-apps"))
+        {
+            return "overview";
+        }
+
+        return normalized;
     }
 
     private async Task RefreshConfigurationAsync()
