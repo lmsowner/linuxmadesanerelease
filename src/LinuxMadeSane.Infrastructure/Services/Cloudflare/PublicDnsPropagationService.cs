@@ -21,7 +21,7 @@ public sealed class PublicDnsPropagationService : IPublicDnsPropagationService
     private readonly int requiredConsecutiveAnswers;
 
     public PublicDnsPropagationService(HttpClient httpClient, TimeProvider timeProvider)
-        : this(httpClient, timeProvider, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(1), 4)
+        : this(httpClient, timeProvider, TimeSpan.FromSeconds(8), TimeSpan.FromSeconds(1), 2)
     {
     }
 

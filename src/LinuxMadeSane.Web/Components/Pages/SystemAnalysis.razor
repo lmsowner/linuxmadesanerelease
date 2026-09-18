@@ -34,8 +34,8 @@
         </ChildContent>
         <Actions>
             <div class="overview-workspace-actions">
-                <div class="system-analysis-update-cycle @(activeTab == "configuration" ? "is-inactive" : null)"
-                     aria-hidden="@(activeTab == "configuration" ? "true" : null)"
+                <div class="system-analysis-update-cycle @(activeTab is "configuration" or "on-demand-apps" ? "is-inactive" : null)"
+                     aria-hidden="@(activeTab is "configuration" or "on-demand-apps" ? "true" : null)"
                      title="@UpdateCycleStatus">
                     <input type="range"
                            min="0"
@@ -819,6 +819,7 @@
     private LocalDiskCleanupResult? lastDiskCleanupResult;
     private LocalProcessMetric? processPendingTermination;
     private bool isRefreshing;
+    private bool hasInitializedPolling;
     private bool isConfigurationLoading;
     private bool configurationCopyFailed;
     private bool isDriveUsageBusy;
@@ -853,12 +854,21 @@
     protected override async Task OnInitializedAsync()
     {
         await RefreshSnapshotAsync(CancellationToken.None);
+        hasInitializedPolling = true;
         StartPolling();
     }
 
-    protected override void OnParametersSet()
+    protected override async Task OnParametersSetAsync()
     {
-        activeTab = NormalizeTab(RequestedTab);
+        var requestedTab = NormalizeTab(RequestedTab);
+        if (hasInitializedPolling && !string.Equals(activeTab, requestedTab, StringComparison.Ordinal))
+        {
+            activeTab = requestedTab;
+            await RestartPollingAsync();
+            return;
+        }
+
+        activeTab = requestedTab;
     }
 
     private async Task RefreshSnapshotAsync(CancellationToken cancellationToken)
@@ -908,7 +918,13 @@
 
     private async Task SetActiveTabAsync(string? value)
     {
-        activeTab = NormalizeTab(value);
+        var selectedTab = NormalizeTab(value);
+        if (!string.Equals(activeTab, selectedTab, StringComparison.Ordinal))
+        {
+            activeTab = selectedTab;
+            await RestartPollingAsync();
+        }
+
         var tabQueryValue = activeTab == "overview" ? null : activeTab;
         var selectedTabUri = Navigation.GetUriWithQueryParameter("tab", tabQueryValue);
         Navigation.NavigateTo(selectedTabUri, replace: true);
@@ -1174,7 +1190,7 @@
     private void StartPolling()
     {
         var interval = GetPollInterval();
-        if (!interval.HasValue || isDisposed)
+        if (!interval.HasValue || isDisposed || activeTab == "on-demand-apps")
         {
             return;
         }
