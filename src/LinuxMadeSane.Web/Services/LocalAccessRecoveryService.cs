@@ -61,7 +61,8 @@ public sealed class LocalAccessRecoveryService(
         await Gate.WaitAsync(cancellationToken);
         try
         {
-            if ((await securityUserStore.ListAsync(cancellationToken)).Count != 0)
+            var users = await securityUserStore.ListAsync(cancellationToken);
+            if (users.Any(user => user.IsEnabled))
             {
                 return false;
             }
@@ -92,7 +93,8 @@ public sealed class LocalAccessRecoveryService(
         await Gate.WaitAsync(cancellationToken);
         try
         {
-            if ((await securityUserStore.ListAsync(cancellationToken)).Count != 0)
+            var users = await securityUserStore.ListAsync(cancellationToken);
+            if (users.Any(user => user.IsEnabled))
             {
                 return TemporarySetupCodeResult.Failure("Initial setup is no longer available.");
             }
