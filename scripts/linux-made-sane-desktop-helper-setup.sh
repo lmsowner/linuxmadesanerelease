@@ -212,14 +212,14 @@ collect_active_desktop_users() {
   local -n users_ref="$1"
   local session_id username session_class session_state session_type bus_path user_id user_unit
 
-  add_user "$INSTALLER_USERNAME" users_ref
+  add_user "$INSTALLER_USERNAME" "$1"
 
   for bus_path in /run/user/[0-9]*/bus; do
     [[ -S "$bus_path" ]] || continue
     user_id="${bus_path#/run/user/}"
     user_id="${user_id%/bus}"
     username="$(getent passwd "$user_id" 2>/dev/null | cut -d: -f1)"
-    add_user "$username" users_ref
+    add_user "$username" "$1"
   done
 
   if has_systemd; then
@@ -227,7 +227,7 @@ collect_active_desktop_users() {
       [[ "$user_unit" =~ ^user@([0-9]+)\.service$ ]] || continue
       user_id="${BASH_REMATCH[1]}"
       username="$(getent passwd "$user_id" 2>/dev/null | cut -d: -f1)"
-      add_user "$username" users_ref
+      add_user "$username" "$1"
     done < <(systemctl list-units --type=service --state=running 'user@*.service' --no-legend --plain 2>/dev/null || true)
   fi
 
@@ -242,7 +242,7 @@ collect_active_desktop_users() {
     [[ "$session_class" == "user" ]] || continue
     [[ "$session_state" == "active" || "$session_state" == "online" || "$session_state" == "closing" ]] || continue
     [[ "$session_type" == "x11" || "$session_type" == "wayland" || "$session_type" == "mir" || -z "$session_type" ]] || continue
-    add_user "$username" users_ref
+    add_user "$username" "$1"
   done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
 }
 

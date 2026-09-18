@@ -828,7 +828,7 @@ lms_collect_desktop_helper_users() {
   local -n target_users="$1"
   local session_id username session_class session_state session_type
 
-  lms_add_desktop_helper_user "${LMS_INSTALLER_USERNAME:-}" target_users
+  lms_add_desktop_helper_user "${LMS_INSTALLER_USERNAME:-}" "$1"
 
   command -v loginctl >/dev/null 2>&1 || return 0
 
@@ -842,7 +842,7 @@ lms_collect_desktop_helper_users() {
     [[ "$session_class" == "user" ]] || continue
     [[ "$session_state" == "active" || "$session_state" == "online" || "$session_state" == "closing" ]] || continue
     [[ "$session_type" == "x11" || "$session_type" == "wayland" || "$session_type" == "mir" || -z "$session_type" ]] || continue
-    lms_add_desktop_helper_user "$username" target_users
+    lms_add_desktop_helper_user "$username" "$1"
   done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
 }
 
