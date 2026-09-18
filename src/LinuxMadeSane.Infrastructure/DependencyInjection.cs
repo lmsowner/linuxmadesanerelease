@@ -52,6 +52,8 @@ public static class DependencyInjection
         services.AddSingleton(configuration.GetSection("OnDemandApps").Get<OnDemandAppsOptions>() ?? new OnDemandAppsOptions());
         services.AddSingleton(TimeProvider.System);
         services.AddHttpClient<ICloudflareClient, CloudflareClient>();
+        services.AddHttpClient<IPublicDnsPropagationService, PublicDnsPropagationService>(client =>
+            client.Timeout = TimeSpan.FromSeconds(5));
         services.AddDbContext<LinuxMadeSaneDbContext>(options => options
             .UseSqlite(connectionString)
             .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.CommandExecuted)));

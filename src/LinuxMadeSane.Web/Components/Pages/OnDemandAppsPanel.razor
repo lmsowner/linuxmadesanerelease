@@ -10,6 +10,7 @@
 @implements IDisposable
 @inject ILocalHttpServiceDiscoveryService HttpServiceDiscovery
 @inject OnDemandAppService OnDemandApps
+@inject HttpServiceDiscoveryCoordinator DiscoveryCoordinator
 @inject NavigationManager Navigation
 
 <div class="on-demand-apps">
@@ -23,7 +24,20 @@
             <UiCheckboxField @bind-Value="includeDocker" Label="Docker" Compact="true" />
             <UiCheckboxField @bind-Value="includeLan" Label="LAN" Compact="true" />
             <UiCheckboxField @bind-Value="includeTailnet" Label="Tailscale" Compact="true" />
-            <UiCommandButton Label="@(isScanning ? "Scanning..." : "Scan")"
+            <UiSelectField TValue="int"
+                           Value="refreshIntervalMinutes"
+                           ValueChanged="SetRefreshIntervalAsync"
+                           Label="Refresh"
+                           Compact="true"
+                           Inline="true">
+                <option value="0">Manual only</option>
+                <option value="60">Every hour</option>
+                <option value="180">Every 3 hours</option>
+                <option value="360">Every 6 hours</option>
+                <option value="720">Every 12 hours</option>
+                <option value="1440">Daily</option>
+            </UiSelectField>
+            <UiCommandButton Label="@(isScanning ? "Scanning in background..." : "Scan now")"
                              Glyph="UiIconGlyph.Search"
                              Variant="UiButtonVariant.Primary"
                              Disabled="@isScanning"
@@ -109,6 +123,8 @@
     private int probedCount;
     private int totalProbeCount;
     private int foundCount;
+    private int refreshIntervalMinutes = 180;
+    private DateTimeOffset? observedCompletionUtc;
 
     private bool CanOpen => availability?.IsAvailable == true && !string.IsNullOrWhiteSpace(userId);
 
@@ -123,6 +139,12 @@
 
     protected override async Task OnInitializedAsync()
     {
+        var preferences = DiscoveryCoordinator.GetPreferences();
+        includeDocker = preferences.IncludeDocker;
+        includeLan = preferences.IncludeLan;
+        includeTailnet = preferences.IncludeTailnet;
+        refreshIntervalMinutes = preferences.RefreshIntervalMinutes;
+
         try
         {
             var uri = new Uri(Navigation.Uri);
@@ -153,6 +175,9 @@
                     favouriteKeys = await OnDemandApps.GetFavouritesAsync(userId, lifetime.Token);
                 }
             }
+
+            await RefreshBackgroundStateAsync();
+            _ = ObserveBackgroundDiscoveryAsync();
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
@@ -163,64 +188,98 @@
         }
     }
 
-    private Task ScanAsync()
+    private async Task ScanAsync()
     {
         if (isScanning)
         {
-            return Task.CompletedTask;
+            return;
         }
 
-        isScanning = true;
-        message = "Discovery is running. Cached apps remain available while results arrive.";
-        scanStatus = "Starting HTTP/S discovery…";
-        probedCount = 0;
-        totalProbeCount = 0;
-        foundCount = 0;
-        _ = RunScanAsync();
-        return Task.CompletedTask;
-    }
-
-    private async Task RunScanAsync()
-    {
         try
         {
-            var request = new LocalHttpServiceDiscoveryRequest(
-                IncludeLocalhost: true,
-                IncludeLan: includeLan,
-                IncludeTailnet: includeTailnet,
-                IncludeDocker: includeDocker);
-            var progress = new Progress<LocalHttpServiceDiscoveryProgressUpdate>(update =>
+            var preferences = CurrentPreferences();
+            await DiscoveryCoordinator.SavePreferencesAsync(preferences, lifetime.Token);
+            if (DiscoveryCoordinator.TryStartScan(preferences.ToRequest()))
             {
-                _ = InvokeAsync(() =>
-                {
-                    scanStatus = update.Message;
-                    probedCount = update.ProbedCount;
-                    totalProbeCount = update.TotalProbeCount;
-                    foundCount = update.FoundCount;
-                    if (update.FoundEndpoint is not null)
-                    {
-                        MergeService(update.FoundEndpoint);
-                    }
+                message = "Discovery is running in the background. You can open an app or leave this page without stopping it.";
+            }
 
-                    StateHasChanged();
-                });
-            });
-            services = await HttpServiceDiscovery.DiscoverAsync(request, progress, lifetime.Token);
-            message = VisibleServiceCount == 0
-                ? "Scan completed. No HTTP/S apps responded."
-                : $"Scan completed. {VisibleServiceCount} app(s) are cached.";
+            await RefreshBackgroundStateAsync();
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
         }
         catch (Exception exception)
         {
-            message = $"HTTP/S discovery failed: {exception.Message}";
+            message = $"HTTP/S discovery could not be started: {exception.Message}";
         }
-        finally
+    }
+
+    private async Task SetRefreshIntervalAsync(int value)
+    {
+        refreshIntervalMinutes = value;
+        try
         {
-            isScanning = false;
-            await InvokeAsync(StateHasChanged);
+            await DiscoveryCoordinator.SavePreferencesAsync(CurrentPreferences(), lifetime.Token);
+            message = value == 0
+                ? "Automatic discovery is off. Cached apps remain available until you scan again."
+                : $"Automatic discovery will refresh the cache {FormatRefreshInterval(value)}.";
+            await RefreshBackgroundStateAsync();
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"The discovery refresh setting could not be saved: {exception.Message}";
+        }
+    }
+
+    private async Task ObserveBackgroundDiscoveryAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            while (await timer.WaitForNextTickAsync(lifetime.Token))
+            {
+                await InvokeAsync(async () =>
+                {
+                    await RefreshBackgroundStateAsync();
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+    }
+
+    private async Task RefreshBackgroundStateAsync()
+    {
+        var background = DiscoveryCoordinator.GetStatus();
+        isScanning = background.IsActive;
+        scanStatus = background.Message;
+        probedCount = background.ProbedCount;
+        totalProbeCount = background.TotalProbeCount;
+        foundCount = background.FoundCount;
+        refreshIntervalMinutes = background.RefreshIntervalMinutes;
+
+        if (background.IsActive)
+        {
+            services = await HttpServiceDiscovery.GetCachedAsync(lifetime.Token);
+            message = "Discovery is running in the background. Cached apps remain available while results arrive.";
+        }
+        else if (!string.IsNullOrWhiteSpace(background.Error))
+        {
+            message = $"HTTP/S discovery failed: {background.Error}";
+        }
+        else if (background.CompletedUtc.HasValue && background.CompletedUtc != observedCompletionUtc)
+        {
+            observedCompletionUtc = background.CompletedUtc;
+            services = await HttpServiceDiscovery.GetCachedAsync(lifetime.Token);
+            message = VisibleServiceCount == 0
+                ? "Background discovery completed. No HTTP/S apps responded."
+                : $"Background discovery completed. {VisibleServiceCount} app(s) are cached.";
         }
     }
 
@@ -257,16 +316,20 @@
         }
     }
 
-    private void MergeService(LocalHttpServiceEndpoint endpoint)
-    {
-        var key = LocalHttpServiceDiscoveryRanking.StableKey(endpoint);
-        services = services
-            .Where(service => !LocalHttpServiceDiscoveryRanking.StableKey(service).Equals(key, StringComparison.OrdinalIgnoreCase))
-            .Append(endpoint)
-            .ToArray();
-    }
-
     private int VisibleServiceCount => SortedServices.Count();
+
+    private HttpServiceDiscoveryPreferences CurrentPreferences() =>
+        new(refreshIntervalMinutes, includeDocker, includeLan, includeTailnet);
+
+    private static string FormatRefreshInterval(int minutes) => minutes switch
+    {
+        60 => "every hour",
+        180 => "every 3 hours",
+        360 => "every 6 hours",
+        720 => "every 12 hours",
+        1440 => "daily",
+        _ => "on the selected schedule"
+    };
 
     private string BuildOpenUrl(string serviceKey) =>
         $"/on-demand-apps/open?service={Uri.EscapeDataString(serviceKey)}";

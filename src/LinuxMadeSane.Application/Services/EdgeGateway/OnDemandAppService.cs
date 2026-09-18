@@ -16,6 +16,7 @@ public sealed class OnDemandAppService(
     IOnDemandAppFavouriteStore favourites,
     IEdgeGatewayStore routes,
     IEdgeGatewayService gateway,
+    IPublicDnsPropagationService publicDns,
     EdgeGatewayOptions edgeGatewayOptions,
     OnDemandAppsOptions options,
     TimeProvider timeProvider)
@@ -122,6 +123,16 @@ public sealed class OnDemandAppService(
 
                 if (IsDirectZoneHostname(existingLease.Hostname, availability.DomainName))
                 {
+                    var existingProvision = await gateway.ProvisionCloudflareRouteAsync(
+                        existingLease.Id,
+                        replaceExistingDnsRecord: false,
+                        cancellationToken);
+                    if (!existingProvision.Success)
+                    {
+                        throw new InvalidOperationException($"The temporary app address could not be verified: {existingProvision.Summary}");
+                    }
+
+                    await EnsurePublicAddressReadyAsync(existingLease.Id, existingLease.Hostname, cancellationToken);
                     return BuildLaunch(existingLease, leaseId);
                 }
 
@@ -170,6 +181,8 @@ public sealed class OnDemandAppService(
                 _ = await gateway.ApplyCaddyConfigurationAsync(cancellationToken);
                 throw new InvalidOperationException($"The temporary app address could not be published: {provisioned.Summary}");
             }
+
+            await EnsurePublicAddressReadyAsync(routeId, hostname, cancellationToken);
 
             var route = await routes.GetRouteAsync(routeId, cancellationToken) ??
                         throw new InvalidOperationException("The temporary app route was not saved.");
@@ -307,6 +320,21 @@ public sealed class OnDemandAppService(
 
     private OnDemandAppLaunch BuildLaunch(EdgeGatewayRoute route, Guid leaseId) =>
         new(leaseId, route.Hostname, $"https://{route.Hostname}/", route.UpdatedAt.Add(options.IdleTimeout));
+
+    private async Task EnsurePublicAddressReadyAsync(
+        Guid routeId,
+        string hostname,
+        CancellationToken cancellationToken)
+    {
+        if (await publicDns.WaitUntilResolvableAsync(hostname, options.DnsPropagationTimeout, cancellationToken))
+        {
+            return;
+        }
+
+        await gateway.DeletePublishedRouteAsync(routeId, cancellationToken);
+        throw new InvalidOperationException(
+            $"The temporary app address was created, but public DNS did not make {hostname} resolvable within {options.DnsPropagationTimeout.TotalSeconds:0} seconds. Try opening the app again.");
+    }
 
     private static bool IsLeaseRoute(EdgeGatewayRoute route, Guid leaseId) =>
         route.Notes.Equals(BuildRouteNote(leaseId), StringComparison.Ordinal);
