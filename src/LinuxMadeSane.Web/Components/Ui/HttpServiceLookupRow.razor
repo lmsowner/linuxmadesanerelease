@@ -43,8 +43,13 @@
 
     private string ResponseLabel =>
         Service.Scope.Equals("Docker", StringComparison.OrdinalIgnoreCase)
-            ? JoinNonBlank(Service.DisplayName, Service.Title, Service.ServerHeader)
-            : FirstNonBlank(Service.Title, Service.DisplayName, Service.ServerHeader) ?? string.Empty;
+            ? JoinNonBlank(RealDisplayName, Service.Title)
+            : FirstNonBlank(Service.Title, RealDisplayName) ?? string.Empty;
+
+    private string? RealDisplayName =>
+        LocalHttpServiceDiscoveryRanking.IsSyntheticDiscoveryLabel(Service.DisplayName)
+            ? null
+            : Service.DisplayName;
 
     private string RowTitle
     {
@@ -60,6 +65,11 @@
             if (!string.IsNullOrWhiteSpace(ResponseLabel))
             {
                 parts.Add($"Response: {ResponseLabel}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(Service.ServerHeader))
+            {
+                parts.Add($"Server: {Service.ServerHeader.Trim()}");
             }
 
             return string.Join(" | ", parts);

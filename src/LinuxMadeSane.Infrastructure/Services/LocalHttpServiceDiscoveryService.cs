@@ -467,7 +467,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                 DateTimeOffset.UtcNow,
                 faviconDataUrl,
                 Confidence: BuildPresentationConfidence(title, faviconDataUrl, (int)response.StatusCode),
-                ServiceName: BuildPresentationName(title, host.DisplayName, response.Headers.Server.ToString()),
+                ServiceName: BuildPresentationName(title, host.DisplayName, targetHost),
                 ServiceKind: "unknown",
                 Exposure: DiscoveryExposure.RequiresManualConfirmation,
                 Fingerprint: $"http:{scheme}:{targetHost}:{port}",
@@ -492,7 +492,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     "localhost",
                     "Localhost",
                     "127.0.0.1",
-                    "Local LMS host",
+                    null,
                     ports,
                     IsLocalhostProbe: true,
                     IsKnownLive: true,
@@ -510,7 +510,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
 
         var neighbours = await LoadLanNeighbourEntriesAsync(cancellationToken);
         var advertisements = await LocalNetworkServiceAdvertisementDiscovery.DiscoverAsync(cancellationToken);
-        var candidates = new List<(IPAddress Address, string SourceLabel, bool IsNeighbour)>();
+        var candidates = new List<(IPAddress Address, bool IsNeighbour)>();
 
         foreach (var plan in plans)
         {
@@ -525,7 +525,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
 
             foreach (var address in neighbourAddresses)
             {
-                candidates.Add((address, $"{plan.SubnetLabel} known neighbour", true));
+                candidates.Add((address, true));
             }
 
             var subnetAddresses = SshHostDiscoveryService.BuildLanCandidateAddresses(plan.LocalAddress, plan.PrefixLength)
@@ -534,7 +534,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
 
             foreach (var address in subnetAddresses)
             {
-                candidates.Add((address, $"{plan.SubnetLabel} via {plan.InterfaceName}", false));
+                candidates.Add((address, false));
             }
         }
 
@@ -552,7 +552,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     ipAddress,
                     "LAN",
                     ipAddress,
-                    group.Any(candidate => candidate.IsNeighbour) ? "Known LAN neighbour" : "LAN candidate",
+                    null,
                     BuildBaseScanPorts(),
                     IsLocalhostProbe: false,
                     IsKnownLive: group.Any(candidate => candidate.IsNeighbour),
@@ -1371,8 +1371,11 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         return string.IsNullOrWhiteSpace(faviconDataUrl) ? 45 : 55;
     }
 
-    private static string BuildPresentationName(string? title, string? displayName, string? serverHeader) =>
-        FirstNonBlank(title, displayName, serverHeader) ?? "Unknown";
+    private static string BuildPresentationName(string? title, string? displayName, string host) =>
+        FirstNonBlank(
+            title,
+            LocalHttpServiceDiscoveryRanking.IsSyntheticDiscoveryLabel(displayName) ? null : displayName,
+            IPAddress.TryParse(host, out _) ? null : host) ?? string.Empty;
 
     private static string? FirstNonBlank(params string?[] values) =>
         values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
@@ -1468,7 +1471,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                 "Tailnet" => 3,
                 _ => 4
             })
-            .ThenBy(endpoint => endpoint.DisplayName ?? endpoint.Host, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(LocalHttpServiceDiscoveryRanking.PickerLabel, StringComparer.OrdinalIgnoreCase)
             .ThenBy(endpoint => endpoint.Port)
             .ThenBy(endpoint => endpoint.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
             .ToArray();

@@ -33,6 +33,13 @@ public sealed record LocalHttpServiceEndpoint(
 
 public static class LocalHttpServiceDiscoveryRanking
 {
+    private static readonly HashSet<string> SyntheticDiscoveryLabels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Known LAN neighbour",
+        "LAN candidate",
+        "Local LMS host"
+    };
+
     public static int PresentationRank(LocalHttpServiceEndpoint endpoint)
     {
         var hasFavicon = !string.IsNullOrWhiteSpace(endpoint.FaviconDataUrl);
@@ -59,6 +66,35 @@ public static class LocalHttpServiceDiscoveryRanking
     public static bool IsHiddenFromPicker(LocalHttpServiceEndpoint endpoint) =>
         endpoint.StatusCode is >= 400 and <= 599 ||
         !string.IsNullOrWhiteSpace(endpoint.Title) && LooksLikeErrorTitle(endpoint.Title);
+
+    public static bool IsSyntheticDiscoveryLabel(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && SyntheticDiscoveryLabels.Contains(value.Trim());
+
+    public static string PickerLabel(LocalHttpServiceEndpoint endpoint)
+    {
+        if (!string.IsNullOrWhiteSpace(endpoint.Title) && !LooksLikeErrorTitle(endpoint.Title))
+        {
+            return endpoint.Title.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(endpoint.DisplayName) &&
+            !IsSyntheticDiscoveryLabel(endpoint.DisplayName))
+        {
+            return endpoint.DisplayName.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(endpoint.Host))
+        {
+            return endpoint.Host.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(endpoint.IpAddress))
+        {
+            return endpoint.IpAddress.Trim();
+        }
+
+        return endpoint.Url;
+    }
 
     public static int TitleQualityRank(string? title) =>
         string.IsNullOrWhiteSpace(title) || LooksLikeErrorTitle(title) ? 2 : 0;
@@ -115,6 +151,7 @@ public static class LocalHttpServiceDiscoveryRanking
 
     public static bool IsUnknownLabel(string? value) =>
         string.IsNullOrWhiteSpace(value) ||
+        IsSyntheticDiscoveryLabel(value) ||
         value.Equals("unknown", StringComparison.OrdinalIgnoreCase) ||
         value.Equals("unknown-http", StringComparison.OrdinalIgnoreCase) ||
         value.Equals("unknown http service", StringComparison.OrdinalIgnoreCase) ||
