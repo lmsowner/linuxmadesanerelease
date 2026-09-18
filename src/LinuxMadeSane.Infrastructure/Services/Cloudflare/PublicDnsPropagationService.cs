@@ -7,15 +7,37 @@ using LinuxMadeSane.Application.Interfaces;
 
 namespace LinuxMadeSane.Infrastructure.Services.Cloudflare;
 
-public sealed class PublicDnsPropagationService(
-    HttpClient httpClient,
-    TimeProvider timeProvider) : IPublicDnsPropagationService
+public sealed class PublicDnsPropagationService : IPublicDnsPropagationService
 {
     private static readonly string[] ResolverEndpoints =
     [
         "https://cloudflare-dns.com/dns-query",
         "https://dns.google/resolve"
     ];
+    private readonly HttpClient httpClient;
+    private readonly TimeProvider timeProvider;
+    private readonly TimeSpan initialDelay;
+    private readonly TimeSpan retryDelay;
+    private readonly int requiredConsecutiveAnswers;
+
+    public PublicDnsPropagationService(HttpClient httpClient, TimeProvider timeProvider)
+        : this(httpClient, timeProvider, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(1), 4)
+    {
+    }
+
+    internal PublicDnsPropagationService(
+        HttpClient httpClient,
+        TimeProvider timeProvider,
+        TimeSpan initialDelay,
+        TimeSpan retryDelay,
+        int requiredConsecutiveAnswers)
+    {
+        this.httpClient = httpClient;
+        this.timeProvider = timeProvider;
+        this.initialDelay = initialDelay;
+        this.retryDelay = retryDelay;
+        this.requiredConsecutiveAnswers = requiredConsecutiveAnswers;
+    }
 
     public async Task<bool> WaitUntilResolvableAsync(
         string hostname,
@@ -29,15 +51,24 @@ public sealed class PublicDnsPropagationService(
         }
 
         var deadline = timeProvider.GetUtcNow().Add(timeout);
-        await Task.Delay(TimeSpan.FromSeconds(1), timeProvider, cancellationToken);
+        var consecutiveAnswers = 0;
+        await Task.Delay(initialDelay, timeProvider, cancellationToken);
         while (timeProvider.GetUtcNow() < deadline)
         {
+            var resolved = true;
             foreach (var endpoint in ResolverEndpoints)
             {
-                if (await ResolvesAsync(endpoint, normalizedHostname, cancellationToken))
+                if (!await ResolvesAsync(endpoint, normalizedHostname, cancellationToken))
                 {
-                    return true;
+                    resolved = false;
+                    break;
                 }
+            }
+
+            consecutiveAnswers = resolved ? consecutiveAnswers + 1 : 0;
+            if (consecutiveAnswers >= requiredConsecutiveAnswers)
+            {
+                return true;
             }
 
             var remaining = deadline - timeProvider.GetUtcNow();
@@ -47,7 +78,7 @@ public sealed class PublicDnsPropagationService(
             }
 
             await Task.Delay(
-                remaining < TimeSpan.FromSeconds(1) ? remaining : TimeSpan.FromSeconds(1),
+                remaining < retryDelay ? remaining : retryDelay,
                 timeProvider,
                 cancellationToken);
         }
