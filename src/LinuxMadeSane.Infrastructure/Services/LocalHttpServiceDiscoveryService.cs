@@ -152,11 +152,9 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             0));
 
         var discovered = await ProbeHostsAsync(hosts, progress, cancellationToken);
-        var merged = existing
+        var merged = MergeDuplicateEndpoints(existing
             .Where(endpoint => !requestedScopes.Contains(endpoint.Scope))
-            .Concat(discovered)
-            .DistinctBy(endpoint => BuildEndpointKey(endpoint), StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+            .Concat(discovered));
 
         await WriteCacheAsync(merged, cancellationToken);
         var sorted = SortEndpoints(merged);
@@ -302,8 +300,24 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                 .Select(scheme => TryProbeAsync(client, host, scheme, port, cancellationToken)));
             foreach (var endpoint in endpoints)
             {
-                if (endpoint is null || !results.TryAdd(BuildEndpointKey(endpoint), endpoint))
+                if (endpoint is null)
                 {
+                    continue;
+                }
+
+                var key = BuildEndpointKey(endpoint);
+                if (!results.TryAdd(key, endpoint))
+                {
+                    var merged = results.AddOrUpdate(
+                        key,
+                        endpoint,
+                        (_, existing) => MergeEndpointGroup([existing, endpoint]));
+                    progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
+                        $"Updated {FormatEndpointForProgress(merged)}",
+                        progressState.ProbedCount,
+                        progressState.TotalProbeCount,
+                        progressState.FoundCount,
+                        merged));
                     continue;
                 }
 
@@ -1493,7 +1507,65 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     }
 
     private static string BuildEndpointKey(LocalHttpServiceEndpoint endpoint) =>
-        $"{endpoint.Scope}|{endpoint.Scheme}|{endpoint.Host}|{endpoint.Port}";
+        $"{NormalizeEndpointAddress(endpoint)}|{endpoint.Port}";
+
+    private static string NormalizeEndpointAddress(LocalHttpServiceEndpoint endpoint) =>
+        FirstNonBlank(endpoint.IpAddress, endpoint.Host)!.Trim().TrimEnd('.').ToLowerInvariant();
+
+    internal static IReadOnlyList<LocalHttpServiceEndpoint> MergeDuplicateEndpoints(
+        IEnumerable<LocalHttpServiceEndpoint> endpoints) =>
+        endpoints
+            .GroupBy(BuildEndpointKey, StringComparer.OrdinalIgnoreCase)
+            .Select(group => MergeEndpointGroup(group.ToArray()))
+            .ToArray();
+
+    private static LocalHttpServiceEndpoint MergeEndpointGroup(IReadOnlyList<LocalHttpServiceEndpoint> endpoints)
+    {
+        var best = endpoints
+            .OrderBy(LocalHttpServiceDiscoveryRanking.PresentationRank)
+            .ThenBy(endpoint => LocalHttpServiceDiscoveryRanking.IsUnknownLabel(endpoint.ServiceName) ? 1 : 0)
+            .ThenBy(endpoint => IPAddress.TryParse(endpoint.Host, out _) ? 1 : 0)
+            .ThenBy(endpoint => LocalHttpServiceDiscoveryRanking.IsSyntheticDiscoveryLabel(endpoint.DisplayName) ? 1 : 0)
+            .ThenByDescending(endpoint => endpoint.Confidence)
+            .ThenBy(endpoint => endpoint.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenByDescending(endpoint => endpoint.DiscoveredAtUtc ?? DateTimeOffset.MinValue)
+            .First();
+        var host = !IPAddress.TryParse(best.Host, out _)
+            ? best.Host
+            : endpoints.Select(endpoint => endpoint.Host)
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value) && !IPAddress.TryParse(value, out _)) ?? best.Host;
+        var title = endpoints
+            .Select(endpoint => endpoint.Title)
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value) && !LocalHttpServiceDiscoveryRanking.LooksLikeErrorTitle(value)) ?? best.Title;
+        var displayName = endpoints
+            .Select(endpoint => endpoint.DisplayName)
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value) && !LocalHttpServiceDiscoveryRanking.IsSyntheticDiscoveryLabel(value));
+        var serviceName = endpoints
+            .Select(endpoint => endpoint.ServiceName)
+            .FirstOrDefault(value => !LocalHttpServiceDiscoveryRanking.IsUnknownLabel(value)) ?? string.Empty;
+        var favicon = endpoints
+            .Select(endpoint => endpoint.FaviconDataUrl)
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+        var evidence = endpoints
+            .SelectMany(endpoint => endpoint.Evidence ?? [])
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return best with
+        {
+            Url = BuildUrl(best.Scheme, host, best.Port),
+            Host = host,
+            IpAddress = endpoints.Select(endpoint => endpoint.IpAddress)
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? best.IpAddress,
+            Title = title,
+            DisplayName = displayName,
+            FaviconDataUrl = favicon,
+            Confidence = endpoints.Max(endpoint => endpoint.Confidence),
+            ServiceName = serviceName,
+            Evidence = evidence,
+            DiscoveredAtUtc = endpoints.Max(endpoint => endpoint.DiscoveredAtUtc)
+        };
+    }
 
     private static string FormatEndpointForProgress(LocalHttpServiceEndpoint endpoint)
     {
@@ -1602,8 +1674,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             : host.Trim();
 
     private static IReadOnlyList<LocalHttpServiceEndpoint> SortEndpoints(IEnumerable<LocalHttpServiceEndpoint> endpoints) =>
-        endpoints
-            .DistinctBy(BuildEndpointKey, StringComparer.OrdinalIgnoreCase)
+        MergeDuplicateEndpoints(endpoints)
             .OrderBy(endpoint => LocalHttpServiceDiscoveryRanking.PresentationRank(endpoint))
             .ThenBy(endpoint => LocalHttpServiceDiscoveryRanking.IsUnknownLabel(endpoint.ServiceName) ? 1 : 0)
             .ThenBy(endpoint => endpoint.Exposure switch

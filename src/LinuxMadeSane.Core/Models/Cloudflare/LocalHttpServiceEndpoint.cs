@@ -1,6 +1,7 @@
 // Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -71,11 +72,13 @@ public static class LocalHttpServiceDiscoveryRanking
         !string.IsNullOrWhiteSpace(endpoint.Title) && LooksLikeErrorTitle(endpoint.Title);
 
     public static bool IsSyntheticDiscoveryLabel(string? value) =>
-        !string.IsNullOrWhiteSpace(value) && SyntheticDiscoveryLabels.Contains(value.Trim());
+        !string.IsNullOrWhiteSpace(value) &&
+        (SyntheticDiscoveryLabels.Contains(value.Trim()) || IsSubnetDiscoveryLabel(value.Trim()));
 
     public static string StableKey(LocalHttpServiceEndpoint endpoint)
     {
-        var identity = $"{endpoint.Scheme.Trim().ToLowerInvariant()}|{endpoint.Host.Trim().TrimEnd('.').ToLowerInvariant()}|{endpoint.Port}";
+        var address = string.IsNullOrWhiteSpace(endpoint.IpAddress) ? endpoint.Host : endpoint.IpAddress;
+        var identity = $"{address.Trim().TrimEnd('.').ToLowerInvariant()}|{endpoint.Port}";
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
     }
 
@@ -165,4 +168,28 @@ public static class LocalHttpServiceDiscoveryRanking
         value.Equals("unknown-http", StringComparison.OrdinalIgnoreCase) ||
         value.Equals("unknown http service", StringComparison.OrdinalIgnoreCase) ||
         value.StartsWith("unknown http", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSubnetDiscoveryLabel(string value)
+    {
+        var separator = value.IndexOf(' ');
+        if (separator <= 0)
+        {
+            return false;
+        }
+
+        var network = value[..separator];
+        var slash = network.LastIndexOf('/');
+        if (slash <= 0 ||
+            !IPAddress.TryParse(network[..slash], out _) ||
+            !int.TryParse(network[(slash + 1)..], out var prefixLength) ||
+            prefixLength is < 0 or > 128)
+        {
+            return false;
+        }
+
+        var suffix = value[(separator + 1)..].Trim();
+        return suffix.Equals("known neighbour", StringComparison.OrdinalIgnoreCase) ||
+               suffix.Equals("known neighbours", StringComparison.OrdinalIgnoreCase) ||
+               suffix.StartsWith("via ", StringComparison.OrdinalIgnoreCase);
+    }
 }
