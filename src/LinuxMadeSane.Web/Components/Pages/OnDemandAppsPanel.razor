@@ -18,7 +18,7 @@
         <div>
             <p class="eyebrow">Published server access</p>
             <h2>On-Demand Apps</h2>
-            <p class="meta-text">Discover web apps on this network, then open a favourite through a temporary LMS-authenticated address. Right-click an app to save its connection defaults.</p>
+            <p class="meta-text">Discover web apps on this network, then open a favourite through a temporary LMS-authenticated address. Discovery adds or refreshes cached apps; only Flush Cache removes them. Right-click an app to save its connection defaults.</p>
         </div>
         <div class="on-demand-apps-scan-controls">
             <UiCheckboxField @bind-Value="includeDocker" Label="Docker" Compact="true" />
@@ -41,8 +41,13 @@
             <UiCommandButton Label="@(isScanning ? "Scanning in background..." : "Scan now")"
                              Glyph="UiIconGlyph.Search"
                              Variant="UiButtonVariant.Primary"
-                             Disabled="@isScanning"
+                             Disabled="@(isScanning || isFlushingCache)"
                              OnClick="ScanAsync" />
+            <UiCommandButton Label="@(isFlushingCache ? "Flushing..." : "Flush Cache")"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@(isScanning || isFlushingCache)"
+                             OnClick="FlushCacheAsync" />
         </div>
     </section>
 
@@ -195,6 +200,7 @@
     private bool includeLan = true;
     private bool includeTailnet;
     private bool isScanning;
+    private bool isFlushingCache;
     private bool showFavouriteSettings;
     private bool isSavingFavouriteSettings;
     private int probedCount;
@@ -304,8 +310,8 @@
         {
             await DiscoveryCoordinator.SavePreferencesAsync(CurrentPreferences(), lifetime.Token);
             message = value == 0
-                ? "Automatic discovery is off. Cached apps remain available until you scan again."
-                : $"Automatic discovery will refresh the cache {FormatRefreshInterval(value)}.";
+                ? "Automatic discovery is off. Cached apps remain available until you flush the cache."
+                : $"Automatic discovery will scan {FormatRefreshInterval(value)}. Existing cached apps are kept.";
             await RefreshBackgroundStateAsync();
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
@@ -314,6 +320,34 @@
         catch (Exception exception)
         {
             message = $"The discovery refresh setting could not be saved: {exception.Message}";
+        }
+    }
+
+    private async Task FlushCacheAsync()
+    {
+        if (isScanning || isFlushingCache)
+        {
+            return;
+        }
+
+        isFlushingCache = true;
+        try
+        {
+            var removedCount = await DiscoveryCoordinator.FlushCacheAsync(lifetime.Token);
+            observedCompletionUtc = DiscoveryCoordinator.GetStatus().CompletedUtc;
+            SetServices(await HttpServiceDiscovery.GetCachedAsync(lifetime.Token));
+            message = $"Flushed {removedCount} cached app(s). Saved favourites were kept.";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"The discovery cache could not be flushed: {exception.Message}";
+        }
+        finally
+        {
+            isFlushingCache = false;
         }
     }
 

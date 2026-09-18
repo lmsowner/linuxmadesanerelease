@@ -174,6 +174,7 @@ ROLLBACK_ARMED=true
 trap rollback_failed_install ERR
 
 cp -a "$APP_SOURCE"/. "$RELEASE_DIR"/
+lms_migrate_http_discovery_state "$PREVIOUS_CURRENT_TARGET" "$DATA_ROOT_ABS"
 ln -sfn "$RELEASE_DIR" "$CURRENT_DIR"
 
 lms_write_env_file \

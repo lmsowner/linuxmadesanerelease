@@ -1509,6 +1509,31 @@ lms_maybe_chown() {
   fi
 }
 
+lms_migrate_http_discovery_state() {
+  local previous_release="$1"
+  local data_root="$2"
+  local legacy_root="${previous_release%/}/data/http-service-discovery"
+  local persistent_root="${data_root%/}/http-service-discovery"
+
+  [[ -n "$previous_release" && -d "$legacy_root" ]] || return 0
+  [[ "$(readlink -f "$legacy_root" 2>/dev/null || printf '%s' "$legacy_root")" != "$(readlink -f "$persistent_root" 2>/dev/null || printf '%s' "$persistent_root")" ]] || return 0
+
+  mkdir -p "$persistent_root"
+  local source_path destination_path migrated=false
+  for source_path in "$legacy_root"/*.json; do
+    [[ -f "$source_path" ]] || continue
+    destination_path="$persistent_root/$(basename "$source_path")"
+    if [[ ! -e "$destination_path" ]]; then
+      cp -a -- "$source_path" "$destination_path"
+      migrated=true
+    fi
+  done
+
+  if [[ "$migrated" == "true" ]]; then
+    lms_log "Preserved HTTP/S discovery cache and settings in $persistent_root"
+  fi
+}
+
 lms_maybe_systemctl_reload() {
   if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
     return

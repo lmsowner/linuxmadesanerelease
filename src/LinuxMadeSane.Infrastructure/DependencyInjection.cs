@@ -99,7 +99,7 @@ public static class DependencyInjection
         services.AddSingleton(new RdpOptimizerStorageSettings(Path.Combine(contentRootPath, "data", "rdp-optimizer")));
         services.AddSingleton(new ShareMountStorageSettings(Path.Combine(contentRootPath, "data", "share-mounts")));
         services.AddSingleton(new SftpBackupStorageSettings(Path.Combine(contentRootPath, "data", "sftp-backups")));
-        services.AddSingleton(new HttpServiceDiscoveryStorageSettings(Path.Combine(contentRootPath, "data", "http-service-discovery")));
+        services.AddSingleton(HttpServiceDiscoveryStorageSettings.CreatePersistent(databaseDirectory, contentRootPath));
         services.AddSingleton(new FirewallTrialStorageSettings(Path.Combine(databaseDirectory, "firewall-trials")));
         services.AddSingleton(new SshAdminStorageSettings(Path.Combine(databaseDirectory, "ssh-admin-trials")));
         services.Configure<DesktopSessionBrokerOptions>(configuration.GetSection("DesktopSession"));

@@ -9,6 +9,8 @@ public interface ILocalHttpServiceDiscoveryService
 {
     Task<IReadOnlyList<LocalHttpServiceEndpoint>> GetCachedAsync(CancellationToken cancellationToken = default);
 
+    Task<int> FlushCacheAsync(CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<LocalHttpServiceEndpoint>> DiscoverAsync(
         LocalHttpServiceDiscoveryRequest request,
         CancellationToken cancellationToken = default);

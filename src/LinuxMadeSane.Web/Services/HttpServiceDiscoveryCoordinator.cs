@@ -100,6 +100,40 @@ public sealed class HttpServiceDiscoveryCoordinator(
         await WriteSettingsAsync(cancellationToken);
     }
 
+    public async Task<int> FlushCacheAsync(CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.CompareExchange(ref scanPendingOrRunning, 1, 0) != 0)
+        {
+            throw new InvalidOperationException("Wait for the current discovery scan to finish before flushing the cache.");
+        }
+
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var discovery = scope.ServiceProvider.GetRequiredService<ILocalHttpServiceDiscoveryService>();
+            var removedCount = await discovery.FlushCacheAsync(cancellationToken);
+            var completed = timeProvider.GetUtcNow();
+            lock (stateGate)
+            {
+                lastAttemptUtc = completed;
+                status = HttpServiceDiscoveryRunStatus.Idle(preferences) with
+                {
+                    CompletedUtc = completed,
+                    Message = $"Discovery cache flushed. {removedCount} cached service(s) removed.",
+                    NextScheduledUtc = CalculateNextScheduledUtc(preferences, lastAttemptUtc)
+                };
+            }
+
+            await WriteSettingsAsync(cancellationToken);
+            logger.LogInformation("HTTP/S discovery cache flushed; {RemovedCount} cached services removed", removedCount);
+            return removedCount;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref scanPendingOrRunning, 0);
+        }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await LoadSettingsAsync(stoppingToken);

@@ -92,6 +92,23 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         return SortEndpoints((await ReadCacheAsync(cancellationToken)).Concat(state.Endpoints.Values));
     }
 
+    public async Task<int> FlushCacheAsync(CancellationToken cancellationToken = default)
+    {
+        var state = GetActiveDiscoveryState();
+        await state.ScanLock.WaitAsync(cancellationToken);
+        try
+        {
+            var cachedCount = (await ReadCacheAsync(cancellationToken)).Count;
+            state.Endpoints.Clear();
+            File.Delete(storageSettings.CachePath);
+            return cachedCount;
+        }
+        finally
+        {
+            state.ScanLock.Release();
+        }
+    }
+
     public Task<IReadOnlyList<LocalHttpServiceEndpoint>> DiscoverAsync(CancellationToken cancellationToken = default) =>
         DiscoverAsync(new LocalHttpServiceDiscoveryRequest(), cancellationToken);
 
@@ -182,9 +199,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             progress,
             PublishActiveEndpoint,
             cancellationToken);
-        var merged = MergeDuplicateEndpoints(existing
-            .Where(endpoint => !requestedScopes.Contains(endpoint.Scope))
-            .Concat(discovered));
+        var merged = MergeDiscoveryResults(existing, discovered);
 
         await WriteCacheAsync(merged, cancellationToken);
         var sorted = SortEndpoints(merged);
@@ -1592,6 +1607,11 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             .GroupBy(BuildEndpointKey, StringComparer.OrdinalIgnoreCase)
             .Select(group => MergeEndpointGroup(group.ToArray()))
             .ToArray();
+
+    internal static IReadOnlyList<LocalHttpServiceEndpoint> MergeDiscoveryResults(
+        IEnumerable<LocalHttpServiceEndpoint> cached,
+        IEnumerable<LocalHttpServiceEndpoint> discovered) =>
+        MergeDuplicateEndpoints(cached.Concat(discovered));
 
     private static LocalHttpServiceEndpoint MergeEndpointGroup(IReadOnlyList<LocalHttpServiceEndpoint> endpoints)
     {
