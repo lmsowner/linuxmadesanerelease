@@ -21,6 +21,23 @@ public static class TrustedNetworkMatcher
         }
     }
 
+    public static bool ContainsAddress(string addressOrCidr, IPAddress? address)
+    {
+        if (address is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return Contains(ParseNetwork(addressOrCidr), Normalize(address));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static TrustedNetworkEntry? Match(IPAddress? remoteAddress, IReadOnlyList<TrustedNetworkEntry> entries)
     {
         if (remoteAddress is null)

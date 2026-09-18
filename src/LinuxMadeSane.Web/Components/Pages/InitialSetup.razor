@@ -5,8 +5,11 @@
 @page "/initial-setup"
 @page "/setup"
 @layout AuthLayout
+@using System.Net
+@using System.Net.NetworkInformation
 @using LinuxMadeSane.Application.Contracts.Security
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
 @inject ISecuritySettingsService SecuritySettingsService
 @inject NavigationManager Navigation
 @inject IHttpContextAccessor HttpContextAccessor
@@ -170,14 +173,14 @@
                         <p>The Temporary Setup Code gives you a short recovery session. Use these controls if a network interface was disabled or made to require authentication before you could log in.</p>
                     </div>
 
-                    @if (securityPage.TrustedNetworks.Count == 0)
+                    @if (RecoverableTrustedNetworks.Count == 0)
                     {
-                        <p class="initial-setup-footnote">No saved interface access rules were found.</p>
+                        <p class="initial-setup-footnote">No saved access rules match addresses currently reported by this machine. Saved rules for unavailable networks are hidden.</p>
                     }
                     else
                     {
                         <div class="initial-setup-network-list">
-                            @foreach (var entry in securityPage.TrustedNetworks)
+                            @foreach (var entry in RecoverableTrustedNetworks)
                             {
                                 <article class="initial-setup-network-row">
                                     <div>
@@ -236,6 +239,11 @@
     private InitialSetupViewModel? setupState;
     private SecurityUserProvisioningViewModel? provisioning;
     private SecuritySettingsPageViewModel? securityPage;
+
+    private IReadOnlyList<TrustedNetworkEntryViewModel> RecoverableTrustedNetworks =>
+        securityPage?.TrustedNetworks
+            .Where(MatchesCurrentMachineAddress)
+            .ToArray() ?? [];
 
     private bool IsSetupRoute =>
         new Uri(Navigation.Uri).AbsolutePath.Equals("/setup", StringComparison.OrdinalIgnoreCase);
@@ -319,5 +327,36 @@
         return entry.IsAuthenticationEnabled
             ? "LMS login required"
             : "Direct access allowed";
+    }
+
+    private static bool MatchesCurrentMachineAddress(TrustedNetworkEntryViewModel entry)
+    {
+        // Public fallback rules describe source policy, not a local interface. They must
+        // never be presented as if the machine actually has such an interface.
+        if (entry.IsBuiltIn && entry.AddressOrCidr is "0.0.0.0/0" or "::/0")
+        {
+            return false;
+        }
+
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .SelectMany(networkInterface =>
+                {
+                    try
+                    {
+                        return networkInterface.GetIPProperties().UnicastAddresses.AsEnumerable();
+                    }
+                    catch
+                    {
+                        return Enumerable.Empty<UnicastIPAddressInformation>();
+                    }
+                })
+                .Any(address => TrustedNetworkMatcher.ContainsAddress(entry.AddressOrCidr, address.Address));
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
