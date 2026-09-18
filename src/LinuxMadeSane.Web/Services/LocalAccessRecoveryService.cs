@@ -64,17 +64,6 @@ public sealed class LocalAccessRecoveryService(
         {
             var users = await securityUserStore.ListAsync(cancellationToken);
             var challenge = await ReadChallengeAsync(cancellationToken);
-            if (users.Any(user => user.LastLoginAtUtc.HasValue))
-            {
-                if (challenge is not null &&
-                    string.Equals(challenge.Purpose, TemporarySetupPurpose, StringComparison.Ordinal))
-                {
-                    DeleteChallengeFile();
-                }
-
-                return false;
-            }
-
             if (!ChallengeCanBeUsed(challenge, null, requireChallengeId: false, temporarySetupOnly: true))
             {
                 if (challenge is not null && IsExpired(challenge))
@@ -82,6 +71,12 @@ public sealed class LocalAccessRecoveryService(
                     DeleteChallengeFile();
                 }
 
+                return false;
+            }
+
+            if (HasRealLoginAfterChallenge(challenge!, users))
+            {
+                DeleteChallengeFile();
                 return false;
             }
 
@@ -102,11 +97,6 @@ public sealed class LocalAccessRecoveryService(
         try
         {
             var users = await securityUserStore.ListAsync(cancellationToken);
-            if (users.Any(user => user.LastLoginAtUtc.HasValue))
-            {
-                return TemporarySetupCodeResult.Failure("Initial setup is no longer available.");
-            }
-
             var challenge = await ReadChallengeAsync(cancellationToken);
             if (!ChallengeCanBeUsed(challenge, null, requireChallengeId: false, temporarySetupOnly: true))
             {
@@ -116,6 +106,12 @@ public sealed class LocalAccessRecoveryService(
                 }
 
                 return TemporarySetupCodeResult.Failure("The Temporary Setup Code has expired. Re-run the installer from the command line to mint a new one.");
+            }
+
+            if (HasRealLoginAfterChallenge(challenge!, users))
+            {
+                DeleteChallengeFile();
+                return TemporarySetupCodeResult.Failure("Initial setup is no longer available.");
             }
 
             if (challenge!.ConsumedAtUtc is not null)
@@ -375,6 +371,22 @@ public sealed class LocalAccessRecoveryService(
 
     private static string NormalizeRemoteIpAddress(string? remoteIpAddress) =>
         string.IsNullOrWhiteSpace(remoteIpAddress) ? "unknown" : remoteIpAddress.Trim();
+
+    private static bool HasRealLoginAfterChallenge(
+        LocalAccessRecoveryChallenge challenge,
+        IReadOnlyList<SecurityUser> users)
+    {
+        if (!DateTimeOffset.TryParse(
+                challenge.CreatedAtUtc,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var challengeCreatedAtUtc))
+        {
+            return users.Any(user => user.LastLoginAtUtc.HasValue);
+        }
+
+        return users.Any(user => user.LastLoginAtUtc >= challengeCreatedAtUtc);
+    }
 
     private sealed record LocalAccessRecoveryChallenge(
         string Purpose,
