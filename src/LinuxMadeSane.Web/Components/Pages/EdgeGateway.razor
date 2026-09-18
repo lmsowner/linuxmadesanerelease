@@ -22,6 +22,8 @@
 @inject EdgeGatewayServerPublishingService ServerPublishing
 @inject LmsServerEmailSetupService ServerEmailSetup
 @inject IMailRelayService MailRelayService
+@inject OnDemandAppService OnDemandApps
+@inject NavigationManager Navigation
 
 <PageTitle>Edge Gateway | Linux Made Sane</PageTitle>
 
@@ -60,6 +62,13 @@
                     Class="page-tab-control edge-tabs"
                     PanelClass="page-tab-panel edge-tab-panel">
             <ChildContent>
+                @if (OnDemandAppsAvailable)
+                {
+                    <TabPage Value="@OnDemandAppsTabValue" Title="On-Demand Apps">
+                        <OnDemandAppsPanel />
+                    </TabPage>
+                }
+
                 <TabPage Value="@PublishedAppsTabValue" Title="@($"Services ({dashboard.Routes.Count})")">
                     <section class="surface-card edge-card">
                         <div class="table-header">
@@ -1181,6 +1190,7 @@
 </div>
 
 @code {
+    private const string OnDemandAppsTabValue = "on-demand-apps";
     private const string PublishedAppsTabValue = "published";
     private const string SetupTabValue = "setup";
     private const string DiagnosticsTabValue = "diagnostics";
@@ -1198,6 +1208,7 @@
     private readonly HashSet<string> expandedRouteDomains = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> knownRouteDomains = new(StringComparer.OrdinalIgnoreCase);
     private EdgeGatewayDashboardViewModel? dashboard;
+    private OnDemandAppsAvailability? onDemandAppsAvailability;
     private EdgeGatewayTemporaryIpApprovalConfiguration temporaryIpApprovalState = EdgeGatewayTemporaryIpApprovalConfiguration.Empty;
     private EdgeGatewayRouteEditor routeEditor = new();
     private EdgeGatewayDiagnosticResult? lastDiagnostic;
@@ -1341,6 +1352,8 @@
     private bool CanCreateAppOnSelectedDomain =>
         SelectedCloudflareDomain is { Paused: false, RelayConfigured: true, RelayUsesCloudflareTunnel: true, RelayOwnedByThisLms: true };
 
+    private bool OnDemandAppsAvailable => onDemandAppsAvailability?.IsAvailable == true;
+
     private bool CanCreateAppForDomain(string domainName) =>
         CloudflareDomains.Any(domain =>
             domain.DomainName.Equals(domainName, StringComparison.OrdinalIgnoreCase) &&
@@ -1433,17 +1446,50 @@
 
     private async Task<EdgeGatewayDashboardSnapshot> LoadDashboardSnapshotAsync(CancellationToken cancellationToken = default)
     {
+        var currentUri = Navigation.ToAbsoluteUri(Navigation.Uri);
         var dashboardTask = EdgeGatewayService.GetDashboardAsync(cancellationToken);
         var settingsTask = EdgeGatewayService.GetSettingsEditorAsync(cancellationToken);
         var usersTask = SecurityUserStore.ListAsync(cancellationToken);
         var approvalTask = TemporaryIpApprovalStore.LoadAsync(cancellationToken);
         await Task.WhenAll(dashboardTask, settingsTask, usersTask, approvalTask);
-        return new EdgeGatewayDashboardSnapshot(await dashboardTask, await settingsTask, await usersTask, await approvalTask);
+        var loadedDashboard = await dashboardTask;
+        var onDemandAvailability = await GetOnDemandAppsAvailabilityAsync(currentUri, loadedDashboard, cancellationToken);
+        return new EdgeGatewayDashboardSnapshot(
+            loadedDashboard,
+            await settingsTask,
+            await usersTask,
+            await approvalTask,
+            onDemandAvailability);
+    }
+
+    private async Task<OnDemandAppsAvailability> GetOnDemandAppsAvailabilityAsync(
+        Uri currentUri,
+        EdgeGatewayDashboardViewModel loadedDashboard,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await OnDemandApps.GetAvailabilityAsync(
+                currentUri.Host,
+                currentUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase),
+                loadedDashboard,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return new OnDemandAppsAvailability(false, $"On-Demand Apps availability could not be checked: {exception.Message}");
+        }
     }
 
     private void ApplyDashboardSnapshot(EdgeGatewayDashboardSnapshot snapshot)
     {
+        var isFirstLoad = dashboard is null;
         dashboard = snapshot.Dashboard;
+        onDemandAppsAvailability = snapshot.OnDemandAppsAvailability;
         temporaryIpApprovalState = snapshot.TemporaryIpApprovalState;
         edgeSettingsEditor = snapshot.SettingsEditor;
         approvalRecipientOptions = TemporaryIpApprovalSelectionOptions.BuildUserOptions(snapshot.SecurityUsers);
@@ -1466,6 +1512,15 @@
         }
 
         SyncRouteDomainExpansionState();
+
+        if (!OnDemandAppsAvailable && activeTab == OnDemandAppsTabValue)
+        {
+            activeTab = PublishedAppsTabValue;
+        }
+        else if (isFirstLoad && OnDemandAppsAvailable && string.IsNullOrWhiteSpace(Tab))
+        {
+            activeTab = OnDemandAppsTabValue;
+        }
     }
 
     private async Task SaveEdgeGatewaySettingsAsync()
@@ -1489,7 +1544,12 @@
 
     private Task HandleTabChangedAsync(string? value)
     {
-        activeTab = string.IsNullOrWhiteSpace(value) ? PublishedAppsTabValue : value;
+        var selectedTab = string.IsNullOrWhiteSpace(value) ? PublishedAppsTabValue : value;
+        activeTab = selectedTab == OnDemandAppsTabValue && !OnDemandAppsAvailable
+            ? PublishedAppsTabValue
+            : selectedTab;
+        var tabQueryValue = activeTab == PublishedAppsTabValue ? null : activeTab;
+        Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("tab", tabQueryValue), replace: true);
         return Task.CompletedTask;
     }
 
@@ -3091,5 +3151,6 @@
         EdgeGatewayDashboardViewModel Dashboard,
         EdgeGatewaySettingsEditor SettingsEditor,
         IReadOnlyList<SecurityUser> SecurityUsers,
-        EdgeGatewayTemporaryIpApprovalConfiguration TemporaryIpApprovalState);
+        EdgeGatewayTemporaryIpApprovalConfiguration TemporaryIpApprovalState,
+        OnDemandAppsAvailability OnDemandAppsAvailability);
 }

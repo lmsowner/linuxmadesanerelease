@@ -27,10 +27,24 @@ public sealed class OnDemandAppService(
 
     public OnDemandAppsOptions Options => options;
 
-    public async Task<OnDemandAppsAvailability> GetAvailabilityAsync(
+    public Task<OnDemandAppsAvailability> GetAvailabilityAsync(
         string publicHost,
         bool isHttps,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetAvailabilityCoreAsync(publicHost, isHttps, dashboard: null, cancellationToken);
+
+    public Task<OnDemandAppsAvailability> GetAvailabilityAsync(
+        string publicHost,
+        bool isHttps,
+        EdgeGatewayDashboardViewModel dashboard,
+        CancellationToken cancellationToken = default) =>
+        GetAvailabilityCoreAsync(publicHost, isHttps, dashboard, cancellationToken);
+
+    private async Task<OnDemandAppsAvailability> GetAvailabilityCoreAsync(
+        string publicHost,
+        bool isHttps,
+        EdgeGatewayDashboardViewModel? dashboard,
+        CancellationToken cancellationToken)
     {
         var normalizedHost = NormalizePublicHost(publicHost);
         if (!isHttps)
@@ -52,7 +66,7 @@ public sealed class OnDemandAppService(
             return Unavailable("This LMS address was not published from Edge Gateway Setup.");
         }
 
-        var dashboard = await gateway.GetDashboardAsync(cancellationToken);
+        dashboard ??= await gateway.GetDashboardAsync(cancellationToken);
         var domain = dashboard.Cloudflare.Domains.FirstOrDefault(item =>
             item.DomainName.Equals(publishedRoute.DomainName, StringComparison.OrdinalIgnoreCase));
         if (domain is not { Paused: false, RelayConfigured: true, RelayUsesCloudflareTunnel: true, RelayOwnedByThisLms: true })

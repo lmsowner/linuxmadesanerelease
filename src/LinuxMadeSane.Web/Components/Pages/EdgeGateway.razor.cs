@@ -21,7 +21,7 @@ public partial class EdgeGateway
 
     protected override void OnParametersSet()
     {
-        if (Tab is PublishedAppsTabValue or SetupTabValue or DiagnosticsTabValue or CaddyTabValue)
+        if (Tab is OnDemandAppsTabValue or PublishedAppsTabValue or SetupTabValue or DiagnosticsTabValue or CaddyTabValue)
             activeTab = Tab;
     }
 
