@@ -6,7 +6,7 @@ const disconnectedStates = new Set(["show", "retrying", "failed", "rejected", "p
 const retryDelayMs = 30_000;
 let recovery = null;
 let requestPending = false;
-let redirectPending = false;
+let reloadPending = false;
 let countdownTimer;
 
 function showStatus(message, seconds) {
@@ -36,7 +36,7 @@ function scheduleRetry() {
 }
 
 async function checkAvailability() {
-    if (!recovery || requestPending || redirectPending) return;
+    if (!recovery || requestPending || reloadPending) return;
     window.clearInterval(countdownTimer);
     if (navigator.onLine === false) {
         showStatus("You’re offline. Waiting for your connection.");
@@ -62,12 +62,11 @@ async function checkAvailability() {
             response.headers.get("content-type")?.split(";")[0].trim() === "application/json") {
             const result = await response.json();
             if (result?.product === "linux-made-sane" && result.status === "ok") {
-                redirectPending = true;
+                reloadPending = true;
                 showStatus("LMS is back. Reconnecting…");
-                // Let the root route apply the normal authentication policy. Keeping this
-                // navigation at / avoids stale return URLs and gateway login redirects after
-                // an LMS restart or update.
-                window.location.replace("/");
+                // Reload the page the user was using. Redirecting to / loses the current
+                // workspace and is especially disruptive during background discovery.
+                window.location.reload();
             }
         }
     } catch {
@@ -76,7 +75,7 @@ async function checkAvailability() {
         window.clearTimeout(timeout);
         requestPending = false;
     }
-    if (!redirectPending) scheduleRetry();
+    if (!reloadPending) scheduleRetry();
 }
 
 function recoverWhenAvailable() {
