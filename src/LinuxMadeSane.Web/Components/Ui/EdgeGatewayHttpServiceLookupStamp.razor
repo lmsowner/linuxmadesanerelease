@@ -3,13 +3,76 @@
 
 @using LinuxMadeSane.Core.Models.Cloudflare
 
-<div class="edge-http-service-stamp-shell @(IsBlocked ? "is-blocked" : null)">
-    <button class="edge-http-service-stamp @(IsBlocked ? "is-blocked" : null) @(HasPoorTitle ? "is-poor-title" : null)"
-            type="button"
-            role="listitem"
-            title="@DetailsTitle"
-            disabled="@IsBlocked"
-            @onclick="HandleUseAsync">
+<div class="edge-http-service-stamp-shell @(IsDisabled ? "is-blocked" : null)">
+    @if (!string.IsNullOrWhiteSpace(Href) && !IsDisabled)
+    {
+        <a class="edge-http-service-stamp @(HasPoorTitle ? "is-poor-title" : null)"
+           role="listitem"
+           title="@DetailsTitle"
+           href="@Href"
+           target="@Target"
+           rel="@Rel"
+           onclick="@OnClientClick">
+            @StampContent
+        </a>
+    }
+    else
+    {
+        <button class="edge-http-service-stamp @(IsDisabled ? "is-blocked" : null) @(HasPoorTitle ? "is-poor-title" : null)"
+                type="button"
+                role="listitem"
+                title="@DetailsTitle"
+                disabled="@IsDisabled"
+                @onclick="HandleUseAsync">
+            @StampContent
+        </button>
+    }
+
+    @if (!IsBlocked)
+    {
+        <div class="edge-http-service-stamp-dock" aria-hidden="true">
+            <span class="edge-http-service-stamp-icon" aria-hidden="true">
+                @if (!string.IsNullOrWhiteSpace(Service.FaviconDataUrl))
+                {
+                    <img src="@Service.FaviconDataUrl" alt="" loading="lazy" />
+                }
+                else
+                {
+                    <span class="edge-http-service-stamp-icon-fallback">@FallbackGlyph</span>
+                }
+            </span>
+            <span class="edge-http-service-stamp-body">
+                <strong class="edge-http-service-stamp-title">@PrimaryLabel</strong>
+                <span class="edge-http-service-stamp-meta">@HostLabel</span>
+                @if (ShowIpLine)
+                {
+                    <span class="edge-http-service-stamp-ip">IP: @Service.IpAddress</span>
+                }
+                <span class="edge-http-service-stamp-scheme">@Service.Scheme.ToUpperInvariant() · @Service.Port · HTTP @Service.StatusCode</span>
+                <span class="edge-http-service-stamp-url">@Service.Url</span>
+                @if (!string.IsNullOrWhiteSpace(Service.ServerHeader))
+                {
+                    <span class="edge-http-service-stamp-meta">Server: @Service.ServerHeader</span>
+                }
+                @if (!string.IsNullOrWhiteSpace(Service.Scope))
+                {
+                    <span class="edge-http-service-stamp-meta">Scope: @Service.Scope</span>
+                }
+            </span>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public LocalHttpServiceEndpoint Service { get; set; } = default!;
+    [Parameter] public EventCallback<LocalHttpServiceEndpoint> OnUse { get; set; }
+    [Parameter] public string? Href { get; set; }
+    [Parameter] public string? Target { get; set; }
+    [Parameter] public string? Rel { get; set; }
+    [Parameter] public string? OnClientClick { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+
+    private RenderFragment StampContent => @<text>
         <span class="edge-http-service-stamp-icon" aria-hidden="true">
             @if (!string.IsNullOrWhiteSpace(Service.FaviconDataUrl))
             {
@@ -25,48 +88,10 @@
             <span class="edge-http-service-stamp-meta">@HostLabel</span>
             <span class="edge-http-service-stamp-scheme">@Service.Scheme.ToUpperInvariant() · @Service.Port</span>
         </span>
-    </button>
-
-    @if (!IsBlocked)
-    {
-        <div class="edge-http-service-stamp-dock" aria-hidden="true">
-        <span class="edge-http-service-stamp-icon" aria-hidden="true">
-            @if (!string.IsNullOrWhiteSpace(Service.FaviconDataUrl))
-            {
-                <img src="@Service.FaviconDataUrl" alt="" loading="lazy" />
-            }
-            else
-            {
-                <span class="edge-http-service-stamp-icon-fallback">@FallbackGlyph</span>
-            }
-        </span>
-        <span class="edge-http-service-stamp-body">
-            <strong class="edge-http-service-stamp-title">@PrimaryLabel</strong>
-            <span class="edge-http-service-stamp-meta">@HostLabel</span>
-            @if (ShowIpLine)
-            {
-                <span class="edge-http-service-stamp-ip">IP: @Service.IpAddress</span>
-            }
-            <span class="edge-http-service-stamp-scheme">@Service.Scheme.ToUpperInvariant() · @Service.Port · HTTP @Service.StatusCode</span>
-            <span class="edge-http-service-stamp-url">@Service.Url</span>
-            @if (!string.IsNullOrWhiteSpace(Service.ServerHeader))
-            {
-                <span class="edge-http-service-stamp-meta">Server: @Service.ServerHeader</span>
-            }
-            @if (!string.IsNullOrWhiteSpace(Service.Scope))
-            {
-                <span class="edge-http-service-stamp-meta">Scope: @Service.Scope</span>
-            }
-        </span>
-        </div>
-    }
-</div>
-
-@code {
-    [Parameter, EditorRequired] public LocalHttpServiceEndpoint Service { get; set; } = default!;
-    [Parameter] public EventCallback<LocalHttpServiceEndpoint> OnUse { get; set; }
+    </text>;
 
     private bool IsBlocked => Service.Exposure == DiscoveryExposure.UnsafeToExpose;
+    private bool IsDisabled => IsBlocked || Disabled;
 
     private bool HasPoorTitle => LocalHttpServiceDiscoveryRanking.TitleQualityRank(Service.Title) > 0;
 
@@ -114,5 +139,5 @@
         }
     }
 
-    private Task HandleUseAsync() => IsBlocked ? Task.CompletedTask : OnUse.InvokeAsync(Service);
+    private Task HandleUseAsync() => IsDisabled ? Task.CompletedTask : OnUse.InvokeAsync(Service);
 }

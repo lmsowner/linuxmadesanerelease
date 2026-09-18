@@ -1,6 +1,9 @@
 // Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using System.Security.Cryptography;
+using System.Text;
+
 namespace LinuxMadeSane.Core.Models.Cloudflare;
 
 public enum DiscoveryExposure
@@ -69,6 +72,12 @@ public static class LocalHttpServiceDiscoveryRanking
 
     public static bool IsSyntheticDiscoveryLabel(string? value) =>
         !string.IsNullOrWhiteSpace(value) && SyntheticDiscoveryLabels.Contains(value.Trim());
+
+    public static string StableKey(LocalHttpServiceEndpoint endpoint)
+    {
+        var identity = $"{endpoint.Scheme.Trim().ToLowerInvariant()}|{endpoint.Host.Trim().TrimEnd('.').ToLowerInvariant()}|{endpoint.Port}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
+    }
 
     public static string PickerLabel(LocalHttpServiceEndpoint endpoint)
     {

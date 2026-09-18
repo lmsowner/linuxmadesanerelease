@@ -49,6 +49,8 @@ public static class DependencyInjection
             .ValidateDataAnnotations();
         services.AddSingleton(serviceProvider => serviceProvider.GetRequiredService<IOptions<CloudflareIntegrationOptions>>().Value);
         services.AddSingleton(configuration.GetSection("EdgeGateway").Get<EdgeGatewayOptions>() ?? new EdgeGatewayOptions());
+        services.AddSingleton(configuration.GetSection("OnDemandApps").Get<OnDemandAppsOptions>() ?? new OnDemandAppsOptions());
+        services.AddSingleton(TimeProvider.System);
         services.AddHttpClient<ICloudflareClient, CloudflareClient>();
         services.AddDbContext<LinuxMadeSaneDbContext>(options => options
             .UseSqlite(connectionString)
@@ -133,6 +135,7 @@ public static class DependencyInjection
         services.AddScoped<ILinuxSchedulingModuleDataService, SqliteLinuxSchedulingModuleDataService>();
         services.AddScoped<ICaddyIntegrationDataService, SqliteCaddyIntegrationDataService>();
         services.AddScoped<IEdgeGatewayStore, SqliteEdgeGatewayStore>();
+        services.AddSingleton<IOnDemandAppFavouriteStore, JsonOnDemandAppFavouriteStore>();
         services.AddScoped<IEdgeGatewayTemporaryIpApprovalService, EdgeGatewayTemporaryIpApprovalService>();
         services.AddScoped<IEdgeGatewayCaddyManager, LocalEdgeGatewayCaddyManager>();
         services.AddScoped<IMediaLibraryIntegrationDataService, SqliteMediaLibraryIntegrationDataService>();

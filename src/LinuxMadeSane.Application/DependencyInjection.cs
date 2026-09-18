@@ -38,6 +38,7 @@ public static class DependencyInjection
         services.AddScoped<EdgeGatewayCaddyfileGenerator>();
         services.AddScoped<IEdgeGatewayService, EdgeGatewayService>();
         services.AddScoped<EdgeGatewayServerPublishingService>();
+        services.AddScoped<OnDemandAppService>();
         services.AddScoped<LmsServerEmailSetupService>();
         // File previews also use the media metadata and streaming services.
         services.AddScoped<IMediaLibraryIntegrationService, MediaLibraryIntegrationService>();

@@ -1,0 +1,285 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using System.Security.Claims
+@using LinuxMadeSane.Application.Contracts.EdgeGateway
+@using LinuxMadeSane.Application.Services.EdgeGateway
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models.Cloudflare
+@using Microsoft.AspNetCore.Components.Authorization
+@implements IDisposable
+@inject ILocalHttpServiceDiscoveryService HttpServiceDiscovery
+@inject OnDemandAppService OnDemandApps
+@inject NavigationManager Navigation
+
+<div class="on-demand-apps">
+    <section class="surface-card on-demand-apps-toolbar">
+        <div>
+            <p class="eyebrow">Published server access</p>
+            <h2>On-Demand Apps</h2>
+            <p class="meta-text">Discover web apps on this network, then open a favourite through a temporary LMS-authenticated address.</p>
+        </div>
+        <div class="on-demand-apps-scan-controls">
+            <UiCheckboxField @bind-Value="includeDocker" Label="Docker" Compact="true" />
+            <UiCheckboxField @bind-Value="includeLan" Label="LAN" Compact="true" />
+            <UiCheckboxField @bind-Value="includeTailnet" Label="Tailscale" Compact="true" />
+            <UiCommandButton Label="@(isScanning ? "Scanning..." : "Scan")"
+                             Glyph="UiIconGlyph.Search"
+                             Variant="UiButtonVariant.Primary"
+                             Disabled="@isScanning"
+                             OnClick="ScanAsync" />
+        </div>
+    </section>
+
+    @if (availability is null)
+    {
+        <p class="callout info">Checking the published LMS address and Edge Gateway relay…</p>
+    }
+    else if (!availability.IsAvailable)
+    {
+        <p class="callout warning"><strong>Opening apps is unavailable.</strong> @availability.Message Discovery and favourites remain available.</p>
+    }
+    else
+    {
+        <p class="callout success"><strong>Ready.</strong> @availability.Message Temporary routes are removed when their window closes or becomes stale.</p>
+    }
+
+    @if (isScanning)
+    {
+        <section class="surface-subcard on-demand-apps-progress" role="status" aria-live="polite">
+            <span class="on-demand-apps-progress-bar"><span></span></span>
+            <span>@BuildScanSummary()</span>
+        </section>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(message))
+    {
+        <p class="meta-text on-demand-apps-message">@message</p>
+    }
+
+    @if (services.Count == 0 && !isScanning)
+    {
+        <section class="empty-state">
+            <h3>No cached HTTP/S apps</h3>
+            <p>Run Scan to search localhost, exposed Docker containers and the private LAN. Enable Tailscale only when you want tailnet peers included.</p>
+        </section>
+    }
+    else
+    {
+        <div class="on-demand-apps-grid" role="list">
+            @foreach (var service in SortedServices)
+            {
+                var key = LocalHttpServiceDiscoveryRanking.StableKey(service);
+                var isFavourite = favouriteKeys.Contains(key);
+                <article class="on-demand-app @(isFavourite ? "is-favourite" : null)">
+                    <EdgeGatewayHttpServiceLookupStamp Service="service"
+                                                       Href="@(CanOpen ? BuildOpenUrl(key) : null)"
+                                                       Target="_blank"
+                                                       Rel="noopener"
+                                                       Disabled="@(!CanOpen)"
+                                                       OnClientClick="return window.lmsOnDemandApps?.openTracked(this) ?? true;" />
+                    <button type="button"
+                            class="on-demand-app-favourite @(isFavourite ? "is-selected" : null)"
+                            title="@(isFavourite ? "Remove from favourites" : "Add to favourites")"
+                            aria-label="@(isFavourite ? $"Remove {LocalHttpServiceDiscoveryRanking.PickerLabel(service)} from favourites" : $"Add {LocalHttpServiceDiscoveryRanking.PickerLabel(service)} to favourites")"
+                            aria-pressed="@(isFavourite ? "true" : "false")"
+                            disabled="@(string.IsNullOrWhiteSpace(userId) || favouriteChangeInProgress.Contains(key))"
+                            @onclick="@(() => ToggleFavouriteAsync(key))">@(isFavourite ? "★" : "☆")</button>
+                </article>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private readonly CancellationTokenSource lifetime = new();
+    private readonly HashSet<string> favouriteChangeInProgress = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<LocalHttpServiceEndpoint> services = [];
+    private IReadOnlySet<string> favouriteKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private OnDemandAppsAvailability? availability;
+    private string userId = string.Empty;
+    private string message = string.Empty;
+    private string scanStatus = string.Empty;
+    private bool includeDocker = true;
+    private bool includeLan = true;
+    private bool includeTailnet;
+    private bool isScanning;
+    private int probedCount;
+    private int totalProbeCount;
+    private int foundCount;
+
+    private bool CanOpen => availability?.IsAvailable == true && !string.IsNullOrWhiteSpace(userId);
+
+    private IEnumerable<LocalHttpServiceEndpoint> SortedServices => services
+        .Where(service => !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(service))
+        .DistinctBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase)
+        .OrderByDescending(service => favouriteKeys.Contains(LocalHttpServiceDiscoveryRanking.StableKey(service)))
+        .ThenBy(LocalHttpServiceDiscoveryRanking.PresentationRank)
+        .ThenBy(LocalHttpServiceDiscoveryRanking.PickerLabel, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(service => service.Host, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(service => service.Port);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var uri = new Uri(Navigation.Uri);
+            availability = await OnDemandApps.GetAvailabilityAsync(uri.Host, uri.Scheme == Uri.UriSchemeHttps, lifetime.Token);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            availability = new OnDemandAppsAvailability(false, $"Edge Gateway readiness could not be checked: {exception.Message}");
+        }
+
+        try
+        {
+            services = await HttpServiceDiscovery.GetCachedAsync(lifetime.Token);
+            message = services.Count == 0
+                ? "No cached apps yet. Run Scan to discover them."
+                : $"Showing {VisibleServiceCount} cached app(s).";
+
+            if (AuthenticationStateTask is not null)
+            {
+                var authenticationState = await AuthenticationStateTask;
+                userId = authenticationState.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(userId))
+                {
+                    favouriteKeys = await OnDemandApps.GetFavouritesAsync(userId, lifetime.Token);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"Apps could not be loaded: {exception.Message}";
+        }
+    }
+
+    private Task ScanAsync()
+    {
+        if (isScanning)
+        {
+            return Task.CompletedTask;
+        }
+
+        isScanning = true;
+        message = "Discovery is running. Cached apps remain available while results arrive.";
+        scanStatus = "Starting HTTP/S discovery…";
+        probedCount = 0;
+        totalProbeCount = 0;
+        foundCount = 0;
+        _ = RunScanAsync();
+        return Task.CompletedTask;
+    }
+
+    private async Task RunScanAsync()
+    {
+        try
+        {
+            var request = new LocalHttpServiceDiscoveryRequest(
+                IncludeLocalhost: true,
+                IncludeLan: includeLan,
+                IncludeTailnet: includeTailnet,
+                IncludeDocker: includeDocker);
+            var progress = new Progress<LocalHttpServiceDiscoveryProgressUpdate>(update =>
+            {
+                _ = InvokeAsync(() =>
+                {
+                    scanStatus = update.Message;
+                    probedCount = update.ProbedCount;
+                    totalProbeCount = update.TotalProbeCount;
+                    foundCount = update.FoundCount;
+                    if (update.FoundEndpoint is not null)
+                    {
+                        MergeService(update.FoundEndpoint);
+                    }
+
+                    StateHasChanged();
+                });
+            });
+            services = await HttpServiceDiscovery.DiscoverAsync(request, progress, lifetime.Token);
+            message = VisibleServiceCount == 0
+                ? "Scan completed. No HTTP/S apps responded."
+                : $"Scan completed. {VisibleServiceCount} app(s) are cached.";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"HTTP/S discovery failed: {exception.Message}";
+        }
+        finally
+        {
+            isScanning = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ToggleFavouriteAsync(string serviceKey)
+    {
+        if (string.IsNullOrWhiteSpace(userId) || !favouriteChangeInProgress.Add(serviceKey))
+        {
+            return;
+        }
+
+        try
+        {
+            var isFavourite = !favouriteKeys.Contains(serviceKey);
+            await OnDemandApps.SetFavouriteAsync(userId, serviceKey, isFavourite, lifetime.Token);
+            var updated = favouriteKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (isFavourite)
+            {
+                updated.Add(serviceKey);
+            }
+            else
+            {
+                updated.Remove(serviceKey);
+            }
+
+            favouriteKeys = updated;
+        }
+        catch (Exception exception)
+        {
+            message = $"Favourite could not be updated: {exception.Message}";
+        }
+        finally
+        {
+            favouriteChangeInProgress.Remove(serviceKey);
+        }
+    }
+
+    private void MergeService(LocalHttpServiceEndpoint endpoint)
+    {
+        var key = LocalHttpServiceDiscoveryRanking.StableKey(endpoint);
+        services = services
+            .Where(service => !LocalHttpServiceDiscoveryRanking.StableKey(service).Equals(key, StringComparison.OrdinalIgnoreCase))
+            .Append(endpoint)
+            .ToArray();
+    }
+
+    private int VisibleServiceCount => services.Count(service => !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(service));
+
+    private string BuildOpenUrl(string serviceKey) =>
+        $"/on-demand-apps/open?service={Uri.EscapeDataString(serviceKey)}";
+
+    private string BuildScanSummary()
+    {
+        var progress = totalProbeCount > 0 ? $"{probedCount}/{totalProbeCount} checked" : "Preparing";
+        return $"{scanStatus} {progress}, {foundCount} found.";
+    }
+
+    public void Dispose()
+    {
+        lifetime.Cancel();
+        lifetime.Dispose();
+    }
+}
