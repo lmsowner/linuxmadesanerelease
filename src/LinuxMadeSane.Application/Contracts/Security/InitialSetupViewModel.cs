@@ -7,6 +7,7 @@ public sealed record InitialSetupViewModel(
     bool IsComplete,
     bool CanStart,
     bool CanVerify,
+    bool AwaitingFirstLogin,
     Guid? PendingUserId,
     string PendingEmail,
     string PendingLinuxUsername,

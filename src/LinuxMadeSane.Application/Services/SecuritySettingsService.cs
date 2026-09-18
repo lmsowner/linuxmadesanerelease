@@ -153,7 +153,7 @@ public sealed class SecuritySettingsService(
             LinuxUsername = linuxUsername,
             IsEnabled = true,
             IsLocalAccountManaged = isLocalAccountManaged,
-            LastLoginAtUtc = now,
+            LastLoginAtUtc = null,
             UpdatedAtUtc = now
         };
         await securityUserStore.SaveAsync(enabledUser, cancellationToken);
@@ -1049,6 +1049,7 @@ public sealed class SecuritySettingsService(
                 false,
                 true,
                 false,
+                false,
                 null,
                 string.Empty,
                 string.Empty,
@@ -1073,6 +1074,7 @@ public sealed class SecuritySettingsService(
                 false,
                 false,
                 true,
+                false,
                 pendingUser.Id,
                 pendingUser.Email,
                 ResolveLinuxUsername(pendingUser),
@@ -1084,10 +1086,14 @@ public sealed class SecuritySettingsService(
                 "Verify the first MFA code to finish setup.");
         }
 
+        var firstLoginPending = orderedUsers.Length == 1 &&
+                                orderedUsers[0].IsEnabled &&
+                                !orderedUsers[0].LastLoginAtUtc.HasValue;
         return new InitialSetupViewModel(
-            true,
+            !firstLoginPending,
             false,
             false,
+            firstLoginPending,
             null,
             string.Empty,
             string.Empty,
@@ -1096,7 +1102,9 @@ public sealed class SecuritySettingsService(
             bootstrap.InstallerHomeDirectory,
             bootstrap.HasInstallerIdentity,
             orderedUsers.Length,
-            "Initial setup is complete.");
+            firstLoginPending
+                ? "Complete one normal LMS login to finish setup."
+                : "Initial setup is complete.");
     }
 
     private InitialSetupBootstrap ReadInitialSetupBootstrap()

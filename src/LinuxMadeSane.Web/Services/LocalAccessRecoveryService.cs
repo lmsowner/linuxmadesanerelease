@@ -63,12 +63,18 @@ public sealed class LocalAccessRecoveryService(
         try
         {
             var users = await securityUserStore.ListAsync(cancellationToken);
-            if (users.Any(user => user.IsEnabled))
+            var challenge = await ReadChallengeAsync(cancellationToken);
+            if (users.Any(user => user.LastLoginAtUtc.HasValue))
             {
+                if (challenge is not null &&
+                    string.Equals(challenge.Purpose, TemporarySetupPurpose, StringComparison.Ordinal))
+                {
+                    DeleteChallengeFile();
+                }
+
                 return false;
             }
 
-            var challenge = await ReadChallengeAsync(cancellationToken);
             if (!ChallengeCanBeUsed(challenge, null, requireChallengeId: false, temporarySetupOnly: true))
             {
                 if (challenge is not null && IsExpired(challenge))
@@ -96,7 +102,7 @@ public sealed class LocalAccessRecoveryService(
         try
         {
             var users = await securityUserStore.ListAsync(cancellationToken);
-            if (users.Any(user => user.IsEnabled))
+            if (users.Any(user => user.LastLoginAtUtc.HasValue))
             {
                 return TemporarySetupCodeResult.Failure("Initial setup is no longer available.");
             }
@@ -112,6 +118,11 @@ public sealed class LocalAccessRecoveryService(
                 return TemporarySetupCodeResult.Failure("The Temporary Setup Code has expired. Re-run the installer from the command line to mint a new one.");
             }
 
+            if (challenge!.ConsumedAtUtc is not null)
+            {
+                return TemporarySetupCodeResult.Failure("The Temporary Setup Code has already been used. Re-run the installer from the command line to mint a new one.");
+            }
+
             var normalizedCode = NormalizeRecoveryCode(temporarySetupCode);
             if (string.IsNullOrWhiteSpace(normalizedCode) || !RecoveryCodeMatches(challenge!, normalizedCode))
             {
@@ -123,7 +134,9 @@ public sealed class LocalAccessRecoveryService(
                 return TemporarySetupCodeResult.Failure("The Temporary Setup Code was not accepted.");
             }
 
-            DeleteChallengeFile();
+            await WriteChallengeAsync(
+                challenge! with { ConsumedAtUtc = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture) },
+                cancellationToken);
             logger.LogInformation("Temporary LMS setup code was consumed.");
             return TemporarySetupCodeResult.Success();
         }
@@ -311,8 +324,7 @@ public sealed class LocalAccessRecoveryService(
         challenge.Version == CurrentVersion &&
         (string.Equals(challenge.Purpose, Purpose, StringComparison.Ordinal) ||
          string.Equals(challenge.Purpose, TemporarySetupPurpose, StringComparison.Ordinal)) &&
-        (!temporarySetupOnly || string.Equals(challenge.Purpose, TemporarySetupPurpose, StringComparison.Ordinal) ||
-         string.Equals(challenge.Purpose, Purpose, StringComparison.Ordinal)) &&
+        (!temporarySetupOnly || string.Equals(challenge.Purpose, TemporarySetupPurpose, StringComparison.Ordinal)) &&
         !string.IsNullOrWhiteSpace(challenge.Salt) &&
         !string.IsNullOrWhiteSpace(challenge.CodeHash) &&
         (!requireChallengeId || string.Equals(challenge.ChallengeId, (challengeId ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase)) &&
@@ -373,7 +385,8 @@ public sealed class LocalAccessRecoveryService(
         string CreatedAtUtc,
         string ExpiresAtUtc,
         int Attempts,
-        Dictionary<string, int>? AttemptsByIp = null);
+        Dictionary<string, int>? AttemptsByIp = null,
+        string? ConsumedAtUtc = null);
 }
 
 public sealed record LocalAccessRecoveryResult(
