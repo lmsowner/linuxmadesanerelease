@@ -19,6 +19,7 @@ public sealed class LocalAccessRecoveryService(
     private const string TemporarySetupPurpose = "linux-made-sane-temporary-setup";
     private const int CurrentVersion = 1;
     private const int MaximumAttempts = 5;
+    private const int MaximumTemporarySetupAttemptsPerIp = 10;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true
@@ -88,6 +89,7 @@ public sealed class LocalAccessRecoveryService(
 
     public async Task<TemporarySetupCodeResult> ConsumeTemporarySetupCodeAsync(
         string? temporarySetupCode,
+        string? remoteIpAddress,
         CancellationToken cancellationToken = default)
     {
         await Gate.WaitAsync(cancellationToken);
@@ -113,7 +115,11 @@ public sealed class LocalAccessRecoveryService(
             var normalizedCode = NormalizeRecoveryCode(temporarySetupCode);
             if (string.IsNullOrWhiteSpace(normalizedCode) || !RecoveryCodeMatches(challenge!, normalizedCode))
             {
-                await RecordFailedAttemptAsync(challenge!, cancellationToken);
+                await RecordFailedAttemptAsync(
+                    challenge!,
+                    cancellationToken,
+                    temporarySetup: true,
+                    remoteIpAddress);
                 return TemporarySetupCodeResult.Failure("The Temporary Setup Code was not accepted.");
             }
 
@@ -191,8 +197,34 @@ public sealed class LocalAccessRecoveryService(
 
     private async Task RecordFailedAttemptAsync(
         LocalAccessRecoveryChallenge challenge,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool temporarySetup = false,
+        string? remoteIpAddress = null)
     {
+        if (temporarySetup)
+        {
+            var attemptsByIp = challenge.AttemptsByIp is null
+                ? new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, int>(challenge.AttemptsByIp, StringComparer.OrdinalIgnoreCase);
+            var ipKey = NormalizeRemoteIpAddress(remoteIpAddress);
+            attemptsByIp.TryGetValue(ipKey, out var attempts);
+            attempts++;
+            attemptsByIp[ipKey] = attempts;
+
+            if (attempts > MaximumTemporarySetupAttemptsPerIp)
+            {
+                DeleteChallengeFile();
+                logger.LogWarning(
+                    "Temporary setup challenge {ChallengeId} was removed after too many failed attempts from {RemoteIpAddress}.",
+                    challenge.ChallengeId,
+                    ipKey);
+                return;
+            }
+
+            await WriteChallengeAsync(challenge with { AttemptsByIp = attemptsByIp }, cancellationToken);
+            return;
+        }
+
         var updated = challenge with
         {
             Attempts = challenge.Attempts + 1
@@ -329,6 +361,9 @@ public sealed class LocalAccessRecoveryService(
     private static string NormalizeEmail(string? email) =>
         (email ?? string.Empty).Trim().ToLowerInvariant();
 
+    private static string NormalizeRemoteIpAddress(string? remoteIpAddress) =>
+        string.IsNullOrWhiteSpace(remoteIpAddress) ? "unknown" : remoteIpAddress.Trim();
+
     private sealed record LocalAccessRecoveryChallenge(
         string Purpose,
         int Version,
@@ -337,7 +372,8 @@ public sealed class LocalAccessRecoveryService(
         string CodeHash,
         string CreatedAtUtc,
         string ExpiresAtUtc,
-        int Attempts);
+        int Attempts,
+        Dictionary<string, int>? AttemptsByIp = null);
 }
 
 public sealed record LocalAccessRecoveryResult(
