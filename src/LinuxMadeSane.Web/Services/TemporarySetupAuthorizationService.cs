@@ -10,7 +10,7 @@ namespace LinuxMadeSane.Web.Services;
 public sealed class TemporarySetupAuthorizationService(IDataProtectionProvider dataProtectionProvider)
 {
     public const string CookieName = "lms.temporary-setup";
-    private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(20);
+    private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(10);
     private readonly IDataProtector protector = dataProtectionProvider.CreateProtector("linux-made-sane", "temporary-setup");
 
     public bool IsAuthorized(HttpRequest request)

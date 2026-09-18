@@ -31,6 +31,11 @@
             <p class="initial-setup-callout error">@Error</p>
         }
 
+        @if (!string.IsNullOrWhiteSpace(NetworkMessage))
+        {
+            <p class="initial-setup-callout @(NetworkError ? "error" : string.Empty)">@NetworkMessage</p>
+        }
+
         @if (IsSetupRoute && !IsSetupAuthorized)
         {
             <div class="initial-setup-card">
@@ -55,104 +60,156 @@
         {
             <p class="initial-setup-callout">Loading setup state...</p>
         }
-        else if (setupState.IsComplete)
+        else
         {
-            <div class="initial-setup-card">
-                <h2>Initial setup is complete.</h2>
-                <p>Use the normal LMS login screen with your email and MFA code.</p>
-                <a class="initial-setup-primary" href="/login">Open login</a>
-            </div>
-        }
-        else if (setupState.AwaitingFirstLogin)
-        {
-            <div class="initial-setup-card">
-                <h2>Complete your first login.</h2>
-                <p>Your LMS account and MFA setup are ready. Sign in through the normal LMS login to confirm access. This setup page remains available until that login succeeds.</p>
-                <a class="initial-setup-primary" href="/login">Open login</a>
-            </div>
-        }
-        else if (setupState.CanStart)
-        {
-            @if (setupState.HasInstallerIdentity)
+            @if (setupState.IsComplete)
             {
                 <div class="initial-setup-card">
-                    <h2>Installer identity detected.</h2>
-                    <p>LMS was installed by Linux user <strong>@setupState.InstallerLinuxUsername</strong>@FormatInstallerHome(setupState.InstallerHomeDirectory). This first LMS login will use that Linux identity by default.</p>
+                    <h2>Initial setup is complete.</h2>
+                    <p>Use the normal LMS login screen with your email and MFA code.</p>
+                    <a class="initial-setup-primary" href="/login">Open login</a>
                 </div>
             }
-
-            <form method="post" action="/auth/initial-setup/start" class="initial-setup-form">
-                <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
-
-                <label class="initial-setup-field">
-                    <span>Email</span>
-                    <input name="email" type="email" value="@Email" autocomplete="email" placeholder="you@example.com" required />
-                </label>
-
-                <label class="initial-setup-field">
-                    <span>Default Linux user</span>
-                    <input name="linuxUsername"
-                           type="text"
-                           value="@LinuxUsernameValue"
-                           autocomplete="username"
-                           placeholder="linuxuser"
-                           required />
-                </label>
-
-                <button class="initial-setup-primary" type="submit">Register LMS login</button>
-                <p class="initial-setup-footnote">Use an email address you control. LMS links this login to the Linux user above for terminals, file access, MFA setup, passkeys, and recovery workflows.</p>
-            </form>
-        }
-        else if (setupState.CanVerify && provisioning is not null)
-        {
-            <div class="initial-setup-card">
-                <div class="initial-setup-account">
-                    <div>
-                        <span>Account</span>
-                        <strong>@provisioning.Email</strong>
-                    </div>
-                    <div>
-                        <span>Linux user</span>
-                        <strong>@provisioning.LinuxUsername</strong>
-                    </div>
+            else if (setupState.AwaitingFirstLogin)
+            {
+                <div class="initial-setup-card">
+                    <h2>Complete your first login.</h2>
+                    <p>Your LMS account and MFA setup are ready. Sign in through the normal LMS login to confirm access. This setup page remains available until that login succeeds.</p>
+                    <a class="initial-setup-primary" href="/login">Open login</a>
                 </div>
-
-                <div class="initial-setup-qr-row">
-                    <div class="initial-setup-qr-box">
-                        <UiQrCode Payload="@provisioning.OtpUri"
-                                  AriaLabel="Linux Made Sane MFA setup QR code" />
+            }
+            else if (setupState.CanStart)
+            {
+                @if (setupState.HasInstallerIdentity)
+                {
+                    <div class="initial-setup-card">
+                        <h2>Installer identity detected.</h2>
+                        <p>LMS was installed by Linux user <strong>@setupState.InstallerLinuxUsername</strong>@FormatInstallerHome(setupState.InstallerHomeDirectory). This first LMS login will use that Linux identity by default.</p>
                     </div>
-                    <div class="initial-setup-manual-key">
-                        <span>Manual key</span>
-                        <code>@provisioning.ManualEntryKey</code>
-                    </div>
-                </div>
+                }
 
-                <form method="post" action="/auth/initial-setup/verify" class="initial-setup-form compact">
+                <form method="post" action="/auth/initial-setup/start" class="initial-setup-form">
                     <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
-                    <input type="hidden" name="userId" value="@provisioning.UserId" />
-                    <input type="hidden" name="email" value="@provisioning.Email" />
 
                     <label class="initial-setup-field">
-                        <span>MFA code</span>
-                        <input name="otpCode"
+                        <span>Email</span>
+                        <input name="email" type="email" value="@Email" autocomplete="email" placeholder="you@example.com" required />
+                    </label>
+
+                    <label class="initial-setup-field">
+                        <span>Default Linux user</span>
+                        <input name="linuxUsername"
                                type="text"
-                               inputmode="numeric"
-                               autocomplete="one-time-code"
-                               maxlength="6"
-                               pattern="[0-9]{6}"
-                               placeholder="123456"
+                               value="@LinuxUsernameValue"
+                               autocomplete="username"
+                               placeholder="linuxuser"
                                required />
                     </label>
 
-                    <button class="initial-setup-primary" type="submit">Confirm MFA and enable authentication</button>
+                    <button class="initial-setup-primary" type="submit">Register LMS login</button>
+                    <p class="initial-setup-footnote">Use an email address you control. LMS links this login to the Linux user above for terminals, file access, MFA setup, passkeys, and recovery workflows.</p>
                 </form>
+            }
+            else if (setupState.CanVerify && provisioning is not null)
+            {
+                <div class="initial-setup-card">
+                    <div class="initial-setup-account">
+                        <div>
+                            <span>Account</span>
+                            <strong>@provisioning.Email</strong>
+                        </div>
+                        <div>
+                            <span>Linux user</span>
+                            <strong>@provisioning.LinuxUsername</strong>
+                        </div>
+                    </div>
 
-                <form method="post" action="/auth/initial-setup/reset" class="initial-setup-reset-form">
-                    <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
-                    <button class="initial-setup-secondary" type="submit">Rotate setup QR</button>
-                </form>
-            </div>
+                    <div class="initial-setup-qr-row">
+                        <div class="initial-setup-qr-box">
+                            <UiQrCode Payload="@provisioning.OtpUri"
+                                      AriaLabel="Linux Made Sane MFA setup QR code" />
+                        </div>
+                        <div class="initial-setup-manual-key">
+                            <span>Manual key</span>
+                            <code>@provisioning.ManualEntryKey</code>
+                        </div>
+                    </div>
+
+                    <form method="post" action="/auth/initial-setup/verify" class="initial-setup-form compact">
+                        <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+                        <input type="hidden" name="userId" value="@provisioning.UserId" />
+                        <input type="hidden" name="email" value="@provisioning.Email" />
+
+                        <label class="initial-setup-field">
+                            <span>MFA code</span>
+                            <input name="otpCode"
+                                   type="text"
+                                   inputmode="numeric"
+                                   autocomplete="one-time-code"
+                                   maxlength="6"
+                                   pattern="[0-9]{6}"
+                                   placeholder="123456"
+                                   required />
+                        </label>
+
+                        <button class="initial-setup-primary" type="submit">Confirm MFA and enable authentication</button>
+                    </form>
+
+                    <form method="post" action="/auth/initial-setup/reset" class="initial-setup-reset-form">
+                        <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+                        <button class="initial-setup-secondary" type="submit">Rotate setup QR</button>
+                    </form>
+                </div>
+            }
+
+            @if (securityPage is not null)
+            {
+                <section class="initial-setup-card initial-setup-network-recovery">
+                    <div>
+                        <h2>Recover interface access</h2>
+                        <p>The Temporary Setup Code gives you a short recovery session. Use these controls if a network interface was disabled or made to require authentication before you could log in.</p>
+                    </div>
+
+                    @if (securityPage.TrustedNetworks.Count == 0)
+                    {
+                        <p class="initial-setup-footnote">No saved interface access rules were found.</p>
+                    }
+                    else
+                    {
+                        <div class="initial-setup-network-list">
+                            @foreach (var entry in securityPage.TrustedNetworks)
+                            {
+                                <article class="initial-setup-network-row">
+                                    <div>
+                                        <strong>@entry.Label</strong>
+                                        <code>@entry.AddressOrCidr</code>
+                                        <span>@DescribeNetworkAccess(entry)</span>
+                                    </div>
+                                    <div class="initial-setup-network-actions">
+                                        @if (!entry.IsEnabled)
+                                        {
+                                            <form method="post" action="/auth/setup/network">
+                                                <input type="hidden" name="entryId" value="@entry.Id" />
+                                                <input type="hidden" name="action" value="enable" />
+                                                <button class="initial-setup-secondary" type="submit">Enable access</button>
+                                            </form>
+                                        }
+                                        else
+                                        {
+                                            <form method="post" action="/auth/setup/network">
+                                                <input type="hidden" name="entryId" value="@entry.Id" />
+                                                <input type="hidden" name="action" value="toggle-authentication" />
+                                                <button class="initial-setup-secondary" type="submit">@(entry.IsAuthenticationEnabled ? "Allow direct access" : "Require LMS login")</button>
+                                            </form>
+                                        }
+                                    </div>
+                                </article>
+                            }
+                        </div>
+                    }
+                    <p class="initial-setup-footnote">Changes apply immediately. Sign in normally once access is restored; that closes this recovery page.</p>
+                </section>
+            }
         }
     </section>
 </div>
@@ -170,8 +227,15 @@
     [SupplyParameterFromQuery]
     public string? LinuxUsername { get; set; }
 
+    [SupplyParameterFromQuery]
+    public string? NetworkMessage { get; set; }
+
+    [SupplyParameterFromQuery]
+    public bool NetworkError { get; set; }
+
     private InitialSetupViewModel? setupState;
     private SecurityUserProvisioningViewModel? provisioning;
+    private SecuritySettingsPageViewModel? securityPage;
 
     private bool IsSetupRoute =>
         new Uri(Navigation.Uri).AbsolutePath.Equals("/setup", StringComparison.OrdinalIgnoreCase);
@@ -204,6 +268,8 @@
         {
             provisioning = await SecuritySettingsService.GetInitialSetupProvisioningAsync(BuildLmsLoginUrl(setupState.PendingEmail));
         }
+
+        securityPage = await SecuritySettingsService.GetPageAsync();
     }
 
     private static string NormalizeReturnUrl(string? returnUrl)
@@ -241,5 +307,17 @@
             Query = $"email={Uri.EscapeDataString(email.Trim())}"
         };
         return builder.Uri.ToString();
+    }
+
+    private static string DescribeNetworkAccess(TrustedNetworkEntryViewModel entry)
+    {
+        if (!entry.IsEnabled)
+        {
+            return "Access disabled";
+        }
+
+        return entry.IsAuthenticationEnabled
+            ? "LMS login required"
+            : "Direct access allowed";
     }
 }
