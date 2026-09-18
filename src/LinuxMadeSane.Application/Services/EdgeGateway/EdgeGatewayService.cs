@@ -1297,6 +1297,79 @@ public sealed class EdgeGatewayService(
     public Task DeleteRouteAsync(Guid routeId, CancellationToken cancellationToken = default) =>
         store.DeleteRouteAsync(routeId, cancellationToken);
 
+    public async Task DeletePublishedRouteAsync(Guid routeId, CancellationToken cancellationToken = default)
+    {
+        var route = await store.GetRouteAsync(routeId, cancellationToken);
+        if (route is null)
+        {
+            return;
+        }
+
+        var normalizedDomain = EdgeGatewayRouteValidator.NormalizeDomainName(route.DomainName);
+        var normalizedHostname = EdgeGatewayRouteValidator.NormalizeHostname(route.Hostname);
+        var settings = await GetGatewaySettingsAsync(cancellationToken);
+        var gatewayDomainName = BuildGatewayDomainName(normalizedDomain, settings.GatewaySubdomain);
+        var relativeHostname = ResolveRelativeHostname(normalizedHostname, normalizedDomain);
+        var relayHostname = $"{relativeHostname}.{gatewayDomainName}";
+        var wildcardHostname = $"*.{gatewayDomainName}";
+        var apiToken = await ResolveSavedCloudflareTokenAsync(cancellationToken);
+        var validation = await exposedServiceManager.ValidateTokenAsync(AiLocalMachine.ManagedHostId, null, cancellationToken);
+        var zone = validation.Zones.FirstOrDefault(item =>
+            item.Name.Equals(normalizedDomain, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"The saved Cloudflare token cannot manage {normalizedDomain}.");
+        var account = ResolveCloudflareAccount(validation.Accounts, zone)
+            ?? throw new InvalidOperationException($"Cloudflare did not return the account that owns {normalizedDomain}.");
+        var records = await cloudflareDnsService.ListRecordsAsync(apiToken, zone.Id, cancellationToken);
+        var routeRecord = records.FirstOrDefault(record =>
+            NormalizeDnsHostname(record.Name).Equals(normalizedHostname, StringComparison.OrdinalIgnoreCase));
+        if (routeRecord is not null &&
+            (!IsManagedCloudflareDnsRecord(routeRecord) || !IsSameDnsTarget(routeRecord, relayHostname)))
+        {
+            throw new InvalidOperationException(
+                $"LMS did not remove {normalizedHostname} because its DNS record is not the LMS-managed route for this application.");
+        }
+
+        var wildcardRecord = records.FirstOrDefault(record => IsWildcardRecordForDomain(record, gatewayDomainName));
+        var tunnelId = TryExtractTunnelIdFromDnsTarget(wildcardRecord?.Content);
+        if (string.IsNullOrWhiteSpace(tunnelId))
+        {
+            throw new InvalidOperationException($"The LMS relay tunnel for {wildcardHostname} could not be identified safely.");
+        }
+
+        var tunnels = await cloudflareTunnelService.ListTunnelsAsync(apiToken, account.Id, cancellationToken);
+        var tunnel = tunnels.FirstOrDefault(item => !item.IsDeleted && item.Id.Equals(tunnelId, StringComparison.OrdinalIgnoreCase));
+        var connectorStatus = await TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
+        if (!IsRelayTunnelOwnedByThisLms(tunnel, gatewayDomainName, settings.TunnelInstanceId, connectorStatus))
+        {
+            throw new InvalidOperationException($"LMS did not alter Cloudflare because tunnel {tunnelId} is not owned by this LMS instance.");
+        }
+
+        var configuration = await cloudflareTunnelService.GetConfigurationAsync(apiToken, account.Id, tunnelId, cancellationToken);
+        var updatedRoutes = RemoveTunnelRoutes(
+            configuration.Routes,
+            new HashSet<string>([normalizedHostname], StringComparer.OrdinalIgnoreCase));
+        await UpdateTunnelConfigurationIfChangedAsync(
+            apiToken,
+            account.Id,
+            tunnelId,
+            configuration,
+            new CloudflareTunnelConfiguration(updatedRoutes),
+            cancellationToken);
+
+        if (routeRecord is not null)
+        {
+            await cloudflareDnsService.DeleteRecordAsync(apiToken, zone.Id, routeRecord.Id, cancellationToken);
+        }
+
+        await store.DeleteRouteAsync(route.Id, cancellationToken);
+        var applied = await ApplyCaddyConfigurationAsync(cancellationToken);
+        if (!applied.Success)
+        {
+            await store.SaveRouteAsync(route, cancellationToken);
+            throw new InvalidOperationException($"The temporary route was removed from Cloudflare, but Caddy did not reload: {applied.Summary}");
+        }
+    }
+
     public async Task<EdgeGatewayDiagnosticResult> TestRouteAsync(Guid routeId, CancellationToken cancellationToken = default)
     {
         var route = await store.GetRouteAsync(routeId, cancellationToken);

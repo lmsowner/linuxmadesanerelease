@@ -62,6 +62,8 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private static readonly Regex FaviconHrefRegex = new(
         "href\\s*=\\s*(?:[\\\"'](?<href>[^\\\"']+)[\\\"']|(?<href>[^\\s>]+))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly ConcurrentDictionary<string, ActiveDiscoveryState> ActiveDiscoveries =
+        new(StringComparer.OrdinalIgnoreCase);
 
     private readonly HttpServiceDiscoveryStorageSettings storageSettings;
     private readonly ILinuxCommandRunner commandRunner;
@@ -84,8 +86,11 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         this.tailscalePeerStatusReader = tailscalePeerStatusReader;
     }
 
-    public async Task<IReadOnlyList<LocalHttpServiceEndpoint>> GetCachedAsync(CancellationToken cancellationToken = default) =>
-        SortEndpoints(await ReadCacheAsync(cancellationToken));
+    public async Task<IReadOnlyList<LocalHttpServiceEndpoint>> GetCachedAsync(CancellationToken cancellationToken = default)
+    {
+        var state = GetActiveDiscoveryState();
+        return SortEndpoints((await ReadCacheAsync(cancellationToken)).Concat(state.Endpoints.Values));
+    }
 
     public Task<IReadOnlyList<LocalHttpServiceEndpoint>> DiscoverAsync(CancellationToken cancellationToken = default) =>
         DiscoverAsync(new LocalHttpServiceDiscoveryRequest(), cancellationToken);
@@ -101,6 +106,25 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         LocalHttpServiceDiscoveryRequest request,
         IProgress<LocalHttpServiceDiscoveryProgressUpdate>? progress,
         CancellationToken cancellationToken = default)
+    {
+        var state = GetActiveDiscoveryState();
+        await state.ScanLock.WaitAsync(cancellationToken);
+        state.Endpoints.Clear();
+        try
+        {
+            return await DiscoverCoreAsync(request, progress, cancellationToken);
+        }
+        finally
+        {
+            state.Endpoints.Clear();
+            state.ScanLock.Release();
+        }
+    }
+
+    private async Task<IReadOnlyList<LocalHttpServiceEndpoint>> DiscoverCoreAsync(
+        LocalHttpServiceDiscoveryRequest request,
+        IProgress<LocalHttpServiceDiscoveryProgressUpdate>? progress,
+        CancellationToken cancellationToken)
     {
         var requestedScopes = BuildRequestedScopes(request);
         if (requestedScopes.Count == 0)
@@ -151,7 +175,11 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             totalProbeCount,
             0));
 
-        var discovered = await ProbeHostsAsync(hosts, progress, cancellationToken);
+        var discovered = await ProbeHostsAsync(
+            hosts,
+            progress,
+            PublishActiveEndpoint,
+            cancellationToken);
         var merged = MergeDuplicateEndpoints(existing
             .Where(endpoint => !requestedScopes.Contains(endpoint.Scope))
             .Concat(discovered));
@@ -172,6 +200,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private async Task<IReadOnlyList<LocalHttpServiceEndpoint>> ProbeHostsAsync(
         IReadOnlyList<HttpProbeHost> hosts,
         IProgress<LocalHttpServiceDiscoveryProgressUpdate>? progress,
+        Action<LocalHttpServiceEndpoint> endpointDiscovered,
         CancellationToken cancellationToken)
     {
         if (hosts.Count == 0)
@@ -199,6 +228,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                 host,
                 progress,
                 progressState,
+                endpointDiscovered,
                 cancellationToken))
             .ToArray();
 
@@ -224,6 +254,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         HttpProbeHost host,
         IProgress<LocalHttpServiceDiscoveryProgressUpdate>? progress,
         HttpDiscoveryProgressState progressState,
+        Action<LocalHttpServiceEndpoint> endpointDiscovered,
         CancellationToken cancellationToken)
     {
         await hostConcurrency.WaitAsync(cancellationToken);
@@ -258,8 +289,8 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
 
         var priorityPorts = openPorts.Where(CommonHomelabPortSet.Contains).ToArray();
         var remainingPorts = openPorts.Where(port => !CommonHomelabPortSet.Contains(port)).ToArray();
-        await ProbePortSetAsync(client, serviceConcurrency, results, host, priorityPorts, progress, progressState, cancellationToken);
-        await ProbePortSetAsync(client, serviceConcurrency, results, host, remainingPorts, progress, progressState, cancellationToken);
+        await ProbePortSetAsync(client, serviceConcurrency, results, host, priorityPorts, progress, progressState, endpointDiscovered, cancellationToken);
+        await ProbePortSetAsync(client, serviceConcurrency, results, host, remainingPorts, progress, progressState, endpointDiscovered, cancellationToken);
     }
 
     private static async Task ProbePortSetAsync(
@@ -270,6 +301,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         IReadOnlyList<int> ports,
         IProgress<LocalHttpServiceDiscoveryProgressUpdate>? progress,
         HttpDiscoveryProgressState progressState,
+        Action<LocalHttpServiceEndpoint> endpointDiscovered,
         CancellationToken cancellationToken)
     {
         await Task.WhenAll(ports.Select(port => ProbePortAsync(
@@ -280,6 +312,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             port,
             progress,
             progressState,
+            endpointDiscovered,
             cancellationToken)));
     }
 
@@ -291,6 +324,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         int port,
         IProgress<LocalHttpServiceDiscoveryProgressUpdate>? progress,
         HttpDiscoveryProgressState progressState,
+        Action<LocalHttpServiceEndpoint> endpointDiscovered,
         CancellationToken cancellationToken)
     {
         await serviceConcurrency.WaitAsync(cancellationToken);
@@ -312,6 +346,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                         key,
                         endpoint,
                         (_, existing) => MergeEndpointGroup([existing, endpoint]));
+                    endpointDiscovered(merged);
                     progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
                         $"Updated {FormatEndpointForProgress(merged)}",
                         progressState.ProbedCount,
@@ -321,6 +356,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     continue;
                 }
 
+                endpointDiscovered(endpoint);
                 var foundCount = progressState.IncrementFoundCount();
                 progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
                     $"Found {FormatEndpointForProgress(endpoint)}",
@@ -1443,6 +1479,12 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         return faviconUrl.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? "image/png" : "image/x-icon";
     }
 
+    private ActiveDiscoveryState GetActiveDiscoveryState() =>
+        ActiveDiscoveries.GetOrAdd(Path.GetFullPath(storageSettings.CachePath), static _ => new ActiveDiscoveryState());
+
+    internal void PublishActiveEndpoint(LocalHttpServiceEndpoint endpoint) =>
+        GetActiveDiscoveryState().Endpoints[BuildEndpointKey(endpoint)] = endpoint;
+
     private async Task<IReadOnlyList<LocalHttpServiceEndpoint>> ReadCacheAsync(CancellationToken cancellationToken)
     {
         try
@@ -1725,6 +1767,13 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         public int IncrementFoundCount() => Interlocked.Increment(ref foundCount);
 
         public int IncrementProbedCount() => Interlocked.Increment(ref probedCount);
+    }
+
+    private sealed class ActiveDiscoveryState
+    {
+        public SemaphoreSlim ScanLock { get; } = new(1, 1);
+        public ConcurrentDictionary<string, LocalHttpServiceEndpoint> Endpoints { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
     }
 
     private sealed record LanScanPlan(

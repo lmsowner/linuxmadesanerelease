@@ -60,7 +60,7 @@ public sealed class OnDemandAppService(
 
         return new OnDemandAppsAvailability(
             true,
-            $"Apps open through temporary authenticated addresses below {domain.GatewayDomainName}.",
+            $"Apps open through temporary authenticated addresses in {domain.DomainName}.",
             publishedRoute.Hostname,
             domain.GatewayDomainName,
             domain.DomainName);
@@ -120,7 +120,20 @@ public sealed class OnDemandAppService(
                     throw new InvalidOperationException("That On-Demand App lease belongs to another LMS account.");
                 }
 
-                return BuildLaunch(existingLease, leaseId);
+                if (IsDirectZoneHostname(existingLease.Hostname, availability.DomainName))
+                {
+                    return BuildLaunch(existingLease, leaseId);
+                }
+
+                // Releases before v2026.09.18.14.08 placed the browser-facing hostname below
+                // the relay namespace, outside the zone's normal one-label TLS certificate.
+                await gateway.DeleteRouteAsync(existingLease.Id, cancellationToken);
+                var removedLegacyRoute = await gateway.ApplyCaddyConfigurationAsync(cancellationToken);
+                if (!removedLegacyRoute.Success)
+                {
+                    await routes.SaveRouteAsync(existingLease, cancellationToken);
+                    throw new InvalidOperationException($"The obsolete temporary route could not be replaced: {removedLegacyRoute.Summary}");
+                }
             }
 
             var activeCount = existingRoutes.Count(IsOnDemandRoute);
@@ -129,7 +142,7 @@ public sealed class OnDemandAppService(
                 throw new InvalidOperationException("The On-Demand App route limit has been reached. Close an open app or wait for stale routes to be cleaned up.");
             }
 
-            var hostname = $"ondemand-{leaseId:N}"[..21] + $".{availability.GatewayDomainName}";
+            var hostname = $"ondemand-{leaseId:N}"[..21] + $".{availability.DomainName}";
             var editor = new EdgeGatewayRouteEditor
             {
                 Enabled = true,
@@ -150,12 +163,12 @@ public sealed class OnDemandAppService(
             };
 
             var routeId = await gateway.SaveRouteAsync(editor, cancellationToken);
-            var applied = await gateway.ApplyCaddyConfigurationAsync(cancellationToken);
-            if (!applied.Success)
+            var provisioned = await gateway.ProvisionCloudflareRouteAsync(routeId, replaceExistingDnsRecord: false, cancellationToken);
+            if (!provisioned.Success)
             {
                 await gateway.DeleteRouteAsync(routeId, cancellationToken);
                 _ = await gateway.ApplyCaddyConfigurationAsync(cancellationToken);
-                throw new InvalidOperationException($"The temporary app route could not be applied: {applied.Summary}");
+                throw new InvalidOperationException($"The temporary app address could not be published: {provisioned.Summary}");
             }
 
             var route = await routes.GetRouteAsync(routeId, cancellationToken) ??
@@ -264,23 +277,32 @@ public sealed class OnDemandAppService(
         IReadOnlyList<EdgeGatewayRoute> routesToRemove,
         CancellationToken cancellationToken)
     {
-        foreach (var route in routesToRemove)
+        var legacyRoutes = routesToRemove
+            .Where(route => !IsDirectZoneHostname(route.Hostname, route.DomainName))
+            .ToArray();
+        foreach (var route in legacyRoutes)
         {
             await gateway.DeleteRouteAsync(route.Id, cancellationToken);
         }
 
-        var applied = await gateway.ApplyCaddyConfigurationAsync(cancellationToken);
-        if (applied.Success)
+        if (legacyRoutes.Length > 0)
         {
-            return;
+            var applied = await gateway.ApplyCaddyConfigurationAsync(cancellationToken);
+            if (!applied.Success)
+            {
+                foreach (var route in legacyRoutes)
+                {
+                    await routes.SaveRouteAsync(route, cancellationToken);
+                }
+
+                throw new InvalidOperationException($"On-Demand App cleanup could not update Caddy: {applied.Summary}");
+            }
         }
 
-        foreach (var route in routesToRemove)
+        foreach (var route in routesToRemove.Where(route => IsDirectZoneHostname(route.Hostname, route.DomainName)))
         {
-            await routes.SaveRouteAsync(route, cancellationToken);
+            await gateway.DeletePublishedRouteAsync(route.Id, cancellationToken);
         }
-
-        throw new InvalidOperationException($"On-Demand App cleanup could not update Caddy: {applied.Summary}");
     }
 
     private OnDemandAppLaunch BuildLaunch(EdgeGatewayRoute route, Guid leaseId) =>
@@ -296,6 +318,19 @@ public sealed class OnDemandAppService(
             .Contains(userEmail.Trim(), StringComparer.OrdinalIgnoreCase);
 
     private static string NormalizePublicHost(string host) => (host ?? string.Empty).Trim().TrimEnd('.').ToLowerInvariant();
+
+    private static bool IsDirectZoneHostname(string hostname, string domainName)
+    {
+        var normalizedHostname = NormalizePublicHost(hostname);
+        var normalizedDomain = NormalizePublicHost(domainName);
+        if (!normalizedHostname.EndsWith($".{normalizedDomain}", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var relative = normalizedHostname[..^(normalizedDomain.Length + 1)];
+        return relative.Length > 0 && !relative.Contains('.', StringComparison.Ordinal);
+    }
 
     private static bool IsFqdn(string host) =>
         !string.IsNullOrWhiteSpace(host) &&
