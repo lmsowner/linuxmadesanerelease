@@ -64,6 +64,7 @@ public sealed class OnDemandAppLaunchTicketStore(TimeProvider timeProvider)
         var identity = new ClaimsIdentity(ticket.Claims, Microsoft.AspNetCore.Authentication.Cookies.CookieAuthenticationDefaults.AuthenticationScheme);
         return new ConsumedOnDemandAppTicket(
             new ClaimsPrincipal(identity),
+            ticket.ExpectedHost,
             ticket.SessionIssuedUtc,
             ticket.SessionExpiresUtc);
     }
@@ -95,5 +96,6 @@ public sealed class OnDemandAppLaunchTicketStore(TimeProvider timeProvider)
 
 public sealed record ConsumedOnDemandAppTicket(
     ClaimsPrincipal Principal,
+    string ExpectedHost,
     DateTimeOffset? SessionIssuedUtc,
     DateTimeOffset? SessionExpiresUtc);
