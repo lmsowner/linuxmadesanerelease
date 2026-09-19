@@ -31,6 +31,7 @@ public sealed class EdgeGatewayRouteEditor
     public string TargetPathPrefix { get; set; } = string.Empty;
     public EdgeGatewayAuthMode AuthMode { get; set; } = EdgeGatewayAuthMode.RequireMfa;
     public bool UsePublicHostHeader { get; set; } = true;
+    public string UpstreamSourceAddress { get; set; } = string.Empty;
     public bool StripForwardedFor { get; set; } = true;
     public bool SkipUpstreamTlsVerification { get; set; } = true;
     public string AllowedUsers { get; set; } = string.Empty;

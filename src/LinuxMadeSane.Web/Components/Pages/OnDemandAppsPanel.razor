@@ -131,12 +131,35 @@
         <ChildContent>
             @if (favouriteSettingsService is not null)
             {
-                <p class="meta-text">These settings apply only to this saved favourite. Automatic header choices are still tested against the real service before the temporary route is created.</p>
+                <p class="meta-text">These settings apply only to this saved favourite. Changes apply when you open a new app window. Test connection checks reachability and an HTTP response; it does not verify application login.</p>
                 <div class="on-demand-favourite-settings-grid">
+                    <UiSelectField TValue="bool" @bind-Value="favouriteSettingsEditor.ConnectAsLms"
+                                   Label="Connection mode" Helper="@ConnectionModeHelp" Compact="true">
+                        <option value="false">Current behaviour</option>
+                        <option value="true">Connect as LMS server</option>
+                    </UiSelectField>
+                    @if (favouriteSettingsEditor.ConnectAsLms)
+                    {
+                        <UiSelectField TValue="string" @bind-Value="favouriteSettingsEditor.SourceSelection"
+                                       Label="Source interface / IPv4 address"
+                                       Helper="Choose LAN for a LAN service or Tailscale for a destination reachable through Tailscale. LMS checks the route and never silently substitutes another interface. Requires Caddy source-address binding support."
+                                       Compact="true">
+                            <option value="">Select an available interface</option>
+                            @foreach (var source in sourceOptions)
+                            {
+                                <option value="@($"{source.InterfaceName}|{source.Address}")">@source.InterfaceName — @source.Address</option>
+                            }
+                        </UiSelectField>
+                        @if (!string.IsNullOrEmpty(favouriteSettingsEditor.SourceSelection) &&
+                             !sourceOptions.Any(item => $"{item.InterfaceName}|{item.Address}" == favouriteSettingsEditor.SourceSelection))
+                        {
+                            <p class="callout warning">The saved source address is unavailable. Select a current interface before testing or saving.</p>
+                        }
+                    }
                     <UiSelectField TValue="OnDemandAppTargetAddressPreference"
                                    @bind-Value="favouriteSettingsEditor.TargetAddress"
                                    Label="Connect using"
-                                   Helper="The discovered IP avoids DNS selecting another interface or an external address."
+                                   Helper="@TargetAddressHelp"
                                    Compact="true">
                         <option value="@OnDemandAppTargetAddressPreference.DiscoveredIp">Discovered IP (recommended)</option>
                         <option value="@OnDemandAppTargetAddressPreference.DiscoveredHostname">Discovered hostname</option>
@@ -144,6 +167,7 @@
                     <UiSelectField TValue="OnDemandAppSchemePreference"
                                    @bind-Value="favouriteSettingsEditor.Scheme"
                                    Label="Protocol"
+                                   Helper="@ProtocolHelp"
                                    Compact="true">
                         <option value="@OnDemandAppSchemePreference.Automatic">Automatic</option>
                         <option value="@OnDemandAppSchemePreference.Http">HTTP</option>
@@ -152,14 +176,18 @@
                     <UiSelectField TValue="OnDemandAppHostHeaderPreference"
                                    @bind-Value="favouriteSettingsEditor.HostHeader"
                                    Label="Host header"
+                                   Helper="@HostHeaderHelp"
                                    Compact="true">
                         <option value="@OnDemandAppHostHeaderPreference.Automatic">Automatic</option>
                         <option value="@OnDemandAppHostHeaderPreference.Upstream">Target address</option>
                         <option value="@OnDemandAppHostHeaderPreference.Public">Temporary public address</option>
                     </UiSelectField>
                     <UiSelectField TValue="OnDemandAppForwardedForPreference"
-                                   @bind-Value="favouriteSettingsEditor.ForwardedFor"
+                                   Value="@(favouriteSettingsEditor.ConnectAsLms ? OnDemandAppForwardedForPreference.Strip : favouriteSettingsEditor.ForwardedFor)"
+                                   ValueChanged="@(value => favouriteSettingsEditor.ForwardedFor = value)"
                                    Label="Client IP header"
+                                   Helper="@ClientIpHelp"
+                                   Disabled="@favouriteSettingsEditor.ConnectAsLms"
                                    Compact="true">
                         <option value="@OnDemandAppForwardedForPreference.Automatic">Automatic</option>
                         <option value="@OnDemandAppForwardedForPreference.Strip">Strip X-Forwarded-For</option>
@@ -178,10 +206,14 @@
             }
         </ChildContent>
         <Footer>
+            <UiCommandButton Label="@(isTestingFavouriteSettings ? "Testing..." : "Test connection")"
+                             Glyph="UiIconGlyph.Connection"
+                             Disabled="@(isSavingFavouriteSettings || isTestingFavouriteSettings || !CanOpen)"
+                             OnClick="TestFavouriteConnectionAsync" />
             <UiCommandButton Label="Save favourite settings"
                              Glyph="UiIconGlyph.Save"
                              Variant="UiButtonVariant.Primary"
-                             Disabled="@isSavingFavouriteSettings"
+                             Disabled="@(isSavingFavouriteSettings || isTestingFavouriteSettings)"
                              OnClick="SaveFavouriteSettingsAsync" />
         </Footer>
     </UiModal>
@@ -205,6 +237,35 @@
     private bool isFlushingCache;
     private bool showFavouriteSettings;
     private bool isSavingFavouriteSettings;
+    private bool isTestingFavouriteSettings;
+    private IReadOnlyList<UiNetworkInterfaceIpOption> sourceOptions = [];
+
+    private string ConnectionModeHelp => favouriteSettingsEditor.ConnectAsLms
+        ? "Use this LMS server's selected network address and remove external client-IP headers on the application hop. Useful for apps that accept local clients only. LMS authentication still applies."
+        : "Keep the existing proxy behaviour. Use this for apps that already work; Linux chooses the outgoing network address.";
+    private string TargetAddressHelp => favouriteSettingsEditor.TargetAddress == OnDemandAppTargetAddressPreference.DiscoveredIp
+        ? "Connect directly to the discovered IP. Avoids DNS selecting a different or external destination."
+        : "Resolve the discovered hostname. In LMS-server mode the tested IPv4 destination is pinned for that app window.";
+    private string ProtocolHelp => favouriteSettingsEditor.Scheme switch
+    {
+        OnDemandAppSchemePreference.Http => "Use HTTP between LMS and the app. Your browser still uses the public HTTPS address.",
+        OnDemandAppSchemePreference.Https => "Use HTTPS between LMS and the app. Internal self-signed or expired certificates are accepted by the existing On-Demand policy.",
+        _ => "Test HTTP and HTTPS and choose a responding profile. This controls the LMS-to-app connection."
+    };
+    private string HostHeaderHelp => favouriteSettingsEditor.HostHeader switch
+    {
+        OnDemandAppHostHeaderPreference.Upstream => "Send the internal target address as Host. Can help apps that reject unfamiliar public hostnames; some apps may then redirect to an internal address.",
+        OnDemandAppHostHeaderPreference.Public => "Send the temporary public hostname as Host. Can help generate public links and redirects; the app must accept that hostname.",
+        _ => "Test internal and public Host headers. A successful page response does not prove login or cookies will work."
+    };
+    private string ClientIpHelp => favouriteSettingsEditor.ConnectAsLms
+        ? "Controlled by Connect as LMS server: remove forwarded external client-IP headers from the app request. LMS access checks retain the real visitor address."
+        : favouriteSettingsEditor.ForwardedFor switch
+        {
+            OnDemandAppForwardedForPreference.Strip => "Remove X-Forwarded-For only. Other headers can still identify the visitor; this does not change the TCP source address.",
+            OnDemandAppForwardedForPreference.Preserve => "Forward client-IP information. The app may require trusted-proxy configuration. This does not change the TCP source address.",
+            _ => "Test with and without X-Forwarded-For. This tests compatibility, not the app's trust or login policy."
+        };
     private int probedCount;
     private int totalProbeCount;
     private int foundCount;
@@ -469,6 +530,8 @@
         var preferences = favouriteProfiles.TryGetValue(key, out var favourite)
             ? favourite.ProxyPreferences
             : new OnDemandAppProxyPreferences();
+        sourceOptions = UiNetworkInterfaceIpCatalog.GetOptions(ipv4Only: true, includeAllIpv4: false, includeLoopback: false)
+            .Where(item => !System.Net.IPAddress.IsLoopback(System.Net.IPAddress.Parse(item.Address))).ToArray();
         favouriteSettingsService = service;
         favouriteSettingsEditor = FavouriteSettingsEditor.From(preferences);
         favouriteSettingsTitle = LocalHttpServiceDiscoveryRanking.PickerLabel(service);
@@ -488,6 +551,10 @@
         try
         {
             var preferences = favouriteSettingsEditor.ToPreferences();
+            if (preferences.ConnectAsLms)
+            {
+                _ = await CheckFavouriteConnectionAsync(preferences);
+            }
             await OnDemandApps.SaveFavouriteAsync(userId, favouriteSettingsService, preferences, lifetime.Token);
             var key = LocalHttpServiceDiscoveryRanking.StableKey(favouriteSettingsService);
             favouriteProfiles[key] = new OnDemandAppFavourite(
@@ -505,6 +572,42 @@
         finally
         {
             isSavingFavouriteSettings = false;
+        }
+    }
+
+    private Task<LocalHttpServiceProxyProfile> CheckFavouriteConnectionAsync(OnDemandAppProxyPreferences preferences)
+    {
+        if (favouriteSettingsService is null || availability?.IsAvailable != true)
+        {
+            throw new InvalidOperationException("Open LMS through its published HTTPS address before testing a connection.");
+        }
+        return OnDemandApps.TestConnectionAsync(favouriteSettingsService,
+            $"ondemand-test.{availability.DomainName}", preferences, lifetime.Token);
+    }
+
+    private async Task TestFavouriteConnectionAsync()
+    {
+        if (isTestingFavouriteSettings || isSavingFavouriteSettings) return;
+        isTestingFavouriteSettings = true;
+        favouriteSettingsMessage = "Testing the selected connection settings...";
+        try
+        {
+            var preferences = favouriteSettingsEditor.ToPreferences();
+            var result = await CheckFavouriteConnectionAsync(preferences);
+            var source = preferences.ConnectAsLms
+                ? $"{preferences.SourceInterface} ({preferences.SourceAddress})"
+                : "system-selected source address";
+            favouriteSettingsMessage = $"Source: {source}. Destination: {result.Endpoint.Scheme}://{result.Endpoint.Host}:{result.Endpoint.Port}. " +
+                $"{result.SelectionReason} Host: {(result.UsePublicHostHeader ? "public test hostname" : "target address")}. " +
+                "Application login has not been verified. No public route was created.";
+        }
+        catch (Exception exception)
+        {
+            favouriteSettingsMessage = $"Connection test failed: {exception.Message}";
+        }
+        finally
+        {
+            isTestingFavouriteSettings = false;
         }
     }
 
@@ -562,15 +665,22 @@
         public OnDemandAppHostHeaderPreference HostHeader { get; set; } = OnDemandAppHostHeaderPreference.Automatic;
         public OnDemandAppForwardedForPreference ForwardedFor { get; set; } = OnDemandAppForwardedForPreference.Automatic;
 
+        public bool ConnectAsLms { get; set; }
+        public string SourceSelection { get; set; } = string.Empty;
+
         public static FavouriteSettingsEditor From(OnDemandAppProxyPreferences preferences) => new()
         {
             TargetAddress = preferences.TargetAddress,
             Scheme = preferences.Scheme,
             HostHeader = preferences.HostHeader,
-            ForwardedFor = preferences.ForwardedFor
+            ForwardedFor = preferences.ForwardedFor,
+            ConnectAsLms = preferences.ConnectAsLms,
+            SourceSelection = string.IsNullOrEmpty(preferences.SourceAddress) ? string.Empty : $"{preferences.SourceInterface}|{preferences.SourceAddress}"
         };
 
         public OnDemandAppProxyPreferences ToPreferences() =>
-            new(TargetAddress, Scheme, HostHeader, ForwardedFor);
+            new(TargetAddress, Scheme, HostHeader, ForwardedFor, ConnectAsLms,
+                SourceSelection.Split('|').FirstOrDefault() ?? string.Empty,
+                SourceSelection.Split('|').ElementAtOrDefault(1) ?? string.Empty);
     }
 }

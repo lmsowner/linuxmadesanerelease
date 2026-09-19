@@ -190,7 +190,8 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
             Enum.IsDefined(typeof(EdgeGatewayDiagnosticStatus), entity.LastTestStatus)
                 ? (EdgeGatewayDiagnosticStatus)entity.LastTestStatus
                 : EdgeGatewayDiagnosticStatus.NotConfigured,
-            entity.LastTestMessage);
+            entity.LastTestMessage,
+            entity.UpstreamSourceAddress);
 
     private static EdgeGatewayRouteEntity Map(EdgeGatewayRoute route) =>
         new()
@@ -207,6 +208,7 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
             AuthMode = (int)route.AuthMode,
             UsePublicHostHeader = route.UsePublicHostHeader,
             StripForwardedFor = route.StripForwardedFor,
+            UpstreamSourceAddress = route.UpstreamSourceAddress,
             SkipUpstreamTlsVerification = route.SkipUpstreamTlsVerification,
             AllowedUsers = route.AllowedUsers,
             AllowedGroups = route.AllowedGroups,
@@ -237,6 +239,7 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
         entity.AuthMode = (int)route.AuthMode;
         entity.UsePublicHostHeader = route.UsePublicHostHeader;
         entity.StripForwardedFor = route.StripForwardedFor;
+        entity.UpstreamSourceAddress = route.UpstreamSourceAddress;
         entity.SkipUpstreamTlsVerification = route.SkipUpstreamTlsVerification;
         entity.AllowedUsers = route.AllowedUsers;
         entity.AllowedGroups = route.AllowedGroups;

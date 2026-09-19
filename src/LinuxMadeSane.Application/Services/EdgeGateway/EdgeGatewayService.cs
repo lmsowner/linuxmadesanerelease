@@ -352,6 +352,7 @@ public sealed class EdgeGatewayService(
                 AuthMode = NormalizePublicAuthMode(route.AuthMode),
                 UsePublicHostHeader = route.UsePublicHostHeader,
                 StripForwardedFor = route.StripForwardedFor,
+                UpstreamSourceAddress = route.UpstreamSourceAddress,
                 SkipUpstreamTlsVerification = route.SkipUpstreamTlsVerification,
                 AllowedUsers = route.AllowedUsers,
                 AllowedGroups = route.AllowedGroups,
@@ -402,7 +403,8 @@ public sealed class EdgeGatewayService(
             existing?.CreatedAt ?? now,
             now,
             existing?.LastTestStatus ?? EdgeGatewayDiagnosticStatus.NotConfigured,
-            existing?.LastTestMessage ?? string.Empty);
+            existing?.LastTestMessage ?? string.Empty,
+            editor.UpstreamSourceAddress?.Trim() ?? string.Empty);
 
         EdgeGatewayRouteValidator.ValidateRoute(route);
         await store.SaveRouteAsync(route, cancellationToken);

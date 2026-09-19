@@ -32,4 +32,5 @@ public sealed record EdgeGatewayRoute(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     EdgeGatewayDiagnosticStatus LastTestStatus,
-    string LastTestMessage);
+    string LastTestMessage,
+    string UpstreamSourceAddress = "");

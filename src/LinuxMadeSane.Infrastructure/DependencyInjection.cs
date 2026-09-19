@@ -66,6 +66,7 @@ public static class DependencyInjection
                     RemoteCertificateValidationCallback = static (_, _, _, _) => true
                 }
             });
+        services.AddSingleton<OnDemandAppSourceBinding>();
         services.AddSingleton<ILocalHttpServiceProxyCompatibilityService, LocalHttpServiceProxyCompatibilityService>();
         services.AddDbContext<LinuxMadeSaneDbContext>(options => options
             .UseSqlite(connectionString)

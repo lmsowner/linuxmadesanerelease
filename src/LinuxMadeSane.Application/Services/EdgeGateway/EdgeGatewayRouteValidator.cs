@@ -93,6 +93,14 @@ public static partial class EdgeGatewayRouteValidator
             throw new InvalidOperationException("The route hostname must sit inside the selected domain.");
         }
 
+        if (!string.IsNullOrEmpty(route.UpstreamSourceAddress) &&
+            (!IPAddress.TryParse(route.UpstreamSourceAddress, out var source) ||
+             source.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
+             source.Equals(IPAddress.Any) || source.Equals(IPAddress.Broadcast)))
+        {
+            throw new InvalidOperationException("Select a specific local IPv4 source address.");
+        }
+
         _ = NormalizeTargetHost(route.TargetHost);
         _ = NormalizeTargetPort(route.TargetPort);
         _ = NormalizePathPrefix(route.TargetPathPrefix);

@@ -713,6 +713,7 @@ public sealed class SqliteDatabaseInitializer(
 
         await dbContext.Database.ExecuteSqlRawAsync(routesSql, cancellationToken);
         await EnsureColumnExistsAsync("edge_gateway_routes", "UsePublicHostHeader", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_routes", "UpstreamSourceAddress", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync("edge_gateway_routes", "StripForwardedFor", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnExistsAsync("edge_gateway_routes", "SkipUpstreamTlsVerification", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
         await EnsureColumnExistsAsync("edge_gateway_routes", "TemporaryIpApprovalRecipients", "TEXT NOT NULL DEFAULT ''", cancellationToken);

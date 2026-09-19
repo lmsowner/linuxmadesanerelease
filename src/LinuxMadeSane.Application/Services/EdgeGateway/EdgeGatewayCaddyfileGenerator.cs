@@ -198,7 +198,16 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
         builder.AppendLine(route.UsePublicHostHeader
             ? "            header_up Host {host}"
             : "            header_up Host {upstream_hostport}");
-        if (route.StripForwardedFor)
+        var connectAsLms = !string.IsNullOrEmpty(route.UpstreamSourceAddress);
+        if (connectAsLms)
+        {
+            // Only the application hop loses visitor identity. forward_auth above retains it.
+            foreach (var header in new[] { "Forwarded", "X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP", "CF-Connecting-IPv6", "True-Client-IP" })
+            {
+                builder.AppendLine($"            header_up -{header}");
+            }
+        }
+        else if (route.StripForwardedFor)
         {
             builder.AppendLine("            header_up -X-Forwarded-For");
         }
@@ -207,7 +216,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
             builder.AppendLine("            header_up X-Forwarded-For 127.0.0.1");
         }
 
-        if (route.UsePublicHostHeader)
+        if (route.UsePublicHostHeader && !connectAsLms)
         {
             builder.AppendLine("            header_up X-Real-IP {remote_host}");
         }
@@ -216,10 +225,17 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
         builder.AppendLine("            header_up X-Forwarded-Host {host}");
         builder.AppendLine("            header_up X-Forwarded-Port 443");
 
-        if (shouldSkipBackendTlsVerification)
+        if (shouldSkipBackendTlsVerification || connectAsLms)
         {
             builder.AppendLine("            transport http {");
-            builder.AppendLine("                tls_insecure_skip_verify");
+            if (shouldSkipBackendTlsVerification)
+            {
+                builder.AppendLine("                tls_insecure_skip_verify");
+            }
+            if (connectAsLms)
+            {
+                builder.AppendLine($"                local_address {route.UpstreamSourceAddress}");
+            }
             builder.AppendLine("            }");
         }
 

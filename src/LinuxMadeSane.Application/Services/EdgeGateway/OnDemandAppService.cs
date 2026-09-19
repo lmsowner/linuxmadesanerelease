@@ -101,6 +101,14 @@ public sealed class OnDemandAppService(
                 timeProvider.GetUtcNow()),
             cancellationToken);
 
+    public Task<LocalHttpServiceProxyProfile> TestConnectionAsync(
+        LocalHttpServiceEndpoint endpoint,
+        string publicHostname,
+        OnDemandAppProxyPreferences preferences,
+        CancellationToken cancellationToken = default) =>
+        proxyCompatibility.TestAsync(ApplyTargetAddressPreference(endpoint, preferences.TargetAddress),
+            publicHostname, preferences, cancellationToken);
+
     public Task RemoveFavouriteAsync(
         string userId,
         string serviceKey,
@@ -204,6 +212,10 @@ public sealed class OnDemandAppService(
             Report(progress, "Testing HTTP/S, address and proxy header combinations.");
             var proxyProfile = await proxyCompatibility.SelectAsync(endpoint, hostname, proxyPreferences, cancellationToken);
             endpoint = proxyProfile.Endpoint;
+            if (proxyPreferences.ConnectAsLms)
+            {
+                Report(progress, $"Connecting from {proxyPreferences.SourceInterface} ({proxyPreferences.SourceAddress}); external client-IP headers are removed from the application hop.");
+            }
             Report(progress, $"Selected {endpoint.Scheme.ToUpperInvariant()} to {endpoint.Host}:{endpoint.Port}.");
             var editor = new EdgeGatewayRouteEditor
             {
@@ -219,6 +231,7 @@ public sealed class OnDemandAppService(
                 AuthMode = EdgeGatewayAuthMode.RequireMfa,
                 AllowedUsers = normalizedEmail,
                 StripForwardedFor = proxyProfile.StripForwardedFor,
+                UpstreamSourceAddress = proxyPreferences.ConnectAsLms ? proxyPreferences.SourceAddress : string.Empty,
                 UsePublicHostHeader = proxyProfile.UsePublicHostHeader,
                 SkipUpstreamTlsVerification = endpoint.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase),
                 Notes = BuildRouteNote(leaseId)

@@ -14,37 +14,62 @@ namespace LinuxMadeSane.Infrastructure.Services;
 public sealed class LocalHttpServiceProxyCompatibilityService(
     IHttpClientFactory httpClientFactory,
     TimeProvider timeProvider,
-    ILogger<LocalHttpServiceProxyCompatibilityService> logger) : ILocalHttpServiceProxyCompatibilityService
+    ILogger<LocalHttpServiceProxyCompatibilityService> logger,
+    OnDemandAppSourceBinding sourceBinding) : ILocalHttpServiceProxyCompatibilityService
 {
     internal const string HttpClientName = "LocalHttpServiceProxyCompatibility";
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromHours(3);
     private readonly ConcurrentDictionary<string, CacheEntry> cache = new(StringComparer.OrdinalIgnoreCase);
 
-    public async Task<LocalHttpServiceProxyProfile> SelectAsync(
+    public Task<LocalHttpServiceProxyProfile> SelectAsync(
         LocalHttpServiceEndpoint endpoint,
         string publicHostname,
         OnDemandAppProxyPreferences preferences,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        SelectCoreAsync(endpoint, publicHostname, preferences, false, cancellationToken);
+
+    public Task<LocalHttpServiceProxyProfile> TestAsync(
+        LocalHttpServiceEndpoint endpoint,
+        string publicHostname,
+        OnDemandAppProxyPreferences preferences,
+        CancellationToken cancellationToken = default) =>
+        SelectCoreAsync(endpoint, publicHostname, preferences, true, cancellationToken);
+
+    private async Task<LocalHttpServiceProxyProfile> SelectCoreAsync(
+        LocalHttpServiceEndpoint endpoint,
+        string publicHostname,
+        OnDemandAppProxyPreferences preferences,
+        bool forceTest,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(publicHostname);
         ArgumentNullException.ThrowIfNull(preferences);
 
+        endpoint = await sourceBinding.ValidateAsync(endpoint, preferences, cancellationToken);
         var key = BuildCacheKey(endpoint, preferences);
-        if (cache.TryGetValue(key, out var cached) && cached.ExpiresAtUtc > timeProvider.GetUtcNow())
+        using var boundClient = preferences.ConnectAsLms
+            ? OnDemandAppSourceBinding.CreateProbeClient(preferences.SourceAddress)
+            : null;
+        if (!forceTest && !preferences.ConnectAsLms && cache.TryGetValue(key, out var cached) && cached.ExpiresAtUtc > timeProvider.GetUtcNow())
         {
             return cached.Profile;
         }
 
         var candidates = BuildCandidates(endpoint, preferences).ToArray();
         var probes = await Task.WhenAll(candidates.Select(candidate =>
-            ProbeAsync(endpoint, publicHostname.Trim(), candidate, cancellationToken)));
+            ProbeAsync(endpoint, publicHostname.Trim(), candidate, boundClient, cancellationToken)));
         var selected = probes
             .OrderByDescending(result => result.Score)
             .ThenBy(result => result.Candidate.Order)
             .First();
 
         LocalHttpServiceProxyProfile profile;
+        if (!selected.Responded && preferences.ConnectAsLms)
+        {
+            throw new InvalidOperationException($"No HTTP response from {endpoint.Host} using {preferences.SourceInterface} ({preferences.SourceAddress}). No route was created.");
+        }
+
         if (!selected.Responded)
         {
             var fallbackEndpoint = endpoint with
@@ -95,6 +120,7 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
         LocalHttpServiceEndpoint endpoint,
         string publicHostname,
         ProbeCandidate candidate,
+        HttpClient? boundClient,
         CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -117,7 +143,7 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
                 request.Headers.TryAddWithoutValidation("X-Forwarded-For", "192.0.2.1");
             }
 
-            using var response = await httpClientFactory.CreateClient(HttpClientName).SendAsync(
+            using var response = await (boundClient ?? httpClientFactory.CreateClient(HttpClientName)).SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 timeout.Token);
@@ -158,7 +184,7 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
             OnDemandAppHostHeaderPreference.Public => [true],
             _ => new[] { false, true }
         };
-        bool[] forwardedForModes = preferences.ForwardedFor switch
+        bool[] forwardedForModes = preferences.ConnectAsLms ? [true] : preferences.ForwardedFor switch
         {
             OnDemandAppForwardedForPreference.Strip => [true],
             OnDemandAppForwardedForPreference.Preserve => [false],
@@ -328,7 +354,10 @@ public sealed class LocalHttpServiceProxyCompatibilityService(
             preferences.TargetAddress,
             preferences.Scheme,
             preferences.HostHeader,
-            preferences.ForwardedFor);
+            preferences.ForwardedFor,
+            preferences.ConnectAsLms,
+            preferences.SourceInterface,
+            preferences.SourceAddress);
 
     private sealed record CacheEntry(LocalHttpServiceProxyProfile Profile, DateTimeOffset ExpiresAtUtc);
     private sealed record ProbeCandidate(
