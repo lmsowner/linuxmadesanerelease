@@ -26,12 +26,14 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
         builder.AppendLine();
 
         var localOrigin = ResolveLocalOrigin(options.CaddyLocalServiceUrl);
+        AppendHttpRedirectListeners(builder, enabledRoutes);
         builder.AppendLine($"{localOrigin.CaddySiteAddress} {{");
         if (localOrigin.UseInternalTls)
         {
             builder.AppendLine("    tls internal");
         }
 
+        builder.AppendLine("    log {\n        format json\n    }");
         builder.AppendLine("    encode zstd gzip");
         builder.AppendLine();
         // Keep this check ahead of every imported relay, auth endpoint and app route.
@@ -41,7 +43,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
         builder.AppendLine("    route {");
         builder.AppendLine("    # Published Edge Gateway services are HTTPS-only.");
         builder.AppendLine("    @lms_insecure expression `!(({http.request.scheme} == 'https' && {http.request.header.X-Forwarded-Proto} == '') || (remote_ip('127.0.0.1/32', '::1/128') && {http.request.header.X-Forwarded-Proto} == 'https'))`");
-        builder.AppendLine("    respond @lms_insecure \"HTTPS is required.\" 403");
+        builder.AppendLine("    redir @lms_insecure https://{host}{uri} 308");
         builder.AppendLine();
         // Only the local cloudflared connector may supply Cloudflare's client address.
         // Direct visitors cannot select their source IP using forwarded headers.
@@ -183,6 +185,27 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
 
     private static string SanitizeComment(string value) =>
         value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+
+    private static void AppendHttpRedirectListeners(StringBuilder builder, IReadOnlyList<EdgeGatewayRoute> routes)
+    {
+        var domains = routes
+            .Select(route => EdgeGatewayRouteValidator.NormalizeDomainName(route.DomainName))
+            .Where(domain => !string.IsNullOrWhiteSpace(domain))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(domain => domain, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        foreach (var domain in domains)
+        {
+            builder.AppendLine($"http://{domain}, http://*.{domain} {{");
+            builder.AppendLine("    log {");
+            builder.AppendLine("        format json");
+            builder.AppendLine("    }");
+            builder.AppendLine("    redir https://{host}{uri} 308");
+            builder.AppendLine("}");
+            builder.AppendLine();
+        }
+    }
 
     private static string BuildMatcherName(EdgeGatewayRoute route) =>
         $"edge_route_{route.Id:N}";
