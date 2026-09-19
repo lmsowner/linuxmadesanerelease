@@ -39,11 +39,15 @@ public static class LocalAiPeerApiEndpointExtensions
             return;
         }
 
+        var runtimeAddresses = ResolveHostAddresses(runtimeEndpoint.Host).ToHashSet();
         var addresses = NetworkInterface.GetAllNetworkInterfaces()
             .Where(network => network.OperationalStatus == OperationalStatus.Up)
             .SelectMany(network => network.GetIPProperties().UnicastAddresses)
             .Select(address => address.Address)
             .Where(address => address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address))
+            .Concat(ResolveHostAddresses(Dns.GetHostName())
+                .Where(address => address.AddressFamily == AddressFamily.InterNetwork &&
+                                  !runtimeAddresses.Contains(address)))
             .Distinct()
             .OrderBy(address => address.ToString(), StringComparer.Ordinal)
             .ToArray();
@@ -55,6 +59,23 @@ public static class LocalAiPeerApiEndpointExtensions
             {
                 app.Urls.Add(serviceAddress);
             }
+        }
+    }
+
+    private static IReadOnlyList<IPAddress> ResolveHostAddresses(string host)
+    {
+        if (IPAddress.TryParse(host, out var address))
+        {
+            return [address];
+        }
+
+        try
+        {
+            return Dns.GetHostAddresses(host);
+        }
+        catch (SocketException)
+        {
+            return [];
         }
     }
 
