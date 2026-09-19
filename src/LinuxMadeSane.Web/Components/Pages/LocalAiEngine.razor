@@ -3,8 +3,6 @@
 
 @page "/ai/engine"
 @rendermode InteractiveServer
-@using System.Security.Claims
-@using Microsoft.AspNetCore.Components.Authorization
 @using LinuxMadeSane.Application.Contracts.LocalAi
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Abstractions
@@ -12,7 +10,6 @@
 @using LinuxMadeSane.Core.Models.LocalAi
 @using LinuxMadeSane.Infrastructure.Services
 @inject ILocalAiEngineManagerService LocalAiService
-@inject IUserDisplayPreferenceService UserDisplayPreferenceService
 @inject ILmsConnectClientFeature ConnectClientFeature
 @inject LocalAiPeerSharingService PeerSharing
 @inject NavigationManager Navigation
@@ -68,7 +65,7 @@
                                     <div>
                                         <p class="eyebrow">One-click path</p>
                                         <h2>Set up private Local AI</h2>
-                                        <p class="meta-text">Choose a model size, approve the install, and Linux Made Sane handles the rest on this computer.</p>
+                                        <p class="meta-text">Choose a model, decide whether to share it with other LMS instances, and Linux Made Sane handles the rest on this computer.</p>
                                     </div>
                                     @if (workspace.Status.IsLocalProviderConfigured)
                                     {
@@ -127,20 +124,11 @@
                                     }
                                 </EditForm>
 
-                                <div class="local-ai-approval-row">
-                                    <label class="local-ai-approval-toggle" title="Required before Linux Made Sane installs Local AI or downloads a model.">
-                                        <UiCompactCheckbox Label="Approve Local AI setup"
-                                                           Value="@setupApproved"
-                                                           ValueChanged="SetSetupApprovedAsync" />
-                                        <span>I approve installing Local AI and downloading the selected model on this computer.</span>
-                                    </label>
-
-                                    <div class="local-ai-inline-actions">
-                                        <UiCommandButton Label="@(isApplyingSetup ? "Setting up..." : "Set up Local AI")"
-                                                         Glyph="UiIconGlyph.Save"
-                                                         Disabled="@(!setupApproved || isBusy || CurrentSetupModel is null)"
-                                                         OnClick="ApplySetupAsync" />
-                                    </div>
+                                <div class="local-ai-inline-actions">
+                                    <UiCommandButton Label="@(isApplyingSetup ? "Setting up..." : "Set up Local AI")"
+                                                     Glyph="UiIconGlyph.Save"
+                                                     Disabled="@(isBusy || CurrentSetupModel is null)"
+                                                     OnClick="ApplySetupAsync" />
                                 </div>
 
                                 @if (isApplyingSetup || setupProgressUpdates.Count > 0)
@@ -337,15 +325,7 @@
                                         <span>@workspace.Status.CheckedAtUtc.ToLocalTime().ToString("dd MMM yyyy HH:mm")</span>
                                     </div>
 
-                                    <div class="local-ai-approval-row">
-                                        <label class="local-ai-approval-toggle" title="Linux Made Sane requires explicit approval before it changes the Local AI service.">
-                                            <UiCompactCheckbox Label="Approve service controls"
-                                                               Value="@runtimeActionsApproved"
-                                                               ValueChanged="SetRuntimeActionsApprovedAsync" />
-                                            <span>I approve start, stop, and restart of Local AI on this computer.</span>
-                                        </label>
-
-                                        <div class="local-ai-inline-actions">
+                                    <div class="local-ai-inline-actions">
                                             <UiCommandButton Label="Test current model"
                                                              Glyph="UiIconGlyph.Analyze"
                                                              Variant="UiButtonVariant.Ghost"
@@ -354,18 +334,17 @@
                                             <UiCommandButton Label="Start"
                                                              Glyph="UiIconGlyph.Run"
                                                              Variant="UiButtonVariant.Ghost"
-                                                             Disabled="@(!runtimeActionsApproved || isBusy)"
+                                                             Disabled="@isBusy"
                                                              OnClick="StartRuntimeAsync" />
                                             <UiCommandButton Label="Stop"
                                                              Glyph="UiIconGlyph.Stop"
                                                              Variant="UiButtonVariant.Ghost"
-                                                             Disabled="@(!runtimeActionsApproved || isBusy)"
+                                                             Disabled="@isBusy"
                                                              OnClick="StopRuntimeAsync" />
                                             <UiCommandButton Label="Restart"
                                                              Glyph="UiIconGlyph.Restart"
-                                                             Disabled="@(!runtimeActionsApproved || isBusy)"
+                                                             Disabled="@isBusy"
                                                              OnClick="RestartRuntimeAsync" />
-                                        </div>
                                     </div>
 
                                     <details class="local-ai-technical-details">
@@ -478,14 +457,6 @@
                                     </div>
                                 }
 
-                                <div class="local-ai-approval-row">
-                                    <label class="local-ai-approval-toggle" title="Required before LMS installs, starts, or stops Docker AI containers.">
-                                        <UiCompactCheckbox Label="Approve Docker actions"
-                                                           Value="@dockerActionsApproved"
-                                                           ValueChanged="SetDockerActionsApprovedAsync" />
-                                        <span>I approve Docker engine install, start, and stop actions.</span>
-                                    </label>
-                                </div>
                             </section>
 
                             <section class="surface-subcard local-ai-card">
@@ -663,34 +634,25 @@
                                                 <div class="toolbar-cluster">
                                                     @if (installedEngine is null)
                                                     {
-                                                        @if (dockerActionsApproved)
-                                                        {
-                                                            <UiCommandButton Label="Install"
-                                                                             Glyph="UiIconGlyph.Download"
-                                                                             Disabled="@(!workspace.DockerEngines.Docker.IsDockerReachable || !engine.IsHostPortAvailable || isBusy)"
-                                                                             OnClick="@(() => InstallDockerEngineAsync(engine.EngineId))" />
-                                                        }
+                                                        <UiCommandButton Label="Install"
+                                                                         Glyph="UiIconGlyph.Download"
+                                                                         Disabled="@(!workspace.DockerEngines.Docker.IsDockerReachable || !engine.IsHostPortAvailable || isBusy)"
+                                                                         OnClick="@(() => InstallDockerEngineAsync(engine.EngineId))" />
                                                     }
                                                     else if (installedEngine.IsRunning)
                                                     {
-                                                        @if (dockerActionsApproved)
-                                                        {
-                                                            <UiCommandButton Label="Stop"
-                                                                             Glyph="UiIconGlyph.Stop"
-                                                                             Variant="UiButtonVariant.Ghost"
-                                                                             Disabled="@isBusy"
-                                                                             OnClick="@(() => StopDockerEngineAsync(installedEngine.ContainerId))" />
-                                                        }
+                                                        <UiCommandButton Label="Stop"
+                                                                         Glyph="UiIconGlyph.Stop"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         Disabled="@isBusy"
+                                                                         OnClick="@(() => StopDockerEngineAsync(installedEngine.ContainerId))" />
                                                     }
                                                     else
                                                     {
-                                                        @if (dockerActionsApproved)
-                                                        {
-                                                            <UiCommandButton Label="Start"
-                                                                             Glyph="UiIconGlyph.Run"
-                                                                             Disabled="@isBusy"
-                                                                             OnClick="@(() => StartDockerEngineAsync(installedEngine.ContainerId))" />
-                                                        }
+                                                        <UiCommandButton Label="Start"
+                                                                         Glyph="UiIconGlyph.Run"
+                                                                         Disabled="@isBusy"
+                                                                         OnClick="@(() => StartDockerEngineAsync(installedEngine.ContainerId))" />
                                                     }
                                                     @if (installedEngine is not null)
                                                     {
@@ -776,24 +738,18 @@
                                                     <div class="toolbar-cluster">
                                                         @if (engine.IsRunning)
                                                         {
-                                                            @if (dockerActionsApproved)
-                                                            {
-                                                                <UiCommandButton Label="Stop"
-                                                                                 Glyph="UiIconGlyph.Stop"
-                                                                                 Variant="UiButtonVariant.Ghost"
-                                                                                 Disabled="@isBusy"
-                                                                                 OnClick="@(() => StopDockerEngineAsync(engine.ContainerId))" />
-                                                            }
+                                                            <UiCommandButton Label="Stop"
+                                                                             Glyph="UiIconGlyph.Stop"
+                                                                             Variant="UiButtonVariant.Ghost"
+                                                                             Disabled="@isBusy"
+                                                                             OnClick="@(() => StopDockerEngineAsync(engine.ContainerId))" />
                                                         }
                                                         else
                                                         {
-                                                            @if (dockerActionsApproved)
-                                                            {
-                                                                <UiCommandButton Label="Start"
-                                                                                 Glyph="UiIconGlyph.Run"
-                                                                                 Disabled="@isBusy"
-                                                                                 OnClick="@(() => StartDockerEngineAsync(engine.ContainerId))" />
-                                                            }
+                                                            <UiCommandButton Label="Start"
+                                                                             Glyph="UiIconGlyph.Run"
+                                                                             Disabled="@isBusy"
+                                                                             OnClick="@(() => StartDockerEngineAsync(engine.ContainerId))" />
                                                         }
                                                         <UiCommandButton Label="Open UI/API"
                                                                          Glyph="UiIconGlyph.PopOut"
@@ -828,15 +784,6 @@
                                         <p class="meta-text">Qwen 3.5 is the current Local AI family. The 4B model is the everyday baseline for most computers.</p>
                                     </div>
                                     <span>@workspace.RecommendedModels.Count option(s)</span>
-                                </div>
-
-                                <div class="local-ai-approval-row">
-                                    <label class="local-ai-approval-toggle" title="Required before Linux Made Sane downloads or removes local models.">
-                                        <UiCompactCheckbox Label="Approve model changes"
-                                                           Value="@modelActionsApproved"
-                                                           ValueChanged="SetModelActionsApprovedAsync" />
-                                        <span>I approve downloading and removing local models on this computer.</span>
-                                    </label>
                                 </div>
 
                                 <div class="compact-list local-ai-model-list">
@@ -882,7 +829,7 @@
                                                     {
                                                         <UiCommandButton Label="Download"
                                                                          Glyph="UiIconGlyph.Upload"
-                                                                         Disabled="@(!modelActionsApproved || isBusy)"
+                                                                         Disabled="@isBusy"
                                                                          OnClick="@(() => PullModelAsync(model.ModelId))" />
                                                     }
                                                     else
@@ -890,7 +837,7 @@
                                                         <UiCommandButton Label="Remove"
                                                                          Glyph="UiIconGlyph.Delete"
                                                                          Variant="UiButtonVariant.Danger"
-                                                                         Disabled="@(!modelActionsApproved || isBusy)"
+                                                                         Disabled="@isBusy"
                                                                          OnClick="@(() => RemoveModelAsync(model.ModelId))" />
                                                     }
                                                     <UiCommandButton Label="Test"
@@ -1286,9 +1233,6 @@
     [Parameter]
     public bool Embedded { get; set; }
 
-    [CascadingParameter]
-    private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
-
     private const string OverviewTabValue = "overview";
     private const string SetupTabValue = "setup";
     private const string DockerTabValue = "docker";
@@ -1309,11 +1253,6 @@
     private bool isLoaded;
     private bool isBusy;
     private bool isApplyingSetup;
-    private bool setupApproved;
-    private bool runtimeActionsApproved;
-    private bool modelActionsApproved;
-    private bool dockerActionsApproved;
-    private Guid? userId;
     private string customOpenAiDisplayName = "OpenAI-compatible API";
     private string customOpenAiBaseUrl = string.Empty;
     private string customOpenAiModelId = string.Empty;
@@ -1355,13 +1294,6 @@
 
     protected override async Task OnInitializedAsync()
     {
-        userId = await ResolveUserIdAsync();
-        if (userId.HasValue)
-        {
-            var preference = await UserDisplayPreferenceService.GetAsync(userId.Value);
-            dockerActionsApproved = preference?.DockerAiActionsApproved ?? false;
-        }
-
         await LoadAsync();
     }
 
@@ -1405,49 +1337,10 @@
         return Task.CompletedTask;
     }
 
-    private Task SetSetupApprovedAsync(bool value)
-    {
-        setupApproved = value;
-        return Task.CompletedTask;
-    }
-
-    private Task SetRuntimeActionsApprovedAsync(bool value)
-    {
-        runtimeActionsApproved = value;
-        return Task.CompletedTask;
-    }
-
-    private Task SetModelActionsApprovedAsync(bool value)
-    {
-        modelActionsApproved = value;
-        return Task.CompletedTask;
-    }
-
-    private async Task SetDockerActionsApprovedAsync(bool value)
-    {
-        dockerActionsApproved = value;
-        if (userId.HasValue)
-        {
-            await UserDisplayPreferenceService.SaveDockerAiActionsApprovedAsync(userId.Value, value);
-        }
-    }
-
     private Task SetCustomOpenAiDefaultAsync(bool value)
     {
         customOpenAiSetDefault = value;
         return Task.CompletedTask;
-    }
-
-    private async Task<Guid?> ResolveUserIdAsync()
-    {
-        var authenticationState = AuthenticationStateTask is null
-            ? null
-            : await AuthenticationStateTask;
-        var value = authenticationState?.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-
-        return Guid.TryParse(value, out var parsed)
-            ? parsed
-            : null;
     }
 
     private async Task PreviewSetupAsync()
@@ -1496,7 +1389,7 @@
 
         try
         {
-            lastApplyResult = await LocalAiService.ApplySetupAsync(setupEditor, setupApproved, progress);
+            lastApplyResult = await LocalAiService.ApplySetupAsync(setupEditor, true, progress);
             SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
             await LoadAsync(clearStatus: false);
         }
@@ -1512,20 +1405,20 @@
     }
 
     private async Task StartRuntimeAsync() =>
-        await RunRuntimeActionAsync(() => LocalAiService.StartRuntimeAsync(runtimeActionsApproved));
+        await RunRuntimeActionAsync(() => LocalAiService.StartRuntimeAsync(true));
 
     private async Task StopRuntimeAsync() =>
-        await RunRuntimeActionAsync(() => LocalAiService.StopRuntimeAsync(runtimeActionsApproved));
+        await RunRuntimeActionAsync(() => LocalAiService.StopRuntimeAsync(true));
 
     private async Task RestartRuntimeAsync() =>
-        await RunRuntimeActionAsync(() => LocalAiService.RestartRuntimeAsync(runtimeActionsApproved));
+        await RunRuntimeActionAsync(() => LocalAiService.RestartRuntimeAsync(true));
 
     private async Task PullModelAsync(string modelId)
     {
         isBusy = true;
         try
         {
-            lastApplyResult = await LocalAiService.PullModelAsync(modelId, modelActionsApproved);
+            lastApplyResult = await LocalAiService.PullModelAsync(modelId, true);
             SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
             await LoadAsync();
         }
@@ -1544,7 +1437,7 @@
         isBusy = true;
         try
         {
-            lastApplyResult = await LocalAiService.RemoveModelAsync(modelId, modelActionsApproved);
+            lastApplyResult = await LocalAiService.RemoveModelAsync(modelId, true);
             SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
             await LoadAsync();
         }
@@ -1810,7 +1703,7 @@
         isBusy = true;
         try
         {
-            lastApplyResult = await LocalAiService.InstallDockerEngineAsync(engineId, dockerActionsApproved);
+            lastApplyResult = await LocalAiService.InstallDockerEngineAsync(engineId, true);
             SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
             await LoadAsync(clearStatus: false);
         }
@@ -1829,7 +1722,7 @@
         isBusy = true;
         try
         {
-            lastApplyResult = await LocalAiService.StartDockerEngineAsync(containerIdOrName, dockerActionsApproved);
+            lastApplyResult = await LocalAiService.StartDockerEngineAsync(containerIdOrName, true);
             SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
             await LoadAsync(clearStatus: false);
         }
@@ -1848,7 +1741,7 @@
         isBusy = true;
         try
         {
-            lastApplyResult = await LocalAiService.StopDockerEngineAsync(containerIdOrName, dockerActionsApproved);
+            lastApplyResult = await LocalAiService.StopDockerEngineAsync(containerIdOrName, true);
             SetStatus(lastApplyResult.Summary, lastApplyResult.Succeeded ? "success" : "error");
             await LoadAsync(clearStatus: false);
         }
