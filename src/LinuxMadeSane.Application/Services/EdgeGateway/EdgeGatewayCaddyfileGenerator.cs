@@ -34,6 +34,15 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
 
         builder.AppendLine("    encode zstd gzip");
         builder.AppendLine();
+        // Keep this check ahead of every imported relay, auth endpoint and app route.
+        // Cloudflare overwrites X-Forwarded-Proto with the visitor's actual scheme.
+        // Only our loopback connector may attest to TLS on the external hop; a
+        // direct plaintext client cannot bypass this by supplying proxy headers.
+        builder.AppendLine("    route {");
+        builder.AppendLine("    # Published Edge Gateway services are HTTPS-only.");
+        builder.AppendLine("    @lms_insecure expression `!(({http.request.scheme} == 'https' && {http.request.header.X-Forwarded-Proto} == '') || (remote_ip('127.0.0.1/32', '::1/128') && {http.request.header.X-Forwarded-Proto} == 'https'))`");
+        builder.AppendLine("    respond @lms_insecure \"HTTPS is required.\" 403");
+        builder.AppendLine();
         // Only the local cloudflared connector may supply Cloudflare's client address.
         // Direct visitors cannot select their source IP using forwarded headers.
         builder.AppendLine("    vars lms_edge_client_ip {remote_host}");
@@ -148,6 +157,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
 
         builder.AppendLine("    handle {");
         builder.AppendLine("        respond 404");
+        builder.AppendLine("    }");
         builder.AppendLine("    }");
         builder.AppendLine("}");
         builder.AppendLine();
