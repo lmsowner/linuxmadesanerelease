@@ -267,11 +267,28 @@ public sealed record CustomOpenAiProviderRequest(
     bool SetDefault);
 
 public sealed record PeerLmsAiProviderRequest(
-    string DisplayName,
     string LmsBaseUrl,
-    string AccessKey,
-    string ModelId,
-    bool SetDefault);
+    string AccessKey)
+{
+    // Keep the previous constructor for existing callers. New callers only
+    // need the shared host and access key; the host model is discovered.
+    public PeerLmsAiProviderRequest(
+        string displayName,
+        string lmsBaseUrl,
+        string accessKey,
+        string modelId,
+        bool setDefault)
+        : this(lmsBaseUrl, accessKey)
+    {
+        DisplayName = displayName;
+        ModelId = modelId;
+        SetDefault = setDefault;
+    }
+
+    public string? DisplayName { get; init; }
+    public string? ModelId { get; init; }
+    public bool SetDefault { get; init; } = true;
+}
 
 public sealed record LocalAiPeerSharingStatus(
     bool Enabled,

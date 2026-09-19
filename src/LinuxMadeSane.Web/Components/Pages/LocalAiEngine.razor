@@ -537,25 +537,16 @@
                                 <div class="table-header">
                                     <div>
                                         <p class="eyebrow">LMS network</p>
-                                        <h2>Use Local AI from another LMS instance</h2>
-                                        <p class="meta-text">Enter the HTTPS address and access key from the LMS machine hosting the local model. The key is stored in LMS protected secrets and is never saved in provider metadata.</p>
+                                        <h2>Connect to a shared Local AI</h2>
+                                        <p class="meta-text">After the other LMS enables sharing, enter its hostname and access key. LMS discovers the available model automatically. The key is stored in protected secrets and is never saved in provider metadata.</p>
                                     </div>
                                 </div>
 
                                 <div class="local-ai-form-grid local-ai-custom-endpoint-grid">
-                                    <UiTextField @bind-Value="peerLmsDisplayName"
-                                                 Label="Display name"
-                                                 Placeholder="Shared LMS Local AI"
-                                                 Compact="true" />
                                     <UiTextField @bind-Value="peerLmsBaseUrl"
-                                                 Label="Host LMS address"
-                                                 Helper="Use the public HTTPS address of the LMS instance hosting Local AI."
-                                                 Placeholder="https://ai-host.example.com"
-                                                 Compact="true" />
-                                    <UiTextField @bind-Value="peerLmsModelId"
-                                                 Label="Model ID"
-                                                 Helper="Exact model name installed on the host LMS instance."
-                                                 Placeholder="qwen2.5-coder:14b"
+                                                 Label="Shared LMS hostname"
+                                                 Helper="Enter a hostname or HTTPS URL for the LMS sharing Local AI."
+                                                 Placeholder="ai-host.example.com"
                                                  Compact="true" />
                                     <UiTextField @bind-Value="peerLmsAccessKey"
                                                  Label="Access key"
@@ -566,9 +557,6 @@
                                 </div>
 
                                 <div class="local-ai-inline-actions">
-                                    <UiCompactCheckbox Label="Default provider"
-                                                       Value="@peerLmsSetDefault"
-                                                       ValueChanged="SetPeerLmsDefaultAsync" />
                                     <UiCommandButton Label="Connect shared Local AI"
                                                      Glyph="UiIconGlyph.Connection"
                                                      Disabled="@(!CanAddPeerLmsProvider)"
@@ -1332,11 +1320,8 @@
     private bool customOpenAiSetDefault;
     private LocalAiPeerSharingStatus? peerSharingStatus;
     private string issuedPeerAccessKey = string.Empty;
-    private string peerLmsDisplayName = "Shared LMS Local AI";
     private string peerLmsBaseUrl = string.Empty;
-    private string peerLmsModelId = string.Empty;
     private string peerLmsAccessKey = string.Empty;
-    private bool peerLmsSetDefault;
     private bool SupportsConnectSharing => ConnectClientFeature.SupportsRemoteAiSharing;
 
     private IReadOnlyList<LocalAiUsageEntry> LocalUsageEntries =>
@@ -1360,7 +1345,6 @@
     private bool CanAddPeerLmsProvider =>
         !isBusy &&
         !string.IsNullOrWhiteSpace(peerLmsBaseUrl) &&
-        !string.IsNullOrWhiteSpace(peerLmsModelId) &&
         !string.IsNullOrWhiteSpace(peerLmsAccessKey);
 
     private LocalAiSetupProgressUpdate? CurrentSetupProgress =>
@@ -1451,12 +1435,6 @@
     private Task SetCustomOpenAiDefaultAsync(bool value)
     {
         customOpenAiSetDefault = value;
-        return Task.CompletedTask;
-    }
-
-    private Task SetPeerLmsDefaultAsync(bool value)
-    {
-        peerLmsSetDefault = value;
         return Task.CompletedTask;
     }
 
@@ -1811,11 +1789,8 @@
         {
             var provider = await LocalAiService.CreateOrUpdatePeerLmsProviderAsync(
                 new PeerLmsAiProviderRequest(
-                    peerLmsDisplayName,
                     peerLmsBaseUrl,
-                    peerLmsAccessKey,
-                    peerLmsModelId,
-                    peerLmsSetDefault));
+                    peerLmsAccessKey));
             peerLmsAccessKey = string.Empty;
             SetStatus($"{provider.DisplayName} is now available in AI Providers.", "success");
             await LoadAsync(clearStatus: false);
