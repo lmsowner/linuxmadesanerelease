@@ -25,6 +25,15 @@ public sealed class LocalAiPeerSharingService(
     public Task DisableAsync(CancellationToken cancellationToken = default) =>
         sharingStore.DisableAsync(cancellationToken);
 
+    public async Task<bool> IsSharedEnginePortAsync(
+        int localPort,
+        CancellationToken cancellationToken = default)
+    {
+        var settings = await localAiStore.GetSettingsAsync(cancellationToken);
+        return Uri.TryCreate(settings.RuntimeEndpoint, UriKind.Absolute, out var runtimeEndpoint) &&
+               runtimeEndpoint.Port == localPort;
+    }
+
     public async Task<LocalAiPeerProxyResult?> ForwardAsync(
         string? bearerToken,
         string relativePath,

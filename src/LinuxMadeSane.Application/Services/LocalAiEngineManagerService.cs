@@ -799,15 +799,10 @@ public sealed class LocalAiEngineManagerService(
         PeerLmsAiProviderRequest request,
         CancellationToken cancellationToken = default)
     {
-        var lmsEndpoint = ParsePeerLmsEndpoint(request.LmsBaseUrl);
-        if (lmsEndpoint is null)
+        var serviceEndpoint = ParsePeerLmsEndpoint(request.LmsBaseUrl);
+        if (serviceEndpoint is null)
         {
-            throw new InvalidOperationException("Enter the hostname of the LMS instance sharing Local AI.");
-        }
-
-        if (lmsEndpoint.Scheme != Uri.UriSchemeHttps && !lmsEndpoint.IsLoopback)
-        {
-            throw new InvalidOperationException("Remote LMS Local AI requires an HTTPS LMS address so its access key is encrypted in transit.");
+            throw new InvalidOperationException("Enter the URL of the shared AI service.");
         }
 
         if (string.IsNullOrWhiteSpace(request.AccessKey))
@@ -816,14 +811,14 @@ public sealed class LocalAiEngineManagerService(
         }
 
         var modelId = string.IsNullOrWhiteSpace(request.ModelId)
-            ? await DiscoverPeerModelAsync(lmsEndpoint, request.AccessKey, cancellationToken)
+            ? await DiscoverPeerModelAsync(serviceEndpoint, request.AccessKey, cancellationToken)
             : request.ModelId.Trim();
 
         var existingProviders = await providerSettingsStore.ListAsync(cancellationToken);
         var displayName = string.IsNullOrWhiteSpace(request.DisplayName)
-            ? $"Local AI on {lmsEndpoint.Host}"
+            ? $"Local AI on {serviceEndpoint.Host}"
             : request.DisplayName.Trim();
-        var providerKey = $"peer-lms-ai-{NormalizeProviderSegment(lmsEndpoint.Authority)}";
+        var providerKey = $"peer-lms-ai-{NormalizeProviderSegment(serviceEndpoint.Authority)}";
         var existing = existingProviders.FirstOrDefault(provider =>
             provider.ProviderKey.Equals(providerKey, StringComparison.OrdinalIgnoreCase));
         var now = DateTimeOffset.UtcNow;
@@ -832,11 +827,11 @@ public sealed class LocalAiEngineManagerService(
             $"peer-lms-local-ai:{providerKey}",
             cancellationToken);
         var shouldBeDefault = request.SetDefault || existing?.IsDefault == true || existingProviders.All(provider => !provider.IsDefault);
-        var baseUrl = $"{lmsEndpoint.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/api/local-ai/v1";
+        var baseUrl = $"{serviceEndpoint.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/v1";
         var metadata = JsonSerializer.Serialize(new
         {
             Kind = "peer-lms-local-ai",
-            HostLmsUrl = lmsEndpoint.GetLeftPart(UriPartial.Authority)
+            AiServiceUrl = serviceEndpoint.GetLeftPart(UriPartial.Authority)
         });
         var provider = new AiProviderSettings(
             providerKey,
@@ -888,7 +883,7 @@ public sealed class LocalAiEngineManagerService(
             "local-ai.peer-provider.saved",
             "peer-lms",
             "Remote LMS Local AI provider saved.",
-            $"{displayName} at {lmsEndpoint.GetLeftPart(UriPartial.Authority)} using {modelId}.",
+            $"{displayName} at {serviceEndpoint.GetLeftPart(UriPartial.Authority)} using {modelId}.",
             true,
             cancellationToken);
 
@@ -896,7 +891,7 @@ public sealed class LocalAiEngineManagerService(
     }
 
     private async Task<string> DiscoverPeerModelAsync(
-        Uri lmsEndpoint,
+        Uri serviceEndpoint,
         string accessKey,
         CancellationToken cancellationToken)
     {
@@ -904,7 +899,7 @@ public sealed class LocalAiEngineManagerService(
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(20));
 
         var modelsEndpoint = new Uri(
-            $"{lmsEndpoint.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/api/local-ai/v1/models",
+            $"{serviceEndpoint.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/v1/models",
             UriKind.Absolute);
         using var request = new HttpRequestMessage(HttpMethod.Get, modelsEndpoint);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessKey.Trim());

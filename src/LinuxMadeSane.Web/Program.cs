@@ -1100,6 +1100,7 @@ public class Program
             componentEndpoint.AddAdditionalAssemblies(PluginModuleLoader.LoadedAssemblies.ToArray());
         }
 
+        app.AddLocalAiServiceAddressesAsync().GetAwaiter().GetResult();
         app.Run();
     }
 
@@ -1247,7 +1248,7 @@ public class Program
 
         if (path.StartsWithSegments("/access-denied") ||
             path.StartsWithSegments("/healthz") ||
-            path.StartsWithSegments("/api/local-ai/v1") ||
+            path.StartsWithSegments("/v1") ||
             path.StartsWithSegments("/desktop-assistant/launch") ||
             path.StartsWithSegments("/api/desktop-assistant/native") ||
             path.StartsWithSegments("/edge-auth/check") ||

@@ -1,6 +1,10 @@
 // Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models.LocalAi;
 using LinuxMadeSane.Infrastructure.Services;
 
@@ -8,12 +12,64 @@ namespace LinuxMadeSane.Web;
 
 public static class LocalAiPeerApiEndpointExtensions
 {
+    public static async Task AddLocalAiServiceAddressesAsync(this WebApplication app)
+    {
+        var explicitUrls =
+            app.Configuration["URLS"] ??
+            app.Configuration["ASPNETCORE_URLS"] ??
+            app.Configuration["DOTNET_URLS"];
+        var configuredUrls = !string.IsNullOrWhiteSpace(explicitUrls)
+            ? explicitUrls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : app.Configuration.GetSection("Server:Urls").Get<string[]>() ?? [];
+        foreach (var configuredUrl in configuredUrls)
+        {
+            if (!app.Urls.Contains(configuredUrl, StringComparer.OrdinalIgnoreCase))
+            {
+                app.Urls.Add(configuredUrl);
+            }
+        }
+
+        using var scope = app.Services.CreateScope();
+        var settings = await scope.ServiceProvider
+            .GetRequiredService<ILocalAiEngineStore>()
+            .GetSettingsAsync();
+        if (!Uri.TryCreate(settings.RuntimeEndpoint, UriKind.Absolute, out var runtimeEndpoint) ||
+            runtimeEndpoint.Scheme != Uri.UriSchemeHttp)
+        {
+            return;
+        }
+
+        var addresses = NetworkInterface.GetAllNetworkInterfaces()
+            .Where(network => network.OperationalStatus == OperationalStatus.Up)
+            .SelectMany(network => network.GetIPProperties().UnicastAddresses)
+            .Select(address => address.Address)
+            .Where(address => address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address))
+            .Distinct()
+            .OrderBy(address => address.ToString(), StringComparer.Ordinal)
+            .ToArray();
+
+        foreach (var address in addresses)
+        {
+            var serviceAddress = $"http://{address}:{runtimeEndpoint.Port}";
+            if (!app.Urls.Contains(serviceAddress, StringComparer.OrdinalIgnoreCase))
+            {
+                app.Urls.Add(serviceAddress);
+            }
+        }
+    }
+
     public static IEndpointRouteBuilder MapLocalAiPeerApi(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapGet("/api/local-ai/v1/models", async (
+        endpoints.MapGet("/v1/models", async (
             HttpContext context,
             LocalAiPeerSharingService peerSharing) =>
         {
+            if (!await peerSharing.IsSharedEnginePortAsync(context.Connection.LocalPort, context.RequestAborted))
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+
             var result = await peerSharing.ForwardAsync(
                 ReadBearerToken(context.Request),
                 "models",
@@ -22,10 +78,16 @@ public static class LocalAiPeerApiEndpointExtensions
             await WriteResponseAsync(context, result);
         });
 
-        endpoints.MapPost("/api/local-ai/v1/chat/completions", async (
+        endpoints.MapPost("/v1/chat/completions", async (
             HttpContext context,
             LocalAiPeerSharingService peerSharing) =>
         {
+            if (!await peerSharing.IsSharedEnginePortAsync(context.Connection.LocalPort, context.RequestAborted))
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+
             var body = await ReadRequestBodyWithLimitAsync(
                 context.Request,
                 LocalAiPeerSharingService.MaximumRequestBytes,

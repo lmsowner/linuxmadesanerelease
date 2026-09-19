@@ -598,7 +598,7 @@ public sealed class AiProviderSettingsService(
         if (Uri.TryCreate(editor.BaseUrl.Trim(), UriKind.Absolute, out var serviceUri) &&
             serviceUri.Scheme is "http" or "https")
         {
-            editor.BaseUrl = $"{serviceUri.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/api/local-ai/v1";
+            editor.BaseUrl = $"{serviceUri.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/v1";
         }
         editor.IsEnabled = true;
         editor.StreamingEnabled = false;
