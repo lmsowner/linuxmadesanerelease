@@ -14,11 +14,33 @@
 @inject NavigationManager Navigation
 
 <div class="on-demand-apps">
+    @if (FavouriteServices.Any())
+    {
+        <section class="on-demand-favourites" aria-labelledby="on-demand-favourites-title">
+            <div class="on-demand-favourites-heading">
+                <h2 id="on-demand-favourites-title">Quick links</h2>
+                <span>@FavouriteServices.Count() favourite@(FavouriteServices.Count() == 1 ? string.Empty : "s")</span>
+            </div>
+            <div class="on-demand-apps-grid on-demand-favourites-grid" role="list">
+                @foreach (var service in FavouriteServices)
+                {
+                    var key = LocalHttpServiceDiscoveryRanking.StableKey(service);
+                    <OnDemandAppCard Service="service"
+                                     Href="@(CanOpen ? BuildOpenUrl(key) : null)"
+                                     CanOpen="@CanOpen"
+                                     IsFavourite="true"
+                                     FavouriteDisabled="@(string.IsNullOrWhiteSpace(userId) || favouriteChangeInProgress.Contains(key))"
+                                     OnToggleFavourite="@(() => ToggleFavouriteAsync(service))"
+                                     OnOpenSettings="@(() => OpenFavouriteSettings(service))" />
+                }
+            </div>
+        </section>
+    }
+
     <section class="surface-card on-demand-apps-toolbar">
-        <div>
-            <p class="eyebrow">Published server access</p>
-            <h2>On-Demand Apps</h2>
-            <p class="meta-text">Discover web apps on this network, then open a favourite through a temporary LMS-authenticated address. Discovery adds or refreshes cached apps; only Flush Cache removes them. Right-click an app to save its connection defaults.</p>
+        <div class="on-demand-apps-toolbar-title">
+            <h2>Discover apps</h2>
+            <p class="meta-text">Scans add or refresh cached apps. Only Flush Cache removes them.</p>
         </div>
         <div class="on-demand-apps-scan-controls">
             <UiCheckboxField @bind-Value="includeDocker" Label="Docker" Compact="true" />
@@ -59,10 +81,6 @@
     {
         <p class="callout warning"><strong>Opening apps is unavailable.</strong> @availability.Message Discovery and favourites remain available.</p>
     }
-    else
-    {
-        <p class="callout success"><strong>Ready.</strong> @availability.Message Temporary routes are removed when their window closes or becomes stale.</p>
-    }
 
     @if (isScanning)
     {
@@ -77,46 +95,25 @@
         <p class="meta-text on-demand-apps-message">@message</p>
     }
 
-    @if (services.Count == 0 && !isScanning)
+    @if (!DiscoveredServices.Any() && !FavouriteServices.Any() && !isScanning)
     {
         <section class="empty-state">
             <h3>No cached HTTP/S apps</h3>
             <p>Run Scan to search localhost, exposed Docker containers and the private LAN. Enable Tailscale only when you want tailnet peers included.</p>
         </section>
     }
-    else
+    else if (DiscoveredServices.Any())
     {
         <div class="on-demand-apps-grid" role="list">
-            @foreach (var service in SortedServices)
+            @foreach (var service in DiscoveredServices)
             {
                 var key = LocalHttpServiceDiscoveryRanking.StableKey(service);
-                var isFavourite = favouriteProfiles.ContainsKey(key);
-                <article class="on-demand-app @(isFavourite ? "is-favourite" : null)"
-                         @oncontextmenu="@(_ => OpenFavouriteSettings(service))"
-                         @oncontextmenu:preventDefault="true"
-                         @oncontextmenu:stopPropagation="true">
-                    <EdgeGatewayHttpServiceLookupStamp Service="service"
-                                                       Href="@(CanOpen ? BuildOpenUrl(key) : null)"
-                                                       Target="_blank"
-                                                       Rel="noopener"
-                                                       Disabled="@(!CanOpen)"
-                                                       OnClientClick="return window.lmsOnDemandApps?.openTracked(this, event) ?? false;" />
-                    <button type="button"
-                            class="on-demand-app-favourite @(isFavourite ? "is-selected" : null)"
-                            title="@(isFavourite ? "Remove from favourites" : "Add to favourites")"
-                            aria-label="@(isFavourite ? $"Remove {LocalHttpServiceDiscoveryRanking.PickerLabel(service)} from favourites" : $"Add {LocalHttpServiceDiscoveryRanking.PickerLabel(service)} to favourites")"
-                            aria-pressed="@(isFavourite ? "true" : "false")"
-                            disabled="@(string.IsNullOrWhiteSpace(userId) || favouriteChangeInProgress.Contains(key))"
-                            @onclick="@(() => ToggleFavouriteAsync(service))">@(isFavourite ? "★" : "☆")</button>
-                    @if (isFavourite)
-                    {
-                        <button type="button"
-                                class="on-demand-app-settings"
-                                title="Favourite connection settings"
-                                aria-label="Configure connection settings for @LocalHttpServiceDiscoveryRanking.PickerLabel(service)"
-                                @onclick="@(() => OpenFavouriteSettings(service))">⚙</button>
-                    }
-                </article>
+                <OnDemandAppCard Service="service"
+                                 Href="@(CanOpen ? BuildOpenUrl(key) : null)"
+                                 CanOpen="@CanOpen"
+                                 FavouriteDisabled="@(string.IsNullOrWhiteSpace(userId) || favouriteChangeInProgress.Contains(key))"
+                                 OnToggleFavourite="@(() => ToggleFavouriteAsync(service))"
+                                 OnOpenSettings="@(() => OpenFavouriteSettings(service))" />
             }
         </div>
     }
@@ -215,11 +212,18 @@
 
     private bool CanOpen => availability?.IsAvailable == true && !string.IsNullOrWhiteSpace(userId);
 
-    private IEnumerable<LocalHttpServiceEndpoint> SortedServices => services
+    private IEnumerable<LocalHttpServiceEndpoint> FavouriteServices => favouriteProfiles.Values
+        .Where(favourite => favourite.Endpoint is not null)
+        .OrderByDescending(favourite => favourite.UpdatedAtUtc)
+        .Select(favourite => favourite.Endpoint!)
         .Where(service => !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(service))
+        .DistinctBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase);
+
+    private IEnumerable<LocalHttpServiceEndpoint> DiscoveredServices => services
+        .Where(service => !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(service))
+        .Where(service => !favouriteProfiles.ContainsKey(LocalHttpServiceDiscoveryRanking.StableKey(service)))
         .DistinctBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase)
-        .OrderByDescending(service => favouriteProfiles.ContainsKey(LocalHttpServiceDiscoveryRanking.StableKey(service)))
-        .ThenBy(LocalHttpServiceDiscoveryRanking.PresentationRank)
+        .OrderBy(LocalHttpServiceDiscoveryRanking.PresentationRank)
         .ThenBy(LocalHttpServiceDiscoveryRanking.PickerLabel, StringComparer.OrdinalIgnoreCase)
         .ThenBy(service => service.Host, StringComparer.OrdinalIgnoreCase)
         .ThenBy(service => service.Port);
@@ -503,7 +507,7 @@
             .ToArray();
     }
 
-    private int VisibleServiceCount => SortedServices.Count();
+    private int VisibleServiceCount => FavouriteServices.Count() + DiscoveredServices.Count();
 
     private HttpServiceDiscoveryPreferences CurrentPreferences() =>
         new(refreshIntervalMinutes, includeDocker, includeLan, includeTailnet);
