@@ -209,6 +209,18 @@ public sealed class SqliteCaddyIntegrationDataService(
     public async Task<CaddyOperationResult> InstallAsync(CancellationToken cancellationToken = default)
     {
         var logs = new List<OperationLogEntry>();
+        var setupTool = Path.Combine(AppContext.BaseDirectory, "tools", "linux-made-sane-caddy-setup");
+        if (File.Exists(setupTool))
+        {
+            // A package transaction must finish or roll back even if the browser disconnects.
+            var setup = await commandRunner.RunAsync(new LinuxCommandRequest(
+                "bash", [setupTool], true, TimeSpan.FromMinutes(10),
+                "Upgrade Caddy for On-Demand App source binding, preserving existing routes"),
+                dryRun: false, CancellationToken.None);
+            logs.Add(Map(setup, "Prepare Caddy source-address support"));
+            if (setup.ExitCode != 0)
+                return BuildFailureResult(logs, "Caddy upgrade failed; see the operation log. Existing LMS routes were retained.");
+        }
         logs.AddRange(await packageManagementService.ApplyActionsAsync(
             [
                 new PackageAction(

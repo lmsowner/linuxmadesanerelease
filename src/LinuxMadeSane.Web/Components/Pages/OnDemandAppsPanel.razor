@@ -6,12 +6,15 @@
 @using LinuxMadeSane.Application.Services.EdgeGateway
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Models.Cloudflare
+@using LinuxMadeSane.Core.Models.Caddy
+@using LinuxMadeSane.Application.Interfaces
 @using Microsoft.AspNetCore.Components.Authorization
 @implements IDisposable
 @inject ILocalHttpServiceDiscoveryService HttpServiceDiscovery
 @inject OnDemandAppService OnDemandApps
 @inject HttpServiceDiscoveryCoordinator DiscoveryCoordinator
 @inject NavigationManager Navigation
+@inject ICaddyIntegrationService CaddyIntegrationService
 
 <div class="on-demand-apps">
     @if (FavouriteServices.Any())
@@ -202,17 +205,31 @@
                 {
                     <p class="meta-text on-demand-apps-message">@favouriteSettingsMessage</p>
                 }
+                @if (caddyUpgradeRequired)
+                {
+                    <p class="meta-text">Upgrade Caddy installs a supported package from Caddy's official stable repository, checks your existing configuration first and restarts Caddy. Open proxy connections may briefly reconnect.</p>
+                    <UiCommandButton Label="@(isUpgradingCaddy ? "Upgrading Caddy..." : "Upgrade Caddy")"
+                                     Disabled="@(isUpgradingCaddy || isTestingFavouriteSettings || isSavingFavouriteSettings)"
+                                     OnClick="UpgradeCaddyAsync" />
+                }
+                @if (!string.IsNullOrWhiteSpace(caddyUpgradeLog))
+                {
+                    <details>
+                        <summary>Caddy upgrade log</summary>
+                        <pre style="max-height: 16rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;">@caddyUpgradeLog</pre>
+                    </details>
+                }
             }
         </ChildContent>
         <Footer>
             <UiCommandButton Label="@(isTestingFavouriteSettings ? "Testing..." : "Test connection")"
                              Glyph="UiIconGlyph.Connection"
-                             Disabled="@(isSavingFavouriteSettings || isTestingFavouriteSettings || !CanOpen)"
+                             Disabled="@(isSavingFavouriteSettings || isTestingFavouriteSettings || isUpgradingCaddy || !CanOpen)"
                              OnClick="TestFavouriteConnectionAsync" />
             <UiCommandButton Label="Save favourite settings"
                              Glyph="UiIconGlyph.Save"
                              Variant="UiButtonVariant.Primary"
-                             Disabled="@(isSavingFavouriteSettings || isTestingFavouriteSettings)"
+                             Disabled="@(isSavingFavouriteSettings || isTestingFavouriteSettings || isUpgradingCaddy)"
                              OnClick="SaveFavouriteSettingsAsync" />
         </Footer>
     </UiModal>
@@ -237,6 +254,9 @@
     private bool showFavouriteSettings;
     private bool isSavingFavouriteSettings;
     private bool isTestingFavouriteSettings;
+    private bool caddyUpgradeRequired;
+    private bool isUpgradingCaddy;
+    private string caddyUpgradeLog = string.Empty;
     private IReadOnlyList<UiNetworkInterfaceIpOption> sourceOptions = [];
 
     private string ConnectionModeHelp => favouriteSettingsEditor.ConnectAsLms
@@ -534,6 +554,8 @@
         favouriteSettingsService = service;
         favouriteSettingsEditor = FavouriteSettingsEditor.From(preferences);
         favouriteSettingsTitle = LocalHttpServiceDiscoveryRanking.PickerLabel(service);
+        caddyUpgradeRequired = false;
+        caddyUpgradeLog = string.Empty;
         favouriteSettingsMessage = string.Empty;
         showFavouriteSettings = true;
     }
@@ -566,6 +588,7 @@
         }
         catch (Exception exception)
         {
+            caddyUpgradeRequired = exception is CaddySourceBindingRequiredException;
             favouriteSettingsMessage = $"Favourite settings could not be saved: {exception.Message}";
         }
         finally
@@ -593,6 +616,7 @@
         {
             var preferences = favouriteSettingsEditor.ToPreferences();
             var result = await CheckFavouriteConnectionAsync(preferences);
+            caddyUpgradeRequired = false;
             var source = preferences.ConnectAsLms
                 ? $"{preferences.SourceInterface} ({preferences.SourceAddress})"
                 : "system-selected source address";
@@ -602,11 +626,35 @@
         }
         catch (Exception exception)
         {
+            caddyUpgradeRequired = exception is CaddySourceBindingRequiredException;
             favouriteSettingsMessage = $"Connection test failed: {exception.Message}";
         }
         finally
         {
             isTestingFavouriteSettings = false;
+        }
+    }
+
+    private async Task UpgradeCaddyAsync()
+    {
+        if (isUpgradingCaddy || isTestingFavouriteSettings || isSavingFavouriteSettings || string.IsNullOrWhiteSpace(userId)) return;
+        isUpgradingCaddy = true;
+        favouriteSettingsMessage = "Preparing Caddy. Your current configuration will be checked before the package is replaced...";
+        try
+        {
+            var result = await CaddyIntegrationService.InstallAsync();
+            caddyUpgradeLog = string.Join(Environment.NewLine, result.Logs.Select(log =>
+                $"{log.Message}{Environment.NewLine}{log.StandardOutput}{Environment.NewLine}{log.StandardError}"));
+            caddyUpgradeRequired = !result.Success;
+            favouriteSettingsMessage = result.Summary;
+        }
+        catch (Exception exception)
+        {
+            favouriteSettingsMessage = $"Caddy could not be upgraded: {exception.Message}";
+        }
+        finally
+        {
+            isUpgradingCaddy = false;
         }
     }
 

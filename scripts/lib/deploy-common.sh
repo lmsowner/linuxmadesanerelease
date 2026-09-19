@@ -124,6 +124,106 @@ lms_install_host_packages() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -- "${missing[@]}"
 }
 
+# Test the feature, not a version string: distro builds may backport it.
+lms_caddy_supports_source_binding() {
+  printf 'http://127.0.0.1:18088 {\n reverse_proxy 127.0.0.1:18089 {\n transport http {\n local_address 127.0.0.1\n }\n }\n}\n' |
+    "$1" adapt --config - --adapter caddyfile >/dev/null 2>&1
+}
+
+lms_lock_caddy_upgrade() {
+  install -d -m 0755 /run/linuxmadesane-caddy-upgrade
+  exec 9>/run/linuxmadesane-caddy-upgrade/lock
+  flock -w 120 9 || lms_die "Another Caddy dependency upgrade is running"
+}
+
+# Ubuntu still ships Caddy 2.6, which cannot bind an upstream source address.
+# Run on CE installs AND updates, before switching LMS. Keep package ownership;
+# never replace /usr/bin/caddy with an unmanaged downloaded executable.
+lms_ensure_caddy_source_binding() (
+  local config_directory="${1:-/etc/caddy}"
+  [[ -z "${LMS_DEST_ROOT:-}" ]] || exit 0
+  lms_is_truthy "${INSTALL_SYSTEM_PACKAGES:-true}" || exit 0
+  [[ "$(id -u)" == 0 ]] || exit 0
+  if command -v caddy >/dev/null 2>&1 && lms_caddy_supports_source_binding caddy; then
+    lms_log "Caddy supports On-Demand App source-address binding"
+    exit 0
+  fi
+
+  command -v apt-get >/dev/null 2>&1 ||
+    lms_die "Connect as LMS server requires Caddy with local_address support. Install a supported Caddy package for this distribution."
+  if command -v caddy >/dev/null 2>&1 && [[ "$(readlink -f "$(command -v caddy)")" != /usr/bin/caddy ]]; then
+    lms_die "A custom Caddy executable is in use; upgrade that installation to support local_address before updating LMS."
+  fi
+
+  lms_install_host_packages ca-certificates curl gnupg
+  local work candidate installed was_active=false
+  work="$(mktemp -d)"
+  trap 'rm -rf -- "$work"' EXIT
+  lms_lock_caddy_upgrade
+  lms_caddy_supports_source_binding caddy && exit 0
+
+  lms_log "Preparing a supported Caddy package from the official stable repository"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 90 \
+    https://dl.cloudsmith.io/public/caddy/stable/gpg.key -o "$work/caddy.key"
+  gpg --batch --yes --dearmor -o "$work/caddy.gpg" "$work/caddy.key"
+  install -m 0644 "$work/caddy.gpg" /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  printf '%s\n' 'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main' > "$work/caddy-stable.list"
+  install -m 0644 "$work/caddy-stable.list" /etc/apt/sources.list.d/caddy-stable.list
+  # An unrelated broken third-party repository must not block this repair.
+  mkdir "$work/empty-sources"
+  apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/caddy-stable.list \
+    -o Dir::Etc::sourceparts="$work/empty-sources" -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any
+  candidate="$(apt-cache madison caddy | awk '/dl.cloudsmith.io\/public\/caddy\/stable/ {print $3; exit}')"
+  [[ -n "$candidate" ]] || lms_die "No Caddy package found in the official stable repository"
+  installed="$(dpkg-query -W -f='${Version}' caddy 2>/dev/null || true)"
+  if [[ -n "$installed" ]]; then
+    dpkg --compare-versions "$candidate" gt "$installed" ||
+      lms_die "The available Caddy package is not newer than the incompatible installed package"
+  fi
+
+  mkdir "$work/new" "$work/old"
+  (cd "$work/new" && apt-get download "caddy=$candidate")
+  local packages=("$work"/new/*.deb)
+  [[ ${#packages[@]} == 1 && -f "${packages[0]}" ]] || lms_die "Expected one verified Caddy package"
+  dpkg-deb -x "${packages[0]}" "$work/staged"
+  lms_caddy_supports_source_binding "$work/staged/usr/bin/caddy" ||
+    lms_die "Candidate Caddy still lacks source-address binding; the running Caddy was not changed"
+  if [[ -f "$config_directory/Caddyfile" ]]; then
+    lms_log "Validating existing Caddy routes with the new executable before upgrading"
+    "$work/staged/usr/bin/caddy" validate --config "$config_directory/Caddyfile" --adapter caddyfile ||
+      lms_die "New Caddy rejected the existing configuration; the running Caddy was not changed"
+    cp -a "$config_directory" "$work/config-backup"
+  fi
+  # Refuse to replace an existing package unless it can be restored locally.
+  if [[ -n "$installed" ]]; then
+    (cd "$work/old" && apt-get download "caddy=$installed") ||
+      lms_die "Could not retain the installed Caddy package for rollback; Caddy was not changed"
+  fi
+  if lms_has_systemd && systemctl is-active --quiet caddy.service; then
+    was_active=true
+  fi
+
+  lms_log "Installing Caddy $candidate, preserving /etc/caddy"
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confold "${packages[0]}" &&
+     lms_caddy_supports_source_binding caddy &&
+     { [[ "$was_active" != true ]] || { systemctl restart caddy.service && systemctl is-active --quiet caddy.service; }; }; then
+    lms_log "Caddy upgraded successfully; Connect as LMS server is supported"
+    exit 0
+  fi
+
+  lms_log "Caddy upgrade failed; restoring the previous package and configuration"
+  if [[ -n "$installed" ]]; then
+    DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "$work"/old/*.deb || true
+  fi
+  if [[ -d "$work/config-backup" ]]; then
+    cp -a "$work/config-backup/." "$config_directory/"
+  fi
+  if [[ "$was_active" == true ]]; then
+    systemctl restart caddy.service || lms_log "Caddy rollback restart failed; inspect systemctl status caddy"
+  fi
+  lms_die "Caddy dependency upgrade failed; LMS was not switched to the new release"
+)
+
 lms_install_optional_host_packages() {
   local packages=("$@")
   [[ ${#packages[@]} -gt 0 ]] || return

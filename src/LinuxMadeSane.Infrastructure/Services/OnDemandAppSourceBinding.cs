@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models.Cloudflare;
+using LinuxMadeSane.Core.Models.Caddy;
 using LinuxMadeSane.Core.Models.RdpOptimizer;
 
 namespace LinuxMadeSane.Infrastructure.Services;
@@ -111,9 +112,7 @@ public sealed class OnDemandAppSourceBinding(ILinuxCommandRunner commands)
                 false, cancellationToken);
             if (result.ExitCode != 0)
             {
-                throw new InvalidOperationException(
-                    "This Caddy installation cannot enable source-address binding. Install a Caddy version supporting local_address " +
-                    "(verified with 2.10.2) and test again. Current behaviour remains available; no live configuration was changed.");
+                throw new CaddySourceBindingRequiredException();
             }
         }
         finally
