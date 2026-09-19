@@ -66,8 +66,10 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         new(StringComparer.OrdinalIgnoreCase);
 
     private readonly HttpServiceDiscoveryStorageSettings storageSettings;
+    private readonly HttpServiceDiscoveryCheckpointStore checkpointStore;
     private readonly ILinuxCommandRunner commandRunner;
     private readonly TailscalePeerStatusReader tailscalePeerStatusReader;
+    private readonly SemaphoreSlim cacheCheckpointGate = new(1, 1);
 
     public LocalHttpServiceDiscoveryService(
         ILinuxCommandRunner commandRunner,
@@ -83,6 +85,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     {
         this.commandRunner = commandRunner;
         this.storageSettings = storageSettings;
+        checkpointStore = new HttpServiceDiscoveryCheckpointStore(storageSettings);
         this.tailscalePeerStatusReader = tailscalePeerStatusReader;
     }
 
@@ -101,6 +104,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             var cachedCount = (await ReadCacheAsync(cancellationToken)).Count;
             state.Endpoints.Clear();
             File.Delete(storageSettings.CachePath);
+            await checkpointStore.ClearAsync(cancellationToken);
             return cachedCount;
         }
         finally
@@ -156,6 +160,12 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             0));
 
         var existing = await ReadCacheAsync(cancellationToken);
+        if (request.ForceRescan)
+        {
+            await checkpointStore.ClearAsync(cancellationToken);
+        }
+
+        var completedTargets = await checkpointStore.ReadAsync(cancellationToken);
         var preferredHosts = BuildPreferredProbeHosts(request.PreferredEndpoints ?? []);
         var hosts = new List<HttpProbeHost>();
         if (request.IncludeLocalhost)
@@ -182,22 +192,34 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
         // complete port inventory even when it has dropped out of the current neighbour table,
         // so its title and favicon can be refreshed.
         hosts.AddRange(BuildCachedProbeHosts(existing, requestedScopes));
-        hosts = MergeProbeHosts(hosts).ToList();
-        var orderedHosts = preferredHosts.Concat(hosts).ToArray();
+        var allHosts = MergeProbeHosts(preferredHosts.Concat(hosts));
+        var orderedHosts = allHosts
+            .Where(host => !HttpServiceDiscoveryCheckpointStore.IsComplete(
+                completedTargets,
+                BuildScanTargetKey(host),
+                BuildPortInventoryFingerprint(host.Ports)))
+            .ToArray();
+        var skippedCount = allHosts.Count - orderedHosts.Length;
 
         var totalProbeCount = orderedHosts.Length;
         progress?.Report(new LocalHttpServiceDiscoveryProgressUpdate(
             totalProbeCount == 0
-                ? "No HTTP/S scan targets were available."
-                : $"Checking {totalProbeCount} local discovery target(s) for live HTTP/S services...",
+                ? skippedCount == 0
+                    ? "No HTTP/S scan targets were available."
+                    : $"All {skippedCount} discovered target(s) were already fully scanned."
+                : skippedCount == 0
+                    ? $"Checking {totalProbeCount} local discovery target(s) for live HTTP/S services..."
+                    : $"Resuming discovery: {skippedCount} fully scanned target(s) skipped; {totalProbeCount} remaining.",
             0,
             totalProbeCount,
             0));
 
+        var checkpointedResults = new ConcurrentDictionary<string, LocalHttpServiceEndpoint>(StringComparer.OrdinalIgnoreCase);
         var discovered = await ProbeHostsAsync(
             orderedHosts,
             progress,
             PublishActiveEndpoint,
+            CheckpointCompletedHostAsync,
             cancellationToken);
         var merged = MergeDiscoveryResults(existing, discovered);
 
@@ -212,12 +234,45 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
             discovered.Count,
             IsCompleted: true));
         return sorted;
+
+        async Task CheckpointCompletedHostAsync(
+            HttpProbeHost host,
+            IReadOnlyList<LocalHttpServiceEndpoint> hostEndpoints,
+            CancellationToken completionToken)
+        {
+            foreach (var endpoint in hostEndpoints)
+            {
+                checkpointedResults.AddOrUpdate(
+                    BuildEndpointKey(endpoint),
+                    endpoint,
+                    (_, current) => MergeEndpointGroup([current, endpoint]));
+            }
+
+            await cacheCheckpointGate.WaitAsync(completionToken);
+            try
+            {
+                // Persist endpoint evidence first. If LMS stops between these writes the host is
+                // safely scanned again; it is never marked complete before its results are durable.
+                await WriteCacheAsync(
+                    MergeDiscoveryResults(existing, checkpointedResults.Values),
+                    completionToken);
+                await checkpointStore.RecordAsync(
+                    BuildScanTargetKey(host),
+                    BuildPortInventoryFingerprint(host.Ports),
+                    completionToken);
+            }
+            finally
+            {
+                cacheCheckpointGate.Release();
+            }
+        }
     }
 
     private async Task<IReadOnlyList<LocalHttpServiceEndpoint>> ProbeHostsAsync(
         IReadOnlyList<HttpProbeHost> hosts,
         IProgress<LocalHttpServiceDiscoveryProgressUpdate>? progress,
         Action<LocalHttpServiceEndpoint> endpointDiscovered,
+        Func<HttpProbeHost, IReadOnlyList<LocalHttpServiceEndpoint>, CancellationToken, Task> hostCompleted,
         CancellationToken cancellationToken)
     {
         if (hosts.Count == 0)
@@ -242,17 +297,30 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
 
         async Task ProbeBatchAsync(IEnumerable<HttpProbeHost> batch)
         {
-            await Task.WhenAll(batch.Select(host => ProbeHostAsync(
-                client,
-                hostConcurrency,
-                tcpConcurrency,
-                serviceConcurrency,
-                results,
-                host,
-                progress,
-                progressState,
-                endpointDiscovered,
-                cancellationToken)));
+            await Task.WhenAll(batch.Select(async host =>
+            {
+                var hostResults = new ConcurrentDictionary<string, LocalHttpServiceEndpoint>(StringComparer.OrdinalIgnoreCase);
+                await ProbeHostAsync(
+                    client,
+                    hostConcurrency,
+                    tcpConcurrency,
+                    serviceConcurrency,
+                    hostResults,
+                    host,
+                    progress,
+                    progressState,
+                    endpointDiscovered,
+                    cancellationToken);
+                foreach (var endpoint in hostResults.Values)
+                {
+                    results.AddOrUpdate(
+                        BuildEndpointKey(endpoint),
+                        endpoint,
+                        (_, current) => MergeEndpointGroup([current, endpoint]));
+                }
+
+                await hostCompleted(host, hostResults.Values.ToArray(), cancellationToken);
+            }));
         }
     }
 
@@ -713,7 +781,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
     private static IReadOnlyList<HttpProbeHost> MergeProbeHosts(IEnumerable<HttpProbeHost> hosts) =>
         hosts
             .GroupBy(
-                host => $"{host.Scope}|{host.ProbeAddress?.ToString() ?? host.ProbeHost}",
+                BuildScanTargetKey,
                 StringComparer.OrdinalIgnoreCase)
             .Select(group =>
             {
@@ -727,6 +795,7 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                     Ports = group.SelectMany(host => host.Ports).Distinct().Order().ToArray(),
                     IsKnownLive = group.Any(host => host.IsKnownLive),
                     IsLocalhostProbe = group.Any(host => host.IsLocalhostProbe),
+                    IsPreferred = group.Any(host => host.IsPreferred),
                     ResolveHostName = group.Any(host => host.ResolveHostName),
                     DisplayName = group.Select(host => host.DisplayName)
                         .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? preferred.DisplayName
@@ -738,6 +807,17 @@ public sealed class LocalHttpServiceDiscoveryService : ILocalHttpServiceDiscover
                 : uint.MaxValue)
             .ThenBy(host => host.ProbeHost, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+
+    private static string BuildScanTargetKey(HttpProbeHost host)
+    {
+        var address = host.ProbeAddress?.ToString() ?? host.ProbeHost.Trim().TrimEnd('.').ToLowerInvariant();
+        return host.IsLocalhostProbe
+            ? $"{host.Scope.Trim().ToLowerInvariant()}|{address}"
+            : address;
+    }
+
+    private static string BuildPortInventoryFingerprint(IEnumerable<int> ports) =>
+        string.Join(',', ports.Distinct().Order());
 
     private async Task<IReadOnlyList<HttpProbeHost>> BuildTailnetProbeHostsAsync(CancellationToken cancellationToken)
     {

@@ -100,6 +100,11 @@ public static class DependencyInjection
         services.AddSingleton(new ShareMountStorageSettings(Path.Combine(contentRootPath, "data", "share-mounts")));
         services.AddSingleton(new SftpBackupStorageSettings(Path.Combine(contentRootPath, "data", "sftp-backups")));
         services.AddSingleton(HttpServiceDiscoveryStorageSettings.CreatePersistent(databaseDirectory, contentRootPath));
+        services.AddSingleton(new LocalAiPeerSharingStorageSettings(Path.Combine(databaseDirectory, "local-ai-peer-sharing")));
+        services.AddSingleton<LocalAiPeerSharingStore>();
+        services.AddScoped<LocalAiPeerSharingService>();
+        services.AddHttpClient(LocalAiPeerSharingService.HttpClientName, client =>
+            client.Timeout = Timeout.InfiniteTimeSpan);
         services.AddSingleton(new FirewallTrialStorageSettings(Path.Combine(databaseDirectory, "firewall-trials")));
         services.AddSingleton(new SshAdminStorageSettings(Path.Combine(databaseDirectory, "ssh-admin-trials")));
         services.Configure<DesktopSessionBrokerOptions>(configuration.GetSection("DesktopSession"));

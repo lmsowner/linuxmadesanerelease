@@ -37,6 +37,9 @@ public interface ILocalAiEngineManagerService
     Task<AiProviderSettings> CreateOrUpdateCustomOpenAiProviderAsync(
         CustomOpenAiProviderRequest request,
         CancellationToken cancellationToken = default);
+    Task<AiProviderSettings> CreateOrUpdatePeerLmsProviderAsync(
+        PeerLmsAiProviderRequest request,
+        CancellationToken cancellationToken = default);
     Task<LocalAiApplyResult> InstallDockerEngineAsync(string engineId, bool approved, CancellationToken cancellationToken = default);
     Task<LocalAiApplyResult> StartDockerEngineAsync(string containerIdOrName, bool approved, CancellationToken cancellationToken = default);
     Task<LocalAiApplyResult> StopDockerEngineAsync(string containerIdOrName, bool approved, CancellationToken cancellationToken = default);

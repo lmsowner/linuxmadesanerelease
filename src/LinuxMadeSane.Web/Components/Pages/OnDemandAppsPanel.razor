@@ -40,7 +40,7 @@
     <section class="surface-card on-demand-apps-toolbar">
         <div class="on-demand-apps-toolbar-title">
             <h2>Discover apps</h2>
-            <p class="meta-text">Scans add or refresh cached apps. Only Flush Cache removes them.</p>
+            <p class="meta-text">Resume scans only new or unfinished targets. Force rescan checks every target again.</p>
         </div>
         <div class="on-demand-apps-scan-controls">
             <UiCheckboxField @bind-Value="includeDocker" Label="Docker" Compact="true" />
@@ -60,11 +60,16 @@
                 <option value="720">Every 12 hours</option>
                 <option value="1440">Daily</option>
             </UiSelectField>
-            <UiCommandButton Label="@(isScanning ? "Scanning in background..." : "Scan now")"
+            <UiCommandButton Label="@(isScanning ? "Scanning in background..." : "Resume scan")"
                              Glyph="UiIconGlyph.Search"
                              Variant="UiButtonVariant.Primary"
                              Disabled="@(isScanning || isFlushingCache)"
                              OnClick="ScanAsync" />
+            <UiCommandButton Label="Force rescan"
+                             Glyph="UiIconGlyph.Refresh"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@(isScanning || isFlushingCache)"
+                             OnClick="ForceRescanAsync" />
             <UiCommandButton Label="@(isFlushingCache ? "Flushing..." : "Flush Cache")"
                              Glyph="UiIconGlyph.Clear"
                              Variant="UiButtonVariant.Danger"
@@ -282,6 +287,16 @@
 
     private async Task ScanAsync()
     {
+        await StartScanAsync(forceRescan: false);
+    }
+
+    private async Task ForceRescanAsync()
+    {
+        await StartScanAsync(forceRescan: true);
+    }
+
+    private async Task StartScanAsync(bool forceRescan)
+    {
         if (isScanning)
         {
             return;
@@ -291,9 +306,12 @@
         {
             var preferences = CurrentPreferences();
             await DiscoveryCoordinator.SavePreferencesAsync(preferences, lifetime.Token);
-            if (DiscoveryCoordinator.TryStartScan(preferences.ToRequest()))
+            var request = preferences.ToRequest() with { ForceRescan = forceRescan };
+            if (DiscoveryCoordinator.TryStartScan(request))
             {
-                message = "Discovery is running in the background. You can open an app or leave this page without stopping it.";
+                message = forceRescan
+                    ? "Full discovery is running in the background. Every target will be scanned again."
+                    : "Discovery is resuming in the background. Fully scanned targets will be skipped.";
             }
 
             await RefreshBackgroundStateAsync();

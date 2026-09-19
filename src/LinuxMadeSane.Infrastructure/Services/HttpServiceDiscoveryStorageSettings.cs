@@ -6,6 +6,7 @@ namespace LinuxMadeSane.Infrastructure.Services;
 public sealed record HttpServiceDiscoveryStorageSettings(string RootDirectory)
 {
     public string CachePath => Path.Combine(RootDirectory, "http-services-cache.json");
+    public string ScanCheckpointsPath => Path.Combine(RootDirectory, "http-service-scan-checkpoints.json");
 
     internal static HttpServiceDiscoveryStorageSettings CreatePersistent(
         string databaseDirectory,

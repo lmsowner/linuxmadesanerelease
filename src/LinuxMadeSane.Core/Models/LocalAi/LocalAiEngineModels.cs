@@ -266,6 +266,27 @@ public sealed record CustomOpenAiProviderRequest(
     string ModelId,
     bool SetDefault);
 
+public sealed record PeerLmsAiProviderRequest(
+    string DisplayName,
+    string LmsBaseUrl,
+    string AccessKey,
+    string ModelId,
+    bool SetDefault);
+
+public sealed record LocalAiPeerSharingStatus(
+    bool Enabled,
+    bool HasAccessKey,
+    DateTimeOffset? AccessKeyIssuedAtUtc);
+
+public sealed record LocalAiPeerSharingKeyResult(
+    LocalAiPeerSharingStatus Status,
+    string AccessKey);
+
+public sealed record LocalAiPeerProxyResult(
+    int StatusCode,
+    string ContentType,
+    byte[] Body);
+
 public sealed record DockerAiEngineProviderMetadata(
     string EngineId,
     string DockerImage,

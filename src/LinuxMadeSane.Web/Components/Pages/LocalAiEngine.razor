@@ -10,9 +10,12 @@
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.LocalAi
+@using LinuxMadeSane.Infrastructure.Services
 @inject ILocalAiEngineManagerService LocalAiService
 @inject IUserDisplayPreferenceService UserDisplayPreferenceService
 @inject ILmsConnectClientFeature ConnectClientFeature
+@inject LocalAiPeerSharingService PeerSharing
+@inject NavigationManager Navigation
 
 @if (!Embedded)
 {
@@ -482,6 +485,94 @@
                                                            ValueChanged="SetDockerActionsApprovedAsync" />
                                         <span>I approve Docker engine install, start, and stop actions.</span>
                                     </label>
+                                </div>
+                            </section>
+
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">LMS network</p>
+                                        <h2>Share this local model with other LMS instances</h2>
+                                        <p class="meta-text">Use one larger LMS machine as the private AI host for your other LMS installations. Only this machine's local model runtime is shared; cloud AI providers remain configured separately on each LMS instance.</p>
+                                    </div>
+                                    <UiPill Tone="@(peerSharingStatus?.Enabled == true ? UiPillTone.Success : UiPillTone.Neutral)">
+                                        @(peerSharingStatus?.Enabled == true ? "Sharing enabled" : "Sharing disabled")
+                                    </UiPill>
+                                </div>
+
+                                <div class="local-ai-inline-meta">
+                                    <span>Host LMS: @Navigation.BaseUri.TrimEnd('/')</span>
+                                    @if (peerSharingStatus?.AccessKeyIssuedAtUtc is not null)
+                                    {
+                                        <span>Key issued @peerSharingStatus.AccessKeyIssuedAtUtc.Value.ToLocalTime().ToString("dd MMM yyyy HH:mm")</span>
+                                    }
+                                </div>
+
+                                @if (!string.IsNullOrWhiteSpace(issuedPeerAccessKey))
+                                {
+                                    <div class="callout warning">
+                                        <strong>Copy this access key now.</strong>
+                                        <p>LMS stores only its hash, so the key cannot be shown again. Rotating it immediately revokes the previous key.</p>
+                                        <code class="local-ai-peer-key">@issuedPeerAccessKey</code>
+                                    </div>
+                                }
+
+                                <div class="local-ai-inline-actions">
+                                    <UiCommandButton Label="@(peerSharingStatus?.Enabled == true ? "Rotate access key" : "Enable and generate key")"
+                                                     Glyph="UiIconGlyph.Key"
+                                                     Disabled="@isBusy"
+                                                     OnClick="EnableOrRotatePeerSharingAsync" />
+                                    @if (peerSharingStatus?.Enabled == true)
+                                    {
+                                        <UiCommandButton Label="Disable sharing"
+                                                         Glyph="UiIconGlyph.Stop"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@isBusy"
+                                                         OnClick="DisablePeerSharingAsync" />
+                                    }
+                                </div>
+                            </section>
+
+                            <section class="surface-subcard local-ai-card">
+                                <div class="table-header">
+                                    <div>
+                                        <p class="eyebrow">LMS network</p>
+                                        <h2>Use Local AI from another LMS instance</h2>
+                                        <p class="meta-text">Enter the HTTPS address and access key from the LMS machine hosting the local model. The key is stored in LMS protected secrets and is never saved in provider metadata.</p>
+                                    </div>
+                                </div>
+
+                                <div class="local-ai-form-grid local-ai-custom-endpoint-grid">
+                                    <UiTextField @bind-Value="peerLmsDisplayName"
+                                                 Label="Display name"
+                                                 Placeholder="Shared LMS Local AI"
+                                                 Compact="true" />
+                                    <UiTextField @bind-Value="peerLmsBaseUrl"
+                                                 Label="Host LMS address"
+                                                 Helper="Use the public HTTPS address of the LMS instance hosting Local AI."
+                                                 Placeholder="https://ai-host.example.com"
+                                                 Compact="true" />
+                                    <UiTextField @bind-Value="peerLmsModelId"
+                                                 Label="Model ID"
+                                                 Helper="Exact model name installed on the host LMS instance."
+                                                 Placeholder="qwen2.5-coder:14b"
+                                                 Compact="true" />
+                                    <UiTextField @bind-Value="peerLmsAccessKey"
+                                                 Label="Access key"
+                                                 Type="password"
+                                                 Autocomplete="off"
+                                                 Helper="Generated on the host LMS instance."
+                                                 Compact="true" />
+                                </div>
+
+                                <div class="local-ai-inline-actions">
+                                    <UiCompactCheckbox Label="Default provider"
+                                                       Value="@peerLmsSetDefault"
+                                                       ValueChanged="SetPeerLmsDefaultAsync" />
+                                    <UiCommandButton Label="Connect shared Local AI"
+                                                     Glyph="UiIconGlyph.Connection"
+                                                     Disabled="@(!CanAddPeerLmsProvider)"
+                                                     OnClick="AddPeerLmsProviderAsync" />
                                 </div>
                             </section>
 
@@ -1239,6 +1330,13 @@
     private string customOpenAiBaseUrl = string.Empty;
     private string customOpenAiModelId = string.Empty;
     private bool customOpenAiSetDefault;
+    private LocalAiPeerSharingStatus? peerSharingStatus;
+    private string issuedPeerAccessKey = string.Empty;
+    private string peerLmsDisplayName = "Shared LMS Local AI";
+    private string peerLmsBaseUrl = string.Empty;
+    private string peerLmsModelId = string.Empty;
+    private string peerLmsAccessKey = string.Empty;
+    private bool peerLmsSetDefault;
     private bool SupportsConnectSharing => ConnectClientFeature.SupportsRemoteAiSharing;
 
     private IReadOnlyList<LocalAiUsageEntry> LocalUsageEntries =>
@@ -1258,6 +1356,12 @@
         !isBusy &&
         !string.IsNullOrWhiteSpace(customOpenAiBaseUrl) &&
         !string.IsNullOrWhiteSpace(customOpenAiModelId);
+
+    private bool CanAddPeerLmsProvider =>
+        !isBusy &&
+        !string.IsNullOrWhiteSpace(peerLmsBaseUrl) &&
+        !string.IsNullOrWhiteSpace(peerLmsModelId) &&
+        !string.IsNullOrWhiteSpace(peerLmsAccessKey);
 
     private LocalAiSetupProgressUpdate? CurrentSetupProgress =>
         setupProgressUpdates.Count == 0 ? null : setupProgressUpdates[^1];
@@ -1286,6 +1390,7 @@
         try
         {
             workspace = await LocalAiService.GetWorkspaceAsync();
+            peerSharingStatus = await PeerSharing.GetStatusAsync();
             sharingEditor = SupportsConnectSharing
                 ? await LocalAiService.GetSharingEditorAsync()
                 : new LocalAiSharingEditor();
@@ -1346,6 +1451,12 @@
     private Task SetCustomOpenAiDefaultAsync(bool value)
     {
         customOpenAiSetDefault = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetPeerLmsDefaultAsync(bool value)
+    {
+        peerLmsSetDefault = value;
         return Task.CompletedTask;
     }
 
@@ -1638,6 +1749,74 @@
                     customOpenAiBaseUrl,
                     customOpenAiModelId,
                     customOpenAiSetDefault));
+            SetStatus($"{provider.DisplayName} is now available in AI Providers.", "success");
+            await LoadAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task EnableOrRotatePeerSharingAsync()
+    {
+        isBusy = true;
+        try
+        {
+            var result = await PeerSharing.EnableWithNewKeyAsync();
+            peerSharingStatus = result.Status;
+            issuedPeerAccessKey = result.AccessKey;
+            SetStatus(
+                "Local AI sharing is enabled. Copy the new access key now; the previous key no longer works.",
+                "success");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task DisablePeerSharingAsync()
+    {
+        isBusy = true;
+        try
+        {
+            await PeerSharing.DisableAsync();
+            peerSharingStatus = await PeerSharing.GetStatusAsync();
+            issuedPeerAccessKey = string.Empty;
+            SetStatus("Local AI sharing is disabled. Existing client LMS instances can no longer use this host.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task AddPeerLmsProviderAsync()
+    {
+        isBusy = true;
+        try
+        {
+            var provider = await LocalAiService.CreateOrUpdatePeerLmsProviderAsync(
+                new PeerLmsAiProviderRequest(
+                    peerLmsDisplayName,
+                    peerLmsBaseUrl,
+                    peerLmsAccessKey,
+                    peerLmsModelId,
+                    peerLmsSetDefault));
+            peerLmsAccessKey = string.Empty;
             SetStatus($"{provider.DisplayName} is now available in AI Providers.", "success");
             await LoadAsync(clearStatus: false);
         }

@@ -8,4 +8,5 @@ public sealed record LocalHttpServiceDiscoveryRequest(
     bool IncludeLan = true,
     bool IncludeTailnet = false,
     bool IncludeDocker = false,
-    IReadOnlyList<LocalHttpServiceEndpoint>? PreferredEndpoints = null);
+    IReadOnlyList<LocalHttpServiceEndpoint>? PreferredEndpoints = null,
+    bool ForceRescan = false);
