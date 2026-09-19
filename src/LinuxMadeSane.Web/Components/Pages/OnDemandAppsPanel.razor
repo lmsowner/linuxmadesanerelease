@@ -46,14 +46,27 @@
             <p class="meta-text">Resume scans only new or unfinished targets. Force rescan checks every target again.</p>
         </div>
         <div class="on-demand-apps-scan-controls">
-            <UiCheckboxField @bind-Value="includeDocker" Label="Docker" Compact="true" />
-            <UiCheckboxField @bind-Value="includeLan" Label="LAN" Compact="true" />
-            <UiCheckboxField @bind-Value="includeTailnet" Label="Tailscale" Compact="true" />
+            <UiCheckboxField Value="@includeDocker"
+                             ValueChanged="SetIncludeDockerAsync"
+                             Label="Docker"
+                             Disabled="@isFlushingCache"
+                             Compact="true" />
+            <UiCheckboxField Value="@includeLan"
+                             ValueChanged="SetIncludeLanAsync"
+                             Label="LAN"
+                             Disabled="@isFlushingCache"
+                             Compact="true" />
+            <UiCheckboxField Value="@includeTailnet"
+                             ValueChanged="SetIncludeTailnetAsync"
+                             Label="Tailscale"
+                             Disabled="@isFlushingCache"
+                             Compact="true" />
             <UiSelectField TValue="int"
                            Value="refreshIntervalMinutes"
                            ValueChanged="SetRefreshIntervalAsync"
                            ValueExpression="@(() => refreshIntervalMinutes)"
                            Label="Refresh"
+                           Disabled="@isFlushingCache"
                            Compact="true"
                            Inline="true">
                 <option value="0">Manual only</option>
@@ -63,11 +76,22 @@
                 <option value="720">Every 12 hours</option>
                 <option value="1440">Daily</option>
             </UiSelectField>
-            <UiCommandButton Label="@(isScanning ? "Scanning in background..." : "Resume scan")"
-                             Glyph="UiIconGlyph.Search"
-                             Variant="UiButtonVariant.Primary"
-                             Disabled="@(isScanning || isFlushingCache)"
-                             OnClick="ScanAsync" />
+            @if (isScanning)
+            {
+                <UiCommandButton Label="Stop scan"
+                                 Glyph="UiIconGlyph.Stop"
+                                 Variant="UiButtonVariant.Danger"
+                                 Disabled="@isFlushingCache"
+                                 OnClick="StopScanAsync" />
+            }
+            else
+            {
+                <UiCommandButton Label="Resume scan"
+                                 Glyph="UiIconGlyph.Search"
+                                 Variant="UiButtonVariant.Primary"
+                                 Disabled="@isFlushingCache"
+                                 OnClick="ScanAsync" />
+            }
             <UiCommandButton Label="Force rescan"
                              Glyph="UiIconGlyph.Refresh"
                              Variant="UiButtonVariant.Ghost"
@@ -373,6 +397,46 @@
     private async Task ForceRescanAsync()
     {
         await StartScanAsync(forceRescan: true);
+    }
+
+    private async Task StopScanAsync()
+    {
+        if (!isScanning)
+        {
+            return;
+        }
+
+        if (DiscoveryCoordinator.TryStopScan())
+        {
+            message = "Stopping discovery… current network probes will cancel as they reach their cancellation point.";
+        }
+
+        await RefreshBackgroundStateAsync();
+    }
+
+    private Task SetIncludeDockerAsync(bool value) => SetScanScopeAsync(() => includeDocker = value);
+
+    private Task SetIncludeLanAsync(bool value) => SetScanScopeAsync(() => includeLan = value);
+
+    private Task SetIncludeTailnetAsync(bool value) => SetScanScopeAsync(() => includeTailnet = value);
+
+    private async Task SetScanScopeAsync(Action update)
+    {
+        update();
+        try
+        {
+            await DiscoveryCoordinator.SavePreferencesAsync(CurrentPreferences(), lifetime.Token);
+            message = isScanning
+                ? "Scan interfaces saved. The current scan will finish with its existing scope; the next scan will use these selections."
+                : "Scan interfaces saved.";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"The scan interface settings could not be saved: {exception.Message}";
+        }
     }
 
     private async Task StartScanAsync(bool forceRescan)

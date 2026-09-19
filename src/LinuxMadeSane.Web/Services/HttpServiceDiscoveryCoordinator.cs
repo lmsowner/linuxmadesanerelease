@@ -35,6 +35,7 @@ public sealed class HttpServiceDiscoveryCoordinator(
     private HttpServiceDiscoveryRunStatus status = HttpServiceDiscoveryRunStatus.Idle(HttpServiceDiscoveryPreferences.Default);
     private DateTimeOffset? lastAttemptUtc;
     private int scanPendingOrRunning;
+    private CancellationTokenSource? scanCancellation;
 
     public HttpServiceDiscoveryPreferences GetPreferences()
     {
@@ -59,8 +60,11 @@ public sealed class HttpServiceDiscoveryCoordinator(
             return false;
         }
 
+        var cancellation = new CancellationTokenSource();
+
         lock (stateGate)
         {
+            scanCancellation = cancellation;
             status = status with
             {
                 IsQueued = true,
@@ -78,8 +82,31 @@ public sealed class HttpServiceDiscoveryCoordinator(
             return true;
         }
 
+        lock (stateGate)
+        {
+            if (ReferenceEquals(scanCancellation, cancellation))
+            {
+                scanCancellation = null;
+            }
+        }
+
+        cancellation.Dispose();
         Interlocked.Exchange(ref scanPendingOrRunning, 0);
         return false;
+    }
+
+    public bool TryStopScan()
+    {
+        lock (stateGate)
+        {
+            if (scanCancellation is null || scanCancellation.IsCancellationRequested)
+            {
+                return false;
+            }
+
+            scanCancellation.Cancel();
+            return true;
+        }
     }
 
     public async Task SavePreferencesAsync(
@@ -202,6 +229,16 @@ public sealed class HttpServiceDiscoveryCoordinator(
         LocalHttpServiceDiscoveryRequest request,
         CancellationToken cancellationToken)
     {
+        CancellationTokenSource? scanCancellationSource;
+        lock (stateGate)
+        {
+            scanCancellationSource = scanCancellation;
+        }
+
+        using var scanCancellationLink = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            scanCancellationSource?.Token ?? CancellationToken.None);
+        var scanToken = scanCancellationLink.Token;
         var started = timeProvider.GetUtcNow();
         lock (stateGate)
         {
@@ -227,7 +264,7 @@ public sealed class HttpServiceDiscoveryCoordinator(
             var favourites = scope.ServiceProvider.GetService<IOnDemandAppFavouriteStore>();
             if (favourites is not null)
             {
-                var savedEndpoints = (await favourites.ListAllAsync(cancellationToken))
+                var savedEndpoints = (await favourites.ListAllAsync(scanToken))
                     .Select(static favourite => favourite.Endpoint)
                     .OfType<LocalHttpServiceEndpoint>();
                 request = request with
@@ -252,10 +289,10 @@ public sealed class HttpServiceDiscoveryCoordinator(
                     };
                 }
             });
-            var services = await discovery.DiscoverAsync(request, progress, cancellationToken);
+            var services = await discovery.DiscoverAsync(request, progress, scanToken);
             if (favourites is not null)
             {
-                await favourites.RefreshEndpointsAsync(services, cancellationToken);
+                await favourites.RefreshEndpointsAsync(services, scanToken);
             }
 
             var completed = timeProvider.GetUtcNow();
@@ -274,8 +311,27 @@ public sealed class HttpServiceDiscoveryCoordinator(
 
             logger.LogInformation("Background HTTP/S service discovery completed with {ServiceCount} cached services", services.Count);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (scanCancellationLink.IsCancellationRequested)
         {
+            var stopped = scanCancellationSource?.IsCancellationRequested == true && !cancellationToken.IsCancellationRequested;
+            var completed = timeProvider.GetUtcNow();
+            lock (stateGate)
+            {
+                status = status with
+                {
+                    IsQueued = false,
+                    IsScanning = false,
+                    CompletedUtc = completed,
+                    Message = stopped ? "Discovery stopped." : "Discovery stopped while LMS was shutting down.",
+                    Error = string.Empty,
+                    NextScheduledUtc = CalculateNextScheduledUtc(preferences, lastAttemptUtc)
+                };
+            }
+
+            if (stopped)
+            {
+                logger.LogInformation("Background HTTP/S service discovery was stopped by the user");
+            }
         }
         catch (Exception exception)
         {
@@ -295,6 +351,15 @@ public sealed class HttpServiceDiscoveryCoordinator(
         }
         finally
         {
+            lock (stateGate)
+            {
+                if (ReferenceEquals(scanCancellation, scanCancellationSource))
+                {
+                    scanCancellation = null;
+                }
+            }
+
+            scanCancellationSource?.Dispose();
             Interlocked.Exchange(ref scanPendingOrRunning, 0);
             await WriteSettingsAsync(CancellationToken.None);
         }
