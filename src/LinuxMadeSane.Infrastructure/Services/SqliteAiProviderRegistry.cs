@@ -83,9 +83,7 @@ public sealed class SqliteAiProviderRegistry(
         new(AiProviderType.XAi, "grok-4.3", "Grok 4.3", "xAI flagship Grok model with strong instruction following and tool calling.", true, true),
 
         new(AiProviderType.DeepSeek, "deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek V4 fast model using non-thinking chat mode for reliable LMS tool workflows.", true, true),
-        new(AiProviderType.DeepSeek, "deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek V4 higher-capability model using non-thinking chat mode for reliable LMS tool workflows.", true, false),
-
-        new(AiProviderType.LinuxMadeSaneAiService, "default", "Service default", "Model selected by the Linux Made Sane AI Service.", true, true)
+        new(AiProviderType.DeepSeek, "deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek V4 higher-capability model using non-thinking chat mode for reliable LMS tool workflows.", true, false)
     ];
 
     public IReadOnlyList<AiProviderDefinition> ListSupportedProviders() =>

@@ -1092,6 +1092,7 @@ public class Program
         }).DisableAntiforgery();
         app.MapMediaLibraryIntegrationApi();
         app.MapStorageApi();
+        app.MapLocalAiPeerApi();
         var componentEndpoint = app.MapRazorComponents<App>()
             .AddInteractiveServerRenderMode();
         if (PluginModuleLoader.LoadedAssemblies.Count > 0)
@@ -1246,6 +1247,7 @@ public class Program
 
         if (path.StartsWithSegments("/access-denied") ||
             path.StartsWithSegments("/healthz") ||
+            path.StartsWithSegments("/api/local-ai/v1") ||
             path.StartsWithSegments("/desktop-assistant/launch") ||
             path.StartsWithSegments("/api/desktop-assistant/native") ||
             path.StartsWithSegments("/edge-auth/check") ||

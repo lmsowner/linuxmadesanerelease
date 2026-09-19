@@ -30,7 +30,8 @@ public sealed class AiProviderModelDiscoveryService(
             AiProviderType.Groq => DiscoverGroqModelsAsync(settings, apiKeyOverride, cancellationToken),
             AiProviderType.XAi => DiscoverXAiModelsAsync(settings, apiKeyOverride, cancellationToken),
             AiProviderType.DeepSeek => DiscoverDeepSeekModelsAsync(settings, apiKeyOverride, cancellationToken),
-            AiProviderType.Custom => DiscoverCustomOpenAiCompatibleModelsAsync(settings, apiKeyOverride, cancellationToken),
+            AiProviderType.LinuxMadeSaneAiService or AiProviderType.Custom =>
+                DiscoverCustomOpenAiCompatibleModelsAsync(settings, apiKeyOverride, cancellationToken),
             AiProviderType.Ollama => DiscoverOllamaModelsAsync(cancellationToken),
             _ => Task.FromResult<IReadOnlyList<AiProviderModelOption>>([])
         };
@@ -271,7 +272,10 @@ public sealed class AiProviderModelDiscoveryService(
 
         using var response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
-        EnsureResponseSucceeded(response, body, "OpenAI-compatible provider");
+        var providerName = settings.ProviderType == AiProviderType.LinuxMadeSaneAiService
+            ? "Linux Made Sane AI Service"
+            : "OpenAI-compatible provider";
+        EnsureResponseSucceeded(response, body, providerName);
 
         var data = JsonNode.Parse(body)?["data"] as JsonArray ?? [];
         return data
@@ -281,7 +285,7 @@ public sealed class AiProviderModelDiscoveryService(
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
             .Select(id => new AiProviderModelOption(
-                AiProviderType.Custom,
+                settings.ProviderType,
                 id,
                 BuildDisplayName(id),
                 "Discovered from the OpenAI-compatible models endpoint.",

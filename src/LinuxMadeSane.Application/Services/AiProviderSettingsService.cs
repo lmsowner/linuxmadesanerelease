@@ -172,15 +172,18 @@ public sealed class AiProviderSettingsService(
             throw new InvalidOperationException("Provider type cannot be changed for an existing record. Create a new provider for a different API.");
         }
 
+        await DiscoverLinuxMadeSaneAiServiceModelAsync(editor, existing, allProviders, cancellationToken);
+
         var supportedModels = providerRegistry.ListModelCatalog(editor.ProviderType);
         var selectedModelId = editor.DefaultModelId.Trim();
-        var selectedModelIsSupported = await IsSelectedModelSupportedAsync(
-            editor,
-            existing,
-            supportedModels,
-            selectedModelId,
-            allProviders,
-            cancellationToken);
+        var selectedModelIsSupported = editor.ProviderType == AiProviderType.LinuxMadeSaneAiService ||
+            await IsSelectedModelSupportedAsync(
+                editor,
+                existing,
+                supportedModels,
+                selectedModelId,
+                allProviders,
+                cancellationToken);
         if (!selectedModelIsSupported)
         {
             throw new InvalidOperationException("Select a supported default model for the selected provider.");
@@ -294,15 +297,18 @@ public sealed class AiProviderSettingsService(
             throw new InvalidOperationException("Provider type cannot be changed for an existing record. Create a new provider for a different API.");
         }
 
+        await DiscoverLinuxMadeSaneAiServiceModelAsync(editor, existing, allProviders, cancellationToken);
+
         var supportedModels = providerRegistry.ListModelCatalog(editor.ProviderType);
         var selectedModelId = editor.DefaultModelId.Trim();
-        var selectedModelIsSupported = await IsSelectedModelSupportedAsync(
-            editor,
-            existing,
-            supportedModels,
-            selectedModelId,
-            allProviders,
-            cancellationToken);
+        var selectedModelIsSupported = editor.ProviderType == AiProviderType.LinuxMadeSaneAiService ||
+            await IsSelectedModelSupportedAsync(
+                editor,
+                existing,
+                supportedModels,
+                selectedModelId,
+                allProviders,
+                cancellationToken);
         if (!selectedModelIsSupported)
         {
             throw new InvalidOperationException("Select a supported default model before testing.");
@@ -589,10 +595,55 @@ public sealed class AiProviderSettingsService(
 
         editor.DisplayName = "Linux Made Sane AI Service";
         editor.DefaultModelId = "default";
+        if (Uri.TryCreate(editor.BaseUrl.Trim(), UriKind.Absolute, out var serviceUri) &&
+            serviceUri.Scheme is "http" or "https")
+        {
+            editor.BaseUrl = $"{serviceUri.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/api/local-ai/v1";
+        }
         editor.IsEnabled = true;
         editor.StreamingEnabled = false;
         editor.ToolUseEnabled = true;
         editor.RequiresApiKey = true;
+    }
+
+    private async Task DiscoverLinuxMadeSaneAiServiceModelAsync(
+        AiProviderSettingsEditor editor,
+        AiProviderSettings? existing,
+        IReadOnlyList<AiProviderSettings> allProviders,
+        CancellationToken cancellationToken)
+    {
+        if (editor.ProviderType != AiProviderType.LinuxMadeSaneAiService)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var settings = new AiProviderSettings(
+            existing?.ProviderKey ?? GenerateProviderKey(editor, allProviders),
+            editor.ProviderType,
+            editor.DisplayName,
+            true,
+            editor.IsDefault,
+            ResolveBaseUrl(editor, existing),
+            editor.DefaultModelId,
+            false,
+            true,
+            existing?.Notes ?? string.Empty,
+            existing?.MetadataJson ?? string.Empty,
+            editor.ClearStoredApiKey ? string.Empty : existing?.ApiKeySecretReference ?? string.Empty,
+            existing?.CreatedAtUtc ?? now,
+            now);
+        var models = await modelDiscoveryService.DiscoverAsync(settings, editor.ApiKeyInput, cancellationToken);
+        var model = models
+            .OrderByDescending(item => item.IsRecommendedDefault)
+            .ThenBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        if (model is null)
+        {
+            throw new InvalidOperationException("The Linux Made Sane AI Service did not report an available Local AI model.");
+        }
+
+        editor.DefaultModelId = model.ModelId;
     }
 
     private static void ValidateEditor(AiProviderSettingsEditor editor)
