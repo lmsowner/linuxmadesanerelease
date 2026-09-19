@@ -3,16 +3,29 @@
 
 @typeparam TValue
 @using System.Linq.Expressions
+@using System.Globalization
 
 <div class="@ShellClass">
-    <InputSelect TValue="TValue"
-                 Value="@Value"
-                 ValueChanged="@ValueChanged"
-                 ValueExpression="@ValueExpression"
-                 class="@ResolvedInputClass"
-                 @attributes="SanitizedAdditionalAttributes">
-        @ChildContent
-    </InputSelect>
+    @if (ValueExpression is not null)
+    {
+        <InputSelect TValue="TValue"
+                     Value="@Value"
+                     ValueChanged="@ValueChanged"
+                     ValueExpression="@ValueExpression"
+                     class="@ResolvedInputClass"
+                     @attributes="SanitizedAdditionalAttributes">
+            @ChildContent
+        </InputSelect>
+    }
+    else
+    {
+        <select value="@FormattedValue"
+                class="@ResolvedInputClass"
+                @onchange="HandleChangedAsync"
+                @attributes="SanitizedAdditionalAttributes">
+            @ChildContent
+        </select>
+    }
     <span class="ui-combobox-indicator ui-select-indicator" aria-hidden="true">
         <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <path d="m2.5 4.5 3.5 3 3.5-3" />
@@ -29,9 +42,20 @@
     [Parameter(CaptureUnmatchedValues = true)] public IReadOnlyDictionary<string, object>? AdditionalAttributes { get; set; }
 
     private IReadOnlyDictionary<string, object>? SanitizedAdditionalAttributes => UiAdditionalAttributes.Sanitize(AdditionalAttributes);
+    private string FormattedValue => Convert.ToString(Value, CultureInfo.CurrentCulture) ?? string.Empty;
     private string ShellClass => string.IsNullOrWhiteSpace(Class)
         ? "ui-combobox-shell ui-select-shell"
         : $"ui-combobox-shell ui-select-shell {Class}";
 
     private string ResolvedInputClass => "ui-combobox-input ui-select-input";
+
+    private Task HandleChangedAsync(ChangeEventArgs args)
+    {
+        if (!BindConverter.TryConvertTo<TValue>(args.Value, CultureInfo.CurrentCulture, out var nextValue))
+        {
+            throw new InvalidOperationException($"The selected value could not be converted to {typeof(TValue).Name}.");
+        }
+
+        return ValueChanged.InvokeAsync(nextValue);
+    }
 }

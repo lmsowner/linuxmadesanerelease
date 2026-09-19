@@ -643,6 +643,8 @@
     private HostSystemUpdateSnapshot hostSnapshot = null!;
     private ScheduleEditorModel scheduleEditor = new();
     private CancellationTokenSource? pollingCancellationTokenSource;
+    private Task pollingTask = Task.CompletedTask;
+    private bool disposed;
     private bool rebootAfterPackages;
     private bool rebootAfterUpgrade;
     private bool releaseAcknowledged;
@@ -683,7 +685,7 @@
         hostSnapshot = HostUpdateService.GetSnapshot();
         scheduleEditor = ScheduleEditorModel.From(hostSnapshot.Schedule);
         pollingCancellationTokenSource = new CancellationTokenSource();
-        _ = PollStatusAsync(pollingCancellationTokenSource.Token);
+        pollingTask = PollStatusAsync(pollingCancellationTokenSource.Token);
         await LoadAiRepairAvailabilityAsync();
     }
 
@@ -702,12 +704,14 @@
 
     public async ValueTask DisposeAsync()
     {
+        disposed = true;
         if (pollingCancellationTokenSource is null)
         {
             return;
         }
 
         await pollingCancellationTokenSource.CancelAsync();
+        await pollingTask;
         pollingCancellationTokenSource.Dispose();
     }
 
@@ -885,6 +889,11 @@
                 await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
                 await InvokeAsync(() =>
                 {
+                    if (disposed || cancellationToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
                     RefreshLmsStatus();
                     RefreshHostStatus();
                     StateHasChanged();
