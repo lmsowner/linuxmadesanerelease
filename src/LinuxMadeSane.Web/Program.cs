@@ -120,6 +120,9 @@ public class Program
         builder.Services.AddSingleton<RemoteLmsTunnelAccessService>();
         builder.Services.AddSingleton<RemoteLmsRelayCaddyService>();
         builder.Services.AddSingleton<RemoteLmsSshTunnelService>();
+        builder.Services.AddSingleton<HttpServiceDiscoveryCoordinator>();
+        builder.Services.AddHostedService(serviceProvider =>
+            serviceProvider.GetRequiredService<HttpServiceDiscoveryCoordinator>());
         builder.Services.AddScoped<LocalInstanceIdentityService>();
         builder.Services.AddScoped<PasskeyAuthenticationService>();
         builder.Services.Configure<ApplicationUpdateOptions>(builder.Configuration.GetSection("ApplicationUpdates"));
