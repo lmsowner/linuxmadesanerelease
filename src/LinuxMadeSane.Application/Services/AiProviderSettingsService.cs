@@ -148,6 +148,7 @@ public sealed class AiProviderSettingsService(
 
     public async Task<string> SaveAsync(AiProviderSettingsEditor editor, CancellationToken cancellationToken = default)
     {
+        NormalizeLinuxMadeSaneAiServiceEditor(editor);
         ValidateEditor(editor);
 
         var supportedProviders = providerRegistry.ListSupportedProviders();
@@ -259,6 +260,7 @@ public sealed class AiProviderSettingsService(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(editor);
+        NormalizeLinuxMadeSaneAiServiceEditor(editor);
 
         if (editor.ProviderType == AiProviderType.Unknown)
         {
@@ -526,6 +528,7 @@ public sealed class AiProviderSettingsService(
             AiProviderType.Groq => "groq",
             AiProviderType.XAi => "xai-grok",
             AiProviderType.DeepSeek => "deepseek",
+            AiProviderType.LinuxMadeSaneAiService => "linux-made-sane-ai-service",
             AiProviderType.Custom => "openai-compatible",
             _ => "provider"
         };
@@ -576,6 +579,21 @@ public sealed class AiProviderSettingsService(
         string.IsNullOrWhiteSpace(editor.BaseUrl)
             ? existing?.BaseUrl ?? string.Empty
             : editor.BaseUrl.Trim().TrimEnd('/');
+
+    private static void NormalizeLinuxMadeSaneAiServiceEditor(AiProviderSettingsEditor editor)
+    {
+        if (editor.ProviderType != AiProviderType.LinuxMadeSaneAiService)
+        {
+            return;
+        }
+
+        editor.DisplayName = "Linux Made Sane AI Service";
+        editor.DefaultModelId = "default";
+        editor.IsEnabled = true;
+        editor.StreamingEnabled = false;
+        editor.ToolUseEnabled = true;
+        editor.RequiresApiKey = true;
+    }
 
     private static void ValidateEditor(AiProviderSettingsEditor editor)
     {

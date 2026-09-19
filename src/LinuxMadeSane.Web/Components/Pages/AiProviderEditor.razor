@@ -85,120 +85,140 @@
                             </UiComboboxField>
                         }
 
-                        <UiTextField @bind-Value="providerContext.Editor.DisplayName"
-                                     Label="Display name" />
+                        @if (!IsLinuxMadeSaneAiService)
+                        {
+                            <UiTextField @bind-Value="providerContext.Editor.DisplayName"
+                                         Label="Display name" />
+                        }
                     </div>
 
-                    @if (providerContext.Editor.ProviderType == AiProviderType.Custom ||
-                         !string.IsNullOrWhiteSpace(providerContext.Editor.BaseUrl))
+                    @if (IsLinuxMadeSaneAiService)
                     {
-                        <section class="ai-provider-docker-api-panel">
-                            @if (!string.IsNullOrWhiteSpace(dockerDiscoveryMessage))
-                            {
-                                <div class="callout warning">@dockerDiscoveryMessage</div>
-                            }
+                        <div class="field-row">
+                            <UiTextField @bind-Value="providerContext.Editor.BaseUrl"
+                                         Label="Service URL"
+                                         Helper="The URL supplied with your Linux Made Sane AI Service." />
 
-                            <div class="field-row ai-provider-docker-source-row">
-                                <UiComboboxField TValue="string"
-                                                 Value="@SelectedDockerEngineBaseUrl"
-                                                 ValueChanged="SetDockerHostedEngineAsync"
-                                                 ValueExpression="@(() => SelectedDockerEngineBaseUrl)"
-                                                 Label="Docker-hosted AI"
-                                                 Helper="@DockerHostedAiHelper">
-                                    <option value="">Manual / external OpenAI-compatible endpoint</option>
-                                    @foreach (var engine in ReadyDockerCompatibleEngines)
-                                    {
-                                        <option value="@NormalizeBaseUrl(engine.BaseUrl)">@FormatDockerEngineOption(engine)</option>
-                                    }
-                                </UiComboboxField>
-
-                                <UiTextField @bind-Value="providerContext.Editor.BaseUrl"
-                                             Label="Base URL"
-                                             Helper="OpenAI-compatible API root, for example http://127.0.0.1:8000/v1." />
-                            </div>
-                        </section>
-                    }
-
-                    <div class="field-row ai-provider-model-row">
-                        <UiComboboxField TValue="string"
-                                       @bind-Value="providerContext.Editor.DefaultModelId"
-                                       Label="Default model"
-                                       Helper="@DefaultModelFieldHelper">
-                            @if (CurrentModelOptions.Count == 0)
-                            {
-                                <option value="">Select an engine or refresh models</option>
-                            }
-                            @foreach (var model in CurrentModelOptions)
-                            {
-                                <option value="@model.ModelId">@model.DisplayName</option>
-                            }
-                        </UiComboboxField>
-                        <UiCommandButton Label="@(isRefreshingModels ? "Refreshing..." : "Refresh models")"
-                                         Glyph="UiIconGlyph.Refresh"
-                                         Variant="UiButtonVariant.Toolbar"
-                                         Class="ai-provider-refresh-models-button"
-                                         Disabled="@(isSaving || isTestingProvider || isRefreshingModels)"
-                                         OnClick="HandleRefreshModelsAsync" />
-                    </div>
-
-                    @if (!string.IsNullOrWhiteSpace(modelRefreshMessage))
-                    {
-                        <div class="callout @modelRefreshTone">@modelRefreshMessage</div>
-                    }
-
-                    <details class="identity-advanced" open>
-                        <summary>Capability flags</summary>
-                        <div class="advanced-fields">
-                            <div class="field-row">
-                                <UiCheckboxField @bind-Value="providerContext.Editor.IsEnabled"
-                                                 Label="Enabled" />
-
-                                <UiCheckboxField @bind-Value="providerContext.Editor.IsDefault"
-                                                 Label="Default provider" />
-                            </div>
-
-                            <div class="field-row">
-                                <UiCheckboxField @bind-Value="providerContext.Editor.StreamingEnabled"
-                                                 Label="Streaming enabled" />
-
-                                <UiCheckboxField @bind-Value="providerContext.Editor.ToolUseEnabled"
-                                                 Label="Tool use enabled" />
-                            </div>
+                            <UiTextField @bind-Value="providerContext.Editor.ApiKeyInput"
+                                         Label="@(providerContext.Editor.HasApiKeyConfigured ? "Replacement token" : "Token")"
+                                         Type="password"
+                                         Autocomplete="new-password"
+                                         Helper="@(providerContext.Editor.HasApiKeyConfigured ? "Leave blank to keep the stored token." : null)" />
                         </div>
-                    </details>
-
-                    @if (providerContext.Editor.RequiresApiKey)
-                    {
-                        <details class="identity-advanced" open>
-                            <summary>Protected API key</summary>
-                            <div class="advanced-fields">
-                                <UiTextField @bind-Value="providerContext.Editor.ApiKeyInput"
-                                             Label="@(providerContext.Editor.HasApiKeyConfigured ? "Replacement API key" : "API key")"
-                                             Type="password"
-                                             Autocomplete="new-password" />
-
-                                <p class="helper-text">
-                                    @(providerContext.Editor.HasApiKeyConfigured
-                                        ? "A key is already stored. Enter a new one to replace it, or clear it."
-                                        : "No key stored yet.")
-                                </p>
-
-                                @if (providerContext.Editor.HasApiKeyConfigured)
-                                {
-                                    <UiCheckboxField @bind-Value="providerContext.Editor.ClearStoredApiKey"
-                                                     Label="Clear stored API key" />
-                                }
-                            </div>
-                        </details>
                     }
                     else
                     {
+                        @if (providerContext.Editor.ProviderType == AiProviderType.Custom ||
+                             !string.IsNullOrWhiteSpace(providerContext.Editor.BaseUrl))
+                        {
+                            <section class="ai-provider-docker-api-panel">
+                                @if (!string.IsNullOrWhiteSpace(dockerDiscoveryMessage))
+                                {
+                                    <div class="callout warning">@dockerDiscoveryMessage</div>
+                                }
+
+                                <div class="field-row ai-provider-docker-source-row">
+                                    <UiComboboxField TValue="string"
+                                                     Value="@SelectedDockerEngineBaseUrl"
+                                                     ValueChanged="SetDockerHostedEngineAsync"
+                                                     ValueExpression="@(() => SelectedDockerEngineBaseUrl)"
+                                                     Label="Docker-hosted AI"
+                                                     Helper="@DockerHostedAiHelper">
+                                        <option value="">Manual / external OpenAI-compatible endpoint</option>
+                                        @foreach (var engine in ReadyDockerCompatibleEngines)
+                                        {
+                                            <option value="@NormalizeBaseUrl(engine.BaseUrl)">@FormatDockerEngineOption(engine)</option>
+                                        }
+                                    </UiComboboxField>
+
+                                    <UiTextField @bind-Value="providerContext.Editor.BaseUrl"
+                                                 Label="Base URL"
+                                                 Helper="OpenAI-compatible API root, for example http://127.0.0.1:8000/v1." />
+                                </div>
+                            </section>
+                        }
+
+                        <div class="field-row ai-provider-model-row">
+                            <UiComboboxField TValue="string"
+                                           @bind-Value="providerContext.Editor.DefaultModelId"
+                                           Label="Default model"
+                                           Helper="@DefaultModelFieldHelper">
+                                @if (CurrentModelOptions.Count == 0)
+                                {
+                                    <option value="">Select an engine or refresh models</option>
+                                }
+                                @foreach (var model in CurrentModelOptions)
+                                {
+                                    <option value="@model.ModelId">@model.DisplayName</option>
+                                }
+                            </UiComboboxField>
+                            <UiCommandButton Label="@(isRefreshingModels ? "Refreshing..." : "Refresh models")"
+                                             Glyph="UiIconGlyph.Refresh"
+                                             Variant="UiButtonVariant.Toolbar"
+                                             Class="ai-provider-refresh-models-button"
+                                             Disabled="@(isSaving || isTestingProvider || isRefreshingModels)"
+                                             OnClick="HandleRefreshModelsAsync" />
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(modelRefreshMessage))
+                        {
+                            <div class="callout @modelRefreshTone">@modelRefreshMessage</div>
+                        }
+
                         <details class="identity-advanced" open>
-                            <summary>Provider runtime</summary>
+                            <summary>Capability flags</summary>
                             <div class="advanced-fields">
-                                <p class="helper-text">This provider is managed by Linux Made Sane and does not require a directly stored API key.</p>
+                                <div class="field-row">
+                                    <UiCheckboxField @bind-Value="providerContext.Editor.IsEnabled"
+                                                     Label="Enabled" />
+
+                                    <UiCheckboxField @bind-Value="providerContext.Editor.IsDefault"
+                                                     Label="Default provider" />
+                                </div>
+
+                                <div class="field-row">
+                                    <UiCheckboxField @bind-Value="providerContext.Editor.StreamingEnabled"
+                                                     Label="Streaming enabled" />
+
+                                    <UiCheckboxField @bind-Value="providerContext.Editor.ToolUseEnabled"
+                                                     Label="Tool use enabled" />
+                                </div>
                             </div>
                         </details>
+
+                        @if (providerContext.Editor.RequiresApiKey)
+                        {
+                            <details class="identity-advanced" open>
+                                <summary>Protected API key</summary>
+                                <div class="advanced-fields">
+                                    <UiTextField @bind-Value="providerContext.Editor.ApiKeyInput"
+                                                 Label="@(providerContext.Editor.HasApiKeyConfigured ? "Replacement API key" : "API key")"
+                                                 Type="password"
+                                                 Autocomplete="new-password" />
+
+                                    <p class="helper-text">
+                                        @(providerContext.Editor.HasApiKeyConfigured
+                                            ? "A key is already stored. Enter a new one to replace it, or clear it."
+                                            : "No key stored yet.")
+                                    </p>
+
+                                    @if (providerContext.Editor.HasApiKeyConfigured)
+                                    {
+                                        <UiCheckboxField @bind-Value="providerContext.Editor.ClearStoredApiKey"
+                                                         Label="Clear stored API key" />
+                                    }
+                                </div>
+                            </details>
+                        }
+                        else
+                        {
+                            <details class="identity-advanced" open>
+                                <summary>Provider runtime</summary>
+                                <div class="advanced-fields">
+                                    <p class="helper-text">This provider is managed by Linux Made Sane and does not require a directly stored API key.</p>
+                                </div>
+                            </details>
+                        }
                     }
 
                     <div class="hero-actions">
@@ -280,6 +300,8 @@
     private string dockerDiscoveryMessage = string.Empty;
     private AiProviderType? lastProviderType;
     private bool IsEditMode => !string.IsNullOrWhiteSpace(ProviderKey);
+    private bool IsLinuxMadeSaneAiService =>
+        providerContext?.Editor.ProviderType == AiProviderType.LinuxMadeSaneAiService;
     private AiProviderDefinition SelectedProviderTypeDefinition =>
         providerContext?.SupportedProviders.FirstOrDefault(provider => provider.ProviderType == providerContext.Editor.ProviderType)
         ?? new AiProviderDefinition("unknown", AiProviderType.Unknown, "Unknown", "Unknown provider type.", false, false);
@@ -407,7 +429,24 @@
             providerContext.Editor.DisplayName = selectedDefinition.DisplayName;
         }
 
-        if (providerContext.Editor.ProviderType == AiProviderType.Custom &&
+        if (providerContext.Editor.ProviderType == AiProviderType.LinuxMadeSaneAiService)
+        {
+            providerContext.Editor.DisplayName = selectedDefinition.DisplayName;
+            if (lastProviderType != AiProviderType.LinuxMadeSaneAiService)
+            {
+                providerContext.Editor.BaseUrl = string.Empty;
+            }
+            providerContext.Editor.DefaultModelId = "default";
+            providerContext.Editor.IsEnabled = true;
+            providerContext.Editor.StreamingEnabled = false;
+            providerContext.Editor.ToolUseEnabled = true;
+        }
+        else if (lastProviderType == AiProviderType.LinuxMadeSaneAiService)
+        {
+            providerContext.Editor.BaseUrl = string.Empty;
+            EnsureSelectedDefaultModelIsSelectable();
+        }
+        else if (providerContext.Editor.ProviderType == AiProviderType.Custom &&
             string.IsNullOrWhiteSpace(providerContext.Editor.BaseUrl) &&
             ReadyDockerCompatibleEngines.Count == 1)
         {

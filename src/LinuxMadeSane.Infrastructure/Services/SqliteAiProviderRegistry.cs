@@ -24,6 +24,7 @@ public sealed class SqliteAiProviderRegistry(
         new("groq", AiProviderType.Groq, "Groq", "GroqCloud OpenAI-compatible chat completions.", true, true, true, string.Empty, false),
         new("xai", AiProviderType.XAi, "xAI Grok", "xAI Grok OpenAI-compatible chat completions.", true, true, true, string.Empty, false),
         new("deepseek", AiProviderType.DeepSeek, "DeepSeek", "DeepSeek OpenAI-compatible chat completions.", true, true, true, string.Empty, false),
+        new("linux-made-sane-ai-service", AiProviderType.LinuxMadeSaneAiService, "Linux Made Sane AI Service", "Connect with a service URL and token.", true, true, true, string.Empty, false),
         new("custom-openai-compatible", AiProviderType.Custom, "OpenAI / Docker-compatible API", "Self-hosted, Docker-hosted, or OpenAI-compatible chat completions.", true, true, true, string.Empty, false, false),
         new("ollama", AiProviderType.Ollama, "Local Ollama", "Linux Made Sane local AI engine powered by Ollama.", true, true, true, string.Empty, false, false)
     ];
@@ -82,7 +83,9 @@ public sealed class SqliteAiProviderRegistry(
         new(AiProviderType.XAi, "grok-4.3", "Grok 4.3", "xAI flagship Grok model with strong instruction following and tool calling.", true, true),
 
         new(AiProviderType.DeepSeek, "deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek V4 fast model using non-thinking chat mode for reliable LMS tool workflows.", true, true),
-        new(AiProviderType.DeepSeek, "deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek V4 higher-capability model using non-thinking chat mode for reliable LMS tool workflows.", true, false)
+        new(AiProviderType.DeepSeek, "deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek V4 higher-capability model using non-thinking chat mode for reliable LMS tool workflows.", true, false),
+
+        new(AiProviderType.LinuxMadeSaneAiService, "default", "Service default", "Model selected by the Linux Made Sane AI Service.", true, true)
     ];
 
     public IReadOnlyList<AiProviderDefinition> ListSupportedProviders() =>
@@ -164,7 +167,7 @@ public sealed class SqliteAiProviderRegistry(
 
         return settings.ProviderType switch
         {
-            AiProviderType.OpenAi or AiProviderType.Anthropic or AiProviderType.Gemini or AiProviderType.Groq or AiProviderType.XAi or AiProviderType.DeepSeek or AiProviderType.Custom or AiProviderType.Ollama or AiProviderType.RemoteLmsAiEngine =>
+            AiProviderType.OpenAi or AiProviderType.Anthropic or AiProviderType.Gemini or AiProviderType.Groq or AiProviderType.XAi or AiProviderType.DeepSeek or AiProviderType.LinuxMadeSaneAiService or AiProviderType.Custom or AiProviderType.Ollama or AiProviderType.RemoteLmsAiEngine =>
                 AiProviderRuntimeFactory.Create(definition, settings, models, secretStore, httpClientFactory, ollamaRuntimeService, remoteGateway),
             _ => new UnavailableAiProvider(
                 settings.ProviderKey,

@@ -65,12 +65,14 @@ public sealed class AiProviderSettingsEditor : IValidatableObject
                 [nameof(DefaultModelId)]);
         }
 
-        if (ProviderType == AiProviderType.Custom)
+        if (ProviderType is AiProviderType.Custom or AiProviderType.LinuxMadeSaneAiService)
         {
             if (string.IsNullOrWhiteSpace(BaseUrl))
             {
                 yield return new ValidationResult(
-                    "Base URL is required for OpenAI-compatible providers.",
+                    ProviderType == AiProviderType.LinuxMadeSaneAiService
+                        ? "Service URL is required."
+                        : "Base URL is required for OpenAI-compatible providers.",
                     [nameof(BaseUrl)]);
             }
             else if (!Uri.TryCreate(BaseUrl.Trim(), UriKind.Absolute, out var uri) ||

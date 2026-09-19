@@ -20,7 +20,7 @@ public sealed class AiProviderCapabilityService(
         var effectiveModelId = string.IsNullOrWhiteSpace(modelId) ? settings.DefaultModelId : modelId.Trim();
         var report = settings.ProviderType switch
         {
-            AiProviderType.OpenAi or AiProviderType.Anthropic or AiProviderType.Gemini or AiProviderType.Groq or AiProviderType.XAi or AiProviderType.DeepSeek => BuildManagedCloudReport(settings.DisplayName, effectiveModelId),
+            AiProviderType.OpenAi or AiProviderType.Anthropic or AiProviderType.Gemini or AiProviderType.Groq or AiProviderType.XAi or AiProviderType.DeepSeek or AiProviderType.LinuxMadeSaneAiService => BuildManagedCloudReport(settings.DisplayName, effectiveModelId),
             AiProviderType.Ollama => modelManagementService.BuildCapabilityReport(settings.DisplayName, effectiveModelId, settings.ToolUseEnabled),
             AiProviderType.Custom => BuildCustomOpenAiCompatibleReport(settings, effectiveModelId),
             AiProviderType.RemoteLmsAiEngine => BuildRemoteReport(settings, effectiveModelId),

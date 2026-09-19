@@ -15,5 +15,6 @@ public enum AiProviderType
     RemoteLmsAiEngine = 7,
     Groq = 8,
     XAi = 9,
-    DeepSeek = 10
+    DeepSeek = 10,
+    LinuxMadeSaneAiService = 11
 }

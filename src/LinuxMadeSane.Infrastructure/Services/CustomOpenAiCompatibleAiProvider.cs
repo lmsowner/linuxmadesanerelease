@@ -224,9 +224,9 @@ public sealed class CustomOpenAiCompatibleAiProvider(
 
     private static void ValidateRequest(AiProviderTurnRequest request)
     {
-        if (request.Thread.ProviderType != AiProviderType.Custom)
+        if (request.Thread.ProviderType is not (AiProviderType.Custom or AiProviderType.LinuxMadeSaneAiService))
         {
-            throw new InvalidOperationException("The custom OpenAI-compatible adapter can only execute custom provider threads.");
+            throw new InvalidOperationException("The OpenAI-compatible adapter can only execute compatible provider threads.");
         }
 
         if (request.InputItems.Count == 0)
