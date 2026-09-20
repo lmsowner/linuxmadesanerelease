@@ -853,6 +853,7 @@ public sealed class SqliteDatabaseInitializer(
                 Image TEXT NOT NULL,
                 VolumeMappingsJson TEXT NOT NULL,
                 PortMappingsJson TEXT NOT NULL,
+                NetworkMode TEXT NOT NULL DEFAULT 'bridge',
                 ConfigurationJson TEXT NOT NULL DEFAULT '{{}}',
                 EdgeGatewayRouteId TEXT NULL,
                 HealthState INTEGER NOT NULL,
@@ -874,6 +875,7 @@ public sealed class SqliteDatabaseInitializer(
 
         await dbContext.Database.ExecuteSqlRawAsync(deploymentsSql, cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(installationsSql, cancellationToken);
+        await EnsureColumnExistsAsync("home_lab_installations", "NetworkMode", "TEXT NOT NULL DEFAULT 'bridge'", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "ConfigurationJson", "TEXT NOT NULL DEFAULT '{{}}'", cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(storageSql, cancellationToken);
     }

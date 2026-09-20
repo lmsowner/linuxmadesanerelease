@@ -182,6 +182,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(item => item.Image).HasMaxLength(255);
             entity.Property(item => item.VolumeMappingsJson).HasColumnType("TEXT");
             entity.Property(item => item.PortMappingsJson).HasColumnType("TEXT");
+            entity.Property(item => item.NetworkMode).HasMaxLength(255);
             entity.Property(item => item.ConfigurationJson).HasColumnType("TEXT");
             entity.Property(item => item.HealthDetail).HasColumnType("TEXT");
             entity.HasIndex(item => new { item.DeploymentId, item.AppId }).IsUnique();

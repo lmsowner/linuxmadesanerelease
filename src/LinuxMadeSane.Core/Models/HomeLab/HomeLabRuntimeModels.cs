@@ -20,6 +20,7 @@ public sealed record HomeLabAppInstallation(
     string Image,
     string VolumeMappingsJson,
     string PortMappingsJson,
+    string NetworkMode,
     Guid? EdgeGatewayRouteId,
     HomeLabHealthState HealthState,
     string HealthDetail,
@@ -51,6 +52,7 @@ public sealed record HomeLabEffectiveContainer(
     string AppId,
     string ContainerName,
     string Image,
+    string NetworkMode,
     IReadOnlyList<string> Volumes,
     IReadOnlyList<string> Ports,
     IReadOnlyList<string> Dependencies);

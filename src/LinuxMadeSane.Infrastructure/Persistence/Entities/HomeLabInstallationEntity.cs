@@ -14,6 +14,7 @@ public sealed class HomeLabInstallationEntity
     public string Image { get; set; } = string.Empty;
     public string VolumeMappingsJson { get; set; } = "[]";
     public string PortMappingsJson { get; set; } = "[]";
+    public string NetworkMode { get; set; } = "bridge";
     public string ConfigurationJson { get; set; } = "{}";
     public Guid? EdgeGatewayRouteId { get; set; }
     public int HealthState { get; set; }

@@ -303,6 +303,7 @@ public sealed class HomeLabService(
                 item.AppId,
                 item.ContainerName,
                 item.Image,
+                item.NetworkMode,
                 DeserializeBindings(item.VolumeMappingsJson)
                     .Select(binding => $"{binding.HostPath}:{binding.ContainerPath}{(binding.ReadOnly ? ":ro" : string.Empty)}")
                     .ToArray(),
@@ -361,6 +362,10 @@ public sealed class HomeLabService(
         var output = new List<string>();
         var createdContainers = new List<string>();
         var createdRoutes = new List<Guid>();
+        var relationships = recipeId is null
+            ? new Dictionary<string, HomeLabRecipeRelationship>(StringComparer.OrdinalIgnoreCase)
+            : HomeLabCatalog.GetRecipe(recipeId).Relationships
+                .ToDictionary(item => item.AppId, StringComparer.OrdinalIgnoreCase);
 
         try
         {
@@ -378,6 +383,7 @@ public sealed class HomeLabService(
                     app,
                     storagePaths,
                     configuration,
+                    ResolveNetworkMode(deployment.Id, app, relationships),
                     recipeId is not null,
                     now);
                 var run = await RunContainerAsync(
@@ -461,6 +467,7 @@ public sealed class HomeLabService(
         HomeLabAppManifest app,
         IReadOnlyDictionary<string, string>? storagePaths,
         IReadOnlyDictionary<string, string>? configuration,
+        string networkMode,
         bool isRecipe,
         DateTimeOffset now)
     {
@@ -480,6 +487,7 @@ public sealed class HomeLabService(
             Image = $"{app.ImageRepository}:{app.ImageTag}",
             VolumeMappingsJson = JsonSerializer.Serialize(bindings, JsonOptions),
             ConfigurationJson = JsonSerializer.Serialize(normalizedConfiguration, JsonOptions),
+            NetworkMode = networkMode,
             HealthState = (int)HomeLabHealthState.Starting,
             HealthDetail = "Container is starting.",
             CreatedAtUtc = now,
@@ -516,12 +524,19 @@ public sealed class HomeLabService(
         var args = new List<string>
         {
             "run", "--detach", "--name", installation.ContainerName,
-            "--restart", "unless-stopped", "--network", installation.NetworkName,
-            "--network-alias", app.Id,
+            "--restart", "unless-stopped",
             "--label", "com.linuxmadesane.homelab=true",
             "--label", $"com.linuxmadesane.homelab.app={app.Id}",
             "--label", $"com.linuxmadesane.homelab.deployment={installation.DeploymentId}"
         };
+        if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase))
+        {
+            args.AddRange(["--network", installation.NetworkName, "--network-alias", app.Id]);
+        }
+        else
+        {
+            args.AddRange(["--network", installation.NetworkMode]);
+        }
         foreach (var capability in app.DockerCapabilities ?? [])
         {
             args.AddRange(["--cap-add", capability]);
@@ -544,9 +559,12 @@ public sealed class HomeLabService(
             args.AddRange(["--volume", $"{binding.HostPath}:{binding.ContainerPath}{(binding.ReadOnly ? ":ro" : string.Empty)}"]);
         }
 
-        foreach (var port in app.Ports)
+        if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase))
         {
-            args.AddRange(["--publish", $"127.0.0.1::{port.ContainerPort}"]);
+            foreach (var port in app.Ports)
+            {
+                args.AddRange(["--publish", $"127.0.0.1::{port.ContainerPort}"]);
+            }
         }
 
         if (app.HealthCheck?.DockerCommand is { Length: > 0 } healthCommand)
@@ -574,8 +592,10 @@ public sealed class HomeLabService(
             return ContainerRunResult.Failed(Failure("Home Lab container inspection failed.", "The container was created but LMS could not read its published ports.", output, HomeLabHealthState.Failed));
         }
 
-        var ports = ParsePortBindings(inspect, app);
-        if (ports.Count != app.Ports.Count)
+        var ports = installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase)
+            ? ParsePortBindings(inspect, app)
+            : app.Ports.Select(port => new HomeLabPortBinding(port.Name, port.ContainerPort, 0)).ToArray();
+        if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase) && ports.Count != app.Ports.Count)
         {
             return ContainerRunResult.Failed(Failure("Home Lab port inspection failed.", "The container was created but LMS could not resolve all published ports.", output, HomeLabHealthState.Failed));
         }
@@ -602,6 +622,28 @@ public sealed class HomeLabService(
 
     private async Task RefreshHealthInternalAsync(HomeLabInstallationEntity installation, CancellationToken cancellationToken)
     {
+        if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            var gatewayName = installation.NetworkMode["container:".Length..];
+            var gateway = await InspectContainerAsync(gatewayName, cancellationToken);
+            if (gateway is null)
+            {
+                installation.HealthState = (int)HomeLabHealthState.Blocked;
+                installation.HealthDetail = "Blocked: VPN Gateway container is unavailable.";
+                installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                return;
+            }
+
+            var gatewayHealth = ResolveHealth(gateway);
+            if (gatewayHealth.Item1 is not (HomeLabHealthState.Healthy or HomeLabHealthState.Starting))
+            {
+                installation.HealthState = (int)HomeLabHealthState.Blocked;
+                installation.HealthDetail = $"Blocked: VPN Gateway unavailable ({gatewayHealth.Item2}).";
+                installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                return;
+            }
+        }
+
         var inspect = await InspectContainerAsync(installation.ContainerName, cancellationToken);
         var health = inspect is null
             ? (HomeLabHealthState.Failed, "Container could not be inspected.")
@@ -766,6 +808,25 @@ public sealed class HomeLabService(
     private static string BuildNetworkName(Guid deploymentId) =>
         $"lms-homelab-{deploymentId.ToString("N")[..12]}";
 
+    private static string ResolveNetworkMode(
+        Guid deploymentId,
+        HomeLabAppManifest app,
+        IReadOnlyDictionary<string, HomeLabRecipeRelationship> relationships)
+    {
+        if (!relationships.TryGetValue(app.Id, out var relationship) || string.IsNullOrWhiteSpace(relationship.RouteVia))
+        {
+            return "bridge";
+        }
+
+        var gateway = HomeLabCatalog.GetApp(relationship.RouteVia);
+        if (!gateway.IsInstallable)
+        {
+            throw new InvalidOperationException($"The network gateway '{gateway.Name}' is not installable.");
+        }
+
+        return $"container:{BuildContainerName(deploymentId, gateway.Id)}";
+    }
+
     private static IReadOnlyList<string> ExpandDependencies(IReadOnlyList<string> requestedAppIds)
     {
         var result = new List<string>();
@@ -859,6 +920,7 @@ public sealed class HomeLabService(
             item.Image,
             item.VolumeMappingsJson,
             item.PortMappingsJson,
+            item.NetworkMode,
             item.EdgeGatewayRouteId,
             ToHealth(item.HealthState),
             item.HealthDetail,
