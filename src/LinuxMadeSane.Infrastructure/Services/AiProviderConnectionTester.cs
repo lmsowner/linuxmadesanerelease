@@ -168,8 +168,10 @@ public sealed class AiProviderConnectionTester(
                 : serviceError);
         }
 
-        var content = JsonNode.Parse(responseBody)?["choices"]?[0]?["message"]?["content"]?.GetValue<string>();
-        if (string.IsNullOrWhiteSpace(content))
+        var responseMessage = JsonNode.Parse(responseBody)?["choices"]?[0]?["message"];
+        var content = responseMessage?["content"]?.GetValue<string>();
+        var reasoningContent = responseMessage?["reasoning_content"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(content) && string.IsNullOrWhiteSpace(reasoningContent))
         {
             throw new InvalidOperationException("The host model completed the connection check without returning a response.");
         }
