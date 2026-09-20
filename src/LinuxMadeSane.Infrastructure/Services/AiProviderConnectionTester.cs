@@ -139,7 +139,7 @@ public sealed class AiProviderConnectionTester(
                     ["role"] = "user",
                     ["content"] = "Reply with exactly OK."
                 }),
-            ["max_tokens"] = 8,
+            ["max_tokens"] = 2,
             ["stream"] = false,
             ["think"] = false
         };
@@ -170,7 +170,8 @@ public sealed class AiProviderConnectionTester(
 
         var responseMessage = JsonNode.Parse(responseBody)?["choices"]?[0]?["message"];
         var content = responseMessage?["content"]?.GetValue<string>();
-        var reasoningContent = responseMessage?["reasoning_content"]?.GetValue<string>();
+        var reasoningContent = responseMessage?["reasoning_content"]?.GetValue<string>()
+            ?? responseMessage?["reasoning"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(content) && string.IsNullOrWhiteSpace(reasoningContent))
         {
             throw new InvalidOperationException("The host model completed the connection check without returning a response.");
