@@ -2,6 +2,8 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models.LocalAi;
 
@@ -62,6 +64,21 @@ public sealed class LocalAiPeerSharingService(
             return new LocalAiPeerProxyResult(503, "application/json", "{\"error\":\"The host Local AI runtime is not configured.\"}"u8.ToArray());
         }
 
+        var defaultModelId = settings.DefaultModelId.Trim();
+        if (string.IsNullOrWhiteSpace(defaultModelId))
+        {
+            return new LocalAiPeerProxyResult(503, "application/json", "{\"error\":\"The host has no default Local AI model.\"}"u8.ToArray());
+        }
+
+        if (relativePath == "chat/completions")
+        {
+            requestBody = SetRequestModel(requestBody, defaultModelId);
+            if (requestBody is null)
+            {
+                return new LocalAiPeerProxyResult(400, "application/json", "{\"error\":\"The AI request body must be a JSON object.\"}"u8.ToArray());
+            }
+        }
+
         await RequestGate.WaitAsync(cancellationToken);
         try
         {
@@ -81,6 +98,15 @@ public sealed class LocalAiPeerSharingService(
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutSource.Token);
             var body = await response.Content.ReadAsByteArrayAsync(timeoutSource.Token);
             var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/json";
+            if (response.IsSuccessStatusCode && relativePath == "models")
+            {
+                body = SelectDefaultModel(body, defaultModelId);
+                if (body is null)
+                {
+                    return new LocalAiPeerProxyResult(503, "application/json", "{\"error\":\"The host default Local AI model is not available.\"}"u8.ToArray());
+                }
+            }
+
             return new LocalAiPeerProxyResult((int)response.StatusCode, contentType, body);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -94,6 +120,57 @@ public sealed class LocalAiPeerSharingService(
         finally
         {
             RequestGate.Release();
+        }
+    }
+
+    private static byte[]? SetRequestModel(byte[]? requestBody, string defaultModelId)
+    {
+        try
+        {
+            var request = requestBody is null
+                ? null
+                : JsonNode.Parse(requestBody) as JsonObject;
+            if (request is null)
+            {
+                return null;
+            }
+
+            request["model"] = defaultModelId;
+            return JsonSerializer.SerializeToUtf8Bytes(request);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static byte[]? SelectDefaultModel(byte[] responseBody, string defaultModelId)
+    {
+        try
+        {
+            var response = JsonNode.Parse(responseBody) as JsonObject;
+            var models = response?["data"] as JsonArray;
+            var defaultModel = models?
+                .OfType<JsonObject>()
+                .FirstOrDefault(model => string.Equals(
+                    model["id"]?.GetValue<string>(),
+                    defaultModelId,
+                    StringComparison.OrdinalIgnoreCase));
+            if (response is null || defaultModel is null)
+            {
+                return null;
+            }
+
+            response["data"] = new JsonArray(defaultModel.DeepClone());
+            return JsonSerializer.SerializeToUtf8Bytes(response);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
         }
     }
 }
