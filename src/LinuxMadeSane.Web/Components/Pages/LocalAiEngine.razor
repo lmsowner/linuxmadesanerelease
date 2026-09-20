@@ -5,6 +5,7 @@
 @rendermode InteractiveServer
 @using LinuxMadeSane.Application.Contracts.LocalAi
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.LocalAi
 @using LinuxMadeSane.Infrastructure.Services
 @inject ILocalAiEngineManagerService LocalAiService
@@ -62,13 +63,26 @@
                     </UiPill>
                 </div>
 
-                <div class="compact-list local-ai-model-list">
+                <div class="local-ai-acceleration-summary">
+                    <div>
+                        <span class="local-ai-summary-label">GPU use</span>
+                        <strong>Use a supported GPU when available</strong>
+                        <p class="meta-text">@GpuModeDetail</p>
+                    </div>
+                    <UiPill Tone="@GpuModeTone">@GpuModeLabel</UiPill>
+                </div>
+
+                <div class="local-ai-model-card-grid">
                     @foreach (var model in ModelRows)
                     {
-                        <div class="compact-row compact-row-block local-ai-model-row">
-                            <div class="compact-row-main">
-                                <div class="provider-record-heading">
-                                    <strong>@model.DisplayName</strong>
+                        <article class="local-ai-model-panel @(model.IsDefault ? "is-default" : string.Empty)">
+                            <div class="local-ai-model-panel-main">
+                                <div class="local-ai-model-panel-heading">
+                                    <div>
+                                        <p class="eyebrow">@model.ModelId</p>
+                                        <h3>@model.DisplayName</h3>
+                                    </div>
+                                    <div class="local-ai-model-badges">
                                     @if (model.IsDefault)
                                     {
                                         <UiPill Tone="UiPillTone.Success">Default</UiPill>
@@ -81,13 +95,22 @@
                                     {
                                         <UiPill Tone="UiPillTone.Warning">Not installed</UiPill>
                                     }
+                                        <UiPill Tone="@GetModelAccelerationTone(model)">@GetModelAccelerationLabel(model)</UiPill>
+                                    </div>
                                 </div>
-                                <p class="compact-row-summary">@model.Description</p>
-                                <div class="local-ai-inline-meta">
-                                    <span>@model.ModelId</span>
+                                <p class="local-ai-model-description">@model.Description</p>
+                                <div class="local-ai-model-facts">
+                                    @if (model.EstimatedRamBytes > 0)
+                                    {
+                                        <span><strong>@FormatBytes(model.EstimatedRamBytes)</strong> RAM</span>
+                                    }
+                                    @if (model.EstimatedVramBytes is > 0)
+                                    {
+                                        <span><strong>@FormatBytes(model.EstimatedVramBytes.Value)</strong> preferred VRAM</span>
+                                    }
                                     @if (model.SizeBytes > 0)
                                     {
-                                        <span>@FormatBytes(model.SizeBytes)</span>
+                                        <span><strong>@FormatBytes(model.SizeBytes)</strong> installed</span>
                                     }
                                 </div>
                                 @if (installingModelId.Equals(model.ModelId, StringComparison.OrdinalIgnoreCase))
@@ -98,7 +121,12 @@
                                     </div>
                                 }
                             </div>
-                            <div class="compact-row-side">
+                            <div class="local-ai-model-panel-actions">
+                                <UiCommandButton Label="Model details"
+                                                 Glyph="UiIconGlyph.Info"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Disabled="@isBusy"
+                                                 OnClick="@(() => OpenModelDetails(model))" />
                                 @if (!model.IsInstalled)
                                 {
                                     <UiCommandButton Label="@(installingModelId.Equals(model.ModelId, StringComparison.OrdinalIgnoreCase) ? "Installing..." : "Install")"
@@ -120,7 +148,7 @@
                                                      Disabled="true" />
                                 }
                             </div>
-                        </div>
+                        </article>
                     }
                 </div>
             </section>
@@ -205,6 +233,91 @@
     }
 </div>
 
+<UiModal IsOpen="@(detailModel is not null)"
+         Title="@(detailModel?.DisplayName ?? "Model details")"
+         Subtitle="@detailModel?.ModelId"
+         Class="local-ai-model-details-modal"
+         OnClose="CloseModelDetails">
+    <ChildContent>
+        @if (detailModel is not null)
+        {
+            <div class="local-ai-model-details">
+                <p class="local-ai-model-details-summary">@detailModel.Description</p>
+
+                <div class="local-ai-detail-grid">
+                    <div class="local-ai-detail-card">
+                        <span class="local-ai-summary-label">Status</span>
+                        <strong>@GetInstallStatus(detailModel)</strong>
+                        <span>@GetSuitabilityLabel(detailModel)</span>
+                    </div>
+                    <div class="local-ai-detail-card">
+                        <span class="local-ai-summary-label">Memory</span>
+                        <strong>@GetMemorySummary(detailModel)</strong>
+                        <span>@GetInstalledSizeSummary(detailModel)</span>
+                    </div>
+                    <div class="local-ai-detail-card">
+                        <span class="local-ai-summary-label">Acceleration</span>
+                        <strong>@GetModelAccelerationLabel(detailModel)</strong>
+                        <span>@GetModelAccelerationDetail(detailModel)</span>
+                    </div>
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(detailModel.SuitabilityWarning))
+                {
+                    <div class="callout warning">@detailModel.SuitabilityWarning</div>
+                }
+
+                <div class="local-ai-model-details-section">
+                    <h3>What it can do</h3>
+                    <div class="local-ai-capability-list">
+                        @foreach (var capability in GetCapabilityLabels(detailModel))
+                        {
+                            <span>@capability</span>
+                        }
+                    </div>
+                </div>
+
+                <div class="local-ai-model-details-section">
+                    <h3>GPU on this server</h3>
+                    <p>@GpuModeDetail</p>
+                    @if (workspace?.Status.Hardware.Gpus.Count > 0)
+                    {
+                        <div class="local-ai-gpu-detail-list">
+                            @foreach (var gpu in workspace.Status.Hardware.Gpus)
+                            {
+                                <div>
+                                    <strong>@gpu.Name</strong>
+                                    <span>@GetGpuDetail(gpu)</span>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Close"
+                         Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Ghost"
+                         OnClick="CloseModelDetails" />
+        @if (detailModel is { IsInstalled: false } modelToInstall)
+        {
+            <UiCommandButton Label="Install model"
+                             Glyph="UiIconGlyph.Upload"
+                             Disabled="@isBusy"
+                             OnClick="@(() => InstallFromDetailsAsync(modelToInstall.ModelId))" />
+        }
+        else if (detailModel is { IsInstalled: true, IsDefault: false } modelToSelect)
+        {
+            <UiCommandButton Label="Set as default"
+                             Glyph="UiIconGlyph.Save"
+                             Disabled="@isBusy"
+                             OnClick="@(() => SetDefaultFromDetailsAsync(modelToSelect.ModelId))" />
+        }
+    </Footer>
+</UiModal>
+
 @code {
     [Parameter]
     public bool Embedded { get; set; }
@@ -219,6 +332,7 @@
     private string installingModelId = string.Empty;
     private string installProgressStep = string.Empty;
     private string installProgressDetail = string.Empty;
+    private ModelRow? detailModel;
     private bool isLoaded;
     private bool isBusy;
 
@@ -278,7 +392,12 @@
                         definition.Description,
                         installed is not null,
                         IsDefault(definition.ModelId),
-                        installed?.SizeBytes ?? 0);
+                        installed?.SizeBytes ?? 0,
+                        definition.EstimatedRamBytes,
+                        definition.EstimatedVramBytes,
+                        definition.Suitability,
+                        definition.Capabilities,
+                        definition.SuitabilityWarning);
                 })
                 .ToList();
 
@@ -290,7 +409,12 @@
                     string.IsNullOrWhiteSpace(installed.Detail) ? "Installed local model." : installed.Detail,
                     true,
                     IsDefault(installed.ModelId),
-                    installed.SizeBytes)));
+                    installed.SizeBytes,
+                    0,
+                    null,
+                    LocalAiModelSuitability.Supported,
+                    installed.Capabilities,
+                    string.Empty)));
 
             return rows
                 .OrderByDescending(row => row.IsDefault)
@@ -396,6 +520,22 @@
         }
     }
 
+    private void OpenModelDetails(ModelRow model) => detailModel = model;
+
+    private void CloseModelDetails() => detailModel = null;
+
+    private async Task InstallFromDetailsAsync(string modelId)
+    {
+        CloseModelDetails();
+        await InstallModelAsync(modelId);
+    }
+
+    private async Task SetDefaultFromDetailsAsync(string modelId)
+    {
+        CloseModelDetails();
+        await SetDefaultModelAsync(modelId);
+    }
+
     private async Task EnableOrRotatePeerSharingAsync()
     {
         isBusy = true;
@@ -461,6 +601,139 @@
         workspace is not null &&
         modelId.Equals(workspace.Status.Settings.DefaultModelId, StringComparison.OrdinalIgnoreCase);
 
+    private UiPillTone GpuModeTone => workspace?.Status.Hardware.GpuAccelerationState switch
+    {
+        LocalAiGpuAccelerationState.Confirmed => UiPillTone.Success,
+        LocalAiGpuAccelerationState.Available => UiPillTone.Warning,
+        _ => UiPillTone.Neutral
+    };
+
+    private string GpuModeLabel => workspace?.Status.Hardware.GpuAccelerationState switch
+    {
+        LocalAiGpuAccelerationState.Confirmed => "GPU ready · automatic",
+        LocalAiGpuAccelerationState.Available => "GPU detected · check driver",
+        LocalAiGpuAccelerationState.NotDetected => "CPU mode",
+        _ => "Checking hardware"
+    };
+
+    private string GpuModeDetail => workspace?.Status.Hardware.GpuAccelerationState switch
+    {
+        LocalAiGpuAccelerationState.Confirmed =>
+            $"Automatic. Ollama will use {GetPrimaryGpuName()} when a model runs and will use system RAM if the model needs more memory.",
+        LocalAiGpuAccelerationState.Available =>
+            $"{GetPrimaryGpuName()} was found, but CUDA or ROCm was not confirmed. Ollama will use it automatically if its driver is supported; otherwise it will use the CPU.",
+        LocalAiGpuAccelerationState.NotDetected =>
+            "No supported GPU was detected. Models will run on the CPU and use system RAM.",
+        _ => "LMS is checking this server for supported GPU acceleration."
+    };
+
+    private string GetPrimaryGpuName() =>
+        workspace?.Status.Hardware.Gpus.FirstOrDefault()?.Name ?? "the detected GPU";
+
+    private UiPillTone GetModelAccelerationTone(ModelRow model) =>
+        workspace?.Status.Hardware.GpuAccelerationState switch
+        {
+            LocalAiGpuAccelerationState.Confirmed when ModelFitsGpu(model) => UiPillTone.Success,
+            LocalAiGpuAccelerationState.Confirmed => UiPillTone.Warning,
+            LocalAiGpuAccelerationState.Available => UiPillTone.Warning,
+            _ => UiPillTone.Neutral
+        };
+
+    private string GetModelAccelerationLabel(ModelRow model) =>
+        workspace?.Status.Hardware.GpuAccelerationState switch
+        {
+            LocalAiGpuAccelerationState.Confirmed when ModelFitsGpu(model) => "Fits GPU",
+            LocalAiGpuAccelerationState.Confirmed => "GPU + RAM",
+            LocalAiGpuAccelerationState.Available => "GPU driver needed",
+            _ => "CPU"
+        };
+
+    private string GetModelAccelerationDetail(ModelRow model) =>
+        workspace?.Status.Hardware.GpuAccelerationState switch
+        {
+            LocalAiGpuAccelerationState.Confirmed when ModelFitsGpu(model) =>
+                $"GPU use is automatic. This model's preferred VRAM fits {GetPrimaryGpuName()}.",
+            LocalAiGpuAccelerationState.Confirmed =>
+                "GPU use is automatic, but the model may also use system RAM because its preferred VRAM exceeds the known GPU memory.",
+            LocalAiGpuAccelerationState.Available =>
+                "A GPU is present, but its acceleration driver was not confirmed. The engine will fall back to the CPU if it cannot use the GPU.",
+            _ => "This model will run on the CPU because no supported GPU was detected."
+        };
+
+    private bool ModelFitsGpu(ModelRow model)
+    {
+        if (model.EstimatedVramBytes is not > 0 || workspace is null)
+        {
+            return false;
+        }
+
+        return workspace.Status.Hardware.Gpus
+            .Where(gpu => gpu.IsCudaAvailable || gpu.IsRocmAvailable)
+            .Any(gpu => gpu.TotalVramBytes is not null && gpu.TotalVramBytes >= model.EstimatedVramBytes);
+    }
+
+    private static string GetInstallStatus(ModelRow model) => model.IsDefault
+        ? "Installed · server default"
+        : model.IsInstalled
+            ? "Installed"
+            : "Available to install";
+
+    private static string GetSuitabilityLabel(ModelRow model) => model.Suitability switch
+    {
+        LocalAiModelSuitability.Recommended => "A good fit for this server",
+        LocalAiModelSuitability.Supported => "Supported on this server",
+        LocalAiModelSuitability.Limited => "May be slow on this server",
+        LocalAiModelSuitability.NotRecommended => "This server is below the preferred hardware",
+        _ => "Hardware fit unavailable"
+    };
+
+    private static string GetMemorySummary(ModelRow model)
+    {
+        if (model.EstimatedRamBytes <= 0)
+        {
+            return "Requirements unavailable";
+        }
+
+        return model.EstimatedVramBytes is > 0
+            ? $"{FormatBytes(model.EstimatedRamBytes)} RAM · {FormatBytes(model.EstimatedVramBytes.Value)} VRAM"
+            : $"{FormatBytes(model.EstimatedRamBytes)} RAM";
+    }
+
+    private static string GetInstalledSizeSummary(ModelRow model) => model.SizeBytes > 0
+        ? $"Installed size: {FormatBytes(model.SizeBytes)}"
+        : "Download size is reported during installation";
+
+    private static IReadOnlyList<string> GetCapabilityLabels(ModelRow model)
+    {
+        var labels = new List<string>();
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.BasicChat, "Chat");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.CommandExplanation, "Command explanations");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.LogSummary, "Log summaries");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.FixPlanGeneration, "Fix planning");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.ToolCalling, "Tool calling");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.Streaming, "Streaming responses");
+        return labels.Count > 0 ? labels : ["Basic local chat"];
+    }
+
+    private static void AddCapability(
+        ICollection<string> labels,
+        AiProviderCapabilityFlag available,
+        AiProviderCapabilityFlag capability,
+        string label)
+    {
+        if (available.HasFlag(capability))
+        {
+            labels.Add(label);
+        }
+    }
+
+    private static string GetGpuDetail(LocalAiGpuAdapter gpu)
+    {
+        var memory = gpu.TotalVramBytes is > 0 ? FormatBytes(gpu.TotalVramBytes.Value) : "VRAM unknown";
+        var engine = gpu.IsCudaAvailable ? "CUDA ready" : gpu.IsRocmAvailable ? "ROCm ready" : "driver not confirmed";
+        return $"{memory} · {engine}";
+    }
+
     private void SetStatus(string message, string tone = "info")
     {
         statusMessage = message;
@@ -487,5 +760,10 @@
         string Description,
         bool IsInstalled,
         bool IsDefault,
-        long SizeBytes);
+        long SizeBytes,
+        long EstimatedRamBytes,
+        long? EstimatedVramBytes,
+        LocalAiModelSuitability Suitability,
+        AiProviderCapabilityFlag Capabilities,
+        string SuitabilityWarning);
 }
