@@ -22,7 +22,7 @@
     {
         <UiHeroPanel Eyebrow="LinuxMadeSane.AI"
                      Title="Local AI"
-                     Description="Choose the models available on this server, set one default, or connect this server to a remote AI host.">
+                     Description="Share this server's default model and choose which local models are available.">
             <Actions>
                 <UiCommandButton Label="Refresh"
                                  Glyph="UiIconGlyph.Refresh"
@@ -51,6 +51,76 @@
     else
     {
         <div class="local-ai-tab-content">
+            <section class="surface-subcard local-ai-card local-ai-sharing-card">
+                <div class="table-header">
+                    <div>
+                        <p class="eyebrow">Remote AI sharing</p>
+                        <h2>Offer this server's default model</h2>
+                        <p class="meta-text">Other LMS machines connect to this AI service and always use the default model selected below.</p>
+                    </div>
+                    <UiPill Tone="@(peerSharingStatus?.Enabled == true ? UiPillTone.Success : UiPillTone.Neutral)">
+                        @(peerSharingStatus?.Enabled == true ? "Sharing enabled" : "Sharing disabled")
+                    </UiPill>
+                </div>
+
+                <div class="local-ai-sharing-details">
+                    <div>
+                        <span class="local-ai-summary-label">AI service URL</span>
+                        <strong>@SharedAiServiceUrl</strong>
+                    </div>
+                    <div>
+                        <span class="local-ai-summary-label">Shared model</span>
+                        <strong>@DefaultModelLabel</strong>
+                    </div>
+                    @if (peerSharingStatus?.AccessKeyIssuedAtUtc is not null)
+                    {
+                        <div>
+                            <span class="local-ai-summary-label">Key issued</span>
+                            <strong>@peerSharingStatus.AccessKeyIssuedAtUtc.Value.ToLocalTime().ToString("dd MMM yyyy HH:mm")</strong>
+                        </div>
+                    }
+                </div>
+
+                @if (peerSharingStatus?.HasAccessKey == true && !string.IsNullOrWhiteSpace(peerSharingStatus.AccessKey))
+                {
+                    <div class="local-ai-stored-key">
+                        <UiTextField Value="@peerSharingStatus.AccessKey"
+                                     Label="Access key"
+                                     Type="@(showPeerAccessKey ? "text" : "password")"
+                                     Autocomplete="off"
+                                     Compact="true"
+                                     readonly="readonly"
+                                     spellcheck="false" />
+                        <UiCommandButton Label="@(showPeerAccessKey ? "Hide key" : "Show key")"
+                                         Glyph="UiIconGlyph.Key"
+                                         Variant="UiButtonVariant.Ghost"
+                                         OnClick="TogglePeerAccessKey" />
+                    </div>
+                }
+                else if (peerSharingStatus?.HasAccessKey == true)
+                {
+                    <div class="callout warning">
+                        <strong>This older access key cannot be displayed.</strong>
+                        <p>Replace it once to store a reusable key. Existing machines using the old key will need the replacement.</p>
+                    </div>
+                }
+
+                <div class="local-ai-inline-actions">
+                    <UiCommandButton Label="@GetPeerKeyActionLabel()"
+                                     Glyph="UiIconGlyph.Key"
+                                     Disabled="@(!HasUsableDefaultModel || isBusy)"
+                                     OnClick="EnableOrRotatePeerSharingAsync" />
+                    @if (peerSharingStatus?.Enabled == true)
+                    {
+                        <UiCommandButton Label="Disable sharing"
+                                         Glyph="UiIconGlyph.Stop"
+                                         Variant="UiButtonVariant.Ghost"
+                                         Disabled="@isBusy"
+                                         OnClick="DisablePeerSharingAsync" />
+                    }
+                </div>
+            </section>
+
             <section class="surface-subcard local-ai-card">
                 <div class="table-header">
                     <div>
@@ -153,82 +223,6 @@
                 </div>
             </section>
 
-            <section class="surface-subcard local-ai-card">
-                <div class="table-header">
-                    <div>
-                        <p class="eyebrow">Remote AI</p>
-                        <h2>Offer this server's default model</h2>
-                        <p class="meta-text">Connected LMS clients see only the default model selected above. Every request is forced to that model.</p>
-                    </div>
-                    <UiPill Tone="@(peerSharingStatus?.Enabled == true ? UiPillTone.Success : UiPillTone.Neutral)">
-                        @(peerSharingStatus?.Enabled == true ? "Sharing enabled" : "Sharing disabled")
-                    </UiPill>
-                </div>
-
-                <div class="local-ai-inline-meta">
-                    <span>AI service: @SharedAiServiceUrl</span>
-                    <span>Model: @DefaultModelLabel</span>
-                    @if (peerSharingStatus?.AccessKeyIssuedAtUtc is not null)
-                    {
-                        <span>Key issued @peerSharingStatus.AccessKeyIssuedAtUtc.Value.ToLocalTime().ToString("dd MMM yyyy HH:mm")</span>
-                    }
-                </div>
-
-                @if (!string.IsNullOrWhiteSpace(issuedPeerAccessKey))
-                {
-                    <div class="callout warning">
-                        <strong>Copy this access key now.</strong>
-                        <p>Only its hash is stored. Generating another key immediately revokes this one.</p>
-                        <code class="local-ai-peer-key">@issuedPeerAccessKey</code>
-                    </div>
-                }
-
-                <div class="local-ai-inline-actions">
-                    <UiCommandButton Label="@(peerSharingStatus?.Enabled == true ? "Generate new access key" : "Enable and generate key")"
-                                     Glyph="UiIconGlyph.Key"
-                                     Disabled="@(!HasUsableDefaultModel || isBusy)"
-                                     OnClick="EnableOrRotatePeerSharingAsync" />
-                    @if (peerSharingStatus?.Enabled == true)
-                    {
-                        <UiCommandButton Label="Disable sharing"
-                                         Glyph="UiIconGlyph.Stop"
-                                         Variant="UiButtonVariant.Ghost"
-                                         Disabled="@isBusy"
-                                         OnClick="DisablePeerSharingAsync" />
-                    }
-                </div>
-            </section>
-
-            <section class="surface-subcard local-ai-card">
-                <div class="table-header">
-                    <div>
-                        <p class="eyebrow">Remote AI</p>
-                        <h2>Connect this server to remote AI</h2>
-                        <p class="meta-text">Enter the remote AI service URL and access key. The remote server supplies its default model automatically.</p>
-                    </div>
-                </div>
-
-                <div class="local-ai-form-grid local-ai-custom-endpoint-grid">
-                    <UiTextField @bind-Value="peerLmsBaseUrl"
-                                 Label="AI service URL"
-                                 Helper="Use the AI engine address shown by the remote server."
-                                 Placeholder="http://ai-host.example.com:11434"
-                                 Compact="true" />
-                    <UiTextField @bind-Value="peerLmsAccessKey"
-                                 Label="Access key"
-                                 Type="password"
-                                 Autocomplete="off"
-                                 Helper="Generated by the remote server."
-                                 Compact="true" />
-                </div>
-
-                <div class="local-ai-inline-actions">
-                    <UiCommandButton Label="Connect remote AI"
-                                     Glyph="UiIconGlyph.Connection"
-                                     Disabled="@(!CanAddPeerLmsProvider)"
-                                     OnClick="AddPeerLmsProviderAsync" />
-                </div>
-            </section>
         </div>
     }
 </div>
@@ -324,22 +318,15 @@
 
     private LocalAiEngineWorkspaceViewModel? workspace;
     private LocalAiPeerSharingStatus? peerSharingStatus;
-    private string issuedPeerAccessKey = string.Empty;
-    private string peerLmsBaseUrl = string.Empty;
-    private string peerLmsAccessKey = string.Empty;
     private string statusMessage = string.Empty;
     private string statusTone = "info";
     private string installingModelId = string.Empty;
     private string installProgressStep = string.Empty;
     private string installProgressDetail = string.Empty;
     private ModelRow? detailModel;
+    private bool showPeerAccessKey;
     private bool isLoaded;
     private bool isBusy;
-
-    private bool CanAddPeerLmsProvider =>
-        !isBusy &&
-        !string.IsNullOrWhiteSpace(peerLmsBaseUrl) &&
-        !string.IsNullOrWhiteSpace(peerLmsAccessKey);
 
     private bool HasUsableDefaultModel =>
         workspace is not null &&
@@ -543,8 +530,8 @@
         {
             var result = await PeerSharing.EnableWithNewKeyAsync();
             peerSharingStatus = result.Status;
-            issuedPeerAccessKey = result.AccessKey;
-            SetStatus("Remote AI sharing is enabled. Copy the new access key now.", "success");
+            showPeerAccessKey = true;
+            SetStatus("Remote AI sharing is enabled. The access key is stored and can be shown here again.", "success");
         }
         catch (Exception exception)
         {
@@ -563,7 +550,7 @@
         {
             await PeerSharing.DisableAsync();
             peerSharingStatus = await PeerSharing.GetStatusAsync();
-            issuedPeerAccessKey = string.Empty;
+            showPeerAccessKey = false;
             SetStatus("Remote AI sharing is disabled.", "success");
         }
         catch (Exception exception)
@@ -576,26 +563,14 @@
         }
     }
 
-    private async Task AddPeerLmsProviderAsync()
+    private void TogglePeerAccessKey() => showPeerAccessKey = !showPeerAccessKey;
+
+    private string GetPeerKeyActionLabel() => peerSharingStatus switch
     {
-        isBusy = true;
-        try
-        {
-            var provider = await LocalAiService.CreateOrUpdatePeerLmsProviderAsync(
-                new PeerLmsAiProviderRequest(peerLmsBaseUrl, peerLmsAccessKey));
-            peerLmsAccessKey = string.Empty;
-            SetStatus($"Connected to {provider.DisplayName}. Its server default model is selected automatically.", "success");
-            await LoadAsync(clearStatus: false);
-        }
-        catch (Exception exception)
-        {
-            SetStatus(exception.Message, "error");
-        }
-        finally
-        {
-            isBusy = false;
-        }
-    }
+        { HasAccessKey: true } => "Replace access key",
+        { Enabled: true } => "Generate access key",
+        _ => "Enable sharing and generate key"
+    };
 
     private bool IsDefault(string modelId) =>
         workspace is not null &&

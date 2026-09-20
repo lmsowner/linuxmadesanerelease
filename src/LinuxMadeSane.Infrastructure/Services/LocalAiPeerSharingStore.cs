@@ -4,11 +4,14 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models.LocalAi;
 
 namespace LinuxMadeSane.Infrastructure.Services;
 
-public sealed class LocalAiPeerSharingStore(LocalAiPeerSharingStorageSettings storageSettings)
+public sealed class LocalAiPeerSharingStore(
+    LocalAiPeerSharingStorageSettings storageSettings,
+    ISecretStore secretStore)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -22,7 +25,8 @@ public sealed class LocalAiPeerSharingStore(LocalAiPeerSharingStorageSettings st
         try
         {
             var settings = await ReadAsync(cancellationToken);
-            return MapStatus(settings);
+            var accessKey = await ResolveAccessKeyAsync(settings, cancellationToken);
+            return MapStatus(settings, accessKey);
         }
         finally
         {
@@ -34,19 +38,43 @@ public sealed class LocalAiPeerSharingStore(LocalAiPeerSharingStorageSettings st
     {
         var accessKey = $"lmsai_{Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant()}";
         var now = DateTimeOffset.UtcNow;
-        var settings = new PersistedPeerSharingSettings(true, Hash(accessKey), now, now);
 
         await gate.WaitAsync(cancellationToken);
         try
         {
-            await WriteAsync(settings, cancellationToken);
+            var current = await ReadAsync(cancellationToken);
+            var secretReference = await secretStore.StoreSecretAsync(
+                accessKey,
+                "Local AI sharing access key",
+                cancellationToken);
+            var settings = new PersistedPeerSharingSettings(
+                true,
+                Hash(accessKey),
+                secretReference,
+                now,
+                now);
+
+            try
+            {
+                await WriteAsync(settings, cancellationToken);
+            }
+            catch
+            {
+                await secretStore.DeleteSecretAsync(secretReference, cancellationToken);
+                throw;
+            }
+
+            if (!string.IsNullOrWhiteSpace(current.AccessKeySecretReference))
+            {
+                await secretStore.DeleteSecretAsync(current.AccessKeySecretReference, cancellationToken);
+            }
+
+            return new LocalAiPeerSharingKeyResult(MapStatus(settings, accessKey), accessKey);
         }
         finally
         {
             gate.Release();
         }
-
-        return new LocalAiPeerSharingKeyResult(MapStatus(settings), accessKey);
     }
 
     public async Task DisableAsync(CancellationToken cancellationToken = default)
@@ -148,15 +176,46 @@ public sealed class LocalAiPeerSharingStore(LocalAiPeerSharingStorageSettings st
     private static string Hash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
-    private static LocalAiPeerSharingStatus MapStatus(PersistedPeerSharingSettings settings) =>
-        new(settings.Enabled, !string.IsNullOrWhiteSpace(settings.AccessKeyHash), settings.AccessKeyIssuedAtUtc);
+    private async Task<string> ResolveAccessKeyAsync(
+        PersistedPeerSharingSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(settings.AccessKeySecretReference))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            return await secretStore.ResolveSecretAsync(settings.AccessKeySecretReference, cancellationToken)
+                   ?? string.Empty;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static LocalAiPeerSharingStatus MapStatus(
+        PersistedPeerSharingSettings settings,
+        string accessKey) =>
+        new(
+            settings.Enabled,
+            !string.IsNullOrWhiteSpace(settings.AccessKeyHash),
+            settings.AccessKeyIssuedAtUtc,
+            accessKey);
 
     private sealed record PersistedPeerSharingSettings(
         bool Enabled,
         string AccessKeyHash,
+        string? AccessKeySecretReference,
         DateTimeOffset? AccessKeyIssuedAtUtc,
         DateTimeOffset UpdatedAtUtc)
     {
-        public static PersistedPeerSharingSettings Empty { get; } = new(false, string.Empty, null, DateTimeOffset.MinValue);
+        public static PersistedPeerSharingSettings Empty { get; } = new(false, string.Empty, null, null, DateTimeOffset.MinValue);
     }
 }

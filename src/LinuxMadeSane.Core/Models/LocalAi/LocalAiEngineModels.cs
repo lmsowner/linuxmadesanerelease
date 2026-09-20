@@ -293,7 +293,8 @@ public sealed record PeerLmsAiProviderRequest(
 public sealed record LocalAiPeerSharingStatus(
     bool Enabled,
     bool HasAccessKey,
-    DateTimeOffset? AccessKeyIssuedAtUtc);
+    DateTimeOffset? AccessKeyIssuedAtUtc,
+    string AccessKey);
 
 public sealed record LocalAiPeerSharingKeyResult(
     LocalAiPeerSharingStatus Status,
