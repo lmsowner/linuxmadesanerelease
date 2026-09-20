@@ -153,6 +153,7 @@ public sealed class LocalAiHardwareInspectionService(
         var adapters = new List<LocalAiGpuAdapter>();
         var nvidiaInfo = ParseNvidia(nvidiaOutput);
         var amdNames = ParseRocm(rocmOutput);
+        var nvidiaAdapterIndex = 0;
 
         foreach (var line in SplitLines(lspciOutput))
         {
@@ -164,25 +165,32 @@ public sealed class LocalAiHardwareInspectionService(
 
             var isNvidia = line.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase);
             var isAmd = line.Contains("AMD", StringComparison.OrdinalIgnoreCase) || line.Contains("Advanced Micro Devices", StringComparison.OrdinalIgnoreCase);
-            var normalizedName = line[(line.IndexOf(':') + 1)..].Trim();
-            var key = normalizedName.ToUpperInvariant();
-            nvidiaInfo.TryGetValue(key, out var matchedNvidia);
-            var rocmMatch = amdNames.FirstOrDefault(item => normalizedName.Contains(item, StringComparison.OrdinalIgnoreCase));
+            var isIntel = line.Contains("Intel", StringComparison.OrdinalIgnoreCase);
+            if (!isNvidia && !isAmd && !isIntel)
+            {
+                continue;
+            }
+
+            var normalizedName = ParseControllerName(line);
+            var matchedNvidia = isNvidia && nvidiaAdapterIndex < nvidiaInfo.Count
+                ? nvidiaInfo.Values.ElementAt(nvidiaAdapterIndex++)
+                : default;
+            var rocmAvailable = isAmd && amdNames.Count > 0;
 
             adapters.Add(new LocalAiGpuAdapter(
-                isNvidia ? "NVIDIA" : isAmd ? "AMD" : "Unknown",
+                isNvidia ? "NVIDIA" : isAmd ? "AMD" : "Intel",
                 normalizedName,
                 isNvidia,
                 isAmd,
                 matchedNvidia.TotalVramBytes,
                 matchedNvidia.IsDetected,
-                !string.IsNullOrWhiteSpace(rocmMatch),
+                rocmAvailable,
                 matchedNvidia.DriverVersion,
                 isNvidia
                     ? (matchedNvidia.IsDetected ? "NVIDIA GPU detected and nvidia-smi is available." : "NVIDIA GPU detected but nvidia-smi did not confirm acceleration.")
                     : isAmd
-                        ? (!string.IsNullOrWhiteSpace(rocmMatch) ? "AMD GPU detected and ROCm tooling is available." : "AMD GPU detected but ROCm is not confirmed.")
-                        : "GPU detected, but vendor-specific acceleration tooling was not confirmed."));
+                        ? (rocmAvailable ? "AMD GPU detected and ROCm tooling is available." : "AMD GPU detected but ROCm is not confirmed.")
+                        : "Intel GPU detected. Ollama will use it automatically when a supported Vulkan driver is available."));
         }
 
         if (adapters.Count > 0)
@@ -211,6 +219,14 @@ public sealed class LocalAiHardwareInspectionService(
         }
 
         return adapters;
+    }
+
+    private static string ParseControllerName(string line)
+    {
+        var separator = line.IndexOf(": ", StringComparison.Ordinal);
+        return separator >= 0 && separator + 2 < line.Length
+            ? line[(separator + 2)..].Trim()
+            : line.Trim();
     }
 
     private static Dictionary<string, (bool IsDetected, long? TotalVramBytes, string DriverVersion)> ParseNvidia(string stdout)
