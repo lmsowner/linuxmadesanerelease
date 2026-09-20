@@ -1,0 +1,243 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@page "/home-lab/apps"
+@rendermode InteractiveServer
+@using System.Text.Json
+@using LinuxMadeSane.Application.Contracts.HomeLab
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.HomeLab
+@inject IHomeLabService HomeLabService
+
+<PageTitle>Home Lab Apps | Linux Made Sane</PageTitle>
+
+<div class="page-shell home-lab-page">
+    <UiHeroPanel Eyebrow="Home Lab"
+                  Title="Apps"
+                  Description="Compose established Docker applications on private LMS-managed networks.">
+        <Actions>
+            <UiCommandButton Label="Refresh"
+                             Glyph="UiIconGlyph.Refresh"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@busy"
+                             OnClick="LoadAsync" />
+            <UiCommandButton Label="Recipes"
+                             Glyph="UiIconGlyph.Connection"
+                             Variant="UiButtonVariant.Ghost"
+                             Href="/home-lab/recipes" />
+        </Actions>
+    </UiHeroPanel>
+
+    @if (!string.IsNullOrWhiteSpace(message))
+    {
+        <p class="callout @(error ? "error" : "ready")">@message</p>
+    }
+
+    @if (workspace is null)
+    {
+        <UiPanel><p class="meta-text">Loading Home Lab...</p></UiPanel>
+    }
+    else
+    {
+        <section class="surface-subcard home-lab-storage-card">
+            <div class="table-header">
+                <div>
+                    <p class="eyebrow">Shared storage roles</p>
+                    <h2>Choose host locations once</h2>
+                    <p class="meta-text">Recipes reuse these paths when mounting downloads and media into participating containers.</p>
+                </div>
+            </div>
+            <div class="home-lab-storage-grid">
+                @foreach (var role in StorageRoles)
+                {
+                    <div class="home-lab-storage-row">
+                        <label for="storage-@role">@role</label>
+                        <input id="storage-@role" class="ui-control-input" @bind="storagePaths[role]" placeholder="/mnt/storage/@role" />
+                        <UiCommandButton Label="Save"
+                                         Glyph="UiIconGlyph.Save"
+                                         Variant="UiButtonVariant.Ghost"
+                                         Disabled="@busy"
+                                         OnClick="() => SaveStorageRoleAsync(role)" />
+                    </div>
+                }
+            </div>
+        </section>
+
+        <section class="feature-grid home-lab-app-grid">
+            @foreach (var app in workspace.Apps)
+            {
+                var installation = workspace.Installations.FirstOrDefault(item => item.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase));
+                <article class="surface-card home-lab-app-card">
+                    <div class="table-header">
+                        <div>
+                            <p class="eyebrow">@FormatCategory(app.Category)</p>
+                            <h2>@app.Name</h2>
+                        </div>
+                        <UiPill Tone="@(installation is null ? UiPillTone.Neutral : GetHealthTone(installation.HealthState))">
+                            @(installation is null ? (app.IsInstallable ? "Available" : "Planned") : installation.HealthState.ToString())
+                        </UiPill>
+                    </div>
+                    <p>@app.Description</p>
+                    <p class="meta-text"><strong>Image:</strong> @app.ImageRepository:@app.ImageTag</p>
+                    @if (installation is not null)
+                    {
+                        <p class="meta-text"><strong>Container:</strong> @installation.ContainerName<br />@installation.HealthDetail</p>
+                        <div class="home-lab-action-row">
+                            @if (BuildLocalUrl(installation) is { } localUrl)
+                            {
+                                <UiCommandButton Label="Open" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.PrimaryMuted" Href="@localUrl" Target="_blank" Rel="noopener" />
+                            }
+                            <UiCommandButton Label="Start" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
+                            <UiCommandButton Label="Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
+                            <UiCommandButton Label="Restart" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Restart)" />
+                            <UiCommandButton Label="Update" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
+                            <UiCommandButton Label="Remove" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Remove)" />
+                        </div>
+                    }
+                    else if (app.IsInstallable)
+                    {
+                        <UiCommandButton Label="Install" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="() => InstallAsync(app)" />
+                    }
+                    else
+                    {
+                        <p class="meta-text">Catalogued for a later Home Lab phase. Its manifest is already available for recipe composition.</p>
+                    }
+                </article>
+            }
+        </section>
+    }
+</div>
+
+@code {
+    private static readonly string[] StorageRoles = ["downloads", "movies", "tv", "photos"];
+    private readonly Dictionary<string, string> storagePaths = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["downloads"] = "/mnt/storage/downloads",
+        ["movies"] = "/mnt/storage/movies",
+        ["tv"] = "/mnt/storage/tv",
+        ["photos"] = "/mnt/storage/photos"
+    };
+    private HomeLabWorkspace? workspace;
+    private string message = string.Empty;
+    private bool error;
+    private bool busy;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        busy = true;
+        try
+        {
+            workspace = await HomeLabService.GetWorkspaceAsync();
+            foreach (var role in workspace.StorageRoles)
+            {
+                storagePaths[role.Role] = role.HostPath;
+            }
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SaveStorageRoleAsync(string role)
+    {
+        await RunUiOperationAsync(async () =>
+        {
+            await HomeLabService.SaveStorageRoleAsync(role, storagePaths[role]);
+            SetMessage($"Storage role '{role}' saved.", false);
+        });
+    }
+
+    private async Task InstallAsync(HomeLabAppManifest app)
+    {
+        await RunUiOperationAsync(async () =>
+        {
+            var paths = storagePaths
+                .Where(item => app.Volumes.Any(volume => volume.SharedRole?.Equals(item.Key, StringComparison.OrdinalIgnoreCase) == true))
+                .ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
+            var result = await HomeLabService.InstallAppAsync(new HomeLabInstallRequest(app.Id, StoragePaths: paths));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private async Task RunAsync(Guid installationId, HomeLabLifecycleAction action)
+    {
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.ExecuteAsync(installationId, action);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private async Task RunUiOperationAsync(Func<Task> operation)
+    {
+        if (busy) return;
+        busy = true;
+        try
+        {
+            await operation();
+            workspace = await HomeLabService.GetWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private void SetMessage(string text, bool isError)
+    {
+        message = text;
+        error = isError;
+    }
+
+    private static string FormatCategory(HomeLabAppCategory category) => category switch
+    {
+        HomeLabAppCategory.Infrastructure => "Infrastructure",
+        HomeLabAppCategory.Download => "Download",
+        HomeLabAppCategory.Media => "Media",
+        HomeLabAppCategory.Automation => "Automation",
+        HomeLabAppCategory.Photos => "Photos",
+        _ => "Utilities"
+    };
+
+    private static UiPillTone GetHealthTone(HomeLabHealthState state) => state switch
+    {
+        HomeLabHealthState.Healthy => UiPillTone.Success,
+        HomeLabHealthState.Starting => UiPillTone.Warning,
+        HomeLabHealthState.Stopped => UiPillTone.Neutral,
+        _ => UiPillTone.Failure
+    };
+
+    private static string? BuildLocalUrl(HomeLabAppInstallation installation)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(installation.PortMappingsJson);
+            var port = document.RootElement
+                .EnumerateArray()
+                .FirstOrDefault(item => item.TryGetProperty("name", out var name) &&
+                                        name.GetString()?.Equals("web", StringComparison.OrdinalIgnoreCase) == true);
+            return port.ValueKind == JsonValueKind.Object &&
+                   port.TryGetProperty("hostPort", out var hostPort) &&
+                   hostPort.TryGetInt32(out var value) &&
+                   value > 0
+                ? $"http://127.0.0.1:{value}"
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+}

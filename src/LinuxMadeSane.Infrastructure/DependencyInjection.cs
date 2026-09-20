@@ -40,6 +40,7 @@ public static class DependencyInjection
             configuration.GetConnectionString("LinuxMadeSane") ?? "Data Source=data/linuxmadesane.db",
             contentRootPath);
         var databaseDirectory = Path.GetDirectoryName(new SqliteConnectionStringBuilder(connectionString).DataSource) ?? contentRootPath;
+        services.AddSingleton(new HomeLabStorageOptions(Path.Combine(databaseDirectory, "home-lab")));
 
         services.AddDataProtection()
             .SetApplicationName("LinuxMadeSane")
@@ -182,6 +183,7 @@ public static class DependencyInjection
         services.AddScoped<ILocalModelManagementService, LocalModelManagementService>();
         services.AddScoped<IOllamaRuntimeService, OllamaRuntimeService>();
         services.AddScoped<IDockerAiEngineDiscoveryService, DockerAiEngineDiscoveryService>();
+        services.AddScoped<IHomeLabService, HomeLabService>();
         services.AddScoped<IRemoteLmsAiEngineGateway, DisabledRemoteLmsAiEngineGateway>();
         services.AddScoped<ISshHostDiscoveryService, SshHostDiscoveryService>();
         services.AddScoped<IDesktopInspectionService, DesktopInspectionService>();

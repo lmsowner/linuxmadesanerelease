@@ -36,6 +36,7 @@ public sealed class SqliteDatabaseInitializer(
         await EnsurePortalTablesAsync(cancellationToken);
         await EnsureCaddyTablesAsync(cancellationToken);
         await EnsureEdgeGatewayTablesAsync(cancellationToken);
+        await EnsureHomeLabTablesAsync(cancellationToken);
         await EnsureMediaLibraryTablesAsync(cancellationToken);
         await EnsureSftpTablesAsync(cancellationToken);
         await EnsureUserDisplayPreferenceTablesAsync(cancellationToken);
@@ -826,6 +827,55 @@ public sealed class SqliteDatabaseInitializer(
         await dbContext.Database.ExecuteSqlRawAsync(
             "CREATE INDEX IF NOT EXISTS IX_edge_gateway_temporary_ip_approval_grants_ExpiresAtUtc ON edge_gateway_temporary_ip_approval_grants (ExpiresAtUtc);",
             cancellationToken);
+    }
+
+    private async Task EnsureHomeLabTablesAsync(CancellationToken cancellationToken)
+    {
+        const string deploymentsSql = """
+            CREATE TABLE IF NOT EXISTS home_lab_deployments (
+                Id TEXT NOT NULL PRIMARY KEY,
+                Name TEXT NOT NULL,
+                RecipeId TEXT NULL,
+                NetworkName TEXT NOT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL
+            );
+            """;
+
+        const string installationsSql = """
+            CREATE TABLE IF NOT EXISTS home_lab_installations (
+                Id TEXT NOT NULL PRIMARY KEY,
+                DeploymentId TEXT NOT NULL,
+                AppId TEXT NOT NULL,
+                DisplayName TEXT NOT NULL,
+                ContainerName TEXT NOT NULL,
+                NetworkName TEXT NOT NULL,
+                Image TEXT NOT NULL,
+                VolumeMappingsJson TEXT NOT NULL,
+                PortMappingsJson TEXT NOT NULL,
+                ConfigurationJson TEXT NOT NULL DEFAULT '{{}}',
+                EdgeGatewayRouteId TEXT NULL,
+                HealthState INTEGER NOT NULL,
+                HealthDetail TEXT NOT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL,
+                IsRecipeInstallation INTEGER NOT NULL,
+                FOREIGN KEY (DeploymentId) REFERENCES home_lab_deployments (Id) ON DELETE CASCADE
+            );
+            """;
+
+        const string storageSql = """
+            CREATE TABLE IF NOT EXISTS home_lab_storage_roles (
+                Role TEXT NOT NULL PRIMARY KEY,
+                HostPath TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL
+            );
+            """;
+
+        await dbContext.Database.ExecuteSqlRawAsync(deploymentsSql, cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(installationsSql, cancellationToken);
+        await EnsureColumnExistsAsync("home_lab_installations", "ConfigurationJson", "TEXT NOT NULL DEFAULT '{{}}'", cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(storageSql, cancellationToken);
     }
 
     private async Task EnsureMessagingTablesAsync(CancellationToken cancellationToken)

@@ -70,6 +70,9 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<MediaLibrarySettingsEntity> MediaLibrarySettings => Set<MediaLibrarySettingsEntity>();
     public DbSet<MediaLibraryRootEntity> MediaLibraryRoots => Set<MediaLibraryRootEntity>();
     public DbSet<MediaItemEntity> MediaItems => Set<MediaItemEntity>();
+    public DbSet<HomeLabDeploymentEntity> HomeLabDeployments => Set<HomeLabDeploymentEntity>();
+    public DbSet<HomeLabInstallationEntity> HomeLabInstallations => Set<HomeLabInstallationEntity>();
+    public DbSet<HomeLabStorageRoleEntity> HomeLabStorageRoles => Set<HomeLabStorageRoleEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -153,6 +156,43 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
                 .WithMany()
                 .HasForeignKey(item => item.ManagedHostId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<HomeLabDeploymentEntity>(entity =>
+        {
+            entity.ToTable("home_lab_deployments");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Name).HasMaxLength(160);
+            entity.Property(item => item.RecipeId).HasMaxLength(120);
+            entity.Property(item => item.NetworkName).HasMaxLength(160);
+            entity.HasMany(item => item.Installations)
+                .WithOne(item => item.Deployment)
+                .HasForeignKey(item => item.DeploymentId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<HomeLabInstallationEntity>(entity =>
+        {
+            entity.ToTable("home_lab_installations");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.AppId).HasMaxLength(120);
+            entity.Property(item => item.DisplayName).HasMaxLength(160);
+            entity.Property(item => item.ContainerName).HasMaxLength(160);
+            entity.Property(item => item.NetworkName).HasMaxLength(160);
+            entity.Property(item => item.Image).HasMaxLength(255);
+            entity.Property(item => item.VolumeMappingsJson).HasColumnType("TEXT");
+            entity.Property(item => item.PortMappingsJson).HasColumnType("TEXT");
+            entity.Property(item => item.ConfigurationJson).HasColumnType("TEXT");
+            entity.Property(item => item.HealthDetail).HasColumnType("TEXT");
+            entity.HasIndex(item => new { item.DeploymentId, item.AppId }).IsUnique();
+        });
+
+        modelBuilder.Entity<HomeLabStorageRoleEntity>(entity =>
+        {
+            entity.ToTable("home_lab_storage_roles");
+            entity.HasKey(item => item.Role);
+            entity.Property(item => item.Role).HasMaxLength(80);
+            entity.Property(item => item.HostPath).HasMaxLength(4096);
         });
 
         modelBuilder.Entity<MailRelayConfigurationEntity>(entity =>

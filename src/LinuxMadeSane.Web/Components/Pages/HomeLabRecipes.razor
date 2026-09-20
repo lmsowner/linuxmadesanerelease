@@ -1,0 +1,119 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@page "/home-lab/recipes"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts.HomeLab
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.HomeLab
+@inject IHomeLabService HomeLabService
+
+<PageTitle>Home Lab Recipes | Linux Made Sane</PageTitle>
+
+<div class="page-shell home-lab-page">
+    <UiHeroPanel Eyebrow="Home Lab"
+                  Title="Recipes"
+                  Description="Install reusable solutions made from the same catalogued App definitions.">
+        <Actions>
+            <UiCommandButton Label="Apps"
+                             Glyph="UiIconGlyph.Connection"
+                             Variant="UiButtonVariant.Ghost"
+                             Href="/home-lab/apps" />
+        </Actions>
+    </UiHeroPanel>
+
+    @if (!string.IsNullOrWhiteSpace(message))
+    {
+        <p class="callout @(error ? "error" : "ready")">@message</p>
+    }
+
+    @if (workspace is null)
+    {
+        <UiPanel><p class="meta-text">Loading Home Lab recipes...</p></UiPanel>
+    }
+    else
+    {
+        <section class="feature-grid home-lab-recipe-grid">
+            @foreach (var recipe in workspace.Recipes)
+            {
+                <article class="surface-card home-lab-recipe-card">
+                    <div class="table-header">
+                        <div>
+                            <p class="eyebrow">Recipe</p>
+                            <h2>@recipe.Name</h2>
+                        </div>
+                        <UiPill Tone="@(recipe.IsInstallable ? UiPillTone.Success : UiPillTone.Neutral)">
+                            @(recipe.IsInstallable ? "Available" : "Planned")
+                        </UiPill>
+                    </div>
+                    <p>@recipe.Description</p>
+                    <div class="home-lab-recipe-apps">
+                        @foreach (var appId in recipe.AppIds)
+                        {
+                            <span>@appId</span>
+                        }
+                    </div>
+                    @if (recipe.RequiresVpnGateway)
+                    {
+                        <p class="meta-text">Requires the reusable VPN Gateway phase. LMS will not silently fall back to direct internet access.</p>
+                    }
+                    @if (recipe.IsInstallable)
+                    {
+                        <UiCommandButton Label="Install" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="() => InstallAsync(recipe)" />
+                    }
+                </article>
+            }
+        </section>
+    }
+</div>
+
+@code {
+    private HomeLabWorkspace? workspace;
+    private string message = string.Empty;
+    private bool error;
+    private bool busy;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            workspace = await HomeLabService.GetWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+    }
+
+    private async Task InstallAsync(HomeLabRecipeManifest recipe)
+    {
+        if (busy) return;
+        busy = true;
+        try
+        {
+            var storage = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["downloads"] = "/mnt/storage/downloads",
+                ["movies"] = "/mnt/storage/movies",
+                ["tv"] = "/mnt/storage/tv"
+            };
+            var result = await HomeLabService.InstallRecipeAsync(new HomeLabRecipeInstallRequest(recipe.Id, storage));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            workspace = await HomeLabService.GetWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private void SetMessage(string text, bool isError)
+    {
+        message = text;
+        error = isError;
+    }
+}
