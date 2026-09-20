@@ -285,10 +285,23 @@ public sealed class LocalAiEngineManagerService(
                 LocalAiSetupProgressState.Completed);
         }
 
+        var runtimeFailure = await EnsureRuntimeReadyAsync(progress, output, cancellationToken);
+        if (runtimeFailure is not null)
+        {
+            await RecordAuditAsync(
+                "local-ai.runtime.unavailable",
+                "runtime",
+                runtimeFailure.Summary,
+                runtimeFailure.Detail,
+                false,
+                cancellationToken);
+            return runtimeFailure;
+        }
+
         ReportSetupProgress(
             progress,
             "Refreshing Local AI status",
-            "Re-checking engine health and installed models after any runtime changes.",
+            "The engine is running. Checking installed models.",
             LocalAiSetupProgressState.Running);
         status = await InspectAsync(cancellationToken);
         if (!status.InstalledModels.Any(item => item.ModelId.Equals(model.ModelId, StringComparison.OrdinalIgnoreCase)))
@@ -298,7 +311,7 @@ public sealed class LocalAiEngineManagerService(
                 $"Downloading {model.DisplayName}",
                 $"Downloading {model.DisplayName} for private use on this computer.",
                 LocalAiSetupProgressState.Running);
-            var pull = await ollamaRuntimeService.PullModelAsync(model.ModelId, true, cancellationToken);
+            var pull = await PullModelAsync(model.ModelId, true, progress, cancellationToken);
             output.AddRange(pull.OutputLines);
             if (!pull.Succeeded)
             {
@@ -1086,6 +1099,101 @@ public sealed class LocalAiEngineManagerService(
             result.Succeeded,
             cancellationToken);
         return result;
+    }
+
+    private async Task<LocalAiApplyResult?> EnsureRuntimeReadyAsync(
+        IProgress<LocalAiSetupProgressUpdate>? progress,
+        List<string> output,
+        CancellationToken cancellationToken)
+    {
+        var runtime = await ollamaRuntimeService.InspectAsync(cancellationToken);
+        if (!runtime.IsInstalled)
+        {
+            return new LocalAiApplyResult(
+                false,
+                "Local AI engine is not installed.",
+                "The engine install finished without an Ollama executable. Run setup again to retry the installation.",
+                false,
+                output.ToArray(),
+                DateTimeOffset.UtcNow);
+        }
+
+        if (!runtime.IsServiceActive)
+        {
+            ReportSetupProgress(
+                progress,
+                "Starting Local AI engine",
+                "Enabling and starting the Ollama service.",
+                LocalAiSetupProgressState.Running);
+            var start = await ollamaRuntimeService.StartAsync(true, cancellationToken);
+            output.AddRange(start.OutputLines);
+            if (!start.Succeeded)
+            {
+                ReportSetupProgress(progress, "Local AI engine did not start", start.Detail, LocalAiSetupProgressState.Failed);
+                return start;
+            }
+        }
+
+        ReportSetupProgress(
+            progress,
+            "Waiting for Local AI engine",
+            "Waiting for the localhost API to accept requests.",
+            LocalAiSetupProgressState.Running);
+        runtime = await WaitForRuntimeApiAsync(cancellationToken);
+        if (!runtime.IsApiReachable)
+        {
+            ReportSetupProgress(
+                progress,
+                "Restarting Local AI engine",
+                "The service is running but its API is not responding. Restarting it once.",
+                LocalAiSetupProgressState.Running);
+            var restart = await ollamaRuntimeService.RestartAsync(true, cancellationToken);
+            output.AddRange(restart.OutputLines);
+            if (!restart.Succeeded)
+            {
+                ReportSetupProgress(progress, "Local AI engine restart failed", restart.Detail, LocalAiSetupProgressState.Failed);
+                return restart;
+            }
+
+            runtime = await WaitForRuntimeApiAsync(cancellationToken);
+        }
+
+        if (!runtime.IsApiReachable)
+        {
+            const string detail = "Ollama is installed and its service was started, but the localhost API at port 11434 did not become ready.";
+            ReportSetupProgress(progress, "Local AI engine unavailable", detail, LocalAiSetupProgressState.Failed);
+            return new LocalAiApplyResult(
+                false,
+                "Local AI engine is unavailable.",
+                detail,
+                false,
+                output.ToArray(),
+                DateTimeOffset.UtcNow);
+        }
+
+        ReportSetupProgress(
+            progress,
+            "Local AI engine ready",
+            "Ollama is installed, its service is running, and the localhost API responded.",
+            LocalAiSetupProgressState.Completed);
+        return null;
+    }
+
+    private async Task<LocalAiRuntime> WaitForRuntimeApiAsync(CancellationToken cancellationToken)
+    {
+        LocalAiRuntime? runtime = null;
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            runtime = await ollamaRuntimeService.InspectAsync(cancellationToken);
+            if (runtime.IsApiReachable)
+            {
+                return runtime;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+        }
+
+        return runtime!;
     }
 
     private static IReadOnlyList<string> BuildWarnings(

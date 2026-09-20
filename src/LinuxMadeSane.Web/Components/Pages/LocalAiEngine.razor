@@ -51,6 +51,87 @@
     else
     {
         <div class="local-ai-tab-content">
+            <section class="surface-subcard local-ai-card local-ai-engine-card">
+                <div class="table-header">
+                    <div>
+                        <p class="eyebrow">Engine</p>
+                        <h2>@EngineStatusTitle</h2>
+                        <p class="meta-text">@workspace.Status.Runtime.Detail</p>
+                    </div>
+                    <UiPill Tone="@(IsEngineReady ? UiPillTone.Success : UiPillTone.Warning)">
+                        @(IsEngineReady ? "Ready for requests" : "Setup needed")
+                    </UiPill>
+                </div>
+
+                <div class="local-ai-engine-checks">
+                    <div class="@(workspace.Status.Runtime.IsInstalled ? "is-ready" : "")">
+                        <span>1</span>
+                        <strong>Installed</strong>
+                        <small>@(workspace.Status.Runtime.IsInstalled ? "Ollama found" : "Not installed")</small>
+                    </div>
+                    <div class="@(workspace.Status.Runtime.IsServiceActive ? "is-ready" : "")">
+                        <span>2</span>
+                        <strong>Running</strong>
+                        <small>@(workspace.Status.Runtime.IsServiceActive ? "Service active" : "Service stopped")</small>
+                    </div>
+                    <div class="@(workspace.Status.Runtime.IsApiReachable ? "is-ready" : "")">
+                        <span>3</span>
+                        <strong>Responding</strong>
+                        <small>@(workspace.Status.Runtime.IsApiReachable ? "API reachable" : "API unavailable")</small>
+                    </div>
+                    <div class="@(HasInstalledDefaultModel ? "is-ready" : "")">
+                        <span>4</span>
+                        <strong>Default model</strong>
+                        <small>@DefaultModelLabel</small>
+                    </div>
+                </div>
+
+                @if (!IsEngineReady)
+                {
+                    <div class="callout warning">
+                        <strong>@EngineNextAction</strong>
+                        <p>@EngineNextActionDetail</p>
+                    </div>
+                    @if (workspace.Status.Runtime.IsInstalled)
+                    {
+                        <div class="local-ai-inline-actions">
+                        <UiCommandButton Label="@EngineActionLabel"
+                                             Glyph="UiIconGlyph.Restart"
+                                             Disabled="@isBusy"
+                                             OnClick="RepairEngineAsync" />
+                        </div>
+                    }
+                }
+            </section>
+
+            @if (setupProgressUpdates.Count > 0)
+            {
+                <section class="surface-subcard local-ai-card local-ai-setup-progress" role="status" aria-live="polite">
+                    <div class="table-header">
+                        <div>
+                            <p class="eyebrow">Setup progress</p>
+                            <h2>@installProgressStep</h2>
+                            <p class="meta-text">@installProgressDetail</p>
+                        </div>
+                        <UiPill Tone="@(isBusy ? UiPillTone.Warning : IsEngineReady ? UiPillTone.Success : UiPillTone.Warning)">
+                            @(isBusy ? "Working" : IsEngineReady ? "Complete" : "Needs attention")
+                        </UiPill>
+                    </div>
+                    <div class="local-ai-setup-progress-list">
+                        @foreach (var update in setupProgressUpdates)
+                        {
+                            <div class="local-ai-setup-progress-row @GetProgressClass(update.State)">
+                                <span aria-hidden="true">@GetProgressMark(update.State)</span>
+                                <div>
+                                    <strong>@update.Step</strong>
+                                    <small>@update.Detail</small>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </section>
+            }
+
             <section class="surface-subcard local-ai-card local-ai-sharing-card">
                 <div class="table-header">
                     <div>
@@ -58,10 +139,17 @@
                         <h2>Offer this server's default model</h2>
                         <p class="meta-text">Other LMS machines connect to this AI service and always use the default model selected below.</p>
                     </div>
-                    <UiPill Tone="@(peerSharingStatus?.Enabled == true ? UiPillTone.Success : UiPillTone.Neutral)">
-                        @(peerSharingStatus?.Enabled == true ? "Sharing enabled" : "Sharing disabled")
+                    <UiPill Tone="@(peerSharingStatus?.Enabled == true && IsEngineReady ? UiPillTone.Success : peerSharingStatus?.Enabled == true ? UiPillTone.Warning : UiPillTone.Neutral)">
+                        @(peerSharingStatus?.Enabled == true && IsEngineReady ? "Sharing ready" : peerSharingStatus?.Enabled == true ? "Sharing blocked" : "Sharing disabled")
                     </UiPill>
                 </div>
+
+                @if (peerSharingStatus?.Enabled == true && !IsEngineReady)
+                {
+                    <div class="callout warning">
+                        The access key is enabled, but this server cannot answer remote AI requests until the engine is running and the default model is ready.
+                    </div>
+                }
 
                 <div class="local-ai-sharing-details">
                     <div>
@@ -112,7 +200,7 @@
                 <div class="local-ai-inline-actions">
                     <UiCommandButton Label="@GetPeerKeyActionLabel()"
                                      Glyph="UiIconGlyph.Key"
-                                     Disabled="@(!HasUsableDefaultModel || isBusy)"
+                                     Disabled="@(!CanShareDefaultModel || isBusy)"
                                      OnClick="EnableOrRotatePeerSharingAsync" />
                     @if (peerSharingStatus?.Enabled == true)
                     {
@@ -327,21 +415,53 @@
     private string installingModelId = string.Empty;
     private string installProgressStep = string.Empty;
     private string installProgressDetail = string.Empty;
+    private readonly List<LocalAiSetupProgressUpdate> setupProgressUpdates = [];
     private ModelRow? detailModel;
     private bool showPeerAccessKey;
     private bool isLoaded;
     private bool isBusy;
 
-    private bool HasUsableDefaultModel =>
+    private bool HasInstalledDefaultModel =>
         workspace is not null &&
         !string.IsNullOrWhiteSpace(workspace.Status.Settings.DefaultModelId) &&
         workspace.InstalledModels.Any(model => model.ModelId.Equals(
             workspace.Status.Settings.DefaultModelId,
             StringComparison.OrdinalIgnoreCase));
 
-    private string DefaultModelLabel => HasUsableDefaultModel
+    private bool IsEngineReady =>
+        workspace?.Status.Runtime is { IsInstalled: true, IsServiceActive: true, IsApiReachable: true } &&
+        HasInstalledDefaultModel;
+
+    private bool CanShareDefaultModel => IsEngineReady;
+
+    private string DefaultModelLabel => HasInstalledDefaultModel
         ? workspace!.Status.Settings.DefaultModelId
         : "No default selected";
+
+    private string EngineStatusTitle => workspace?.Status.Runtime switch
+    {
+        not { IsInstalled: true } => "Local AI needs installing",
+        not { IsServiceActive: true } => "Local AI is stopped",
+        not { IsApiReachable: true } => "Local AI is not responding",
+        _ when !HasInstalledDefaultModel => "Choose a default model",
+        _ => "Local AI is running"
+    };
+
+    private string EngineNextAction => workspace?.Status.Runtime.IsInstalled != true
+        ? "Choose a model below to install Local AI."
+        : workspace.Status.Runtime.IsApiReachable && !HasInstalledDefaultModel
+            ? "Choose or install a default model below."
+            : "Repair the engine before using or sharing it.";
+
+    private string EngineNextActionDetail => workspace?.Status.Runtime.IsInstalled != true
+        ? "The Install button handles the engine, starts it, downloads the model, tests it, and sets it as the default. Progress stays visible here."
+        : workspace.Status.Runtime.IsApiReachable && !HasInstalledDefaultModel
+            ? "Remote LMS machines always use the default model selected on this server."
+            : "LMS will start or restart Ollama, wait for its localhost API, and verify the default model.";
+
+    private string EngineActionLabel => workspace?.Status.Runtime.IsApiReachable == true && !HasInstalledDefaultModel
+        ? "Finish setup"
+        : "Repair and verify engine";
 
     private string SharedAiServiceUrl
     {
@@ -417,7 +537,11 @@
 
     protected override Task OnInitializedAsync() => LoadAsync();
 
-    private Task RefreshAsync() => LoadAsync();
+    private async Task RefreshAsync()
+    {
+        setupProgressUpdates.Clear();
+        await LoadAsync();
+    }
 
     private async Task LoadAsync(bool clearStatus = true)
     {
@@ -446,6 +570,7 @@
     {
         isBusy = true;
         installingModelId = modelId;
+        setupProgressUpdates.Clear();
         installProgressStep = $"Installing {modelId}";
         installProgressDetail = "Preparing the model download...";
         SetStatus($"Installing {modelId}. This can take several minutes for a large model.", "info");
@@ -455,6 +580,7 @@
         {
             installProgressStep = update.Step;
             installProgressDetail = update.Detail;
+            RecordProgress(update);
             SetStatus(update.Detail, update.State == LocalAiSetupProgressState.Failed ? "error" : "info");
             _ = InvokeAsync(StateHasChanged);
         });
@@ -462,10 +588,10 @@
         try
         {
             LocalAiApplyResult result;
-            if (workspace?.Status.Runtime.IsInstalled == true && workspace.Status.Runtime.IsServiceActive)
+            if (workspace?.Status.Runtime.IsApiReachable == true)
             {
                 result = await LocalAiService.PullModelAsync(modelId, true, progress);
-                if (result.Succeeded && !HasUsableDefaultModel)
+                if (result.Succeeded && !HasInstalledDefaultModel)
                 {
                     await LocalAiService.CreateOrUpdateLocalProviderAsync(modelId);
                 }
@@ -491,6 +617,50 @@
             isBusy = false;
         }
     }
+
+    private async Task RepairEngineAsync()
+    {
+        var modelId = HasInstalledDefaultModel
+            ? workspace!.Status.Settings.DefaultModelId
+            : ModelRows.FirstOrDefault(model => model.IsInstalled)?.ModelId
+              ?? ModelRows.FirstOrDefault()?.ModelId
+              ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            SetStatus("Choose a model below to finish Local AI setup.", "warning");
+            return;
+        }
+
+        await InstallModelAsync(modelId);
+    }
+
+    private void RecordProgress(LocalAiSetupProgressUpdate update)
+    {
+        if (setupProgressUpdates.Count > 0 &&
+            setupProgressUpdates[^1].Step.Equals(update.Step, StringComparison.Ordinal) &&
+            setupProgressUpdates[^1].State == LocalAiSetupProgressState.Running &&
+            update.State == LocalAiSetupProgressState.Running)
+        {
+            setupProgressUpdates[^1] = update;
+            return;
+        }
+
+        setupProgressUpdates.Add(update);
+    }
+
+    private static string GetProgressClass(LocalAiSetupProgressState state) => state switch
+    {
+        LocalAiSetupProgressState.Completed => "is-complete",
+        LocalAiSetupProgressState.Failed => "is-failed",
+        _ => "is-running"
+    };
+
+    private static string GetProgressMark(LocalAiSetupProgressState state) => state switch
+    {
+        LocalAiSetupProgressState.Completed => "✓",
+        LocalAiSetupProgressState.Failed => "!",
+        _ => "•"
+    };
 
     private async Task SetDefaultModelAsync(string modelId)
     {

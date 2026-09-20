@@ -1,6 +1,10 @@
 // Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models.Ai;
 using LinuxMadeSane.Core.Enums;
@@ -14,16 +18,26 @@ public sealed class AiProviderConnectionTester(
     IOllamaRuntimeService ollamaRuntimeService,
     IRemoteLmsAiEngineGateway remoteGateway) : IAiProviderConnectionTester
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     public async Task<AiProviderConnectionTestResult> TestAsync(
         AiProviderSettings settings,
         CancellationToken cancellationToken = default)
     {
         var checkedAtUtc = DateTimeOffset.UtcNow;
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(20));
+        var timeout = settings.ProviderType == AiProviderType.LinuxMadeSaneAiService
+            ? TimeSpan.FromSeconds(130)
+            : TimeSpan.FromSeconds(20);
+        timeoutCts.CancelAfter(timeout);
 
         try
         {
+            if (settings.ProviderType == AiProviderType.LinuxMadeSaneAiService)
+            {
+                return await TestLinuxMadeSaneAiServiceAsync(settings, checkedAtUtc, timeoutCts.Token);
+            }
+
             var definition = providerRegistry.FindDefinition(settings.ProviderType);
             if (definition is null)
             {
@@ -83,7 +97,9 @@ public sealed class AiProviderConnectionTester(
             return new AiProviderConnectionTestResult(
                 false,
                 "Provider test timed out.",
-                "The provider did not respond within 20 seconds.",
+                settings.ProviderType == AiProviderType.LinuxMadeSaneAiService
+                    ? "The host model did not complete the connection check within 130 seconds. Check the Local AI engine on the host."
+                    : "The provider did not respond within 20 seconds.",
                 checkedAtUtc);
         }
         catch (Exception exception)
@@ -93,6 +109,92 @@ public sealed class AiProviderConnectionTester(
                 "Provider test failed.",
                 exception.Message,
                 checkedAtUtc);
+        }
+    }
+
+    private async Task<AiProviderConnectionTestResult> TestLinuxMadeSaneAiServiceAsync(
+        AiProviderSettings settings,
+        DateTimeOffset checkedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(settings.BaseUrl))
+        {
+            throw new InvalidOperationException("The Linux Made Sane AI Service does not have a service URL.");
+        }
+
+        var accessKey = string.IsNullOrWhiteSpace(settings.ApiKeySecretReference)
+            ? null
+            : await secretStore.ResolveSecretAsync(settings.ApiKeySecretReference, cancellationToken);
+        if (string.IsNullOrWhiteSpace(accessKey))
+        {
+            throw new InvalidOperationException("The Linux Made Sane AI Service does not have an access key.");
+        }
+
+        var payload = new JsonObject
+        {
+            ["model"] = settings.DefaultModelId,
+            ["messages"] = new JsonArray(
+                new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = "Reply with exactly OK."
+                }),
+            ["max_tokens"] = 8,
+            ["stream"] = false,
+            ["think"] = false
+        };
+
+        using var httpClient = httpClientFactory.CreateClient();
+        httpClient.Timeout = Timeout.InfiniteTimeSpan;
+        using var message = new HttpRequestMessage(
+            HttpMethod.Post,
+            DeepSeekAiProvider.ResolveOpenAiCompatibleEndpoint(settings.BaseUrl, "chat/completions"))
+        {
+            Content = new StringContent(payload.ToJsonString(JsonOptions), Encoding.UTF8, "application/json")
+        };
+        message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessKey.Trim());
+
+        using var response = await httpClient.SendAsync(
+            message,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            var serviceError = TryReadServiceError(responseBody);
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(serviceError)
+                ? $"The Linux Made Sane AI Service returned {(int)response.StatusCode} {response.ReasonPhrase}."
+                : serviceError);
+        }
+
+        var content = JsonNode.Parse(responseBody)?["choices"]?[0]?["message"]?["content"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            throw new InvalidOperationException("The host model completed the connection check without returning a response.");
+        }
+
+        return new AiProviderConnectionTestResult(
+            true,
+            "Provider test succeeded.",
+            $"The host executed a test response using {settings.DefaultModelId}.",
+            checkedAtUtc);
+    }
+
+    private static string? TryReadServiceError(string responseBody)
+    {
+        try
+        {
+            return JsonNode.Parse(responseBody)?["error"] switch
+            {
+                JsonValue value => value.GetValue<string>(),
+                JsonObject error => error["message"]?.GetValue<string>(),
+                _ => null
+            };
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            return null;
         }
     }
 

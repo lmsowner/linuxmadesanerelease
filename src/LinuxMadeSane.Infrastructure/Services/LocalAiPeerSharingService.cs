@@ -111,17 +111,27 @@ public sealed class LocalAiPeerSharingService(
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return new LocalAiPeerProxyResult(504, "application/json", "{\"error\":\"The host Local AI runtime timed out.\"}"u8.ToArray());
+            return ErrorResult(
+                504,
+                "The host Local AI model did not respond before its configured timeout. Open Local AI on the host and confirm the engine is ready, then try again.");
         }
         catch (HttpRequestException)
         {
-            return new LocalAiPeerProxyResult(503, "application/json", "{\"error\":\"The host Local AI runtime is unavailable.\"}"u8.ToArray());
+            return ErrorResult(
+                503,
+                "The host could not reach its local Ollama API. Open Local AI on the host and start or repair the engine, then try again.");
         }
         finally
         {
             RequestGate.Release();
         }
     }
+
+    private static LocalAiPeerProxyResult ErrorResult(int statusCode, string message) =>
+        new(
+            statusCode,
+            "application/json",
+            JsonSerializer.SerializeToUtf8Bytes(new { error = message }));
 
     private static byte[]? SetRequestModel(byte[]? requestBody, string defaultModelId)
     {
