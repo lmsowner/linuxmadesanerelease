@@ -220,9 +220,18 @@
                         <h2>Models on this server</h2>
                         <p class="meta-text">Install the models you want and choose one default. LMS and connected clients always use that default.</p>
                     </div>
-                    <UiPill Tone="@(workspace.Status.Runtime.IsApiReachable ? UiPillTone.Success : UiPillTone.Warning)">
-                        @(workspace.Status.Runtime.IsApiReachable ? "Engine ready" : "Engine unavailable")
-                    </UiPill>
+                    <div class="local-ai-model-header-actions">
+                        <UiPill Tone="@(workspace.Status.Runtime.IsApiReachable ? UiPillTone.Success : UiPillTone.Warning)">
+                            @(workspace.Status.Runtime.IsApiReachable ? "Engine ready" : "Engine unavailable")
+                        </UiPill>
+                        <UiPill Tone="UiPillTone.Neutral">
+                            @workspace.InstalledModels.Count installed · @FormatBytes(TotalInstalledModelBytes)
+                        </UiPill>
+                        <UiCommandButton Label="Check for new models"
+                                         Glyph="UiIconGlyph.Refresh"
+                                         Disabled="@isBusy"
+                                         OnClick="CheckForNewModelsAsync" />
+                    </div>
                 </div>
 
                 <div class="local-ai-acceleration-summary">
@@ -302,6 +311,11 @@
                                                      Glyph="UiIconGlyph.Save"
                                                      Disabled="@isBusy"
                                                      OnClick="@(() => SetDefaultModelAsync(model.ModelId))" />
+                                    <UiCommandButton Label="Remove"
+                                                     Glyph="UiIconGlyph.Delete"
+                                                     Variant="UiButtonVariant.Danger"
+                                                     Disabled="@isBusy"
+                                                     OnClick="@(() => OpenRemoveModelDialog(model))" />
                                 }
                                 else
                                 {
@@ -396,11 +410,92 @@
         }
         else if (detailModel is { IsInstalled: true, IsDefault: false } modelToSelect)
         {
+            <UiCommandButton Label="Remove model"
+                             Glyph="UiIconGlyph.Delete"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@isBusy"
+                             OnClick="@(() => OpenRemoveModelFromDetails(modelToSelect))" />
             <UiCommandButton Label="Set as default"
                              Glyph="UiIconGlyph.Save"
                              Disabled="@isBusy"
                              OnClick="@(() => SetDefaultFromDetailsAsync(modelToSelect.ModelId))" />
         }
+    </Footer>
+</UiModal>
+
+<UiModal IsOpen="@showModelFinder"
+         Title="Check for new models"
+         Subtitle="Install any model from the Ollama library"
+         Class="local-ai-model-finder-modal"
+         OnClose="CloseModelFinderAsync">
+    <ChildContent>
+        <div class="local-ai-model-finder">
+            <p>
+                LMS refreshed this server and found <strong>@(workspace?.InstalledModels.Count ?? 0)</strong> installed models.
+                The model panels already show the built-in recommendations for this machine.
+            </p>
+            <div class="callout info">
+                Open the current Ollama library, copy a model name such as <code>gemma3:4b</code>, then install it here.
+                It will appear as another model panel when the download finishes.
+            </div>
+            <UiTextField @bind-Value="modelFinderId"
+                         Label="Ollama model name"
+                         Helper="Use the exact model name and size tag shown in the Ollama library."
+                         Placeholder="gemma3:4b"
+                         Disabled="@isBusy" />
+        </div>
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Close"
+                         Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Ghost"
+                         Disabled="@isBusy"
+                         OnClick="CloseModelFinderAsync" />
+        <UiCommandButton Label="Browse Ollama library"
+                         Glyph="UiIconGlyph.Connection"
+                         Variant="UiButtonVariant.Ghost"
+                         Href="https://ollama.com/search"
+                         Target="_blank"
+                         Rel="noopener noreferrer" />
+        <UiCommandButton Label="Install model"
+                         Glyph="UiIconGlyph.Upload"
+                         Disabled="@(isBusy || string.IsNullOrWhiteSpace(modelFinderId))"
+                         OnClick="InstallModelFromFinderAsync" />
+    </Footer>
+</UiModal>
+
+<UiModal IsOpen="@(modelPendingRemoval is not null)"
+         Title="Remove local model"
+         Subtitle="@modelPendingRemoval?.ModelId"
+         Class="local-ai-remove-model-modal"
+         OnClose="CloseRemoveModelDialogAsync">
+    <ChildContent>
+        @if (modelPendingRemoval is not null)
+        {
+            <div class="local-ai-remove-model-content">
+                <p>Remove <strong>@modelPendingRemoval.DisplayName</strong> from this server?</p>
+                <div class="local-ai-detail-card">
+                    <span class="local-ai-summary-label">Disk space to reclaim</span>
+                    <strong>@FormatBytes(modelPendingRemoval.SizeBytes)</strong>
+                    <span>The model can be downloaded again later.</span>
+                </div>
+                <div class="callout warning">
+                    This removes the model files from Ollama. It does not remove the Local AI engine or any other model.
+                </div>
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Cancel"
+                         Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Ghost"
+                         Disabled="@isBusy"
+                         OnClick="CloseRemoveModelDialogAsync" />
+        <UiCommandButton Label="Remove model"
+                         Glyph="UiIconGlyph.Delete"
+                         Variant="UiButtonVariant.Danger"
+                         Disabled="@isBusy"
+                         OnClick="ConfirmRemoveModelAsync" />
     </Footer>
 </UiModal>
 
@@ -417,6 +512,9 @@
     private string installProgressDetail = string.Empty;
     private readonly List<LocalAiSetupProgressUpdate> setupProgressUpdates = [];
     private ModelRow? detailModel;
+    private ModelRow? modelPendingRemoval;
+    private string modelFinderId = string.Empty;
+    private bool showModelFinder;
     private bool showPeerAccessKey;
     private bool isLoaded;
     private bool isBusy;
@@ -433,6 +531,8 @@
         HasInstalledDefaultModel;
 
     private bool CanShareDefaultModel => IsEngineReady;
+
+    private long TotalInstalledModelBytes => workspace?.InstalledModels.Sum(model => model.SizeBytes) ?? 0;
 
     private string DefaultModelLabel => HasInstalledDefaultModel
         ? workspace!.Status.Settings.DefaultModelId
@@ -541,6 +641,35 @@
     {
         setupProgressUpdates.Clear();
         await LoadAsync();
+    }
+
+    private async Task CheckForNewModelsAsync()
+    {
+        await LoadAsync(clearStatus: false);
+        showModelFinder = true;
+        var availableCount = ModelRows.Count(model => !model.IsInstalled);
+        SetStatus(
+            $"Model list refreshed. {workspace?.InstalledModels.Count ?? 0} installed and {availableCount} built-in recommendations available to install.",
+            "success");
+    }
+
+    private Task CloseModelFinderAsync()
+    {
+        showModelFinder = false;
+        modelFinderId = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private async Task InstallModelFromFinderAsync()
+    {
+        var modelId = (modelFinderId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return;
+        }
+
+        await CloseModelFinderAsync();
+        await InstallModelAsync(modelId);
     }
 
     private async Task LoadAsync(bool clearStatus = true)
@@ -684,6 +813,62 @@
     private void OpenModelDetails(ModelRow model) => detailModel = model;
 
     private void CloseModelDetails() => detailModel = null;
+
+    private void OpenRemoveModelDialog(ModelRow model)
+    {
+        if (!model.IsInstalled || model.IsDefault)
+        {
+            return;
+        }
+
+        modelPendingRemoval = model;
+    }
+
+    private void OpenRemoveModelFromDetails(ModelRow model)
+    {
+        CloseModelDetails();
+        OpenRemoveModelDialog(model);
+    }
+
+    private Task CloseRemoveModelDialogAsync()
+    {
+        modelPendingRemoval = null;
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmRemoveModelAsync()
+    {
+        if (modelPendingRemoval is not { IsInstalled: true, IsDefault: false } model)
+        {
+            return;
+        }
+
+        isBusy = true;
+        try
+        {
+            var result = await LocalAiService.RemoveModelAsync(model.ModelId, true);
+            if (result.Succeeded)
+            {
+                modelPendingRemoval = null;
+                await LoadAsync(clearStatus: false);
+                SetStatus(
+                    $"{model.DisplayName} was removed. Reclaimed up to {FormatBytes(model.SizeBytes)}.",
+                    "success");
+            }
+            else
+            {
+                SetStatus($"{result.Summary} {result.Detail}", "error");
+            }
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
 
     private async Task InstallFromDetailsAsync(string modelId)
     {
