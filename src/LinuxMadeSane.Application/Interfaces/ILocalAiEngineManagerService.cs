@@ -21,6 +21,11 @@ public interface ILocalAiEngineManagerService
     Task<LocalAiApplyResult> StopRuntimeAsync(bool approved, CancellationToken cancellationToken = default);
     Task<LocalAiApplyResult> RestartRuntimeAsync(bool approved, CancellationToken cancellationToken = default);
     Task<LocalAiApplyResult> PullModelAsync(string modelId, bool approved, CancellationToken cancellationToken = default);
+    Task<LocalAiApplyResult> PullModelAsync(
+        string modelId,
+        bool approved,
+        IProgress<LocalAiSetupProgressUpdate>? progress,
+        CancellationToken cancellationToken = default);
     Task<LocalAiApplyResult> RemoveModelAsync(string modelId, bool approved, CancellationToken cancellationToken = default);
     Task<LocalAiBenchmarkResult> TestModelAsync(string modelId, CancellationToken cancellationToken = default);
     Task<LocalAiBenchmarkResult> BenchmarkAsync(string modelId, CancellationToken cancellationToken = default);

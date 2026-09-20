@@ -451,13 +451,38 @@ public sealed class LocalAiEngineManagerService(
     }
 
     public async Task<LocalAiApplyResult> PullModelAsync(string modelId, bool approved, CancellationToken cancellationToken = default)
+        => await PullModelAsync(modelId, approved, progress: null, cancellationToken);
+
+    public async Task<LocalAiApplyResult> PullModelAsync(
+        string modelId,
+        bool approved,
+        IProgress<LocalAiSetupProgressUpdate>? progress,
+        CancellationToken cancellationToken = default)
     {
-        var result = await ollamaRuntimeService.PullModelAsync(modelId, approved, cancellationToken);
+        ReportSetupProgress(
+            progress,
+            $"Installing {modelId}",
+            "Starting the model download. Large models can take several minutes.",
+            LocalAiSetupProgressState.Running);
+        var runtimeProgress = progress is null
+            ? null
+            : new Progress<string>(detail => ReportSetupProgress(
+                progress,
+                $"Installing {modelId}",
+                detail,
+                LocalAiSetupProgressState.Running));
+        var result = await ollamaRuntimeService.PullModelAsync(modelId, approved, runtimeProgress, cancellationToken);
         if (result.Succeeded)
         {
             await RefreshInstalledModelsAsync(cancellationToken);
             await RecordAuditAsync("local-ai.model.pulled", "models", "Local AI model pulled.", modelId, true, cancellationToken);
         }
+
+        ReportSetupProgress(
+            progress,
+            result.Succeeded ? $"{modelId} installed" : $"{modelId} install failed",
+            result.Detail,
+            result.Succeeded ? LocalAiSetupProgressState.Completed : LocalAiSetupProgressState.Failed);
 
         return result;
     }
@@ -587,6 +612,11 @@ public sealed class LocalAiEngineManagerService(
             UpdatedAtUtc = now
         };
         await store.SaveSettingsAsync(engineSettings, cancellationToken);
+        if (engineSettings.SharingEnabled && connectClientFeature.SupportsRemoteAiSharing)
+        {
+            await remoteGateway.SyncSharedEngineAsync(await InspectAsync(cancellationToken), cancellationToken);
+        }
+
         return provider;
     }
 
@@ -835,7 +865,7 @@ public sealed class LocalAiEngineManagerService(
         });
         var provider = new AiProviderSettings(
             providerKey,
-            AiProviderType.Custom,
+            AiProviderType.LinuxMadeSaneAiService,
             displayName,
             true,
             shouldBeDefault,

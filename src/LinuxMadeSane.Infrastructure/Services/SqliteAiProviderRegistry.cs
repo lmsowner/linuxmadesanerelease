@@ -1,6 +1,9 @@
 // Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Ai;
@@ -16,6 +19,9 @@ public sealed class SqliteAiProviderRegistry(
     IRemoteLmsAiEngineGateway remoteGateway,
     ILmsConnectClientFeature connectClientFeature) : IAiProviderRegistry
 {
+    private static readonly TimeSpan ServerModelRefreshInterval = TimeSpan.FromSeconds(30);
+    private readonly object serverModelCacheLock = new();
+    private readonly Dictionary<string, ServerModelCacheEntry> serverModelCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly IReadOnlyList<AiProviderDefinition> CommonProviderDefinitions =
     [
         new("openai", AiProviderType.OpenAi, "OpenAI", "Runnable in this build.", true, true),
@@ -100,13 +106,17 @@ public sealed class SqliteAiProviderRegistry(
             .ToArray();
 
     public async Task<IReadOnlyList<AiProviderSettings>> ListConfiguredProvidersAsync(CancellationToken cancellationToken = default) =>
-        FilterConfiguredProviders(await providerSettingsStore.ListAsync(cancellationToken));
+        FilterConfiguredProviders(await RefreshServerSelectedModelsAsync(
+            await providerSettingsStore.ListAsync(cancellationToken),
+            cancellationToken));
 
     public async Task<IReadOnlyList<AiModelDefinition>> ListModelsAsync(
         string? providerKey = null,
         CancellationToken cancellationToken = default)
     {
-        var providers = FilterConfiguredProviders(await providerSettingsStore.ListAsync(cancellationToken));
+        var providers = FilterConfiguredProviders(await RefreshServerSelectedModelsAsync(
+            await providerSettingsStore.ListAsync(cancellationToken),
+            cancellationToken));
 
         return providers
             .Where(provider =>
@@ -129,6 +139,8 @@ public sealed class SqliteAiProviderRegistry(
         {
             return null;
         }
+
+        settings = await RefreshServerSelectedModelAsync(settings, cancellationToken);
 
         if (settings.ProviderType == AiProviderType.RemoteLmsAiEngine &&
             !connectClientFeature.SupportsRemoteAiSharing)
@@ -222,6 +234,115 @@ public sealed class SqliteAiProviderRegistry(
         connectClientFeature.SupportsRemoteAiSharing
             ? providers
             : providers.Where(provider => provider.ProviderType != AiProviderType.RemoteLmsAiEngine).ToArray();
+
+    private async Task<IReadOnlyList<AiProviderSettings>> RefreshServerSelectedModelsAsync(
+        IReadOnlyList<AiProviderSettings> providers,
+        CancellationToken cancellationToken)
+    {
+        var refreshed = new List<AiProviderSettings>(providers.Count);
+        foreach (var provider in providers)
+        {
+            refreshed.Add(await RefreshServerSelectedModelAsync(provider, cancellationToken));
+        }
+
+        return refreshed;
+    }
+
+    private async Task<AiProviderSettings> RefreshServerSelectedModelAsync(
+        AiProviderSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (!settings.IsEnabled || !IsServerSelectedModelProvider(settings) || string.IsNullOrWhiteSpace(settings.BaseUrl))
+        {
+            return settings;
+        }
+
+        lock (serverModelCacheLock)
+        {
+            if (serverModelCache.TryGetValue(settings.ProviderKey, out var cached) &&
+                cached.ExpiresAtUtc > DateTimeOffset.UtcNow &&
+                cached.Settings.BaseUrl.Equals(settings.BaseUrl, StringComparison.OrdinalIgnoreCase) &&
+                cached.Settings.ApiKeySecretReference.Equals(settings.ApiKeySecretReference, StringComparison.Ordinal) &&
+                cached.Settings.UpdatedAtUtc == settings.UpdatedAtUtc)
+            {
+                return cached.Settings;
+            }
+        }
+
+        try
+        {
+            var accessKey = string.IsNullOrWhiteSpace(settings.ApiKeySecretReference)
+                ? string.Empty
+                : await secretStore.ResolveSecretAsync(settings.ApiKeySecretReference, cancellationToken) ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(accessKey))
+            {
+                return CacheServerSelectedModel(settings);
+            }
+
+            using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutSource.CancelAfter(TimeSpan.FromSeconds(3));
+            var baseUrl = settings.BaseUrl.Trim().TrimEnd('/');
+            var modelsUrl = baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
+                ? $"{baseUrl}/models"
+                : $"{baseUrl}/v1/models";
+            using var request = new HttpRequestMessage(HttpMethod.Get, modelsUrl);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessKey.Trim());
+            using var response = await httpClientFactory.CreateClient()
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutSource.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                return CacheServerSelectedModel(settings);
+            }
+
+            var body = await response.Content.ReadAsStringAsync(timeoutSource.Token);
+            var serverDefaultModel = (JsonNode.Parse(body)?["data"] as JsonArray)?
+                .OfType<JsonObject>()
+                .Select(model => model["id"]?.GetValue<string>())
+                .FirstOrDefault(modelId => !string.IsNullOrWhiteSpace(modelId))?
+                .Trim();
+            if (string.IsNullOrWhiteSpace(serverDefaultModel) ||
+                serverDefaultModel.Equals(settings.DefaultModelId, StringComparison.OrdinalIgnoreCase))
+            {
+                return CacheServerSelectedModel(settings);
+            }
+
+            var refreshed = settings with
+            {
+                DefaultModelId = serverDefaultModel,
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            };
+            await providerSettingsStore.SaveAsync(refreshed, cancellationToken);
+            return CacheServerSelectedModel(refreshed);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return CacheServerSelectedModel(settings);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or JsonException or InvalidOperationException)
+        {
+            return CacheServerSelectedModel(settings);
+        }
+    }
+
+    private AiProviderSettings CacheServerSelectedModel(AiProviderSettings settings)
+    {
+        lock (serverModelCacheLock)
+        {
+            serverModelCache[settings.ProviderKey] = new ServerModelCacheEntry(
+                settings,
+                DateTimeOffset.UtcNow.Add(ServerModelRefreshInterval));
+        }
+
+        return settings;
+    }
+
+    private static bool IsServerSelectedModelProvider(AiProviderSettings settings) =>
+        settings.ProviderType == AiProviderType.LinuxMadeSaneAiService ||
+        (settings.ProviderType == AiProviderType.Custom &&
+         settings.MetadataJson.Contains("peer-lms-local-ai", StringComparison.OrdinalIgnoreCase));
+
+    private sealed record ServerModelCacheEntry(AiProviderSettings Settings, DateTimeOffset ExpiresAtUtc);
 
     private sealed class UnavailableAiProvider(
         string providerKey,

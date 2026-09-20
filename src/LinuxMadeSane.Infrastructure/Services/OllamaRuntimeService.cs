@@ -6,6 +6,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Ai;
@@ -196,16 +197,44 @@ public sealed class OllamaRuntimeService(
         ControlServiceAsync("restart", "Restart Ollama service", "Ollama restarted.", "The local Ollama service was restarted.", approved, cancellationToken);
 
     public async Task<LocalAiApplyResult> PullModelAsync(string modelId, bool approved, CancellationToken cancellationToken = default)
+        => await PullModelAsync(modelId, approved, progress: null, cancellationToken);
+
+    public async Task<LocalAiApplyResult> PullModelAsync(
+        string modelId,
+        bool approved,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken = default)
     {
         if (!approved)
         {
             return Failed("Model pull blocked.", "Linux Made Sane requires explicit approval before pulling a local model.", []);
         }
 
-        var result = await commandRunner.RunAsync(
-            new LinuxCommandRequest("ollama", ["pull", modelId.Trim()], false, TimeSpan.FromMinutes(30), $"Pull Ollama model {modelId}"),
-            dryRun: false,
-            cancellationToken);
+        var request = new LinuxCommandRequest(
+            "ollama",
+            ["pull", modelId.Trim()],
+            false,
+            TimeSpan.FromMinutes(30),
+            $"Pull Ollama model {modelId}");
+        var result = commandRunner is IStreamingLinuxCommandRunner streamingRunner && progress is not null
+            ? await streamingRunner.RunStreamingAsync(
+                request,
+                dryRun: false,
+                output =>
+                {
+                    var detail = Regex.Replace(
+                            output.Text,
+                            "\\x1B\\[[0-?]*[ -/]*[@-~]",
+                            string.Empty,
+                            RegexOptions.CultureInvariant)
+                        .Trim();
+                    if (!string.IsNullOrWhiteSpace(detail))
+                    {
+                        progress.Report(detail);
+                    }
+                },
+                cancellationToken)
+            : await commandRunner.RunAsync(request, dryRun: false, cancellationToken);
 
         var output = new List<string>();
         AppendOutput(output, result);

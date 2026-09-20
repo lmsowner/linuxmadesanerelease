@@ -63,6 +63,9 @@ public sealed class AiThreadService(
             {
                 var configuredProvider = configuredProviders
                     .FirstOrDefault(provider => provider.ProviderKey.Equals(thread.ProviderKey, StringComparison.OrdinalIgnoreCase));
+                var displayedModelId = IsServerSelectedModelProvider(configuredProvider)
+                    ? configuredProvider!.DefaultModelId
+                    : thread.ModelId;
 
                 var providerLabel = configuredProvider?.DisplayName;
                 if (string.IsNullOrWhiteSpace(providerLabel))
@@ -76,7 +79,7 @@ public sealed class AiThreadService(
                     thread.Id,
                     thread.Title,
                     providerLabel,
-                    string.IsNullOrWhiteSpace(thread.ModelId) ? "Not assigned" : thread.ModelId,
+                    string.IsNullOrWhiteSpace(displayedModelId) ? "Not assigned" : displayedModelId,
                     thread.TrustProfile.TrustLevel,
                     attachedServersByThread.GetValueOrDefault(thread.Id),
                     messagesByThread.GetValueOrDefault(thread.Id),
@@ -117,6 +120,12 @@ public sealed class AiThreadService(
         var editor = thread is null
             ? BuildMissingThreadEditor(threadId, configuredProviders, models)
             : MapEditor(thread, attachedServers);
+        var editorProvider = configuredProviders.FirstOrDefault(provider =>
+            provider.ProviderKey.Equals(editor.ProviderKey, StringComparison.OrdinalIgnoreCase));
+        if (IsServerSelectedModelProvider(editorProvider))
+        {
+            editor.ModelId = editorProvider!.DefaultModelId;
+        }
 
         return new AiChatThreadEditorContextViewModel(
             editor,
@@ -143,9 +152,11 @@ public sealed class AiThreadService(
 
         var providerKey = providerSettings?.ProviderKey ?? string.Empty;
         var providerType = providerSettings?.ProviderType ?? AiProviderType.Unknown;
-        var modelId = string.IsNullOrWhiteSpace(editor.ModelId)
-            ? providerSettings?.DefaultModelId ?? string.Empty
-            : editor.ModelId.Trim();
+        var modelId = IsServerSelectedModelProvider(providerSettings)
+            ? providerSettings!.DefaultModelId
+            : (string.IsNullOrWhiteSpace(editor.ModelId)
+                ? providerSettings?.DefaultModelId ?? string.Empty
+                : editor.ModelId.Trim());
 
         if (configuredModels.Count > 0 &&
             configuredModels.All(model => !model.ModelId.Equals(modelId, StringComparison.OrdinalIgnoreCase)))
@@ -318,6 +329,12 @@ public sealed class AiThreadService(
         return !string.Equals(existing.ProviderKey, providerKey, StringComparison.OrdinalIgnoreCase)
                || !string.Equals(existing.ModelId, modelId, StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool IsServerSelectedModelProvider(AiProviderSettings? settings) =>
+        settings is not null &&
+        (settings.ProviderType == AiProviderType.LinuxMadeSaneAiService ||
+         (settings.ProviderType == AiProviderType.Custom &&
+          settings.MetadataJson.Contains("peer-lms-local-ai", StringComparison.OrdinalIgnoreCase)));
 
     private static string BuildCheckpointSummary(AiChatThread thread, IReadOnlyList<AiAttachedServer> attachedServers)
     {

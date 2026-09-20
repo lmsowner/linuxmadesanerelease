@@ -15,6 +15,12 @@ public interface IOllamaRuntimeService
     Task<LocalAiApplyResult> StopAsync(bool approved, CancellationToken cancellationToken = default);
     Task<LocalAiApplyResult> RestartAsync(bool approved, CancellationToken cancellationToken = default);
     Task<LocalAiApplyResult> PullModelAsync(string modelId, bool approved, CancellationToken cancellationToken = default);
+    Task<LocalAiApplyResult> PullModelAsync(
+        string modelId,
+        bool approved,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken = default) =>
+        PullModelAsync(modelId, approved, cancellationToken);
     Task<LocalAiApplyResult> RemoveModelAsync(string modelId, bool approved, CancellationToken cancellationToken = default);
     Task<LocalAiBenchmarkResult> TestModelAsync(string modelId, CancellationToken cancellationToken = default);
     Task<AiProviderTurnResult> ExecuteAsync(

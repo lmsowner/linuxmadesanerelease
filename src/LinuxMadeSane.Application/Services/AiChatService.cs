@@ -64,6 +64,7 @@ public sealed class AiChatService(
         var availableServers = await hostStore.ListAsync(cancellationToken);
         var supportedProviders = providerRegistry.ListSupportedProviders();
         var configuredProviders = await providerRegistry.ListConfiguredProvidersAsync(cancellationToken);
+        thread = await AlignThreadWithServerSelectedModelAsync(thread, configuredProviders, cancellationToken);
         var models = await providerRegistry.ListModelsAsync(cancellationToken: cancellationToken);
         var publishedTools = toolBridge.ListPublishedTools(thread, attachedServers)
             .Select(tool => tool.Name)
@@ -107,6 +108,11 @@ public sealed class AiChatService(
             throw new InvalidOperationException("That AI chat thread could not be found.");
         }
 
+        thread = await AlignThreadWithServerSelectedModelAsync(
+            thread,
+            await providerRegistry.ListConfiguredProvidersAsync(cancellationToken),
+            cancellationToken);
+
         var existingMessages = await conversationStore.ListMessagesAsync(threadId, cancellationToken);
         var now = DateTimeOffset.UtcNow;
         var nextSequenceNumber = existingMessages.Count == 0
@@ -140,6 +146,35 @@ public sealed class AiChatService(
             thread with { UpdatedAtUtc = now },
             message,
             cancellationToken);
+    }
+
+    private async Task<AiChatThread> AlignThreadWithServerSelectedModelAsync(
+        AiChatThread thread,
+        IReadOnlyList<AiProviderSettings> configuredProviders,
+        CancellationToken cancellationToken)
+    {
+        var provider = configuredProviders.FirstOrDefault(item =>
+            item.ProviderKey.Equals(thread.ProviderKey, StringComparison.OrdinalIgnoreCase));
+        var serverSelectsModel = provider is not null &&
+            (provider.ProviderType == AiProviderType.LinuxMadeSaneAiService ||
+             (provider.ProviderType == AiProviderType.Custom &&
+              provider.MetadataJson.Contains("peer-lms-local-ai", StringComparison.OrdinalIgnoreCase)));
+        if (!serverSelectsModel ||
+            string.IsNullOrWhiteSpace(provider!.DefaultModelId) ||
+            provider.DefaultModelId.Equals(thread.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            return thread;
+        }
+
+        var aligned = thread with
+        {
+            ModelId = provider.DefaultModelId,
+            ProviderConversationReference = string.Empty,
+            ProviderStateReference = string.Empty,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        await conversationStore.SaveThreadAsync(aligned, cancellationToken);
+        return aligned;
     }
 
     public async Task ReRunCommandAsync(Guid threadId, Guid invocationId, CancellationToken cancellationToken = default)

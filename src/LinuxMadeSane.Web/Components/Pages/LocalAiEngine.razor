@@ -90,11 +90,18 @@
                                         <span>@FormatBytes(model.SizeBytes)</span>
                                     }
                                 </div>
+                                @if (installingModelId.Equals(model.ModelId, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    <div class="callout info" role="status" aria-live="polite">
+                                        <strong>@installProgressStep</strong>
+                                        <p>@installProgressDetail</p>
+                                    </div>
+                                }
                             </div>
                             <div class="compact-row-side">
                                 @if (!model.IsInstalled)
                                 {
-                                    <UiCommandButton Label="Install"
+                                    <UiCommandButton Label="@(installingModelId.Equals(model.ModelId, StringComparison.OrdinalIgnoreCase) ? "Installing..." : "Install")"
                                                      Glyph="UiIconGlyph.Upload"
                                                      Disabled="@isBusy"
                                                      OnClick="@(() => InstallModelAsync(model.ModelId))" />
@@ -209,6 +216,9 @@
     private string peerLmsAccessKey = string.Empty;
     private string statusMessage = string.Empty;
     private string statusTone = "info";
+    private string installingModelId = string.Empty;
+    private string installProgressStep = string.Empty;
+    private string installProgressDetail = string.Empty;
     private bool isLoaded;
     private bool isBusy;
 
@@ -320,12 +330,26 @@
     private async Task InstallModelAsync(string modelId)
     {
         isBusy = true;
+        installingModelId = modelId;
+        installProgressStep = $"Installing {modelId}";
+        installProgressDetail = "Preparing the model download...";
+        SetStatus($"Installing {modelId}. This can take several minutes for a large model.", "info");
+        await InvokeAsync(StateHasChanged);
+
+        var progress = new Progress<LocalAiSetupProgressUpdate>(update =>
+        {
+            installProgressStep = update.Step;
+            installProgressDetail = update.Detail;
+            SetStatus(update.Detail, update.State == LocalAiSetupProgressState.Failed ? "error" : "info");
+            _ = InvokeAsync(StateHasChanged);
+        });
+
         try
         {
             LocalAiApplyResult result;
             if (workspace?.Status.Runtime.IsInstalled == true && workspace.Status.Runtime.IsServiceActive)
             {
-                result = await LocalAiService.PullModelAsync(modelId, true);
+                result = await LocalAiService.PullModelAsync(modelId, true, progress);
                 if (result.Succeeded && !HasUsableDefaultModel)
                 {
                     await LocalAiService.CreateOrUpdateLocalProviderAsync(modelId);
@@ -335,7 +359,8 @@
             {
                 result = await LocalAiService.ApplySetupAsync(
                     new LocalAiSetupEditor { SelectedModelId = modelId },
-                    true);
+                    true,
+                    progress);
             }
 
             SetStatus(result.Summary, result.Succeeded ? "success" : "error");
@@ -347,6 +372,7 @@
         }
         finally
         {
+            installingModelId = string.Empty;
             isBusy = false;
         }
     }
