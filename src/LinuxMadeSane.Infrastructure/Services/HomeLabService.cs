@@ -56,7 +56,7 @@ public sealed class HomeLabService(
             .ToListAsync(cancellationToken);
         var storageRoles = storageRoleEntities.Select(MapStorageRole).ToArray();
 
-        return new HomeLabWorkspace(HomeLabCatalog.Apps, HomeLabCatalog.Recipes, storageRoles, deployments, installations);
+        return new HomeLabWorkspace(HomeLabCatalog.VisibleApps, HomeLabCatalog.Recipes, storageRoles, deployments, installations);
     }
 
     public async Task<HomeLabStorageRole> SaveStorageRoleAsync(
@@ -322,12 +322,12 @@ public sealed class HomeLabService(
         IReadOnlySet<string>? selectedAppIds,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<string> appIds = recipeId is null
+        IReadOnlyList<string> requestedAppIds = recipeId is null
             ? [id]
             : HomeLabCatalog.GetRecipe(recipeId).AppIds
                 .Where(appId => selectedAppIds is null || selectedAppIds.Contains(appId, StringComparer.OrdinalIgnoreCase))
                 .ToArray();
-        if (appIds.Count == 0)
+        if (requestedAppIds.Count == 0)
         {
             throw new InvalidOperationException("Choose at least one Home Lab app.");
         }
@@ -337,7 +337,7 @@ public sealed class HomeLabService(
             throw new InvalidOperationException("This recipe is catalogued for a later Home Lab phase and is not installable yet.");
         }
 
-        var apps = appIds.Select(HomeLabCatalog.GetApp).ToArray();
+        var apps = ExpandDependencies(requestedAppIds).Select(HomeLabCatalog.GetApp).ToArray();
         if (apps.Any(app => !app.IsInstallable))
         {
             var unavailable = string.Join(", ", apps.Where(app => !app.IsInstallable).Select(app => app.Name));
@@ -517,10 +517,20 @@ public sealed class HomeLabService(
         {
             "run", "--detach", "--name", installation.ContainerName,
             "--restart", "unless-stopped", "--network", installation.NetworkName,
+            "--network-alias", app.Id,
             "--label", "com.linuxmadesane.homelab=true",
             "--label", $"com.linuxmadesane.homelab.app={app.Id}",
             "--label", $"com.linuxmadesane.homelab.deployment={installation.DeploymentId}"
         };
+        foreach (var capability in app.DockerCapabilities ?? [])
+        {
+            args.AddRange(["--cap-add", capability]);
+        }
+
+        foreach (var device in app.DockerDevices ?? [])
+        {
+            args.AddRange(["--device", device]);
+        }
         foreach (var environment in app.Environment
                      .Concat(configuration)
                      .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
@@ -755,6 +765,40 @@ public sealed class HomeLabService(
 
     private static string BuildNetworkName(Guid deploymentId) =>
         $"lms-homelab-{deploymentId.ToString("N")[..12]}";
+
+    private static IReadOnlyList<string> ExpandDependencies(IReadOnlyList<string> requestedAppIds)
+    {
+        var result = new List<string>();
+        var visiting = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var added = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void Visit(string appId)
+        {
+            if (!visiting.Add(appId))
+            {
+                throw new InvalidOperationException($"The Home Lab catalog contains a dependency cycle involving '{appId}'.");
+            }
+
+            var app = HomeLabCatalog.GetApp(appId);
+            foreach (var dependency in app.Dependencies)
+            {
+                Visit(dependency);
+            }
+
+            visiting.Remove(appId);
+            if (added.Add(appId))
+            {
+                result.Add(appId);
+            }
+        }
+
+        foreach (var appId in requestedAppIds)
+        {
+            Visit(appId);
+        }
+
+        return result;
+    }
 
     private static bool ContainsNoSuchContainer(LinuxCommandResult result) =>
         result.StandardError.Contains("No such container", StringComparison.OrdinalIgnoreCase);

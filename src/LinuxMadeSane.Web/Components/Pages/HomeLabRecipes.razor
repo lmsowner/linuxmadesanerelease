@@ -13,14 +13,13 @@
 <div class="page-shell home-lab-page">
     <UiHeroPanel Eyebrow="Home Lab"
                   Title="Recipes"
-                  Description="Install reusable solutions made from the same catalogued App definitions.">
-        <Actions>
-            <UiCommandButton Label="Apps"
-                             Glyph="UiIconGlyph.Connection"
-                             Variant="UiButtonVariant.Ghost"
-                             Href="/home-lab/apps" />
-        </Actions>
-    </UiHeroPanel>
+                  Description="Install reusable solutions made from the same catalogued App definitions."
+                  Compact="true" />
+
+    <nav class="home-lab-section-tabs" aria-label="Home Lab">
+        <a href="/home-lab/apps">Apps</a>
+        <a class="active" href="/home-lab/recipes">Recipes</a>
+    </nav>
 
     @if (!string.IsNullOrWhiteSpace(message))
     {
@@ -33,37 +32,41 @@
     }
     else
     {
-        <section class="feature-grid home-lab-recipe-grid">
-            @foreach (var recipe in workspace.Recipes)
-            {
-                <article class="surface-card home-lab-recipe-card">
-                    <div class="table-header">
-                        <div>
-                            <p class="eyebrow">Recipe</p>
-                            <h2>@recipe.Name</h2>
+        <TabControl ActiveValue="@activeTab"
+                    ActiveValueChanged="HandleTabChangedAsync"
+                    Class="home-lab-tabs"
+                    PanelClass="home-lab-tab-panel">
+            <TabPage Value="recipes" Title="Recipes">
+                <div class="home-lab-recipe-list">
+                    @foreach (var recipe in workspace.Recipes)
+                    {
+                        <div class="home-lab-recipe-row">
+                            <div>
+                                <strong>@recipe.Name</strong>
+                                <span>@recipe.Description</span>
+                            </div>
+                            <div class="home-lab-recipe-apps">
+                                @foreach (var appId in recipe.AppIds)
+                                {
+                                    <span>@appId</span>
+                                }
+                            </div>
+                            <UiCommandButton Label="Install" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="() => InstallAsync(recipe)" />
                         </div>
-                        <UiPill Tone="@(recipe.IsInstallable ? UiPillTone.Success : UiPillTone.Neutral)">
-                            @(recipe.IsInstallable ? "Available" : "Planned")
-                        </UiPill>
-                    </div>
-                    <p>@recipe.Description</p>
-                    <div class="home-lab-recipe-apps">
-                        @foreach (var appId in recipe.AppIds)
-                        {
-                            <span>@appId</span>
-                        }
-                    </div>
-                    @if (recipe.RequiresVpnGateway)
-                    {
-                        <p class="meta-text">Requires the reusable VPN Gateway phase. LMS will not silently fall back to direct internet access.</p>
                     }
-                    @if (recipe.IsInstallable)
-                    {
-                        <UiCommandButton Label="Install" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="() => InstallAsync(recipe)" />
-                    }
-                </article>
-            }
-        </section>
+                </div>
+            </TabPage>
+            <TabPage Value="ai" Title="AI help">
+                <section class="home-lab-ai-panel">
+                    <div>
+                        <p class="eyebrow">Recipe assistant</p>
+                        <h2>Choose a stack with AI</h2>
+                        <p class="meta-text">Ask AI to compare recipes, check storage requirements, or explain how the applications will communicate before you install.</p>
+                    </div>
+                    <UiCommandButton Label="Open AI assistant" Glyph="UiIconGlyph.Ai" Variant="UiButtonVariant.PrimaryMuted" Href="/ai" />
+                </section>
+            </TabPage>
+        </TabControl>
     }
 </div>
 
@@ -72,6 +75,7 @@
     private string message = string.Empty;
     private bool error;
     private bool busy;
+    private string activeTab = "recipes";
 
     protected override async Task OnInitializedAsync()
     {
@@ -83,6 +87,12 @@
         {
             SetMessage(exception.Message, true);
         }
+    }
+
+    private Task HandleTabChangedAsync(string? value)
+    {
+        activeTab = value == "ai" ? "ai" : "recipes";
+        return Task.CompletedTask;
     }
 
     private async Task InstallAsync(HomeLabRecipeManifest recipe)

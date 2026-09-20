@@ -56,7 +56,10 @@ public sealed record HomeLabAppManifest(
     bool SupportsDirectNetwork = true,
     bool SupportsVpnGateway = false,
     bool EdgeGatewaySupported = true,
-    bool IsInstallable = true);
+    bool IsInstallable = true,
+    IReadOnlyList<string>? DockerCapabilities = null,
+    IReadOnlyList<string>? DockerDevices = null,
+    bool IsSystemDependency = false);
 
 public sealed record HomeLabRecipeRelationship(
     string AppId,

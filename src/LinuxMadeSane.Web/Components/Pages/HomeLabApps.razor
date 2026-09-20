@@ -15,19 +15,21 @@
 <div class="page-shell home-lab-page">
     <UiHeroPanel Eyebrow="Home Lab"
                   Title="Apps"
-                  Description="Compose established Docker applications on private LMS-managed networks.">
+                  Description="Compose established Docker applications on private LMS-managed networks."
+                  Compact="true">
         <Actions>
             <UiCommandButton Label="Refresh"
                              Glyph="UiIconGlyph.Refresh"
                              Variant="UiButtonVariant.Ghost"
                              Disabled="@busy"
                              OnClick="LoadAsync" />
-            <UiCommandButton Label="Recipes"
-                             Glyph="UiIconGlyph.Connection"
-                             Variant="UiButtonVariant.Ghost"
-                             Href="/home-lab/recipes" />
         </Actions>
     </UiHeroPanel>
+
+    <nav class="home-lab-section-tabs" aria-label="Home Lab">
+        <a class="active" href="/home-lab/apps">Apps</a>
+        <a href="/home-lab/recipes">Recipes</a>
+    </nav>
 
     @if (!string.IsNullOrWhiteSpace(message))
     {
@@ -40,72 +42,94 @@
     }
     else
     {
-        <section class="surface-subcard home-lab-storage-card">
-            <div class="table-header">
-                <div>
-                    <p class="eyebrow">Shared storage roles</p>
-                    <h2>Choose host locations once</h2>
-                    <p class="meta-text">Recipes reuse these paths when mounting downloads and media into participating containers.</p>
+        <TabControl ActiveValue="@activeTab"
+                    ActiveValueChanged="HandleTabChangedAsync"
+                    Class="home-lab-tabs"
+                    PanelClass="home-lab-tab-panel">
+            <TabPage Value="apps" Title="Apps">
+                <div class="home-lab-filter-tabs" role="tablist" aria-label="App categories">
+                    @foreach (var category in Categories)
+                    {
+                        <button class="@(activeCategory == category ? "active" : string.Empty)"
+                                type="button"
+                                role="tab"
+                                aria-selected="@(activeCategory == category)"
+                                @onclick="() => activeCategory = category">@(category is null ? "All" : FormatCategory(category.Value))</button>
+                    }
                 </div>
-            </div>
-            <div class="home-lab-storage-grid">
-                @foreach (var role in StorageRoles)
-                {
-                    <div class="home-lab-storage-row">
-                        <label for="storage-@role">@role</label>
-                        <input id="storage-@role" class="ui-control-input" @bind="storagePaths[role]" placeholder="/mnt/storage/@role" />
-                        <UiCommandButton Label="Save"
-                                         Glyph="UiIconGlyph.Save"
-                                         Variant="UiButtonVariant.Ghost"
-                                         Disabled="@busy"
-                                         OnClick="() => SaveStorageRoleAsync(role)" />
-                    </div>
-                }
-            </div>
-        </section>
 
-        <section class="feature-grid home-lab-app-grid">
-            @foreach (var app in workspace.Apps)
-            {
-                var installation = workspace.Installations.FirstOrDefault(item => item.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase));
-                <article class="surface-card home-lab-app-card">
-                    <div class="table-header">
-                        <div>
-                            <p class="eyebrow">@FormatCategory(app.Category)</p>
-                            <h2>@app.Name</h2>
-                        </div>
-                        <UiPill Tone="@(installation is null ? UiPillTone.Neutral : GetHealthTone(installation.HealthState))">
-                            @(installation is null ? (app.IsInstallable ? "Available" : "Planned") : installation.HealthState.ToString())
-                        </UiPill>
+                <div class="home-lab-app-list">
+                    <div class="home-lab-app-list-header">
+                        <span>Application</span>
+                        <span>Image</span>
+                        <span>Status</span>
+                        <span>Actions</span>
                     </div>
-                    <p>@app.Description</p>
-                    <p class="meta-text"><strong>Image:</strong> @app.ImageRepository:@app.ImageTag</p>
-                    @if (installation is not null)
+                    @foreach (var app in FilteredApps)
                     {
-                        <p class="meta-text"><strong>Container:</strong> @installation.ContainerName<br />@installation.HealthDetail</p>
-                        <div class="home-lab-action-row">
-                            @if (BuildLocalUrl(installation) is { } localUrl)
-                            {
-                                <UiCommandButton Label="Open" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.PrimaryMuted" Href="@localUrl" Target="_blank" Rel="noopener" />
-                            }
-                            <UiCommandButton Label="Start" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
-                            <UiCommandButton Label="Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
-                            <UiCommandButton Label="Restart" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Restart)" />
-                            <UiCommandButton Label="Update" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
-                            <UiCommandButton Label="Remove" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Remove)" />
+                        var installation = workspace.Installations.FirstOrDefault(item => item.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase));
+                        <div class="home-lab-app-row">
+                            <div class="home-lab-app-name">
+                                <strong>@app.Name</strong>
+                                <span>@app.Description</span>
+                            </div>
+                            <span class="home-lab-image">@app.ImageRepository:@app.ImageTag</span>
+                            <UiPill Tone="@(installation is null ? UiPillTone.Neutral : GetHealthTone(installation.HealthState))">
+                                @(installation is null ? "Available" : installation.HealthState.ToString())
+                            </UiPill>
+                            <div class="home-lab-action-row">
+                                @if (installation is not null)
+                                {
+                                    @if (BuildLocalUrl(installation) is { } localUrl)
+                                    {
+                                        <UiCommandButton Label="Open" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.PrimaryMuted" Href="@localUrl" Target="_blank" Rel="noopener" />
+                                    }
+                                    <UiCommandButton Label="Start" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
+                                    <UiCommandButton Label="Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
+                                    <UiCommandButton Label="Update" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
+                                    <UiCommandButton Label="Remove" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Remove)" />
+                                }
+                                else
+                                {
+                                    <UiCommandButton Label="Install" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="() => InstallAsync(app)" />
+                                }
+                            </div>
                         </div>
                     }
-                    else if (app.IsInstallable)
-                    {
-                        <UiCommandButton Label="Install" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="() => InstallAsync(app)" />
-                    }
-                    else
-                    {
-                        <p class="meta-text">Catalogued for a later Home Lab phase. Its manifest is already available for recipe composition.</p>
-                    }
-                </article>
-            }
-        </section>
+                </div>
+            </TabPage>
+
+            <TabPage Value="storage" Title="Storage">
+                <section class="home-lab-storage-panel">
+                    <div>
+                        <p class="eyebrow">Shared storage roles</p>
+                        <h2>Choose host locations once</h2>
+                        <p class="meta-text">Recipes reuse these paths when mounting downloads and media into participating containers.</p>
+                    </div>
+                    <div class="home-lab-storage-grid">
+                        @foreach (var role in StorageRoles)
+                        {
+                            <div class="home-lab-storage-row">
+                                <label for="storage-@role">@role</label>
+                                <input id="storage-@role" class="ui-control-input" @bind="storagePaths[role]" placeholder="/mnt/storage/@role" />
+                                <UiCommandButton Label="Save" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(role)" />
+                            </div>
+                        }
+                    </div>
+                </section>
+            </TabPage>
+
+            <TabPage Value="ai" Title="AI help">
+                <section class="home-lab-ai-panel">
+                    <div>
+                        <p class="eyebrow">Home Lab assistant</p>
+                        <h2>Use AI to plan and troubleshoot</h2>
+                        <p class="meta-text">Ask about choosing a recipe, storage layout, Docker health, or an app’s effective configuration. AI suggestions do not install or change anything automatically.</p>
+                    </div>
+                    <UiCommandButton Label="Open AI assistant" Glyph="UiIconGlyph.Ai" Variant="UiButtonVariant.PrimaryMuted" Href="/ai" />
+                </section>
+            </TabPage>
+        </TabControl>
     }
 </div>
 
@@ -122,6 +146,22 @@
     private string message = string.Empty;
     private bool error;
     private bool busy;
+    private string activeTab = "apps";
+    private HomeLabAppCategory? activeCategory;
+
+    private static readonly HomeLabAppCategory?[] Categories =
+    [
+        null,
+        HomeLabAppCategory.Infrastructure,
+        HomeLabAppCategory.Download,
+        HomeLabAppCategory.Media,
+        HomeLabAppCategory.Automation,
+        HomeLabAppCategory.Photos,
+        HomeLabAppCategory.Utilities
+    ];
+
+    private IReadOnlyList<HomeLabAppManifest> FilteredApps =>
+        workspace?.Apps.Where(app => activeCategory is null || app.Category == activeCategory).ToArray() ?? [];
 
     protected override Task OnInitializedAsync() => LoadAsync();
 
@@ -144,6 +184,12 @@
         {
             busy = false;
         }
+    }
+
+    private Task HandleTabChangedAsync(string? value)
+    {
+        activeTab = value is "storage" or "ai" ? value : "apps";
+        return Task.CompletedTask;
     }
 
     private async Task SaveStorageRoleAsync(string role)

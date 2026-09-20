@@ -32,7 +32,8 @@ public static class HomeLabCatalog
                 new("credentials", "Credentials or configuration", "secret", true, Secret: true)
             ],
             SupportsVpnGateway: false,
-            IsInstallable: false),
+            DockerCapabilities: ["NET_ADMIN"],
+            DockerDevices: ["/dev/net/tun:/dev/net/tun"]),
         new(
             "qbittorrent",
             "qBittorrent",
@@ -97,7 +98,7 @@ public static class HomeLabCatalog
             "1",
             [new("web", 11470, Primary: true)],
             [new("config", "/root/.stremio-server", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(), [], null, [], SupportsVpnGateway: true, IsInstallable: false),
+            new Dictionary<string, string>(), [], null, [], SupportsVpnGateway: true),
         new(
             "immich",
             "Immich",
@@ -110,8 +111,78 @@ public static class HomeLabCatalog
             "release",
             "1",
             [new("web", 2283, Primary: true)],
-            [new("library", "/usr/src/app/upload", HomeLabStorageKind.UserData, "photos")],
-            new Dictionary<string, string>(), ["immich-database", "immich-redis"], null, [], IsInstallable: false),
+            [new("library", "/data", HomeLabStorageKind.UserData, "photos")],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["DB_HOSTNAME"] = "immich-database",
+                ["DB_USERNAME"] = "postgres",
+                ["DB_PASSWORD"] = "postgres",
+                ["DB_DATABASE_NAME"] = "immich",
+                ["REDIS_HOSTNAME"] = "immich-redis",
+                ["IMMICH_MACHINE_LEARNING_URL"] = "http://immich-machine-learning:3003"
+            },
+            ["immich-database", "immich-redis", "immich-machine-learning"],
+            new HomeLabHealthCheckManifest(HttpPath: "/api/server/ping", Port: 2283), [], IsInstallable: true),
+        new(
+            "immich-database",
+            "Immich Database",
+            "PostgreSQL and VectorChord database used by Immich.",
+            HomeLabAppCategory.Infrastructure,
+            "database",
+            "https://immich.app/",
+            "https://docs.immich.app/install/docker-compose",
+            "ghcr.io/immich-app/postgres",
+            "14-vectorchord0.4.3-pgvectors0.2.0",
+            "1",
+            [],
+            [new("database", "/var/lib/postgresql/data", HomeLabStorageKind.Configuration)],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["POSTGRES_PASSWORD"] = "postgres",
+                ["POSTGRES_USER"] = "postgres",
+                ["POSTGRES_DB"] = "immich",
+                ["POSTGRES_INITDB_ARGS"] = "--data-checksums"
+            },
+            [],
+            new HomeLabHealthCheckManifest(DockerCommand: "pg_isready -U postgres -d immich"),
+            [],
+            IsSystemDependency: true),
+        new(
+            "immich-redis",
+            "Immich Redis",
+            "Valkey cache service used by Immich.",
+            HomeLabAppCategory.Infrastructure,
+            "database",
+            "https://immich.app/",
+            "https://docs.immich.app/install/docker-compose",
+            "docker.io/valkey/valkey",
+            "9",
+            "1",
+            [],
+            [],
+            new Dictionary<string, string>(),
+            [],
+            new HomeLabHealthCheckManifest(DockerCommand: "valkey-cli ping | grep -q PONG"),
+            [],
+            IsSystemDependency: true),
+        new(
+            "immich-machine-learning",
+            "Immich Machine Learning",
+            "Machine-learning service used by Immich for search and facial recognition.",
+            HomeLabAppCategory.Infrastructure,
+            "cpu",
+            "https://immich.app/",
+            "https://docs.immich.app/install/docker-compose",
+            "ghcr.io/immich-app/immich-machine-learning",
+            "release",
+            "1",
+            [],
+            [new("cache", "/cache", HomeLabStorageKind.Cache)],
+            new Dictionary<string, string>(),
+            [],
+            new HomeLabHealthCheckManifest(DockerCommand: "wget --no-verbose --tries=1 --spider http://127.0.0.1:3003/ping"),
+            [],
+            IsSystemDependency: true),
         new(
             "webtor",
             "Webtor",
@@ -120,12 +191,12 @@ public static class HomeLabCatalog
             "play",
             "https://webtor.io/",
             "https://webtor.io/",
-            "webtor/webtor",
+            "ghcr.io/webtor-io/self-hosted",
             "latest",
             "1",
             [new("web", 8080, Primary: true)],
-            [new("config", "/config", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(), [], null, [], SupportsVpnGateway: true, IsInstallable: false)
+            [new("data", "/data", HomeLabStorageKind.UserData), new("database", "/pgdata", HomeLabStorageKind.Configuration)],
+            new Dictionary<string, string>(), [], null, [], SupportsVpnGateway: true)
         ,
         new(
             "prowlarr",
@@ -140,7 +211,7 @@ public static class HomeLabCatalog
             "1",
             [new("web", 9696, Primary: true)],
             [new("config", "/config", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(), [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 9696), [], IsInstallable: false),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 9696), []),
         new(
             "sonarr",
             "Sonarr",
@@ -158,7 +229,7 @@ public static class HomeLabCatalog
                 new("downloads", "/downloads", HomeLabStorageKind.UserData, "downloads"),
                 new("tv", "/tv", HomeLabStorageKind.UserData, "tv")
             ],
-            new Dictionary<string, string>(), [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8989), [], IsInstallable: false),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8989), []),
         new(
             "radarr",
             "Radarr",
@@ -176,7 +247,7 @@ public static class HomeLabCatalog
                 new("downloads", "/downloads", HomeLabStorageKind.UserData, "downloads"),
                 new("movies", "/movies", HomeLabStorageKind.UserData, "movies")
             ],
-            new Dictionary<string, string>(), [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 7878), [], IsInstallable: false),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 7878), []),
         new(
             "seerr",
             "Seerr",
@@ -185,12 +256,12 @@ public static class HomeLabCatalog
             "list",
             "https://seerr.dev/",
             "https://docs.seerr.dev/",
-            "fallenbagel/jellyseerr",
+            "ghcr.io/seerr-team/seerr",
             "latest",
             "1",
             [new("web", 5055, Primary: true)],
             [new("config", "/app/config", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(), [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 5055), [], IsInstallable: false)
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PORT"] = "5055", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/api/v1/settings/public", Port: 5055), [])
     ];
 
     public static IReadOnlyList<HomeLabRecipeManifest> Recipes { get; } =
@@ -202,8 +273,7 @@ public static class HomeLabCatalog
             ["vpn-gateway", "qbittorrent"],
             ["downloads"],
             [new("qbittorrent", RouteVia: "vpn-gateway")],
-            RequiresVpnGateway: true,
-            IsInstallable: false),
+            RequiresVpnGateway: true),
         new(
             "private-stremio",
             "Private Stremio",
@@ -211,8 +281,7 @@ public static class HomeLabCatalog
             ["vpn-gateway", "stremio-server"],
             [],
             [new("stremio-server", RouteVia: "vpn-gateway")],
-            RequiresVpnGateway: true,
-            IsInstallable: false),
+            RequiresVpnGateway: true),
         new(
             "private-webtor",
             "Private Webtor",
@@ -220,8 +289,7 @@ public static class HomeLabCatalog
             ["vpn-gateway", "webtor"],
             [],
             [new("webtor", RouteVia: "vpn-gateway")],
-            RequiresVpnGateway: true,
-            IsInstallable: false),
+            RequiresVpnGateway: true),
         new(
             "media-automation",
             "Media Automation Stack",
@@ -233,7 +301,7 @@ public static class HomeLabCatalog
                 new("radarr", DownloadClient: "qbittorrent", IndexerManager: "prowlarr"),
                 new("seerr", Sonarr: "sonarr", Radarr: "radarr")
             ],
-            IsInstallable: false),
+            IsInstallable: true),
         new(
             "jellyfin-media",
             "Jellyfin Media Stack",
@@ -251,13 +319,15 @@ public static class HomeLabCatalog
                 new("qbittorrent", RouteVia: "vpn-gateway"),
                 new("jellyfin", DownloadClient: "qbittorrent")
             ],
-            RequiresVpnGateway: true,
-            IsInstallable: false)
+            RequiresVpnGateway: true)
     ];
 
     public static HomeLabAppManifest GetApp(string id) =>
         Apps.FirstOrDefault(app => app.Id.Equals(id?.Trim(), StringComparison.OrdinalIgnoreCase))
         ?? throw new InvalidOperationException($"Home Lab app '{id}' is not in the catalog.");
+
+    public static IReadOnlyList<HomeLabAppManifest> VisibleApps =>
+        Apps.Where(app => !app.IsSystemDependency).ToArray();
 
     public static HomeLabRecipeManifest GetRecipe(string id) =>
         Recipes.FirstOrDefault(recipe => recipe.Id.Equals(id?.Trim(), StringComparison.OrdinalIgnoreCase))
