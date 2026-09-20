@@ -299,6 +299,15 @@ public sealed class AiProviderSettingsService(
 
         await DiscoverLinuxMadeSaneAiServiceModelAsync(editor, existing, allProviders, cancellationToken);
 
+        if (editor.ProviderType == AiProviderType.LinuxMadeSaneAiService)
+        {
+            return new AiProviderConnectionTestResult(
+                true,
+                "Provider test succeeded.",
+                $"The service authenticated successfully and exposed its default model, {editor.DefaultModelId}.",
+                DateTimeOffset.UtcNow);
+        }
+
         var supportedModels = providerRegistry.ListModelCatalog(editor.ProviderType);
         var selectedModelId = editor.DefaultModelId.Trim();
         var selectedModelIsSupported = editor.ProviderType == AiProviderType.LinuxMadeSaneAiService ||

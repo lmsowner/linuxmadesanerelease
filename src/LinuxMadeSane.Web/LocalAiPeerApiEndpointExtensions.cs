@@ -12,6 +12,56 @@ namespace LinuxMadeSane.Web;
 
 public static class LocalAiPeerApiEndpointExtensions
 {
+    public static IApplicationBuilder UseLocalAiPeerApiPortIsolation(this WebApplication app)
+    {
+        app.Use(async (context, next) =>
+        {
+            var peerSharing = context.RequestServices.GetRequiredService<LocalAiPeerSharingService>();
+            if (!await peerSharing.IsSharedEnginePortAsync(
+                    context.Connection.LocalPort,
+                    context.RequestAborted))
+            {
+                await next();
+                return;
+            }
+
+            var path = context.Request.Path;
+            var isModelsRequest = HttpMethods.IsGet(context.Request.Method) &&
+                                  path.Equals("/v1/models", StringComparison.OrdinalIgnoreCase);
+            var isChatRequest = HttpMethods.IsPost(context.Request.Method) &&
+                                path.Equals("/v1/chat/completions", StringComparison.OrdinalIgnoreCase);
+            if (isModelsRequest || isChatRequest)
+            {
+                await next();
+                return;
+            }
+
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.ContentType = "application/json";
+            if (HttpMethods.IsGet(context.Request.Method) &&
+                (path == PathString.Empty || path == new PathString("/")))
+            {
+                await context.Response.WriteAsJsonAsync(
+                    new
+                    {
+                        service = "Linux Made Sane AI Service",
+                        api = "OpenAI-compatible",
+                        models = "/v1/models",
+                        chatCompletions = "/v1/chat/completions"
+                    },
+                    context.RequestAborted);
+                return;
+            }
+
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            await context.Response.WriteAsJsonAsync(
+                new { error = "This port only serves the Linux Made Sane AI API." },
+                context.RequestAborted);
+        });
+
+        return app;
+    }
+
     public static async Task AddLocalAiServiceAddressesAsync(this WebApplication app)
     {
         var explicitUrls =
