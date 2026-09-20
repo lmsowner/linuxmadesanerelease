@@ -37,6 +37,50 @@
                     Class="home-lab-tabs"
                     PanelClass="home-lab-tab-panel">
             <TabPage Value="recipes" Title="Recipes">
+                @if (configuringRecipe is { } recipeToConfigure)
+                {
+                    var vpn = HomeLabCatalog.GetApp("vpn-gateway");
+                    <section class="surface-card home-lab-config-panel">
+                        <div class="home-lab-config-heading">
+                            <div>
+                                <p class="eyebrow">VPN gateway setup</p>
+                                <h2>Configure @recipeToConfigure.Name</h2>
+                                <p class="meta-text">This recipe installs Gluetun and routes the selected apps through it. Credentials are stored by LMS.</p>
+                            </div>
+                            <CompactUIButton Label="Cancel" Glyph="UiIconGlyph.Clear" Disabled="@busy" OnClick="CancelConfiguration" />
+                        </div>
+                        <div class="home-lab-config-grid">
+                            @foreach (var field in vpn.ConfigurationSchema.Where(ShouldShowConfigurationField))
+                            {
+                                <div class="home-lab-config-field">
+                                    <label for="recipe-vpn-@field.Id">@field.Label</label>
+                                    @if (field.Type.Equals("select", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <select id="recipe-vpn-@field.Id" class="ui-control-input" value="@GetConfigurationValue(field.Id)" @onchange="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString())">
+                                            <option value="">Choose...</option>
+                                            @foreach (var option in field.Options ?? [])
+                                            {
+                                                <option value="@option">@option</option>
+                                            }
+                                        </select>
+                                    }
+                                    else
+                                    {
+                                        <input id="recipe-vpn-@field.Id" class="ui-control-input" type="@(field.Secret ? "password" : "text")" value="@(field.Secret ? GetSecretConfigurationValue(field.Id) : GetConfigurationValue(field.Id))" autocomplete="@(field.Secret ? "new-password" : "off")" @oninput="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString(), field.Secret)" />
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(field.Help))
+                                    {
+                                        <span class="meta-text">@field.Help</span>
+                                    }
+                                </div>
+                            }
+                        </div>
+                        <div class="home-lab-config-footer">
+                            <span class="meta-text">The recipe remains blocked if the VPN gateway is unhealthy.</span>
+                            <CompactUIButton Label="Install configured recipe" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="InstallConfiguredAsync" />
+                        </div>
+                    </section>
+                }
                 <div class="surface-card home-lab-recipe-list">
                     @foreach (var recipe in workspace.Recipes)
                     {
@@ -76,6 +120,9 @@
     private bool error;
     private bool busy;
     private string activeTab = "recipes";
+    private HomeLabRecipeManifest? configuringRecipe;
+    private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
 
     protected override async Task OnInitializedAsync()
     {
@@ -97,6 +144,16 @@
 
     private async Task InstallAsync(HomeLabRecipeManifest recipe)
     {
+        if (recipe.RequiresVpnGateway)
+        {
+            configuringRecipe = recipe;
+            configurationValues.Clear();
+            secretConfigurationValues.Clear();
+            configurationValues["provider"] = "ProtonVPN";
+            configurationValues["protocol"] = "WireGuard";
+            return;
+        }
+
         if (busy) return;
         busy = true;
         try
@@ -119,6 +176,75 @@
         {
             busy = false;
         }
+    }
+
+    private async Task InstallConfiguredAsync()
+    {
+        if (configuringRecipe is not { } recipe || busy)
+        {
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            var storage = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["downloads"] = "/mnt/storage/downloads",
+                ["movies"] = "/mnt/storage/movies",
+                ["tv"] = "/mnt/storage/tv"
+            };
+            var result = await HomeLabService.InstallRecipeAsync(new HomeLabRecipeInstallRequest(
+                recipe.Id,
+                storage,
+                configurationValues,
+                SecretConfiguration: secretConfigurationValues));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            if (result.Succeeded)
+            {
+                configuringRecipe = null;
+                configurationValues.Clear();
+                secretConfigurationValues.Clear();
+            }
+            workspace = await HomeLabService.GetWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private void CancelConfiguration()
+    {
+        configuringRecipe = null;
+        configurationValues.Clear();
+        secretConfigurationValues.Clear();
+    }
+
+    private bool ShouldShowConfigurationField(HomeLabConfigurationField field)
+    {
+        var protocol = GetConfigurationValue("protocol");
+        if (field.Id.StartsWith("wireguard-", StringComparison.OrdinalIgnoreCase))
+        {
+            return protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase);
+        }
+        if (field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
+        {
+            return protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase);
+        }
+        return true;
+    }
+
+    private string GetConfigurationValue(string key) => configurationValues.TryGetValue(key, out var value) ? value : string.Empty;
+    private string GetSecretConfigurationValue(string key) => secretConfigurationValues.TryGetValue(key, out var value) ? value : string.Empty;
+
+    private void SetConfigurationValue(string key, string? value, bool secret = false)
+    {
+        (secret ? secretConfigurationValues : configurationValues)[key] = value ?? string.Empty;
     }
 
     private void SetMessage(string text, bool isError)

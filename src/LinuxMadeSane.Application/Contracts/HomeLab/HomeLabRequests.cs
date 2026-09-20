@@ -15,13 +15,15 @@ public sealed record HomeLabInstallRequest(
     string? DisplayName = null,
     IReadOnlyDictionary<string, string>? StoragePaths = null,
     IReadOnlyDictionary<string, string>? Configuration = null,
-    HomeLabEdgeGatewayRequest? EdgeGateway = null);
+    HomeLabEdgeGatewayRequest? EdgeGateway = null,
+    IReadOnlyDictionary<string, string>? SecretConfiguration = null);
 
 public sealed record HomeLabRecipeInstallRequest(
     string RecipeId,
     IReadOnlyDictionary<string, string>? StoragePaths = null,
     IReadOnlyDictionary<string, string>? Configuration = null,
-    IReadOnlySet<string>? AppIds = null);
+    IReadOnlySet<string>? AppIds = null,
+    IReadOnlyDictionary<string, string>? SecretConfiguration = null);
 
 public enum HomeLabLifecycleAction
 {

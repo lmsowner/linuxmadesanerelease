@@ -21,15 +21,27 @@ public static class HomeLabCatalog
             "qmcgaw/gluetun",
             "latest",
             "1",
-            [new("http-proxy", 8888, Primary: true)],
+            [
+                new("http-proxy", 8888, Primary: true),
+                new("routed-web", 8080),
+                new("routed-stremio", 11470)
+            ],
             [new("config", "/gluetun", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(),
             [],
             new HomeLabHealthCheckManifest(DockerCommand: "wget -qO- http://127.0.0.1:9999/ >/dev/null || exit 1"),
             [
-                new("provider", "Provider", "select", true, Options: ["ProtonVPN", "NordVPN", "Mullvad", "Surfshark", "Private Internet Access", "Custom WireGuard", "Custom OpenVPN"]),
-                new("protocol", "Protocol", "select", true, Options: ["WireGuard", "OpenVPN"]),
-                new("credentials", "Credentials or configuration", "secret", true, Secret: true)
+                new("provider", "Provider", "select", true, Help: "These provider names are Gluetun provider profiles; LMS does not implement the VPN protocol." , Options: ["ProtonVPN", "NordVPN", "Mullvad", "Surfshark", "Private Internet Access", "Custom WireGuard"]),
+                new("protocol", "Protocol", "select", true, Help: "Choose the protocol supported by your provider credentials.", Options: ["WireGuard", "OpenVPN"]),
+                new("server-countries", "Server countries", Help: "Optional comma-separated Gluetun server country filter, for example Netherlands, Switzerland."),
+                new("wireguard-private-key", "WireGuard private key", "secret", true, Secret: true, Help: "Required for WireGuard. Stored in the LMS secret store."),
+                new("wireguard-addresses", "WireGuard addresses", Required: true, Help: "The tunnel address from your provider, for example 10.2.0.2/32."),
+                new("wireguard-public-key", "WireGuard server public key", Help: "Required for custom WireGuard when your provider does not supply a server profile."),
+                new("wireguard-endpoint-ip", "WireGuard endpoint IP", Help: "Optional custom WireGuard endpoint IP."),
+                new("wireguard-endpoint-port", "WireGuard endpoint port", Help: "Optional custom WireGuard endpoint port."),
+                new("wireguard-preshared-key", "WireGuard preshared key", "secret", Secret: true),
+                new("openvpn-username", "OpenVPN username", "secret", true, Secret: true, Help: "Required for provider OpenVPN profiles."),
+                new("openvpn-password", "OpenVPN password", "secret", true, Secret: true, Help: "Stored in the LMS secret store and never shown again.")
             ],
             SupportsVpnGateway: false,
             DockerCapabilities: ["NET_ADMIN"],

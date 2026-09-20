@@ -13,5 +13,7 @@ public sealed record LinuxCommandRequest(
 {
     public bool IsOptionalExternalTool { get; init; }
 
+    public IReadOnlySet<int>? SensitiveArgumentIndexes { get; init; }
+
     public byte[]? StandardInputBytes { get; init; }
 }

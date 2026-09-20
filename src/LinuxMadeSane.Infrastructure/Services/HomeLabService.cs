@@ -22,6 +22,7 @@ public sealed class HomeLabService(
     LinuxMadeSaneDbContext dbContext,
     ILinuxCommandRunner commandRunner,
     IEdgeGatewayService edgeGatewayService,
+    ISecretStore secretStore,
     HomeLabStorageOptions storageOptions,
     ILogger<HomeLabService> logger) : IHomeLabService
 {
@@ -99,6 +100,7 @@ public sealed class HomeLabService(
             request.DisplayName,
             request.StoragePaths,
             request.Configuration,
+            request.SecretConfiguration,
             request.EdgeGateway,
             null,
             null,
@@ -115,6 +117,7 @@ public sealed class HomeLabService(
             null,
             request.StoragePaths,
             request.Configuration,
+            request.SecretConfiguration,
             null,
             request.RecipeId,
             request.AppIds,
@@ -150,6 +153,7 @@ public sealed class HomeLabService(
                 item => item.DeploymentId == deployment.Id && item.Id != installation.Id,
                 cancellationToken);
             var routeId = installation.EdgeGatewayRouteId;
+            var secretReferences = DeserializeDictionary(installation.SecretConfigurationJson).Values.ToArray();
             dbContext.HomeLabInstallations.Remove(installation);
             if (isLast)
             {
@@ -165,6 +169,10 @@ public sealed class HomeLabService(
             if (routeId.HasValue)
             {
                 await edgeGatewayService.DeleteRouteAsync(routeId.Value, cancellationToken);
+            }
+            foreach (var secretReference in secretReferences)
+            {
+                await secretStore.DeleteSecretAsync(secretReference, cancellationToken);
             }
 
             return Success(
@@ -201,6 +209,7 @@ public sealed class HomeLabService(
                 app,
                 DeserializeBindings(installation.VolumeMappingsJson),
                 DeserializeDictionary(installation.ConfigurationJson),
+                DeserializeDictionary(installation.SecretConfigurationJson),
                 output,
                 cancellationToken);
             if (!run.Succeeded)
@@ -318,6 +327,7 @@ public sealed class HomeLabService(
         string? displayName,
         IReadOnlyDictionary<string, string>? storagePaths,
         IReadOnlyDictionary<string, string>? configuration,
+        IReadOnlyDictionary<string, string>? secretConfiguration,
         HomeLabEdgeGatewayRequest? edgeGateway,
         string? recipeId,
         IReadOnlySet<string>? selectedAppIds,
@@ -362,6 +372,7 @@ public sealed class HomeLabService(
         var output = new List<string>();
         var createdContainers = new List<string>();
         var createdRoutes = new List<Guid>();
+        var createdSecretReferences = new List<string>();
         var relationships = recipeId is null
             ? new Dictionary<string, HomeLabRecipeRelationship>(StringComparer.OrdinalIgnoreCase)
             : HomeLabCatalog.GetRecipe(recipeId).Relationships
@@ -378,11 +389,18 @@ public sealed class HomeLabService(
 
             foreach (var app in apps)
             {
+                var preparedConfiguration = await PrepareConfigurationAsync(
+                    app,
+                    configuration,
+                    secretConfiguration,
+                    cancellationToken);
+                createdSecretReferences.AddRange(preparedConfiguration.SecretReferences.Values);
                 var installation = BuildInstallationEntity(
                     deployment,
                     app,
                     storagePaths,
-                    configuration,
+                    preparedConfiguration.Configuration,
+                    preparedConfiguration.SecretReferences,
                     ResolveNetworkMode(deployment.Id, app, relationships),
                     recipeId is not null,
                     now);
@@ -391,6 +409,7 @@ public sealed class HomeLabService(
                     app,
                     DeserializeBindings(installation.VolumeMappingsJson),
                     DeserializeDictionary(installation.ConfigurationJson),
+                    DeserializeDictionary(installation.SecretConfigurationJson),
                     output,
                     cancellationToken);
                 if (!run.Succeeded)
@@ -458,6 +477,11 @@ public sealed class HomeLabService(
 
             try { await RunDockerAsync(["network", "rm", networkName], $"Clean up Home Lab network {networkName}", cancellationToken); }
             catch (Exception cleanupException) { logger.LogDebug(cleanupException, "Could not clean up Home Lab network {NetworkName}.", networkName); }
+            foreach (var secretReference in createdSecretReferences.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                try { await secretStore.DeleteSecretAsync(secretReference, cancellationToken); }
+                catch (Exception cleanupException) { logger.LogDebug(cleanupException, "Could not remove Home Lab secret reference."); }
+            }
             return Failure("Home Lab installation failed.", exception.Message, output, HomeLabHealthState.Failed);
         }
     }
@@ -466,7 +490,8 @@ public sealed class HomeLabService(
         HomeLabDeploymentEntity deployment,
         HomeLabAppManifest app,
         IReadOnlyDictionary<string, string>? storagePaths,
-        IReadOnlyDictionary<string, string>? configuration,
+        IReadOnlyDictionary<string, string> configuration,
+        IReadOnlyDictionary<string, string> secretReferences,
         string networkMode,
         bool isRecipe,
         DateTimeOffset now)
@@ -475,7 +500,6 @@ public sealed class HomeLabService(
             ResolveVolumeHostPath(deployment.Id, app, volume, storagePaths),
             volume.ContainerPath,
             volume.ReadOnly)).ToArray();
-        var normalizedConfiguration = NormalizeConfiguration(app, configuration);
         return new HomeLabInstallationEntity
         {
             Id = Guid.NewGuid(),
@@ -486,7 +510,8 @@ public sealed class HomeLabService(
             NetworkName = deployment.NetworkName,
             Image = $"{app.ImageRepository}:{app.ImageTag}",
             VolumeMappingsJson = JsonSerializer.Serialize(bindings, JsonOptions),
-            ConfigurationJson = JsonSerializer.Serialize(normalizedConfiguration, JsonOptions),
+            ConfigurationJson = JsonSerializer.Serialize(configuration, JsonOptions),
+            SecretConfigurationJson = JsonSerializer.Serialize(secretReferences, JsonOptions),
             NetworkMode = networkMode,
             HealthState = (int)HomeLabHealthState.Starting,
             HealthDetail = "Container is starting.",
@@ -501,6 +526,7 @@ public sealed class HomeLabService(
         HomeLabAppManifest app,
         IReadOnlyList<HomeLabVolumeBinding> bindings,
         IReadOnlyDictionary<string, string> configuration,
+        IReadOnlyDictionary<string, string> secretReferences,
         List<string> output,
         CancellationToken cancellationToken)
     {
@@ -532,6 +558,13 @@ public sealed class HomeLabService(
         if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase))
         {
             args.AddRange(["--network", installation.NetworkName, "--network-alias", app.Id]);
+            if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var routedApp in HomeLabCatalog.Apps.Where(candidate => candidate.SupportsVpnGateway))
+                {
+                    args.AddRange(["--network-alias", routedApp.Id]);
+                }
+            }
         }
         else
         {
@@ -546,6 +579,17 @@ public sealed class HomeLabService(
         {
             args.AddRange(["--device", device]);
         }
+        var resolvedSecrets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var secretReference in secretReferences)
+        {
+            var secret = await secretStore.ResolveSecretAsync(secretReference.Value, cancellationToken);
+            if (string.IsNullOrEmpty(secret))
+            {
+                return ContainerRunResult.Failed(Failure("Home Lab secret resolution failed.", $"The secret for '{secretReference.Key}' is unavailable. Re-enter the VPN credentials.", output, HomeLabHealthState.Failed));
+            }
+            resolvedSecrets[secretReference.Key] = secret;
+        }
+
         foreach (var environment in app.Environment
                      .Concat(configuration)
                      .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
@@ -578,8 +622,16 @@ public sealed class HomeLabService(
             ]);
         }
 
+        var sensitiveIndexes = new HashSet<int>();
+        foreach (var environment in resolvedSecrets)
+        {
+            var index = args.Count;
+            args.AddRange(["--env", $"{environment.Key}={environment.Value}"]);
+            sensitiveIndexes.Add(index + 1);
+        }
+
         args.Add(installation.Image);
-        var run = await RunDockerAsync(args, $"Install Home Lab app {app.Name}", cancellationToken);
+        var run = await RunDockerAsync(args, $"Install Home Lab app {app.Name}", cancellationToken, sensitiveIndexes);
         AppendOutput(output, run);
         if (run.ExitCode != 0)
         {
@@ -594,13 +646,25 @@ public sealed class HomeLabService(
 
         var ports = installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase)
             ? ParsePortBindings(inspect, app)
-            : app.Ports.Select(port => new HomeLabPortBinding(port.Name, port.ContainerPort, 0)).ToArray();
+            : await ParseSharedNamespacePortBindingsAsync(installation.NetworkMode, app, cancellationToken);
         if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase) && ports.Count != app.Ports.Count)
         {
             return ContainerRunResult.Failed(Failure("Home Lab port inspection failed.", "The container was created but LMS could not resolve all published ports.", output, HomeLabHealthState.Failed));
         }
 
         return ContainerRunResult.Completed(ports);
+    }
+
+    private async Task<IReadOnlyList<HomeLabPortBinding>> ParseSharedNamespacePortBindingsAsync(
+        string networkMode,
+        HomeLabAppManifest app,
+        CancellationToken cancellationToken)
+    {
+        var gatewayName = networkMode["container:".Length..];
+        var gateway = await InspectContainerAsync(gatewayName, cancellationToken);
+        return gateway is null
+            ? []
+            : ParsePortBindings(gateway, app);
     }
 
     private async Task<HomeLabOperationResult> EnsureNetworkAsync(string networkName, CancellationToken cancellationToken)
@@ -671,11 +735,13 @@ public sealed class HomeLabService(
     private async Task<LinuxCommandResult> RunDockerAsync(
         IReadOnlyList<string> arguments,
         string description,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken,
+        IReadOnlySet<int>? sensitiveArgumentIndexes = null) =>
         await RunAsync(
             new LinuxCommandRequest("docker", arguments, true, DockerCommandTimeout, description)
             {
-                IsOptionalExternalTool = true
+                IsOptionalExternalTool = true,
+                SensitiveArgumentIndexes = sensitiveArgumentIndexes
             },
             cancellationToken);
 
@@ -752,30 +818,158 @@ public sealed class HomeLabService(
         return Path.Combine(storageOptions.RootPath, "deployments", deploymentId.ToString("N"), app.Id, volume.Id);
     }
 
-    private static Dictionary<string, string> NormalizeConfiguration(
+    private async Task<PreparedConfiguration> PrepareConfigurationAsync(
         HomeLabAppManifest app,
-        IReadOnlyDictionary<string, string>? configuration)
+        IReadOnlyDictionary<string, string>? configuration,
+        IReadOnlyDictionary<string, string>? secretConfiguration,
+        CancellationToken cancellationToken)
     {
-        var result = new Dictionary<string, string>(app.Environment, StringComparer.OrdinalIgnoreCase);
-        if (configuration is null)
+        var supplied = configuration ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var suppliedSecrets = secretConfiguration ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var values = new Dictionary<string, string>(app.Environment, StringComparer.OrdinalIgnoreCase);
+        var secretReferences = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
         {
-            return result;
+            var provider = RequiredValue(supplied, "provider", "Choose a VPN provider.");
+            var protocol = RequiredValue(supplied, "protocol", "Choose a VPN protocol.");
+            var providerValue = provider switch
+            {
+                "ProtonVPN" => "protonvpn",
+                "NordVPN" => "nordvpn",
+                "Mullvad" => "mullvad",
+                "Surfshark" => "surfshark",
+                "Private Internet Access" => "private internet access",
+                "Custom WireGuard" or "Custom OpenVPN" => "custom",
+                _ => throw new InvalidOperationException($"VPN provider '{provider}' is not supported by this LMS definition.")
+            };
+            var protocolValue = protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase) ? "wireguard" :
+                protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase) ? "openvpn" :
+                throw new InvalidOperationException("Choose WireGuard or OpenVPN.");
+
+            if (provider.Equals("Custom WireGuard", StringComparison.OrdinalIgnoreCase) && protocolValue != "wireguard" ||
+                provider.Equals("Custom OpenVPN", StringComparison.OrdinalIgnoreCase) && protocolValue != "openvpn")
+            {
+                throw new InvalidOperationException($"{provider} must use {provider.Contains("WireGuard", StringComparison.OrdinalIgnoreCase) switch { true => "WireGuard", _ => "OpenVPN" }}.");
+            }
+
+            values["VPN_SERVICE_PROVIDER"] = providerValue;
+            values["VPN_TYPE"] = protocolValue;
+            AddOptional(values, supplied, "server-countries", "SERVER_COUNTRIES");
+
+            if (protocolValue == "wireguard")
+            {
+                await AddRequiredSecretAsync(secretReferences, suppliedSecrets, "wireguard-private-key", "WIREGUARD_PRIVATE_KEY", "Enter the WireGuard private key.", cancellationToken);
+                AddRequired(values, supplied, "wireguard-addresses", "WIREGUARD_ADDRESSES", "Enter the WireGuard addresses, for example 10.2.0.2/32.");
+                if (provider.Equals("Custom WireGuard", StringComparison.OrdinalIgnoreCase))
+                {
+                    AddRequired(values, supplied, "wireguard-public-key", "WIREGUARD_PUBLIC_KEY", "Enter the WireGuard server public key.");
+                    AddRequired(values, supplied, "wireguard-endpoint-ip", "WIREGUARD_ENDPOINT_IP", "Enter the WireGuard endpoint IP.");
+                    AddRequired(values, supplied, "wireguard-endpoint-port", "WIREGUARD_ENDPOINT_PORT", "Enter the WireGuard endpoint port.");
+                }
+                else
+                {
+                    AddOptional(values, supplied, "wireguard-public-key", "WIREGUARD_PUBLIC_KEY");
+                    AddOptional(values, supplied, "wireguard-endpoint-ip", "WIREGUARD_ENDPOINT_IP");
+                    AddOptional(values, supplied, "wireguard-endpoint-port", "WIREGUARD_ENDPOINT_PORT");
+                }
+                await AddOptionalSecretAsync(secretReferences, suppliedSecrets, "wireguard-preshared-key", "WIREGUARD_PRESHARED_KEY", cancellationToken);
+            }
+            else
+            {
+                await AddRequiredSecretAsync(secretReferences, suppliedSecrets, "openvpn-username", "OPENVPN_USER", "Enter the OpenVPN username.", cancellationToken);
+                await AddRequiredSecretAsync(secretReferences, suppliedSecrets, "openvpn-password", "OPENVPN_PASSWORD", "Enter the OpenVPN password.", cancellationToken);
+            }
+
+            if (provider.Equals("Custom OpenVPN", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Custom OpenVPN needs a mounted .ovpn profile. Use a supported Gluetun provider here, or add the profile to the LMS host before selecting this option.");
+            }
+        }
+        else
+        {
+            foreach (var item in supplied)
+            {
+                var schema = app.ConfigurationSchema.FirstOrDefault(field => field.Id.Equals(item.Key, StringComparison.OrdinalIgnoreCase));
+                if (schema is not null && !schema.Secret)
+                {
+                    values[schema.Id] = item.Value ?? string.Empty;
+                }
+            }
         }
 
-        foreach (var item in configuration)
+        foreach (var item in suppliedSecrets)
         {
-            var schema = app.ConfigurationSchema.FirstOrDefault(field => field.Id.Equals(item.Key, StringComparison.OrdinalIgnoreCase));
-            if (schema is null)
+            var field = app.ConfigurationSchema.FirstOrDefault(candidate => candidate.Id.Equals(item.Key, StringComparison.OrdinalIgnoreCase));
+            if (field is null || !field.Secret || app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException($"Configuration field '{item.Key}' is not supported by {app.Name}.");
+                continue;
             }
-            if (schema.Secret)
+            if (string.IsNullOrWhiteSpace(item.Value))
             {
-                throw new InvalidOperationException($"Secret configuration for {app.Name} is reserved for the LMS secret-backed VPN phase.");
+                throw new InvalidOperationException($"Enter {field.Label}.");
             }
-            result[schema.Id] = item.Value ?? string.Empty;
+            secretReferences[field.Id] = await secretStore.StoreSecretAsync(item.Value, $"Home Lab {app.Name}: {field.Label}", cancellationToken);
         }
-        return result;
+
+        return new PreparedConfiguration(values, secretReferences);
+    }
+
+    private async Task AddRequiredSecretAsync(
+        IDictionary<string, string> references,
+        IReadOnlyDictionary<string, string> supplied,
+        string fieldId,
+        string environmentName,
+        string errorMessage,
+        CancellationToken cancellationToken)
+    {
+        if (!supplied.TryGetValue(fieldId, out var value) || string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException(errorMessage);
+        }
+        if (value.Contains('\r') || value.Contains('\n'))
+        {
+            throw new InvalidOperationException($"{fieldId} cannot contain line breaks.");
+        }
+        references[environmentName] = await secretStore.StoreSecretAsync(value, $"Home Lab VPN Gateway: {fieldId}", cancellationToken);
+    }
+
+    private async Task AddOptionalSecretAsync(
+        IDictionary<string, string> references,
+        IReadOnlyDictionary<string, string> supplied,
+        string fieldId,
+        string environmentName,
+        CancellationToken cancellationToken)
+    {
+        if (!supplied.TryGetValue(fieldId, out var value) || string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+        if (value.Contains('\r') || value.Contains('\n'))
+        {
+            throw new InvalidOperationException($"{fieldId} cannot contain line breaks.");
+        }
+        references[environmentName] = await secretStore.StoreSecretAsync(value, $"Home Lab VPN Gateway: {fieldId}", cancellationToken);
+    }
+
+    private sealed record PreparedConfiguration(
+        IReadOnlyDictionary<string, string> Configuration,
+        IReadOnlyDictionary<string, string> SecretReferences);
+
+    private static string RequiredValue(IReadOnlyDictionary<string, string> values, string key, string errorMessage) =>
+        values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value.Trim() : throw new InvalidOperationException(errorMessage);
+
+    private static void AddRequired(IDictionary<string, string> target, IReadOnlyDictionary<string, string> source, string sourceKey, string targetKey, string errorMessage)
+    {
+        target[targetKey] = RequiredValue(source, sourceKey, errorMessage);
+    }
+
+    private static void AddOptional(IDictionary<string, string> target, IReadOnlyDictionary<string, string> source, string sourceKey, string targetKey)
+    {
+        if (source.TryGetValue(sourceKey, out var value) && !string.IsNullOrWhiteSpace(value))
+        {
+            target[targetKey] = value.Trim();
+        }
     }
 
     private static string NormalizeRole(string role)

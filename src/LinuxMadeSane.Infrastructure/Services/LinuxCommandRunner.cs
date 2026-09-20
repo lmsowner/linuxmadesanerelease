@@ -237,9 +237,9 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
             startInfo.ArgumentList.Add(request.FileName);
         }
 
-        foreach (var argument in request.Arguments)
+        for (var index = 0; index < request.Arguments.Count; index++)
         {
-            startInfo.ArgumentList.Add(argument);
+            startInfo.ArgumentList.Add(request.Arguments[index]);
         }
 
         return startInfo;
@@ -275,10 +275,12 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
         }
 
         builder.Append(request.FileName);
-        foreach (var argument in request.Arguments)
+        for (var index = 0; index < request.Arguments.Count; index++)
         {
             builder.Append(' ');
-            builder.Append(Quote(argument));
+            builder.Append(request.SensitiveArgumentIndexes?.Contains(index) == true
+                ? "'<redacted>'"
+                : Quote(request.Arguments[index]));
         }
 
         return builder.ToString();

@@ -47,6 +47,55 @@
                     Class="home-lab-tabs"
                     PanelClass="home-lab-tab-panel">
             <TabPage Value="apps" Title="Apps">
+                @if (configuringApp is { } appToConfigure)
+                {
+                    <section class="surface-card home-lab-config-panel">
+                        <div class="home-lab-config-heading">
+                            <div>
+                                <p class="eyebrow">Installation settings</p>
+                                <h2>Configure @appToConfigure.Name</h2>
+                                <p class="meta-text">These values are applied to the Docker container. Secret fields are stored by LMS and are not shown again.</p>
+                            </div>
+                            <CompactUIButton Label="Cancel" Glyph="UiIconGlyph.Clear" Disabled="@busy" OnClick="CancelConfiguration" />
+                        </div>
+                        <div class="home-lab-config-grid">
+                            @foreach (var field in appToConfigure.ConfigurationSchema.Where(ShouldShowConfigurationField))
+                            {
+                                <div class="home-lab-config-field">
+                                    <label for="home-lab-@field.Id">@field.Label</label>
+                                    @if (field.Type.Equals("select", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <select id="home-lab-@field.Id" class="ui-control-input" value="@GetConfigurationValue(field.Id)" @onchange="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString())">
+                                            <option value="">Choose...</option>
+                                            @foreach (var option in field.Options ?? [])
+                                            {
+                                                <option value="@option">@option</option>
+                                            }
+                                        </select>
+                                    }
+                                    else
+                                    {
+                                        <input id="home-lab-@field.Id"
+                                               class="ui-control-input"
+                                               type="@(field.Secret ? "password" : "text")"
+                                               value="@(field.Secret ? GetSecretConfigurationValue(field.Id) : GetConfigurationValue(field.Id))"
+                                               autocomplete="@(field.Secret ? "new-password" : "off")"
+                                               @oninput="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString(), field.Secret)" />
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(field.Help))
+                                    {
+                                        <span class="meta-text">@field.Help</span>
+                                    }
+                                </div>
+                            }
+                        </div>
+                        <div class="home-lab-config-footer">
+                            <span class="meta-text">VPN routing and the kill switch are applied by Gluetun and the LMS dependency state.</span>
+                            <CompactUIButton Label="Install configured app" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="InstallConfiguredAsync" />
+                        </div>
+                    </section>
+                }
+
                 <div class="home-lab-filter-tabs" role="tablist" aria-label="App categories">
                     @foreach (var category in Categories)
                     {
@@ -148,6 +197,9 @@
     private bool busy;
     private string activeTab = "apps";
     private HomeLabAppCategory? activeCategory;
+    private HomeLabAppManifest? configuringApp;
+    private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly HomeLabAppCategory?[] Categories =
     [
@@ -203,6 +255,20 @@
 
     private async Task InstallAsync(HomeLabAppManifest app)
     {
+        if (app.ConfigurationSchema.Count > 0)
+        {
+            configuringApp = app;
+            configurationValues.Clear();
+            secretConfigurationValues.Clear();
+            if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+            {
+                configurationValues["provider"] = "ProtonVPN";
+                configurationValues["protocol"] = "WireGuard";
+            }
+            activeTab = "apps";
+            return;
+        }
+
         await RunUiOperationAsync(async () =>
         {
             var paths = storagePaths
@@ -211,6 +277,71 @@
             var result = await HomeLabService.InstallAppAsync(new HomeLabInstallRequest(app.Id, StoragePaths: paths));
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
         });
+    }
+
+    private async Task InstallConfiguredAsync()
+    {
+        if (configuringApp is not { } app)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var paths = storagePaths
+                .Where(item => app.Volumes.Any(volume => volume.SharedRole?.Equals(item.Key, StringComparison.OrdinalIgnoreCase) == true))
+                .ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
+            var result = await HomeLabService.InstallAppAsync(new HomeLabInstallRequest(
+                app.Id,
+                StoragePaths: paths,
+                Configuration: configurationValues,
+                SecretConfiguration: secretConfigurationValues));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            if (result.Succeeded)
+            {
+                configuringApp = null;
+                configurationValues.Clear();
+                secretConfigurationValues.Clear();
+            }
+        });
+    }
+
+    private void CancelConfiguration()
+    {
+        configuringApp = null;
+        configurationValues.Clear();
+        secretConfigurationValues.Clear();
+    }
+
+    private bool ShouldShowConfigurationField(HomeLabConfigurationField field)
+    {
+        if (configuringApp is null || !configuringApp.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var protocol = GetConfigurationValue("protocol");
+        if (field.Id.StartsWith("wireguard-", StringComparison.OrdinalIgnoreCase))
+        {
+            return protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase);
+        }
+        if (field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
+        {
+            return protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase);
+        }
+        return true;
+    }
+
+    private string GetConfigurationValue(string key) =>
+        configurationValues.TryGetValue(key, out var value) ? value : string.Empty;
+
+    private string GetSecretConfigurationValue(string key) =>
+        secretConfigurationValues.TryGetValue(key, out var value) ? value : string.Empty;
+
+    private void SetConfigurationValue(string key, string? value, bool secret = false)
+    {
+        var target = secret ? secretConfigurationValues : configurationValues;
+        target[key] = value ?? string.Empty;
     }
 
     private async Task RunAsync(Guid installationId, HomeLabLifecycleAction action)
