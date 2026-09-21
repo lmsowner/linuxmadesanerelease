@@ -72,7 +72,7 @@ public static class HomeLabCatalog
             },
             [],
             new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8080),
-            [],
+            [new("network-route", "Internet route", "select", true, Help: "Direct exposes qBittorrent through the deployment network. VPN Gateway routes its traffic through Gluetun.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"])],
             SupportsVpnGateway: true),
         new(
             "jellyfin",
@@ -112,7 +112,9 @@ public static class HomeLabCatalog
             "1",
             [new("web", 11470, Primary: true)],
             [new("config", "/root/.stremio-server", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(), [], null, [], SupportsVpnGateway: true),
+            new Dictionary<string, string>(), [], null,
+            [new("network-route", "Internet route", "select", true, Help: "Direct exposes Stremio without a VPN. VPN Gateway routes its traffic through Gluetun.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"])],
+            SupportsVpnGateway: true),
         new(
             "immich",
             "Immich",
@@ -210,7 +212,9 @@ public static class HomeLabCatalog
             "1",
             [new("web", 8080, Primary: true)],
             [new("data", "/data", HomeLabStorageKind.UserData), new("database", "/pgdata", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(), [], null, [], SupportsVpnGateway: true)
+            new Dictionary<string, string>(), [], null,
+            [new("network-route", "Internet route", "select", true, Help: "Direct exposes Webtor without a VPN. VPN Gateway routes its traffic through Gluetun.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"])],
+            SupportsVpnGateway: true)
         ,
         new(
             "prowlarr",

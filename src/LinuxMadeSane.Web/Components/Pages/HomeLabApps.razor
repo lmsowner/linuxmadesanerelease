@@ -202,6 +202,44 @@
                                 }
                             </div>
 
+                            @if (GetApp(selectedDetails.AppId).SupportsVpnGateway && !selectedInstallation.IsRecipeInstallation)
+                            {
+                                <div class="home-lab-credential-panel">
+                                    <div>
+                                        <h3>Internet route</h3>
+                                        <p class="meta-text">
+                                            Current route:
+                                            <strong>@(IsVpnRoute(selectedInstallation.NetworkMode) ? "VPN Gateway (Gluetun)" : "Direct (NO VPN)")</strong>.
+                                            Changing this recreates the container with the selected Docker network mode.
+                                        </p>
+                                        @if (IsVpnRoute(selectedInstallation.NetworkMode))
+                                        {
+                                            <p class="meta-text">This container shares the VPN gateway network namespace. If Gluetun is unhealthy, LMS marks the app blocked and does not fall back to direct Internet access.</p>
+                                        }
+                                        else
+                                        {
+                                            <p class="meta-text">This container has direct Internet access. Use the VPN route button before using it for privacy-sensitive traffic.</p>
+                                        }
+                                    </div>
+                                    <div class="home-lab-action-row">
+                                        @if (IsVpnRoute(selectedInstallation.NetworkMode))
+                                        {
+                                            <CompactUIButton Label="Use direct route"
+                                                             Glyph="UiIconGlyph.Connection"
+                                                             Disabled="@busy"
+                                                             OnClick="() => ChangeRouteAsync(false)" />
+                                        }
+                                        else
+                                        {
+                                            <CompactUIButton Label="Route through Gluetun"
+                                                             Glyph="UiIconGlyph.Connection"
+                                                             Disabled="@busy"
+                                                             OnClick="() => ChangeRouteAsync(true)" />
+                                        }
+                                    </div>
+                                </div>
+                            }
+
                             @if (selectedDetails.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
                             {
                                 <div class="home-lab-credential-panel">
@@ -436,11 +474,15 @@
 
     private async Task InstallAsync(HomeLabAppManifest app)
     {
-        if (app.ConfigurationSchema.Count > 0)
+        if (app.ConfigurationSchema.Count > 0 || app.SupportsVpnGateway)
         {
             configuringApp = app;
             configurationValues.Clear();
             secretConfigurationValues.Clear();
+            if (app.SupportsVpnGateway)
+            {
+                configurationValues["network-route"] = "VPN Gateway (Gluetun)";
+            }
             if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             {
                 configurationValues["configuration-mode"] = "Guided";
@@ -663,8 +705,11 @@
 
     private static string FormatNetwork(string networkMode) =>
         networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
-            ? "VPN Gateway namespace"
-            : "Direct on deployment network";
+            ? "VPN ROUTE: Gluetun"
+            : "DIRECT ROUTE: no VPN";
+
+    private static bool IsVpnRoute(string networkMode) =>
+        networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
 
     private static string DescribeHealthCheck(HomeLabAppManifest app)
     {
@@ -692,6 +737,27 @@
         {
             var result = await HomeLabService.ExecuteAsync(installationId, action);
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private async Task ChangeRouteAsync(bool useVpnGateway)
+    {
+        if (selectedInstallation is null)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var installationId = selectedInstallation.Id;
+            var result = await HomeLabService.SetNetworkRouteAsync(installationId, useVpnGateway);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            workspace = await HomeLabService.GetWorkspaceAsync();
+            selectedInstallation = workspace?.Installations.FirstOrDefault(item => item.Id == installationId);
+            if (selectedInstallation is not null)
+            {
+                effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(selectedInstallation.DeploymentId);
+            }
         });
     }
 
