@@ -1609,6 +1609,14 @@ lms_maybe_chown() {
   fi
 }
 
+lms_maybe_chown_directory() {
+  local owner="$1"
+  local path="$2"
+  if [[ "${LMS_DEST_ROOT:-}" == "" ]]; then
+    chown "$owner" "$path"
+  fi
+}
+
 lms_migrate_http_discovery_state() {
   local previous_release="$1"
   local data_root="$2"

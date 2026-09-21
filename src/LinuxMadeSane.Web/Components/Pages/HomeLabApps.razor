@@ -49,11 +49,19 @@
             <TabPage Value="apps" Title="Apps">
                 @if (configuringApp is { } appToConfigure)
                 {
-                    <section class="surface-card home-lab-config-panel">
+                    <UiModal IsOpen="true"
+                             Title="@(configuringInstallation is null ? $"Configure {appToConfigure.Name}" : $"Reconfigure {configuringInstallation.DisplayName}")"
+                             Subtitle="Container settings are applied by LMS. Secrets are stored securely and are not shown again."
+                             Class="home-lab-settings-modal"
+                             Resizable="true"
+                             CloseOnBackdrop="false"
+                             OnClose="CancelConfiguration">
+                        <ChildContent>
+                    <section class="home-lab-config-panel">
                         <div class="home-lab-config-heading">
                             <div>
                                 <p class="eyebrow">Installation settings</p>
-                                <h2>Configure @appToConfigure.Name</h2>
+                                <h2>@(configuringInstallation is null ? $"Configure {appToConfigure.Name}" : $"Replace configuration for {configuringInstallation.DisplayName}")</h2>
                                 <p class="meta-text">These values are applied to the Docker container. Secret fields are stored by LMS and are not shown again.</p>
                             </div>
                             <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelConfiguration" />
@@ -109,9 +117,11 @@
                         </div>
                         <div class="home-lab-config-footer">
                             <span class="meta-text">VPN routing and the kill switch are applied by Gluetun and the LMS dependency state.</span>
-                            <UiCommandButton Label="Install configured app" Glyph="UiIconGlyph.Download" Variant="UiButtonVariant.Primary" Disabled="@busy" OnClick="InstallConfiguredAsync" />
+                            <UiCommandButton Label="@(configuringInstallation is null ? "Install configured app" : "Apply and reconnect apps")" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Primary" Disabled="@busy" OnClick="InstallConfiguredAsync" />
                         </div>
                     </section>
+                        </ChildContent>
+                    </UiModal>
                 }
 
                 @if (selectedInstallation is not null && effectiveConfiguration is not null)
@@ -148,7 +158,14 @@
                                             <dt>Provider</dt><dd>@FormatProvider(GetEffectiveEnvironmentValue(selectedDetails, "VPN_SERVICE_PROVIDER"))</dd>
                                             <dt>Protocol</dt><dd>@FormatProtocol(GetEffectiveEnvironmentValue(selectedDetails, "VPN_TYPE"))</dd>
                                             <dt>Public IP</dt><dd><code>@(networkSecurity?.PublicIp ?? "Checking…")</code></dd>
+                                            <dt>Incoming P2P port</dt><dd>@GetEffectiveEnvironmentValue(selectedDetails, "VPN_PORT_FORWARDING")</dd>
                                         </dl>
+                                        <UiCommandButton Label="Replace VPN config"
+                                                         Title="Paste a new provider profile and reconnect every app using this gateway"
+                                                         Glyph="UiIconGlyph.Edit"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         Disabled="@busy"
+                                                         OnClick="BeginVpnReconfiguration" />
                                     </div>
                                 }
 
@@ -168,6 +185,10 @@
                                             <dt>Gluetun gateway</dt><dd><code>@FormatGatewayLabel(security.GatewayContainer)</code></dd>
                                             <dt>Gateway health</dt><dd>@security.GatewayHealth</dd>
                                             <dt>Public IP</dt><dd><code>@(security.PublicIp ?? "Unavailable")</code></dd>
+                                            @if (selectedDetails.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                <dt>Incoming peer port</dt><dd><strong>@(security.PortForwardingStatus ?? "Unverified")</strong>@(security.ForwardedPort is int forwardedPort ? $" · {forwardedPort}" : string.Empty)</dd>
+                                            }
                                             <dt>Checked</dt><dd>@security.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</dd>
                                         </dl>
                                         <p class="meta-text">@security.Detail</p>
@@ -405,7 +426,22 @@
                                 }
                             </div>
                             <span class="home-lab-image">@app.ImageRepository:@app.ImageTag</span>
-                            @if (installation is not null)
+                            @if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) && installations.Length > 0)
+                            {
+                                <div class="home-lab-gateway-summary-list">
+                                    @foreach (var gateway in installations.OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase))
+                                    {
+                                        <div class="home-lab-network-summary home-lab-gateway-summary">
+                                            <div class="home-lab-network-summary-heading">
+                                                <UiPill Tone="@GetNetworkSummaryTone(gateway)">@GetNetworkSummaryState(gateway)</UiPill>
+                                                <strong>@gateway.DisplayName</strong>
+                                            </div>
+                                            <span>Public IP: <code>@GetNetworkSummaryPublicIp(gateway)</code></span>
+                                        </div>
+                                    }
+                                </div>
+                            }
+                            else if (installation is not null)
                             {
                                 <div class="home-lab-network-summary">
                                     <div class="home-lab-network-summary-heading">
@@ -413,6 +449,10 @@
                                         <strong>@GetNetworkSummaryRoute(installation)</strong>
                                     </div>
                                     <span>Public IP: <code>@GetNetworkSummaryPublicIp(installation)</code></span>
+                                    @if (installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) && GetSummaryNetworkSecurity(installation) is { } qbitSecurity)
+                                    {
+                                        <span>Incoming peer port: <strong>@(qbitSecurity.PortForwardingStatus ?? "Unverified")</strong>@(qbitSecurity.ForwardedPort is int forwardedPort ? $" · {forwardedPort}" : string.Empty)</span>
+                                    }
                                     @if (app.SupportsVpnGateway && !app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
                                     {
                                         <select class="ui-control-input home-lab-route-select"
@@ -430,32 +470,52 @@
                                 </div>
                             }
                             <UiPill Tone="@(installation is null ? UiPillTone.Neutral : GetHealthTone(installation.HealthState))">
-                                @(installation is null ? "Available" : installation.HealthState.ToString())
+                                @(installation is null
+                                    ? "Available"
+                                    : app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) && installations.Length > 1
+                                        ? $"{installations.Length} gateways"
+                                        : installation.HealthState.ToString())
                             </UiPill>
                             <div class="home-lab-action-row row-action-cluster">
-                                @if (installation is not null)
+                                @if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    @if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) && installations.Length > 1)
+                                    <UiCommandButton Label="Add VPN Gateway"
+                                                     Title="Install another independently configured Gluetun gateway"
+                                                     Glyph="UiIconGlyph.Plus"
+                                                     Variant="UiButtonVariant.PrimaryMuted"
+                                                     Disabled="@busy"
+                                                     OnClick="() => InstallAsync(app)" />
+                                    @foreach (var gateway in installations.OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase))
                                     {
-                                        @foreach (var gateway in installations)
-                                        {
+                                        <div class="home-lab-gateway-action-group">
+                                            <strong>@gateway.DisplayName</strong>
+                                            <div class="home-lab-action-row row-action-cluster">
                                             @if (BuildLocalUrl(gateway) is { } gatewayUrl)
                                             {
                                                 <UiCommandButton Label="Open" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.Action" Href="@gatewayUrl" Target="_blank" Rel="noopener" />
                                             }
-                                            <UiCommandButton Label="@($"Settings: {gateway.DisplayName}")"
+                                            <UiCommandButton Label="Settings"
                                                              Glyph="UiIconGlyph.ListView"
                                                              Variant="UiButtonVariant.Ghost"
+                                                             Title="View settings or replace this VPN configuration"
                                                              Disabled="@busy"
                                                              OnClick="() => ManageAsync(gateway)" />
+                                            <UiCommandButton Label="Replace config"
+                                                             Glyph="UiIconGlyph.Edit"
+                                                             Variant="UiButtonVariant.ActionSubtle"
+                                                             Title="Paste a new VPN provider configuration and reconnect apps using this gateway"
+                                                             Disabled="@busy"
+                                                             OnClick="() => BeginVpnReconfiguration(gateway)" />
                                             <UiCommandButton Label="Start" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Start)" />
                                             <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Stop)" />
                                             <UiCommandButton Label="Update" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Update)" />
                                             <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Remove)" />
-                                        }
+                                            </div>
+                                        </div>
                                     }
-                                    else
-                                    {
+                                }
+                                else if (installation is not null)
+                                {
                                         @if (BuildLocalUrl(installation) is { } localUrl)
                                         {
                                             <UiCommandButton Label="Open" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.Action" Href="@localUrl" Target="_blank" Rel="noopener" />
@@ -470,7 +530,6 @@
                                         <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
                                         <UiCommandButton Label="Update" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
                                         <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Remove)" />
-                                    }
                                 }
                                 else
                                 {
@@ -532,6 +591,7 @@
     private string activeTab = "apps";
     private HomeLabAppCategory? activeCategory;
     private HomeLabAppManifest? configuringApp;
+    private HomeLabAppInstallation? configuringInstallation;
     private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
     private HomeLabAppInstallation? selectedInstallation;
@@ -604,6 +664,7 @@
         if (app.ConfigurationSchema.Count > 0 || app.SupportsVpnGateway)
         {
             configuringApp = app;
+            configuringInstallation = null;
             configurationValues.Clear();
             secretConfigurationValues.Clear();
             if (app.SupportsVpnGateway)
@@ -621,6 +682,7 @@
                 configurationValues["configuration-mode"] = "Guided";
                 configurationValues["provider"] = "ProtonVPN";
                 configurationValues["protocol"] = "WireGuard";
+                configurationValues["port-forwarding"] = "Required for qBittorrent/P2P";
             }
             activeTab = "apps";
             return;
@@ -648,15 +710,21 @@
             var paths = storagePaths
                 .Where(item => app.Volumes.Any(volume => volume.SharedRole?.Equals(item.Key, StringComparison.OrdinalIgnoreCase) == true))
                 .ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
-            var result = await HomeLabService.InstallAppAsync(new HomeLabInstallRequest(
-                app.Id,
-                StoragePaths: paths,
-                Configuration: configurationValues,
-                SecretConfiguration: secretConfigurationValues));
+            var result = configuringInstallation is { } gateway
+                ? await HomeLabService.ReconfigureVpnGatewayAsync(
+                    gateway.Id,
+                    configurationValues,
+                    secretConfigurationValues)
+                : await HomeLabService.InstallAppAsync(new HomeLabInstallRequest(
+                    app.Id,
+                    StoragePaths: paths,
+                    Configuration: configurationValues,
+                    SecretConfiguration: secretConfigurationValues));
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
             if (result.Succeeded)
             {
                 configuringApp = null;
+                configuringInstallation = null;
                 configurationValues.Clear();
                 secretConfigurationValues.Clear();
             }
@@ -740,7 +808,10 @@
         return security is null
             ? "UNVERIFIED"
             : security.IsSecured
-                ? "VPN SECURED"
+                ? installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) &&
+                  !string.Equals(security.PortForwardingStatus, "ACTIVE", StringComparison.OrdinalIgnoreCase)
+                    ? "VPN SECURED / FIREWALLED"
+                    : "VPN SECURED"
                 : security.Status.Equals("DIRECT", StringComparison.OrdinalIgnoreCase)
                     ? "DIRECT / NO VPN"
                     : security.Status;
@@ -783,7 +854,10 @@
         }
 
         return security.IsSecured
-            ? UiPillTone.Success
+            ? installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) &&
+              !string.Equals(security.PortForwardingStatus, "ACTIVE", StringComparison.OrdinalIgnoreCase)
+                ? UiPillTone.Warning
+                : UiPillTone.Success
             : security.Status.Equals("DIRECT", StringComparison.OrdinalIgnoreCase)
                 ? UiPillTone.Warning
                 : UiPillTone.Failure;
@@ -900,8 +974,38 @@
     private void CancelConfiguration()
     {
         configuringApp = null;
+        configuringInstallation = null;
         configurationValues.Clear();
         secretConfigurationValues.Clear();
+    }
+
+    private void BeginVpnReconfiguration()
+    {
+        if (selectedInstallation is not { } gateway || !gateway.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        BeginVpnReconfiguration(gateway);
+    }
+
+    private void BeginVpnReconfiguration(HomeLabAppInstallation gateway)
+    {
+        if (!gateway.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        configuringInstallation = gateway;
+        configuringApp = GetApp("vpn-gateway");
+        configurationValues.Clear();
+        secretConfigurationValues.Clear();
+        configurationValues["gateway-name"] = gateway.DisplayName;
+        configurationValues["configuration-mode"] = "Paste provider config";
+        configurationValues["provider"] = "ProtonVPN";
+        configurationValues["protocol"] = "WireGuard";
+        configurationValues["port-forwarding"] = "Required for qBittorrent/P2P";
+        CloseDetails();
     }
 
     private bool ShouldShowConfigurationField(HomeLabConfigurationField field)
@@ -921,13 +1025,11 @@
         {
             return setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase);
         }
-        if (field.Id.Equals("provider", StringComparison.OrdinalIgnoreCase))
-        {
-            return !setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase);
-        }
         if (setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase) &&
             !field.Id.Equals("configuration-mode", StringComparison.OrdinalIgnoreCase) &&
             !field.Id.Equals("protocol", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("provider", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("port-forwarding", StringComparison.OrdinalIgnoreCase) &&
             !field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
         {
             return false;
@@ -989,8 +1091,22 @@
 
     private string NextGatewayName()
     {
-        var count = InstalledVpnGateways.Count();
-        return count == 0 ? "VPN Gateway" : $"VPN Gateway {count + 1}";
+        var existingNames = InstalledVpnGateways
+            .Select(item => item.DisplayName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!existingNames.Contains("VPN Gateway"))
+        {
+            return "VPN Gateway";
+        }
+
+        for (var suffix = 2; ; suffix++)
+        {
+            var candidate = $"VPN Gateway {suffix}";
+            if (!existingNames.Contains(candidate))
+            {
+                return candidate;
+            }
+        }
     }
 
     private string GetGatewayIdFromNetworkMode(string networkMode)

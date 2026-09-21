@@ -71,4 +71,7 @@ public sealed record HomeLabNetworkSecurity(
     string GatewayHealth,
     string? PublicIp,
     string Detail,
-    DateTimeOffset CheckedAtUtc);
+    DateTimeOffset CheckedAtUtc,
+    string? PortForwardingStatus = null,
+    int? ForwardedPort = null,
+    string? PortForwardingDetail = null);

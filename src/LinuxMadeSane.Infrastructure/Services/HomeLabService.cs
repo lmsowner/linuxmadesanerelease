@@ -165,6 +165,66 @@ public sealed class HomeLabService(
             cancellationToken);
     }
 
+    public async Task<HomeLabOperationResult> ReconfigureVpnGatewayAsync(
+        Guid installationId,
+        IReadOnlyDictionary<string, string> configuration,
+        IReadOnlyDictionary<string, string> secretConfiguration,
+        CancellationToken cancellationToken = default)
+    {
+        var gateway = await dbContext.HomeLabInstallations
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The VPN Gateway installation was not found.");
+        if (!gateway.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return Failure("VPN Gateway reconfiguration is unavailable.", "The selected installation is not a VPN Gateway.", [], HomeLabHealthState.Failed);
+        }
+
+        var app = HomeLabCatalog.GetApp(gateway.AppId);
+        PreparedConfiguration prepared;
+        try
+        {
+            prepared = await PrepareConfigurationAsync(app, configuration, secretConfiguration, false, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            return Failure("VPN Gateway configuration was rejected.", exception.Message, [], ToHealth(gateway.HealthState));
+        }
+
+        var previousConfiguration = gateway.ConfigurationJson;
+        var previousSecrets = gateway.SecretConfigurationJson;
+        var previousDisplayName = gateway.DisplayName;
+        gateway.ConfigurationJson = JsonSerializer.Serialize(prepared.Configuration, JsonOptions);
+        gateway.SecretConfigurationJson = JsonSerializer.Serialize(prepared.SecretReferences, JsonOptions);
+        if (prepared.Configuration.TryGetValue("gateway-name", out var gatewayName) && !string.IsNullOrWhiteSpace(gatewayName))
+        {
+            gateway.DisplayName = gatewayName.Trim();
+        }
+
+        var result = await UpdateVpnGatewayAsync(gateway, [], cancellationToken);
+        if (!result.Succeeded)
+        {
+            gateway.ConfigurationJson = previousConfiguration;
+            gateway.SecretConfigurationJson = previousSecrets;
+            gateway.DisplayName = previousDisplayName;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            foreach (var reference in prepared.SecretReferences.Values)
+            {
+                await secretStore.DeleteSecretAsync(reference, cancellationToken);
+            }
+            return result;
+        }
+
+        foreach (var reference in DeserializeDictionary(previousSecrets).Values)
+        {
+            await secretStore.DeleteSecretAsync(reference, cancellationToken);
+        }
+        return result with
+        {
+            Summary = "VPN Gateway reconfigured.",
+            Detail = "The new provider profile was applied and every routed app was reconnected to the same gateway namespace."
+        };
+    }
+
     public async Task<HomeLabOperationResult> SetNetworkRouteAsync(
         Guid installationId,
         bool useVpnGateway,
@@ -214,6 +274,14 @@ public sealed class HomeLabService(
                     "VPN route was not applied.",
                     "Install and configure the VPN Gateway first. LMS will not fall back to a direct route.",
                     [],
+                    HomeLabHealthState.Blocked);
+            }
+            if (app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) && !VpnGatewaySupportsP2p(selectedGateway))
+            {
+                return Failure(
+                    "qBittorrent route blocked.",
+                    "The selected VPN Gateway has no incoming P2P port. Reconfigure it with a supported paid P2P profile before routing qBittorrent through it.",
+                    output,
                     HomeLabHealthState.Blocked);
             }
 
@@ -395,16 +463,87 @@ public sealed class HomeLabService(
                 checkedAtUtc);
         }
 
+        var portForwarding = app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase)
+            ? await ResolveQbittorrentPortForwardingAsync(gatewayContainer, installation.ContainerName, gatewayInspect, cancellationToken)
+            : (Status: (string?)null, Port: (int?)null, Detail: (string?)null);
+        var status = portForwarding.Status is "ACTIVE" ? "SECURED" :
+            portForwarding.Status is null ? "SECURED" : "SECURED / FIREWALLED";
+        var securedDetail = portForwarding.Detail is null
+            ? "Docker network mode, Gluetun health, and the gateway egress IP were verified."
+            : $"Docker network mode, Gluetun health, and the gateway egress IP were verified. {portForwarding.Detail}";
+
         return new HomeLabNetworkSecurity(
-            "SECURED",
+            status,
             true,
             true,
             $"VPN Gateway (Gluetun): {gatewayContainer}",
             gatewayContainer,
             gatewayHealth.Item1.ToString(),
             publicIpProbeFromGateway.PublicIp,
-            "Docker network mode, Gluetun health, and the gateway egress IP were verified.",
-            checkedAtUtc);
+            securedDetail,
+            checkedAtUtc,
+            portForwarding.Status,
+            portForwarding.Port,
+            portForwarding.Detail);
+    }
+
+    private async Task<(string? Status, int? Port, string? Detail)> ResolveQbittorrentPortForwardingAsync(
+        string gatewayContainer,
+        string qbittorrentContainer,
+        JsonObject gatewayInspect,
+        CancellationToken cancellationToken)
+    {
+        var environment = gatewayInspect["Config"]?["Env"]?.AsArray()
+            .Select(item => item?.GetValue<string>() ?? string.Empty)
+            .ToArray() ?? [];
+        var enabled = environment.Any(item => item.Equals("VPN_PORT_FORWARDING=on", StringComparison.OrdinalIgnoreCase));
+        if (!enabled)
+        {
+            return ("OFF", null, "Incoming VPN port forwarding is off. qBittorrent remains private behind Gluetun, but it is firewalled from incoming peers and performance can suffer.");
+        }
+
+        var forwardedPortResult = await RunDockerAsync(
+            ["exec", gatewayContainer, "cat", "/tmp/gluetun/forwarded_port"],
+            $"Read the active VPN forwarded port from {gatewayContainer}",
+            cancellationToken);
+        if (!int.TryParse(forwardedPortResult.StandardOutput.Trim(), out var forwardedPort) || forwardedPort is < 1 or > 65535)
+        {
+            var logs = await RunDockerAsync(
+                ["logs", "--tail", "200", gatewayContainer],
+                $"Read VPN port forwarding status from {gatewayContainer}",
+                cancellationToken);
+            var forwardingError = ($"{logs.StandardOutput}\n{logs.StandardError}")
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .LastOrDefault(line => line.Contains("port forwarding", StringComparison.OrdinalIgnoreCase) &&
+                                       line.Contains("ERROR", StringComparison.OrdinalIgnoreCase));
+            return (
+                "UNAVAILABLE",
+                null,
+                forwardingError is null
+                    ? "Gluetun has not obtained an incoming VPN port. Check that the provider profile and selected server support P2P port forwarding."
+                    : $"Gluetun could not obtain an incoming VPN port: {forwardingError[(forwardingError.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) + 5)..].Trim()}");
+        }
+
+        var preferences = await RunDockerAsync(
+            ["exec", qbittorrentContainer, "curl", "-fsS", "http://127.0.0.1:8080/api/v2/app/preferences"],
+            $"Verify qBittorrent listening port in {qbittorrentContainer}",
+            cancellationToken);
+        try
+        {
+            var json = JsonNode.Parse(preferences.StandardOutput)?.AsObject();
+            var listeningPort = json?["listen_port"]?.GetValue<int>();
+            var networkInterface = json?["current_network_interface"]?.GetValue<string>();
+            if (preferences.ExitCode != 0 || listeningPort != forwardedPort || !string.Equals(networkInterface, "tun0", StringComparison.OrdinalIgnoreCase))
+            {
+                return ("MISMATCH", forwardedPort, $"Gluetun opened VPN port {forwardedPort}, but qBittorrent is not listening on that port through tun0.");
+            }
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            return ("UNVERIFIED", forwardedPort, $"Gluetun opened VPN port {forwardedPort}, but LMS could not verify qBittorrent's listening port.");
+        }
+
+        return ("ACTIVE", forwardedPort, $"Gluetun forwarded VPN port {forwardedPort} and qBittorrent is listening on the same port through tun0.");
     }
 
     public async Task<HomeLabOperationResult> ExecuteAsync(
@@ -1191,6 +1330,10 @@ public sealed class HomeLabService(
         }
         if (standaloneUsesVpn && reusableVpnGateway is not null)
         {
+            if (standaloneApp!.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) && !VpnGatewaySupportsP2p(reusableVpnGateway))
+            {
+                throw new InvalidOperationException("The selected VPN Gateway has no incoming P2P port. Reconfigure it with a supported paid P2P profile before installing qBittorrent.");
+            }
             await EnsureVpnNamespacePortAvailabilityAsync(
                 standaloneApp!,
                 reusableVpnGateway.ContainerName,
@@ -1615,6 +1758,8 @@ public sealed class HomeLabService(
             [Preferences]
             WebUI\ReverseProxySupportEnabled=true
             WebUI\HostHeaderValidation=false
+            WebUI\LocalHostAuth=false
+            Connection\UPnP=false
             LMS_QBITTORRENT_CONFIG
                 changed=1
             else
@@ -1635,6 +1780,22 @@ public sealed class HomeLabService(
                         sed -i '/^\\[Preferences\\]$/a WebUI\\HostHeaderValidation=false' "$config_file"
                     else
                         printf '\n[Preferences]\nWebUI\HostHeaderValidation=false\n' >> "$config_file"
+                    fi
+                    changed=1
+                fi
+                if ! grep -q '^WebUI\\LocalHostAuth=false$' "$config_file"; then
+                    if grep -q '^WebUI\\LocalHostAuth=' "$config_file"; then
+                        sed -i 's/^WebUI\\LocalHostAuth=.*/WebUI\\LocalHostAuth=false/' "$config_file"
+                    elif grep -q '^\[Preferences\]$' "$config_file"; then
+                        sed -i '/^\[Preferences\]$/a WebUI\\LocalHostAuth=false' "$config_file"
+                    fi
+                    changed=1
+                fi
+                if ! grep -q '^Connection\\UPnP=false$' "$config_file"; then
+                    if grep -q '^Connection\\UPnP=' "$config_file"; then
+                        sed -i 's/^Connection\\UPnP=.*/Connection\\UPnP=false/' "$config_file"
+                    elif grep -q '^\[Preferences\]$' "$config_file"; then
+                        sed -i '/^\[Preferences\]$/a Connection\\UPnP=false' "$config_file"
                     fi
                     changed=1
                 fi
@@ -2087,6 +2248,7 @@ public sealed class HomeLabService(
             var protocolValue = protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase) ? "wireguard" :
                 protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase) ? "openvpn" :
                 throw new InvalidOperationException("Choose WireGuard or OpenVPN.");
+            var provider = RequiredValue(supplied, "provider", "Choose the provider that issued this VPN configuration.");
 
             if (setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase))
             {
@@ -2096,6 +2258,7 @@ public sealed class HomeLabService(
                 {
                     throw new InvalidOperationException("Paste the provider configuration file.");
                 }
+                ConfigureVpnPortForwarding(values, supplied, provider, protocolValue, pastedConfig);
 
                 var configPath = protocolValue == "openvpn"
                     ? "/gluetun/custom.conf"
@@ -2113,7 +2276,6 @@ public sealed class HomeLabService(
                 return new PreparedConfiguration(values, secretReferences);
             }
 
-            var provider = RequiredValue(supplied, "provider", "Choose a VPN provider.");
             var providerValue = provider switch
             {
                 "ProtonVPN" => "protonvpn",
@@ -2163,6 +2325,8 @@ public sealed class HomeLabService(
             {
                 throw new InvalidOperationException("Custom OpenVPN needs a mounted .ovpn profile. Use a supported Gluetun provider here, or add the profile to the LMS host before selecting this option.");
             }
+
+            ConfigureVpnPortForwarding(values, supplied, provider, protocolValue, null);
         }
         else
         {
@@ -2404,10 +2568,29 @@ public sealed class HomeLabService(
             ? gatewayId
             : null;
 
+    private static bool VpnGatewaySupportsP2p(HomeLabInstallationEntity gateway) =>
+        DeserializeDictionary(gateway.ConfigurationJson)
+            .TryGetValue("VPN_PORT_FORWARDING", out var value) &&
+        value.Equals("on", StringComparison.OrdinalIgnoreCase);
+
     private static bool IsInternalConfigurationKey(string key) =>
         key.Equals("network-route", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase);
+
+    private static void ConfigureVpnPortForwarding(
+        IDictionary<string, string> values,
+        IReadOnlyDictionary<string, string> supplied,
+        string provider,
+        string protocol,
+        string? pastedConfiguration)
+    {
+        var selection = RequiredValue(supplied, "port-forwarding", "Choose whether this gateway must support an incoming P2P port.");
+        foreach (var item in HomeLabVpnPortForwardingPlan.Build(selection, provider, protocol, pastedConfiguration))
+        {
+            values[item.Key] = item.Value;
+        }
+    }
 
     private static IReadOnlyDictionary<string, string> AddStandaloneRouteConfiguration(
         IReadOnlyDictionary<string, string> preparedConfiguration,

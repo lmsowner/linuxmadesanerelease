@@ -264,7 +264,7 @@ lms_write_update_helper \
   "$LMS_DATA_PROTECTION_KEY_DIRECTORY"
 
 lms_maybe_chown "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_ROOT_ABS"
-lms_maybe_chown "$SERVICE_USER:$SERVICE_GROUP" "$DATA_ROOT_ABS"
+lms_maybe_chown_directory "$SERVICE_USER:$SERVICE_GROUP" "$DATA_ROOT_ABS"
 lms_maybe_chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_ROOT_ABS"
 lms_prepare_desktop_session_socket_directory "$DESKTOP_HELPER_SOCKET_PATH" "$SERVICE_USER" "$SERVICE_GROUP"
 
