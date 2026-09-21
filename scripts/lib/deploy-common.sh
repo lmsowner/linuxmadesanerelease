@@ -1344,7 +1344,7 @@ lms_resolve_version_date() {
     return
   fi
 
-  date -u +%Y.%m.%d.%H.%M
+  date +%Y.%m.%d.%H.%M
 }
 
 lms_resolve_version_revision() {
