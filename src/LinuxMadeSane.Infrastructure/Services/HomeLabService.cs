@@ -355,7 +355,7 @@ public sealed class HomeLabService(
                 checkedAtUtc);
         }
 
-        if (gatewayHealth.Item1 is not (HomeLabHealthState.Healthy or HomeLabHealthState.Starting))
+        if (gatewayHealth.Item1 is not HomeLabHealthState.Healthy)
         {
             return new HomeLabNetworkSecurity(
                 "BLOCKED",
