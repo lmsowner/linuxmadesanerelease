@@ -112,9 +112,9 @@
                         <section class="surface-card home-lab-details-panel">
                             <div class="home-lab-details-heading">
                                 <div>
-                                    <p class="eyebrow">Effective configuration</p>
+                                    <p class="eyebrow">Docker settings</p>
                                     <h2>@GetApp(selectedDetails.AppId).Name</h2>
-                                    <p class="meta-text">This is what LMS actually created for Docker. Secret values are shown as redacted.</p>
+                                    <p class="meta-text">This is the effective Docker configuration LMS created. Secrets are shown as redacted and are never included here.</p>
                                 </div>
                                 <CompactUIButton Label="Close" Glyph="UiIconGlyph.Clear" Disabled="@busy" OnClick="CloseDetails" />
                             </div>
@@ -143,12 +143,22 @@
                                     <dl class="home-lab-detail-list home-lab-detail-definition-list">
                                         <dt>Container</dt><dd><code>@selectedDetails.ContainerName</code></dd>
                                         <dt>Image</dt><dd><code>@selectedDetails.Image</code></dd>
+                                        <dt>Definition</dt><dd><code>@GetApp(selectedDetails.AppId).DefinitionVersion</code></dd>
                                         <dt>Network mode</dt><dd><code>@selectedDetails.NetworkMode</code></dd>
                                         <dt>Network</dt><dd><code>@effectiveConfiguration.NetworkName</code></dd>
+                                        <dt>Published ports</dt><dd><code>@string.Join(", ", selectedDetails.Ports)</code></dd>
                                         @if (selectedInstallation.CaddySourcePort is int caddyPort)
                                         {
                                             <dt>LMS Caddy port</dt><dd><code>@caddyPort</code></dd>
                                         }
+                                    </dl>
+                                </div>
+                                <div class="home-lab-detail-block">
+                                    <h3>Health</h3>
+                                    <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                        <dt>State</dt><dd>@selectedInstallation.HealthState</dd>
+                                        <dt>Detail</dt><dd>@selectedInstallation.HealthDetail</dd>
+                                        <dt>Check</dt><dd>@DescribeHealthCheck(GetApp(selectedDetails.AppId))</dd>
                                     </dl>
                                 </div>
                             </div>
@@ -173,6 +183,23 @@
                                         </div>
                                     }
                                 </div>
+                            </div>
+
+                            <div class="home-lab-detail-block">
+                                <h3>Dependencies</h3>
+                                @if (selectedDetails.Dependencies.Count == 0)
+                                {
+                                    <p class="meta-text">None declared.</p>
+                                }
+                                else
+                                {
+                                    <ul class="home-lab-detail-list">
+                                        @foreach (var dependency in selectedDetails.Dependencies)
+                                        {
+                                            <li>@GetApp(dependency).Name <code>(@dependency)</code></li>
+                                        }
+                                    </ul>
+                                }
                             </div>
                         </section>
                     }
@@ -219,7 +246,11 @@
                                     {
                                         <CompactUIButton Label="Open" Glyph="UiIconGlyph.Website" Href="@localUrl" Target="_blank" Rel="noopener" />
                                     }
-                                    <CompactUIButton Label="Manage" Glyph="UiIconGlyph.Info" Disabled="@busy" OnClick="() => ManageAsync(installation)" />
+                                    <CompactUIButton Label="Settings"
+                                                     Glyph="UiIconGlyph.ListView"
+                                                     Title="View effective Docker settings"
+                                                     Disabled="@busy"
+                                                     OnClick="() => ManageAsync(installation)" />
                                     <CompactUIButton Label="Start" Glyph="UiIconGlyph.Run" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
                                     <CompactUIButton Label="Stop" Glyph="UiIconGlyph.Stop" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
                                     <CompactUIButton Label="Update" Glyph="UiIconGlyph.Refresh" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
@@ -486,6 +517,26 @@
         networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
             ? "VPN Gateway namespace"
             : "Direct on deployment network";
+
+    private static string DescribeHealthCheck(HomeLabAppManifest app)
+    {
+        if (app.HealthCheck is null)
+        {
+            return "Container state fallback";
+        }
+
+        if (!string.IsNullOrWhiteSpace(app.HealthCheck.HttpPath))
+        {
+            return $"HTTP {app.HealthCheck.HttpPath} on port {app.HealthCheck.Port}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(app.HealthCheck.DockerCommand))
+        {
+            return $"Docker command: {app.HealthCheck.DockerCommand}";
+        }
+
+        return "Container state fallback";
+    }
 
     private async Task RunAsync(Guid installationId, HomeLabLifecycleAction action)
     {
