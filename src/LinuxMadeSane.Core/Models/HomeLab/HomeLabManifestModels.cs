@@ -77,8 +77,7 @@ public sealed record HomeLabRecipeRelationship(
     string? DownloadClient = null,
     string? IndexerManager = null,
     string? Sonarr = null,
-    string? Radarr = null,
-    string? StremioAddonProvider = null);
+    string? Radarr = null);
 
 public sealed record HomeLabRecipeManifest(
     string Id,

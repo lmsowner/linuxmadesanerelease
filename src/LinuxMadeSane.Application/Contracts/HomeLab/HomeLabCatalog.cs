@@ -322,17 +322,6 @@ public static class HomeLabCatalog
             [new("webtor", RouteVia: "vpn-gateway")],
             RequiresVpnGateway: true),
         new(
-            "stremio-webtor",
-            "Stremio + Webtor",
-            "Webtor streams a private torrent library through its user-specific Stremio addon. Stremio provides the browser and TV playback experience. Both services remain separate and independently upgradeable, share the recipe VPN Gateway, and LMS publishes Webtor over HTTPS so Stremio clients can reach its manifest and streams. After installation, use the recipe's Install in Stremio button once to add the generated addon to your Stremio account; its URL is also shown for copy and paste.",
-            ["vpn-gateway", "webtor", "stremio-server"],
-            [],
-            [
-                new("webtor", RouteVia: "vpn-gateway"),
-                new("stremio-server", RouteVia: "vpn-gateway", StremioAddonProvider: "webtor")
-            ],
-            RequiresVpnGateway: true),
-        new(
             "media-automation",
             "Media Automation Stack",
             "qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr on one private network.",

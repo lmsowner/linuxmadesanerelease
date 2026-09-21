@@ -23,8 +23,7 @@ public sealed record HomeLabRecipeInstallRequest(
     IReadOnlyDictionary<string, string>? StoragePaths = null,
     IReadOnlyDictionary<string, string>? Configuration = null,
     IReadOnlySet<string>? AppIds = null,
-    IReadOnlyDictionary<string, string>? SecretConfiguration = null,
-    IReadOnlyDictionary<string, HomeLabEdgeGatewayRequest>? EdgeGatewayRoutes = null);
+    IReadOnlyDictionary<string, string>? SecretConfiguration = null);
 
 public enum HomeLabLifecycleAction
 {

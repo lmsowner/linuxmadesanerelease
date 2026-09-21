@@ -75,18 +75,3 @@ public sealed record HomeLabNetworkSecurity(
     string? PortForwardingStatus = null,
     int? ForwardedPort = null,
     string? PortForwardingDetail = null);
-
-public sealed record HomeLabRecipeIntegrationStatus(
-    Guid DeploymentId,
-    string RecipeId,
-    bool StremioRunning,
-    bool WebtorRunning,
-    bool WebtorExternallyReachable,
-    bool WebtorManifestReachable,
-    bool VpnConnected,
-    bool IntegrationReady,
-    string WebtorUrl,
-    string StremioUrl,
-    string AddonUrl,
-    string InstallUrl,
-    string Detail);
