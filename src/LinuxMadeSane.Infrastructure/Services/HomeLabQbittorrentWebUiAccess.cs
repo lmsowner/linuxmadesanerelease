@@ -10,6 +10,19 @@ internal static class HomeLabQbittorrentWebUiAccess
 {
     public static bool TryBuildDockerGatewaySubnet(string output, out string subnet)
     {
+        if (TryParseDockerGatewayAddress(output, out var gatewayAddress) &&
+            IPAddress.TryParse(gatewayAddress, out var address))
+        {
+            subnet = $"{address}/{(address.AddressFamily == AddressFamily.InterNetwork ? 32 : 128)}";
+            return true;
+        }
+
+        subnet = string.Empty;
+        return false;
+    }
+
+    public static bool TryParseDockerGatewayAddress(string output, out string gatewayAddress)
+    {
         foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             if (!IPAddress.TryParse(line, out var address))
@@ -17,11 +30,11 @@ internal static class HomeLabQbittorrentWebUiAccess
                 continue;
             }
 
-            subnet = $"{address}/{(address.AddressFamily == AddressFamily.InterNetwork ? 32 : 128)}";
+            gatewayAddress = address.ToString();
             return true;
         }
 
-        subnet = string.Empty;
+        gatewayAddress = string.Empty;
         return false;
     }
 }

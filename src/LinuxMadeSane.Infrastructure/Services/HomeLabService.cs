@@ -65,6 +65,7 @@ public sealed class HomeLabService(
                             NormalizeFailure(restart));
                     }
                 }
+                await EnsureStremioHostGatewayMappingAsync(entity, null, cancellationToken);
             }
             catch (Exception exception)
             {
@@ -790,6 +791,22 @@ public sealed class HomeLabService(
                     installation.HealthDetail,
                     output,
                     HomeLabHealthState.Failed);
+            }
+
+            if (action is HomeLabLifecycleAction.Start or HomeLabLifecycleAction.Restart)
+            {
+                try
+                {
+                    await EnsureStremioHostGatewayMappingAsync(installation, output, cancellationToken);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    return Failure(
+                        "Stremio local streaming route failed.",
+                        exception.Message,
+                        output,
+                        HomeLabHealthState.Degraded);
+                }
             }
         }
 
@@ -1789,6 +1806,19 @@ public sealed class HomeLabService(
             return ContainerRunResult.Failed(Failure("Home Lab container creation failed.", NormalizeFailure(run), output, HomeLabHealthState.Failed));
         }
 
+        try
+        {
+            await EnsureStremioHostGatewayMappingAsync(installation, output, cancellationToken);
+        }
+        catch (InvalidOperationException exception)
+        {
+            return ContainerRunResult.Failed(Failure(
+                "Stremio local streaming route failed.",
+                exception.Message,
+                output,
+                HomeLabHealthState.Degraded));
+        }
+
         var inspect = await InspectContainerAsync(installation.ContainerName, cancellationToken);
         if (inspect is null)
         {
@@ -1947,6 +1977,69 @@ public sealed class HomeLabService(
         }
 
         return subnet;
+    }
+
+    private async Task EnsureStremioHostGatewayMappingAsync(
+        HomeLabInstallationEntity installation,
+        List<string>? output,
+        CancellationToken cancellationToken)
+    {
+        if (!installation.AppId.Equals("stremio-server", StringComparison.OrdinalIgnoreCase) ||
+            !installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var gatewayContainer = installation.NetworkMode["container:".Length..].TrimStart('/');
+        var inspect = await RunDockerAsync(
+            ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{println .Gateway}}{{end}}", gatewayContainer],
+            $"Resolve the Docker host gateway for {installation.DisplayName}",
+            cancellationToken);
+        if (output is not null)
+        {
+            AppendOutput(output, inspect);
+        }
+        if (inspect.ExitCode != 0 ||
+            !HomeLabQbittorrentWebUiAccess.TryParseDockerGatewayAddress(inspect.StandardOutput, out var gatewayAddress))
+        {
+            throw new InvalidOperationException(
+                $"LMS could not resolve the host gateway that Stremio needs for local Webtor streams: {NormalizeFailure(inspect)}");
+        }
+
+        var hostName = Dns.GetHostName();
+        var script = """
+            set -eu
+            gateway_address="$1"
+            host_name="$2"
+            temporary_file="/tmp/lms-hosts.$$"
+            awk -v host="$host_name" '
+                {
+                    keep = 1
+                    for (field = 2; field <= NF; field++) {
+                        if ($field == host) keep = 0
+                    }
+                    if (keep) print
+                }
+            ' /etc/hosts > "$temporary_file"
+            printf '%s\t%s\t# lms-host-gateway\n' "$gateway_address" "$host_name" >> "$temporary_file"
+            cat "$temporary_file" > /etc/hosts
+            rm -f "$temporary_file"
+            resolved_address="$(getent hosts "$host_name" | awk 'NR == 1 { print $1 }')"
+            test "$resolved_address" = "$gateway_address"
+            """;
+        var mapping = await RunDockerAsync(
+            ["exec", installation.ContainerName, "sh", "-c", script, "lms-host-gateway", gatewayAddress, hostName],
+            $"Allow {installation.DisplayName} to reach LMS local app URLs",
+            cancellationToken);
+        if (output is not null)
+        {
+            AppendOutput(output, mapping);
+        }
+        if (mapping.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"LMS could not map {hostName} to the Docker host gateway inside Stremio: {NormalizeFailure(mapping)}");
+        }
     }
 
     private async Task<LinuxCommandResult> ResetQbittorrentCredentialsAsync(
