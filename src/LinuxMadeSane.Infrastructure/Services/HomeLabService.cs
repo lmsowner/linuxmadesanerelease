@@ -241,7 +241,7 @@ public sealed class HomeLabService(
             gateway.DisplayName = gatewayName.Trim();
         }
 
-        var result = await UpdateVpnGatewayAsync(gateway, [], cancellationToken);
+        var result = await RecreateVpnGatewayAsync(gateway, [], true, cancellationToken);
         if (!result.Succeeded)
         {
             gateway.ConfigurationJson = previousConfiguration;
@@ -318,7 +318,7 @@ public sealed class HomeLabService(
             }
 
             await EnsureVpnNamespacePortAvailabilityAsync(app, selectedGateway.ContainerName, installation.Id, cancellationToken);
-            var gatewayPreparation = await EnsureVpnGatewayNamespacePortAsync(selectedGateway, app, output, cancellationToken);
+            var gatewayPreparation = await EnsureVpnGatewayNamespacePortAsync(selectedGateway, app, output, true, cancellationToken);
             if (!gatewayPreparation.Succeeded)
             {
                 return gatewayPreparation;
@@ -685,11 +685,29 @@ public sealed class HomeLabService(
                 HomeLabHealthState.Stopped);
         }
 
-        if (action == HomeLabLifecycleAction.Update)
+        if (action is HomeLabLifecycleAction.Update or HomeLabLifecycleAction.Repair)
         {
+            var isRepair = action == HomeLabLifecycleAction.Repair;
+            if (isRepair)
+            {
+                await RefreshHealthInternalAsync(installation, cancellationToken);
+                if (ToHealth(installation.HealthState) is not (
+                    HomeLabHealthState.Degraded or
+                    HomeLabHealthState.Failed or
+                    HomeLabHealthState.Blocked))
+                {
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    return Success(
+                        "Home Lab repair not needed.",
+                        $"{app.Name} is {ToHealth(installation.HealthState).ToString().ToLowerInvariant()}.",
+                        output,
+                        ToHealth(installation.HealthState));
+                }
+            }
+
             if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             {
-                return await UpdateVpnGatewayAsync(installation, output, cancellationToken);
+                return await RecreateVpnGatewayAsync(installation, output, !isRepair, cancellationToken);
             }
 
             if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
@@ -706,10 +724,31 @@ public sealed class HomeLabService(
                         HomeLabHealthState.Blocked);
                 }
 
+                if (isRepair && ToHealth(installation.HealthState) == HomeLabHealthState.Blocked)
+                {
+                    await RefreshHealthInternalAsync(gateway, cancellationToken);
+                    var gatewayHealth = ToHealth(gateway.HealthState);
+                    if (gatewayHealth is HomeLabHealthState.Degraded or HomeLabHealthState.Failed)
+                    {
+                        return await RecreateVpnGatewayAsync(gateway, output, false, cancellationToken);
+                    }
+
+                    if (gatewayHealth is HomeLabHealthState.Stopped or HomeLabHealthState.Starting)
+                    {
+                        await dbContext.SaveChangesAsync(cancellationToken);
+                        return Failure(
+                            "Home Lab app repair paused.",
+                            $"The selected VPN Gateway is {gatewayHealth.ToString().ToLowerInvariant()}. Start it or wait for it to finish starting before repairing this app.",
+                            output,
+                            HomeLabHealthState.Blocked);
+                    }
+                }
+
                 var gatewayPreparation = await EnsureVpnGatewayNamespacePortAsync(
                     gateway,
                     app,
                     output,
+                    !isRepair,
                     cancellationToken);
                 if (!gatewayPreparation.Succeeded)
                 {
@@ -717,25 +756,32 @@ public sealed class HomeLabService(
                 }
             }
 
-            var targetImage = $"{app.ImageRepository}:{app.ImageTag}";
-            var pull = await RunDockerAsync(
-                ["pull", targetImage],
-                $"Pull updated Home Lab image {targetImage}",
-                cancellationToken);
-            AppendOutput(output, pull);
-            if (pull.ExitCode != 0)
+            var targetImage = isRepair ? installation.Image : $"{app.ImageRepository}:{app.ImageTag}";
+            if (!isRepair)
             {
-                return Failure("Home Lab image update failed.", NormalizeFailure(pull), output, HomeLabHealthState.Failed);
+                var pull = await RunDockerAsync(
+                    ["pull", targetImage],
+                    $"Pull updated Home Lab image {targetImage}",
+                    cancellationToken);
+                AppendOutput(output, pull);
+                if (pull.ExitCode != 0)
+                {
+                    return Failure("Home Lab image update failed.", NormalizeFailure(pull), output, HomeLabHealthState.Failed);
+                }
             }
 
             var remove = await RunDockerAsync(
                 ["rm", "--force", installation.ContainerName],
-                $"Replace Home Lab container {installation.ContainerName}",
+                $"{(isRepair ? "Repair" : "Replace")} Home Lab container {installation.ContainerName}",
                 cancellationToken);
             AppendOutput(output, remove);
             if (remove.ExitCode != 0 && !ContainsNoSuchContainer(remove))
             {
-                return Failure("Home Lab container replacement failed.", NormalizeFailure(remove), output, HomeLabHealthState.Failed);
+                return Failure(
+                    isRepair ? "Home Lab container repair failed." : "Home Lab container replacement failed.",
+                    NormalizeFailure(remove),
+                    output,
+                    HomeLabHealthState.Failed);
             }
 
             installation.Image = targetImage;
@@ -757,9 +803,21 @@ public sealed class HomeLabService(
             installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
             await RefreshHealthInternalAsync(installation, cancellationToken);
             await dbContext.SaveChangesAsync(cancellationToken);
+            var repairedHealth = ToHealth(installation.HealthState);
+            if (isRepair && repairedHealth is not (HomeLabHealthState.Healthy or HomeLabHealthState.Starting))
+            {
+                return Failure(
+                    "Home Lab repair completed, but the container is still faulty.",
+                    installation.HealthDetail,
+                    output,
+                    repairedHealth);
+            }
+
             return Success(
-                "Home Lab app updated.",
-                $"{app.Name} was recreated from {targetImage}.",
+                isRepair ? "Home Lab app repaired." : "Home Lab app updated.",
+                isRepair
+                    ? $"{app.Name} was recreated from its saved configuration and existing image. {installation.HealthDetail}"
+                    : $"{app.Name} was recreated from {targetImage}.",
                 output,
                 ToHealth(installation.HealthState));
         }
@@ -819,37 +877,43 @@ public sealed class HomeLabService(
             ToHealth(installation.HealthState));
     }
 
-    private async Task<HomeLabOperationResult> UpdateVpnGatewayAsync(
+    private async Task<HomeLabOperationResult> RecreateVpnGatewayAsync(
         HomeLabInstallationEntity gateway,
         List<string> output,
+        bool pullImage,
         CancellationToken cancellationToken)
     {
         var routedInstallations = await dbContext.HomeLabInstallations
             .Where(item => item.NetworkMode == $"container:{gateway.ContainerName}")
             .ToListAsync(cancellationToken);
 
-        var pull = await RunDockerAsync(
-            ["pull", gateway.Image],
-            $"Pull updated Home Lab VPN Gateway image {gateway.Image}",
-            cancellationToken);
-        AppendOutput(output, pull);
-        if (pull.ExitCode != 0)
+        if (pullImage)
         {
-            return Failure("VPN Gateway update failed.", NormalizeFailure(pull), output, HomeLabHealthState.Failed);
+            var pull = await RunDockerAsync(
+                ["pull", gateway.Image],
+                $"Pull updated Home Lab VPN Gateway image {gateway.Image}",
+                cancellationToken);
+            AppendOutput(output, pull);
+            if (pull.ExitCode != 0)
+            {
+                return Failure("VPN Gateway update failed.", NormalizeFailure(pull), output, HomeLabHealthState.Failed);
+            }
         }
+
+        var operationName = pullImage ? "update" : "repair";
 
         foreach (var routed in routedInstallations)
         {
             var removeRouted = await RunDockerAsync(
                 ["rm", "--force", routed.ContainerName],
-                $"Pause routed Home Lab app {routed.ContainerName} for VPN Gateway update",
+                $"Pause routed Home Lab app {routed.ContainerName} for VPN Gateway {operationName}",
                 cancellationToken);
             AppendOutput(output, removeRouted);
             if (removeRouted.ExitCode != 0 && !ContainsNoSuchContainer(removeRouted))
             {
-                MarkVpnDependentsBlocked(routedInstallations, "VPN Gateway update could not pause all routed apps.");
+                MarkVpnDependentsBlocked(routedInstallations, $"VPN Gateway {operationName} could not pause all routed apps.");
                 await dbContext.SaveChangesAsync(cancellationToken);
-                return Failure("VPN Gateway update could not pause routed apps.", NormalizeFailure(removeRouted), output, HomeLabHealthState.Failed);
+                return Failure($"VPN Gateway {operationName} could not pause routed apps.", NormalizeFailure(removeRouted), output, HomeLabHealthState.Failed);
             }
         }
 
@@ -860,7 +924,7 @@ public sealed class HomeLabService(
         AppendOutput(output, removeGateway);
         if (removeGateway.ExitCode != 0 && !ContainsNoSuchContainer(removeGateway))
         {
-            MarkVpnDependentsBlocked(routedInstallations, "VPN Gateway update could not replace the gateway container.");
+            MarkVpnDependentsBlocked(routedInstallations, $"VPN Gateway {operationName} could not replace the gateway container.");
             await dbContext.SaveChangesAsync(cancellationToken);
             return Failure("VPN Gateway container replacement failed.", NormalizeFailure(removeGateway), output, HomeLabHealthState.Failed);
         }
@@ -876,7 +940,7 @@ public sealed class HomeLabService(
         if (!gatewayRun.Succeeded)
         {
             gateway.HealthState = (int)HomeLabHealthState.Failed;
-            gateway.HealthDetail = "VPN Gateway replacement failed; routed apps remain blocked.";
+            gateway.HealthDetail = $"VPN Gateway {operationName} failed; routed apps remain blocked.";
             MarkVpnDependentsBlocked(routedInstallations, gateway.HealthDetail);
             await dbContext.SaveChangesAsync(cancellationToken);
             return gatewayRun.Result!;
@@ -890,6 +954,17 @@ public sealed class HomeLabService(
             gatewayRun.PortBindings,
             cancellationToken);
         await RefreshHealthInternalAsync(gateway, cancellationToken);
+        var recreatedGatewayHealth = ToHealth(gateway.HealthState);
+        if (recreatedGatewayHealth is not (HomeLabHealthState.Healthy or HomeLabHealthState.Starting))
+        {
+            MarkVpnDependentsBlocked(routedInstallations, $"VPN Gateway {operationName} did not restore a working gateway.");
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return Failure(
+                $"VPN Gateway {operationName} completed, but the gateway is still faulty.",
+                gateway.HealthDetail,
+                output,
+                recreatedGatewayHealth);
+        }
 
         var failedRoutedApps = new List<string>();
         foreach (var routed in routedInstallations)
@@ -906,7 +981,7 @@ public sealed class HomeLabService(
             if (!routedRun.Succeeded)
             {
                 routed.HealthState = (int)HomeLabHealthState.Blocked;
-                routed.HealthDetail = "Blocked: VPN Gateway was updated, but this app could not be recreated.";
+                routed.HealthDetail = $"Blocked: VPN Gateway {operationName} completed, but this app could not be recreated.";
                 failedRoutedApps.Add(app.Name);
                 continue;
             }
@@ -921,17 +996,17 @@ public sealed class HomeLabService(
         if (failedRoutedApps.Count > 0)
         {
             return Failure(
-                "VPN Gateway updated with blocked routed apps.",
-                $"The gateway was updated, but these apps need attention: {string.Join(", ", failedRoutedApps)}.",
+                $"VPN Gateway {operationName} completed with blocked routed apps.",
+                $"The gateway was recreated, but these apps need attention: {string.Join(", ", failedRoutedApps)}.",
                 output,
                 HomeLabHealthState.Degraded);
         }
 
         return Success(
-            "VPN Gateway updated.",
+            pullImage ? "VPN Gateway updated." : "VPN Gateway repaired.",
             routedInstallations.Count == 0
-                ? $"{gateway.DisplayName} was recreated from {gateway.Image}."
-                : $"{gateway.DisplayName} was recreated and {routedInstallations.Count} routed app(s) were reconnected.",
+                ? $"{gateway.DisplayName} was recreated from its saved configuration and existing image. {gateway.HealthDetail}"
+                : $"{gateway.DisplayName} was recreated and {routedInstallations.Count} routed app(s) were reconnected. {gateway.HealthDetail}",
             output,
             ToHealth(gateway.HealthState));
     }
@@ -1521,6 +1596,7 @@ public sealed class HomeLabService(
                         reusableVpnGateway,
                         app,
                         output,
+                        true,
                         cancellationToken);
                     if (!gatewayPreparation.Succeeded)
                     {
@@ -2941,6 +3017,7 @@ public sealed class HomeLabService(
         HomeLabInstallationEntity gateway,
         HomeLabAppManifest app,
         List<string> output,
+        bool pullImage,
         CancellationToken cancellationToken)
     {
         var requiredPorts = app.Ports
@@ -2963,7 +3040,7 @@ public sealed class HomeLabService(
 
         var trackedGateway = await dbContext.HomeLabInstallations
             .SingleAsync(item => item.Id == gateway.Id, cancellationToken);
-        return await UpdateVpnGatewayAsync(trackedGateway, output, cancellationToken);
+        return await RecreateVpnGatewayAsync(trackedGateway, output, pullImage, cancellationToken);
     }
 
     private static IReadOnlyList<string> ExpandDependencies(IReadOnlyList<string> requestedAppIds)

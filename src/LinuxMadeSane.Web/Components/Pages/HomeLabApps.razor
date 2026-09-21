@@ -517,6 +517,15 @@
                                                              OnClick="() => BeginVpnReconfiguration(gateway)" />
                                             <UiCommandButton Label="Start" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Start)" />
                                             <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Stop)" />
+                                            @if (CanRepair(gateway))
+                                            {
+                                                <UiCommandButton Label="Repair"
+                                                                 Title="Recreate this faulty gateway from its saved configuration and reconnect its routed apps"
+                                                                 Glyph="UiIconGlyph.Repair"
+                                                                 Variant="UiButtonVariant.PrimaryMuted"
+                                                                 Disabled="@busy"
+                                                                 OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Repair)" />
+                                            }
                                             <UiCommandButton Label="Update" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Update)" />
                                             <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Remove)" />
                                             </div>
@@ -543,6 +552,15 @@
                                                          OnClick="() => ManageAsync(installation)" />
                                         <UiCommandButton Label="Start" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
                                         <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
+                                        @if (CanRepair(installation))
+                                        {
+                                            <UiCommandButton Label="Repair"
+                                                             Title="Recreate this faulty container from its saved configuration and existing image"
+                                                             Glyph="UiIconGlyph.Repair"
+                                                             Variant="UiButtonVariant.PrimaryMuted"
+                                                             Disabled="@busy"
+                                                             OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Repair)" />
+                                        }
                                         <UiCommandButton Label="Update" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
                                         <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Remove)" />
                                 }
@@ -1266,6 +1284,24 @@
         HomeLabHealthState.Stopped => UiPillTone.Neutral,
         _ => UiPillTone.Failure
     };
+
+    private bool CanRepair(HomeLabAppInstallation installation)
+    {
+        if (installation.HealthState is HomeLabHealthState.Degraded or HomeLabHealthState.Failed)
+        {
+            return true;
+        }
+
+        if (installation.HealthState != HomeLabHealthState.Blocked || !IsVpnRoute(installation.NetworkMode))
+        {
+            return false;
+        }
+
+        var gatewayContainer = installation.NetworkMode["container:".Length..];
+        var gateway = InstalledVpnGateways.FirstOrDefault(item =>
+            item.ContainerName.Equals(gatewayContainer, StringComparison.OrdinalIgnoreCase));
+        return gateway?.HealthState is HomeLabHealthState.Healthy or HomeLabHealthState.Degraded or HomeLabHealthState.Failed;
+    }
 
     private string? BuildLocalUrl(HomeLabAppInstallation installation)
     {

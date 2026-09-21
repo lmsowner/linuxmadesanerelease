@@ -32,7 +32,8 @@ public enum HomeLabLifecycleAction
     Restart = 2,
     Update = 3,
     Remove = 4,
-    RefreshHealth = 5
+    RefreshHealth = 5,
+    Repair = 6
 }
 
 public sealed record HomeLabOperationResult(
