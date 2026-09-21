@@ -19,4 +19,5 @@ public interface IHomeLabService
     Task<HomeLabOperationResult> ResetCredentialsAsync(Guid installationId, CancellationToken cancellationToken = default);
     Task<HomeLabLogsResult> GetLogsAsync(Guid installationId, CancellationToken cancellationToken = default);
     Task<HomeLabEffectiveConfiguration?> GetEffectiveConfigurationAsync(Guid deploymentId, CancellationToken cancellationToken = default);
+    Task<HomeLabRecipeIntegrationStatus?> GetRecipeIntegrationStatusAsync(Guid deploymentId, CancellationToken cancellationToken = default);
 }

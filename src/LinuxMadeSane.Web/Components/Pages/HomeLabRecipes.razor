@@ -4,9 +4,13 @@
 @page "/home-lab/recipes"
 @rendermode InteractiveServer
 @using LinuxMadeSane.Application.Contracts.HomeLab
+@using LinuxMadeSane.Application.Contracts.EdgeGateway
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.HomeLab
 @inject IHomeLabService HomeLabService
+@inject IEdgeGatewayService EdgeGatewayService
+@inject IJSRuntime JSRuntime
 
 <PageTitle>Home Lab Recipes | Linux Made Sane</PageTitle>
 
@@ -78,6 +82,31 @@
                                     }
                                 </div>
                             }
+                            @if (IsStremioWebtorRecipe(recipeToConfigure))
+                            {
+                                <div class="home-lab-config-field">
+                                    <label for="webtor-hostname">Webtor public hostname</label>
+                                    <input id="webtor-hostname" class="ui-control-input" value="@webtorHostname" @oninput="eventArgs => webtorHostname = eventArgs.Value?.ToString() ?? string.Empty" placeholder="webtor" />
+                                    <span class="meta-text">The subdomain used by Stremio clients, TVs, and browsers.</span>
+                                </div>
+                                <div class="home-lab-config-field">
+                                    <label for="webtor-domain">Edge Gateway domain</label>
+                                    @if (EdgeGatewayDomains.Count > 0)
+                                    {
+                                        <select id="webtor-domain" class="ui-control-input" value="@webtorDomain" @onchange="eventArgs => webtorDomain = eventArgs.Value?.ToString() ?? string.Empty">
+                                            @foreach (var domain in EdgeGatewayDomains)
+                                            {
+                                                <option value="@domain">@domain</option>
+                                            }
+                                        </select>
+                                    }
+                                    else
+                                    {
+                                        <input id="webtor-domain" class="ui-control-input" value="@webtorDomain" @oninput="eventArgs => webtorDomain = eventArgs.Value?.ToString() ?? string.Empty" placeholder="relay.example.com" />
+                                    }
+                                    <span class="meta-text">Webtor is published as HTTPS with pass-through access because Stremio clients cannot complete an LMS login challenge.</span>
+                                </div>
+                            }
                         </div>
                         <div class="home-lab-config-footer">
                             <span class="meta-text">The recipe remains blocked if the VPN gateway is unhealthy.</span>
@@ -103,6 +132,58 @@
                         </div>
                     }
                 </div>
+                @foreach (var deployment in StremioWebtorDeployments)
+                {
+                    var status = integrationStatuses.GetValueOrDefault(deployment.Id);
+                    <section class="surface-card home-lab-integration-card">
+                        <div class="home-lab-config-heading">
+                            <div>
+                                <p class="eyebrow">Installed integration</p>
+                                <h2>@deployment.Name</h2>
+                                <p class="meta-text">Webtor supplies the scoped addon catalog and playback streams. Stremio reads them over the Edge Gateway HTTPS URL.</p>
+                            </div>
+                            <CompactUIButton Label="Refresh status" Glyph="UiIconGlyph.Refresh" Disabled="@busy" OnClick="() => RefreshIntegrationAsync(deployment.Id)" />
+                        </div>
+                        @if (status is null)
+                        {
+                            <p class="meta-text">Checking integration...</p>
+                        }
+                        else
+                        {
+                            <div class="home-lab-integration-statuses">
+                                @IntegrationIndicator("Stremio running", status.StremioRunning)
+                                @IntegrationIndicator("Webtor running", status.WebtorRunning)
+                                @IntegrationIndicator("Webtor externally reachable", status.WebtorExternallyReachable)
+                                @IntegrationIndicator("Webtor Stremio manifest reachable", status.WebtorManifestReachable)
+                                @IntegrationIndicator("VPN connected", status.VpnConnected)
+                                @IntegrationIndicator("Integration ready", status.IntegrationReady)
+                            </div>
+                            <p class="meta-text">@status.Detail</p>
+                            @if (!string.IsNullOrWhiteSpace(status.AddonUrl))
+                            {
+                                <code class="home-lab-addon-url">@status.AddonUrl</code>
+                            }
+                            <div class="home-lab-integration-actions row-action-cluster">
+                                @if (!string.IsNullOrWhiteSpace(status.InstallUrl))
+                                {
+                                    <UiCommandButton Label="Install in Stremio" Glyph="UiIconGlyph.Download" Variant="UiButtonVariant.PrimaryMuted" Href="@status.InstallUrl" />
+                                }
+                                @if (!string.IsNullOrWhiteSpace(status.AddonUrl))
+                                {
+                                    <UiCommandButton Label="Copy addon URL" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.ActionSubtle" OnClick="() => CopyAddonUrlAsync(status.AddonUrl)" />
+                                }
+                                @if (!string.IsNullOrWhiteSpace(status.WebtorUrl))
+                                {
+                                    <UiCommandButton Label="Open Webtor" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.Action" Href="@status.WebtorUrl" Target="_blank" Rel="noopener" />
+                                }
+                                @if (!string.IsNullOrWhiteSpace(status.StremioUrl))
+                                {
+                                    <UiCommandButton Label="Open Stremio" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.Action" Href="@status.StremioUrl" Target="_blank" Rel="noopener" />
+                                }
+                            </div>
+                        }
+                    </section>
+                }
             </TabPage>
             <TabPage Value="ai" Title="AI help">
                 <section class="surface-subcard home-lab-ai-panel">
@@ -127,12 +208,30 @@
     private HomeLabRecipeManifest? configuringRecipe;
     private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<Guid, HomeLabRecipeIntegrationStatus?> integrationStatuses = [];
+    private EdgeGatewayDashboardViewModel? edgeGatewayDashboard;
+    private string webtorHostname = "webtor";
+    private string webtorDomain = string.Empty;
+
+    private IReadOnlyList<string> EdgeGatewayDomains => edgeGatewayDashboard?.Cloudflare.Domains
+        .Select(domain => domain.DomainName)
+        .Where(domain => !string.IsNullOrWhiteSpace(domain))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(domain => domain, StringComparer.OrdinalIgnoreCase)
+        .ToArray() ?? [];
+
+    private IEnumerable<HomeLabDeployment> StremioWebtorDeployments =>
+        workspace?.Deployments.Where(item => item.RecipeId?.Equals("stremio-webtor", StringComparison.OrdinalIgnoreCase) == true)
+        ?? Enumerable.Empty<HomeLabDeployment>();
 
     protected override async Task OnInitializedAsync()
     {
         try
         {
             workspace = await HomeLabService.GetWorkspaceAsync();
+            edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
+            webtorDomain = EdgeGatewayDomains.FirstOrDefault() ?? string.Empty;
+            await LoadIntegrationStatusesAsync();
         }
         catch (Exception exception)
         {
@@ -157,6 +256,11 @@
             configurationValues["configuration-mode"] = "Guided";
             configurationValues["provider"] = "ProtonVPN";
             configurationValues["protocol"] = "WireGuard";
+            if (IsStremioWebtorRecipe(recipe))
+            {
+                webtorHostname = "webtor";
+                webtorDomain = EdgeGatewayDomains.FirstOrDefault() ?? webtorDomain;
+            }
             return;
         }
 
@@ -173,6 +277,7 @@
             var result = await HomeLabService.InstallRecipeAsync(new HomeLabRecipeInstallRequest(recipe.Id, storage));
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
             workspace = await HomeLabService.GetWorkspaceAsync();
+            await LoadIntegrationStatusesAsync();
         }
         catch (Exception exception)
         {
@@ -204,7 +309,8 @@
                 recipe.Id,
                 storage,
                 configurationValues,
-                SecretConfiguration: secretConfigurationValues));
+                SecretConfiguration: secretConfigurationValues,
+                EdgeGatewayRoutes: BuildEdgeGatewayRoutes(recipe)));
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
             if (result.Succeeded)
             {
@@ -213,6 +319,7 @@
                 secretConfigurationValues.Clear();
             }
             workspace = await HomeLabService.GetWorkspaceAsync();
+            await LoadIntegrationStatusesAsync();
         }
         catch (Exception exception)
         {
@@ -230,6 +337,66 @@
         configurationValues.Clear();
         secretConfigurationValues.Clear();
     }
+
+    private IReadOnlyDictionary<string, HomeLabEdgeGatewayRequest>? BuildEdgeGatewayRoutes(HomeLabRecipeManifest recipe)
+    {
+        if (!IsStremioWebtorRecipe(recipe))
+        {
+            return null;
+        }
+        if (string.IsNullOrWhiteSpace(webtorHostname) || string.IsNullOrWhiteSpace(webtorDomain))
+        {
+            throw new InvalidOperationException("Choose the Edge Gateway hostname and configured relay domain for Webtor.");
+        }
+        return new Dictionary<string, HomeLabEdgeGatewayRequest>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["webtor"] = new(webtorHostname.Trim(), webtorDomain.Trim(), EdgeGatewayAuthMode.PassThrough)
+        };
+    }
+
+    private async Task LoadIntegrationStatusesAsync()
+    {
+        foreach (var deployment in StremioWebtorDeployments)
+        {
+            integrationStatuses[deployment.Id] = await HomeLabService.GetRecipeIntegrationStatusAsync(deployment.Id);
+        }
+    }
+
+    private async Task RefreshIntegrationAsync(Guid deploymentId)
+    {
+        if (busy) return;
+        busy = true;
+        try
+        {
+            workspace = await HomeLabService.GetWorkspaceAsync();
+            integrationStatuses[deploymentId] = await HomeLabService.GetRecipeIntegrationStatusAsync(deploymentId);
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task CopyAddonUrlAsync(string addonUrl)
+    {
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", addonUrl);
+        SetMessage(copied ? "Webtor addon URL copied." : "The browser could not copy the addon URL.", !copied);
+    }
+
+    private static bool IsStremioWebtorRecipe(HomeLabRecipeManifest recipe) =>
+        recipe.Id.Equals("stremio-webtor", StringComparison.OrdinalIgnoreCase);
+
+    private static RenderFragment IntegrationIndicator(string label, bool ready) => builder =>
+    {
+        builder.OpenElement(0, "span");
+        builder.AddAttribute(1, "class", $"home-lab-integration-indicator {(ready ? "ready" : "pending")}");
+        builder.AddContent(2, ready ? $"✓ {label}" : $"○ {label}");
+        builder.CloseElement();
+    };
 
     private bool ShouldShowConfigurationField(HomeLabConfigurationField field)
     {

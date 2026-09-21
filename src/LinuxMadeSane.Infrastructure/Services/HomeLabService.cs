@@ -27,10 +27,13 @@ public sealed class HomeLabService(
     ILinuxCommandRunner commandRunner,
     IEdgeGatewayService edgeGatewayService,
     ICaddyIntegrationService caddyIntegrationService,
+    IPublicDnsPropagationService publicDnsPropagationService,
     ISecretStore secretStore,
     HomeLabStorageOptions storageOptions,
     ILogger<HomeLabService> logger) : IHomeLabService
 {
+    private const string PublicUrlConfigurationKey = "__lms-public-url";
+    private const string WebtorAddonPathConfigurationKey = "__lms-webtor-stremio-addon-path";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan DockerCommandTimeout = TimeSpan.FromMinutes(5);
 
@@ -146,6 +149,7 @@ public sealed class HomeLabService(
             request.EdgeGateway,
             null,
             null,
+            null,
             cancellationToken);
     }
 
@@ -163,6 +167,7 @@ public sealed class HomeLabService(
             null,
             request.RecipeId,
             request.AppIds,
+            request.EdgeGatewayRoutes,
             cancellationToken);
     }
 
@@ -650,6 +655,8 @@ public sealed class HomeLabService(
                 item => item.DeploymentId == deployment.Id && item.Id != installation.Id,
                 cancellationToken);
             var routeId = installation.EdgeGatewayRouteId;
+            var hasPublishedPublicUrl = DeserializeDictionary(installation.ConfigurationJson)
+                .ContainsKey(PublicUrlConfigurationKey);
             var caddyRouteId = installation.CaddyRouteId;
             var secretReferences = DeserializeDictionary(installation.SecretConfigurationJson).Values.ToArray();
             dbContext.HomeLabInstallations.Remove(installation);
@@ -666,7 +673,15 @@ public sealed class HomeLabService(
             await dbContext.SaveChangesAsync(cancellationToken);
             if (routeId.HasValue)
             {
-                await edgeGatewayService.DeleteRouteAsync(routeId.Value, cancellationToken);
+                if (hasPublishedPublicUrl)
+                {
+                    await edgeGatewayService.DeletePublishedRouteAsync(routeId.Value, cancellationToken);
+                }
+                else
+                {
+                    await edgeGatewayService.DeleteRouteAsync(routeId.Value, cancellationToken);
+                    await edgeGatewayService.ApplyCaddyConfigurationAsync(cancellationToken);
+                }
             }
             if (caddyRouteId.HasValue)
             {
@@ -1055,6 +1070,136 @@ public sealed class HomeLabService(
                 edgeGatewayRoutesByInstallation.GetValueOrDefault(item.Id))).ToArray());
     }
 
+    public async Task<HomeLabRecipeIntegrationStatus?> GetRecipeIntegrationStatusAsync(
+        Guid deploymentId,
+        CancellationToken cancellationToken = default)
+    {
+        var deployment = await dbContext.HomeLabDeployments
+            .AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == deploymentId, cancellationToken);
+        if (deployment?.RecipeId?.Equals("stremio-webtor", StringComparison.OrdinalIgnoreCase) != true)
+        {
+            return null;
+        }
+
+        var installations = await dbContext.HomeLabInstallations
+            .AsNoTracking()
+            .Where(item => item.DeploymentId == deploymentId)
+            .ToListAsync(cancellationToken);
+        var webtor = installations.SingleOrDefault(item => item.AppId.Equals("webtor", StringComparison.OrdinalIgnoreCase));
+        var stremio = installations.SingleOrDefault(item => item.AppId.Equals("stremio-server", StringComparison.OrdinalIgnoreCase));
+        var gateway = installations.SingleOrDefault(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase));
+        if (webtor is null || stremio is null)
+        {
+            return new HomeLabRecipeIntegrationStatus(
+                deploymentId,
+                deployment.RecipeId,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                "The recipe is missing its Webtor or Stremio service.");
+        }
+
+        var webtorRunning = ToHealth(webtor.HealthState) == HomeLabHealthState.Healthy;
+        var stremioRunning = ToHealth(stremio.HealthState) == HomeLabHealthState.Healthy;
+        var vpnConnected = gateway is not null &&
+                           ToHealth(gateway.HealthState) == HomeLabHealthState.Healthy &&
+                           webtor.NetworkMode.Equals($"container:{gateway.ContainerName}", StringComparison.OrdinalIgnoreCase) &&
+                           stremio.NetworkMode.Equals($"container:{gateway.ContainerName}", StringComparison.OrdinalIgnoreCase);
+        var configuration = DeserializeDictionary(webtor.ConfigurationJson);
+        var publicUrl = configuration.GetValueOrDefault(PublicUrlConfigurationKey)?.Trim().TrimEnd('/') ?? string.Empty;
+        var addonPath = configuration.GetValueOrDefault(WebtorAddonPathConfigurationKey)?.Trim() ?? string.Empty;
+        var addonUrl = publicUrl.Length > 0 && addonPath.Length > 0 ? publicUrl + addonPath : string.Empty;
+        var installUrl = addonUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            ? "stremio://" + addonUrl["https://".Length..]
+            : addonUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                ? "stremio://" + addonUrl["http://".Length..]
+                : string.Empty;
+        var webtorUrl = publicUrl;
+        var stremioUrl = stremio.CaddySourcePort is int stremioPort
+            ? $"http://{Dns.GetHostName()}:{stremioPort}/"
+            : string.Empty;
+
+        var externallyReachable = false;
+        var manifestReachable = false;
+        var detail = string.Empty;
+        if (publicUrl.Length == 0)
+        {
+            detail = "Webtor has no Edge Gateway HTTPS URL.";
+        }
+        else if (addonUrl.Length == 0)
+        {
+            detail = "Webtor has not generated its user-specific Stremio addon URL.";
+        }
+        else
+        {
+            try
+            {
+                using var client = await CreatePublicHttpClientAsync(new Uri(publicUrl), cancellationToken);
+                using var rootRequest = new HttpRequestMessage(HttpMethod.Get, publicUrl + "/");
+                using var root = await client.SendAsync(rootRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                externallyReachable = root.IsSuccessStatusCode;
+
+                using var manifestRequest = new HttpRequestMessage(HttpMethod.Get, addonUrl);
+                manifestRequest.Headers.TryAddWithoutValidation("Origin", stremioUrl.Length > 0 ? stremioUrl : "https://app.strem.io");
+                using var manifest = await client.SendAsync(manifestRequest, cancellationToken);
+                var body = await manifest.Content.ReadAsStringAsync(cancellationToken);
+                using var json = manifest.IsSuccessStatusCode ? JsonDocument.Parse(body) : null;
+                var manifestValid = manifest.IsSuccessStatusCode &&
+                                    json?.RootElement.TryGetProperty("id", out var id) == true &&
+                                    id.GetString()?.Equals("org.stremio.webtor.io", StringComparison.Ordinal) == true &&
+                                    manifest.Headers.TryGetValues("Access-Control-Allow-Origin", out var cors) &&
+                                    cors.Contains("*", StringComparer.Ordinal) &&
+                                    body.Contains(publicUrl, StringComparison.OrdinalIgnoreCase) &&
+                                    !body.Contains("localhost", StringComparison.OrdinalIgnoreCase) &&
+                                    !body.Contains("127.0.0.1", StringComparison.OrdinalIgnoreCase) &&
+                                    !body.Contains("http://webtor:", StringComparison.OrdinalIgnoreCase);
+
+                var catalogUrl = addonUrl[..^"manifest.json".Length] + "catalog/movie/Webtor.io.json";
+                using var catalogRequest = new HttpRequestMessage(HttpMethod.Get, catalogUrl);
+                catalogRequest.Headers.TryAddWithoutValidation("Origin", stremioUrl.Length > 0 ? stremioUrl : "https://app.strem.io");
+                using var catalog = await client.SendAsync(catalogRequest, cancellationToken);
+                var catalogBody = await catalog.Content.ReadAsStringAsync(cancellationToken);
+                using var catalogJson = catalog.IsSuccessStatusCode ? JsonDocument.Parse(catalogBody) : null;
+                var catalogReadable = catalog.IsSuccessStatusCode &&
+                                      catalogJson?.RootElement.TryGetProperty("metas", out _) == true &&
+                                      catalog.Headers.TryGetValues("Access-Control-Allow-Origin", out var catalogCors) &&
+                                      catalogCors.Contains("*", StringComparer.Ordinal);
+                manifestReachable = manifestValid && catalogReadable;
+                detail = manifestReachable
+                    ? "Webtor's scoped addon manifest and catalog are reachable over HTTPS with public URLs and Stremio-compatible CORS."
+                    : $"The Webtor addon manifest or catalog did not pass its external protocol check (manifest HTTP {(int)manifest.StatusCode}, catalog HTTP {(int)catalog.StatusCode}).";
+            }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
+            {
+                detail = $"External Webtor check failed: {exception.Message}";
+            }
+        }
+
+        var integrationReady = stremioRunning && webtorRunning && externallyReachable && manifestReachable && vpnConnected;
+        return new HomeLabRecipeIntegrationStatus(
+            deploymentId,
+            deployment.RecipeId,
+            stremioRunning,
+            webtorRunning,
+            externallyReachable,
+            manifestReachable,
+            vpnConnected,
+            integrationReady,
+            webtorUrl,
+            stremioUrl,
+            addonUrl,
+            installUrl,
+            detail);
+    }
+
     private static HomeLabEffectiveContainer BuildEffectiveContainer(
         HomeLabInstallationEntity installation,
         IReadOnlyList<HomeLabInstallationEntity> installations,
@@ -1160,6 +1305,7 @@ public sealed class HomeLabService(
                 AddConnection("Indexer manager", relationship.IndexerManager);
                 AddConnection("Sonarr", relationship.Sonarr);
                 AddConnection("Radarr", relationship.Radarr);
+                AddConnection("Stremio addon provider", relationship.StremioAddonProvider);
             }
         }
 
@@ -1306,6 +1452,22 @@ public sealed class HomeLabService(
         editor.RewriteSecureCookiesForHttp = app.Id.Equals("webtor", StringComparison.OrdinalIgnoreCase);
         await caddyIntegrationService.SaveRouteAsync(editor, cancellationToken);
         installation.CaddySourcePort = editor.SourcePort;
+
+        if (installation.EdgeGatewayRouteId is Guid edgeRouteId)
+        {
+            var edgeRoute = await edgeGatewayService.GetEditorAsync(edgeRouteId, cancellationToken);
+            if (edgeRoute.Id == edgeRouteId)
+            {
+                edgeRoute.TargetHost = "127.0.0.1";
+                edgeRoute.TargetPort = primaryPort.HostPort;
+                await edgeGatewayService.SaveRouteAsync(edgeRoute, cancellationToken);
+                var applied = await edgeGatewayService.ApplyCaddyConfigurationAsync(cancellationToken);
+                if (!applied.Success)
+                {
+                    throw new InvalidOperationException($"The Edge Gateway target was updated, but Caddy could not apply it: {applied.Summary}");
+                }
+            }
+        }
     }
 
     private async Task RemoveCaddyAccessAsync(
@@ -1383,6 +1545,7 @@ public sealed class HomeLabService(
         HomeLabEdgeGatewayRequest? edgeGateway,
         string? recipeId,
         IReadOnlySet<string>? selectedAppIds,
+        IReadOnlyDictionary<string, HomeLabEdgeGatewayRequest>? recipeEdgeGatewayRoutes,
         CancellationToken cancellationToken)
     {
         var standaloneApp = recipeId is null ? HomeLabCatalog.GetApp(id) : null;
@@ -1457,6 +1620,8 @@ public sealed class HomeLabService(
         var output = new List<string>();
         var createdContainers = new List<string>();
         var createdRoutes = new List<Guid>();
+        var publishedRoutes = new HashSet<Guid>();
+        var publishedHostnames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var createdCaddyRoutes = new List<Guid>();
         var createdSecretReferences = new List<string>();
         var relationships = recipeId is null
@@ -1481,12 +1646,25 @@ public sealed class HomeLabService(
                     secretConfiguration,
                     recipeId is null,
                     cancellationToken);
+                var preparedValues = new Dictionary<string, string>(
+                    preparedConfiguration.Configuration,
+                    StringComparer.OrdinalIgnoreCase);
+                var appEdgeGateway = recipeId is null
+                    ? app.Id == apps[0].Id ? edgeGateway : null
+                    : recipeEdgeGatewayRoutes?.FirstOrDefault(item =>
+                        item.Key.Equals(app.Id, StringComparison.OrdinalIgnoreCase)).Value;
+                if (appEdgeGateway is not null && !string.IsNullOrWhiteSpace(app.PublicUrlEnvironmentVariable))
+                {
+                    var publicUrl = BuildEdgeGatewayPublicUrl(appEdgeGateway);
+                    preparedValues[PublicUrlConfigurationKey] = publicUrl;
+                    publishedHostnames.Add(new Uri(publicUrl).Host);
+                }
                 createdSecretReferences.AddRange(preparedConfiguration.SecretReferences.Values);
                 var installation = BuildInstallationEntity(
                     deployment,
                     app,
                     storagePaths,
-                    AddStandaloneRouteConfiguration(preparedConfiguration.Configuration, configuration, app, recipeId),
+                    AddStandaloneRouteConfiguration(preparedValues, configuration, app, recipeId),
                     preparedConfiguration.SecretReferences,
                     ResolveNetworkMode(
                         deployment.Id,
@@ -1527,7 +1705,7 @@ public sealed class HomeLabService(
                 installation.PortMappingsJson = JsonSerializer.Serialize(run.PortBindings, JsonOptions);
                 await RefreshHealthInternalAsync(installation, cancellationToken);
 
-                if (edgeGateway is not null && app.Id == apps[0].Id)
+                if (appEdgeGateway is not null)
                 {
                     var primaryManifestPort = ResolvePrimaryPort(app);
                     var primaryPort = run.PortBindings.FirstOrDefault(port =>
@@ -1542,9 +1720,9 @@ public sealed class HomeLabService(
                         new EdgeGatewayRouteEditor
                         {
                             DisplayName = app.Name,
-                            Hostname = edgeGateway.Hostname,
-                            DomainName = edgeGateway.DomainName,
-                            AuthMode = edgeGateway.AuthMode,
+                            Hostname = appEdgeGateway.Hostname,
+                            DomainName = appEdgeGateway.DomainName,
+                            AuthMode = appEdgeGateway.AuthMode,
                             TargetScheme = EdgeGatewayTargetScheme.Http,
                             TargetHost = "127.0.0.1",
                             TargetPort = primaryPort.HostPort,
@@ -1566,6 +1744,59 @@ public sealed class HomeLabService(
                 deployment.Installations.Add(installation);
             }
 
+            if (createdRoutes.Count > 0)
+            {
+                if (recipeId?.Equals("stremio-webtor", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    foreach (var routeId in createdRoutes)
+                    {
+                        var published = await edgeGatewayService.ProvisionCloudflareRouteAsync(
+                            routeId,
+                            replaceExistingDnsRecord: false,
+                            cancellationToken);
+                        if (!published.Success)
+                        {
+                            throw new InvalidOperationException(published.RequiresDnsReplacement
+                                ? $"{published.Summary} Choose another Webtor hostname or resolve the existing DNS record in Edge Gateway."
+                                : published.Summary);
+                        }
+                        publishedRoutes.Add(routeId);
+                    }
+
+                    foreach (var hostname in publishedHostnames)
+                    {
+                        var resolvable = await publicDnsPropagationService.WaitUntilResolvableAsync(
+                            hostname,
+                            TimeSpan.FromMinutes(2),
+                            cancellationToken);
+                        if (!resolvable)
+                        {
+                            throw new InvalidOperationException(
+                                $"The Webtor route was published, but {hostname} did not become resolvable through public DNS within two minutes.");
+                        }
+                    }
+                }
+                else
+                {
+                    var applied = await edgeGatewayService.ApplyCaddyConfigurationAsync(cancellationToken);
+                    if (!applied.Success)
+                    {
+                        throw new InvalidOperationException($"The Edge Gateway route was saved, but Caddy could not apply it: {applied.Summary}");
+                    }
+                }
+            }
+
+            if (recipeId?.Equals("stremio-webtor", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var webtor = deployment.Installations.Single(item => item.AppId.Equals("webtor", StringComparison.OrdinalIgnoreCase));
+                var configurationValues = DeserializeDictionary(webtor.ConfigurationJson);
+                var addonPath = await WebtorStremioIntegrationClient.EnsureAddonPathAsync(
+                    BuildLocalCaddyUri(webtor),
+                    cancellationToken);
+                configurationValues[WebtorAddonPathConfigurationKey] = addonPath;
+                webtor.ConfigurationJson = JsonSerializer.Serialize(configurationValues, JsonOptions);
+            }
+
             dbContext.HomeLabDeployments.Add(deployment);
             await dbContext.SaveChangesAsync(cancellationToken);
             return Success(
@@ -1579,8 +1810,23 @@ public sealed class HomeLabService(
             logger.LogWarning(exception, "Home Lab deployment {DeploymentId} failed.", deploymentId);
             foreach (var routeId in createdRoutes)
             {
-                try { await edgeGatewayService.DeleteRouteAsync(routeId, cancellationToken); }
+                try
+                {
+                    if (publishedRoutes.Contains(routeId))
+                    {
+                        await edgeGatewayService.DeletePublishedRouteAsync(routeId, cancellationToken);
+                    }
+                    else
+                    {
+                        await edgeGatewayService.DeleteRouteAsync(routeId, cancellationToken);
+                    }
+                }
                 catch (Exception cleanupException) { logger.LogDebug(cleanupException, "Could not remove Home Lab Edge Gateway route {RouteId}.", routeId); }
+            }
+            if (createdRoutes.Count > 0)
+            {
+                try { await edgeGatewayService.ApplyCaddyConfigurationAsync(cancellationToken); }
+                catch (Exception cleanupException) { logger.LogDebug(cleanupException, "Could not reload Edge Gateway after Home Lab route cleanup."); }
             }
 
             foreach (var routeId in createdCaddyRoutes)
@@ -2331,12 +2577,129 @@ public sealed class HomeLabService(
             return [];
         }
 
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        var publicUrl = configuration.TryGetValue(PublicUrlConfigurationKey, out var configuredPublicUrl) &&
+                        !string.IsNullOrWhiteSpace(configuredPublicUrl)
+            ? configuredPublicUrl.Trim().TrimEnd('/')
+            : $"http://{Dns.GetHostName()}:{caddyPort}";
         return
         [
             new KeyValuePair<string, string>(
                 app.PublicUrlEnvironmentVariable,
-                $"http://{Dns.GetHostName()}:{caddyPort}")
+                publicUrl)
         ];
+    }
+
+    private static string BuildEdgeGatewayPublicUrl(HomeLabEdgeGatewayRequest route)
+    {
+        var hostname = route.Hostname.Trim().TrimEnd('.');
+        var domain = route.DomainName.Trim().TrimEnd('.');
+        var publicHostname = hostname.EndsWith(domain, StringComparison.OrdinalIgnoreCase)
+            ? hostname
+            : $"{hostname}.{domain}";
+        return $"https://{publicHostname}";
+    }
+
+    private static Uri BuildLocalCaddyUri(HomeLabInstallationEntity installation) =>
+        installation.CaddySourcePort is int port
+            ? new Uri($"http://127.0.0.1:{port}/", UriKind.Absolute)
+            : throw new InvalidOperationException("Webtor has no LMS Caddy route for addon setup.");
+
+    private static async Task<HttpClient> CreatePublicHttpClientAsync(
+        Uri publicUri,
+        CancellationToken cancellationToken)
+    {
+        var publicAddresses = await ResolvePublicAddressesAsync(publicUri.Host, cancellationToken);
+        if (publicAddresses.Count == 0)
+        {
+            return new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        }
+
+        var handler = new SocketsHttpHandler
+        {
+            ConnectCallback = async (context, connectCancellationToken) =>
+            {
+                var addresses = context.DnsEndPoint.Host.Equals(publicUri.Host, StringComparison.OrdinalIgnoreCase)
+                    ? publicAddresses
+                    : await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, connectCancellationToken);
+                Exception? lastError = null;
+                foreach (var address in addresses)
+                {
+                    var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                    try
+                    {
+                        await socket.ConnectAsync(
+                            new IPEndPoint(address, context.DnsEndPoint.Port),
+                            connectCancellationToken);
+                        return new NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch (Exception exception) when (exception is SocketException or OperationCanceledException)
+                    {
+                        socket.Dispose();
+                        lastError = exception;
+                    }
+                }
+
+                throw new HttpRequestException($"Could not connect to {context.DnsEndPoint.Host} through its public DNS addresses.", lastError);
+            }
+        };
+        return new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(15) };
+    }
+
+    private static async Task<IReadOnlyList<IPAddress>> ResolvePublicAddressesAsync(
+        string hostname,
+        CancellationToken cancellationToken)
+    {
+        string[] resolverEndpoints =
+        [
+            "https://cloudflare-dns.com/dns-query",
+            "https://dns.google/resolve"
+        ];
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        foreach (var endpoint in resolverEndpoints)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    $"{endpoint}?name={Uri.EscapeDataString(hostname)}&type=A");
+                request.Headers.Accept.ParseAdd("application/dns-json");
+                using var response = await client.SendAsync(request, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+                if (!document.RootElement.TryGetProperty("Status", out var status) || status.GetInt32() != 0 ||
+                    !document.RootElement.TryGetProperty("Answer", out var answers))
+                {
+                    continue;
+                }
+
+                var addresses = answers.EnumerateArray()
+                    .Where(answer => answer.TryGetProperty("type", out var type) && type.GetInt32() == 1)
+                    .Select(answer => answer.TryGetProperty("data", out var data) ? data.GetString() : null)
+                    .OfType<string>()
+                    .Where(data => IPAddress.TryParse(data, out _))
+                    .Select(IPAddress.Parse)
+                    .Distinct()
+                    .ToArray();
+                if (addresses.Length > 0)
+                {
+                    return addresses;
+                }
+            }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+            }
+        }
+
+        return [];
     }
 
     private string ResolveVolumeHostPath(
@@ -2721,7 +3084,8 @@ public sealed class HomeLabService(
     private static bool IsInternalConfigurationKey(string key) =>
         key.Equals("network-route", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) ||
-        key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase);
+        key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase) ||
+        key.StartsWith("__lms-", StringComparison.OrdinalIgnoreCase);
 
     private static void ConfigureVpnPortForwarding(
         IDictionary<string, string> values,
