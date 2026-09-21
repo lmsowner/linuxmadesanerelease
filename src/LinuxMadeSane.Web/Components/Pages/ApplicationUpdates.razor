@@ -624,6 +624,46 @@
     </TabControl>
 </div>
 
+<UiModal IsOpen="@isUpdateDialogOpen"
+         Title="@(updateRestartExpected ? "LMS update in progress" : "Installing LMS update")"
+         Subtitle="Keep this page open while Linux Made Sane applies the update."
+         Class="updates-install-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseUpdateDialogAsync">
+    <ChildContent>
+        <div class="updates-install-dialog" aria-live="polite">
+            @if (updateCountdownSeconds > 0)
+            {
+                <div class="updates-install-countdown">
+                    <span class="updates-eyebrow">Restarting shortly</span>
+                    <strong>@updateCountdownSeconds</strong>
+                    <span>seconds</span>
+                </div>
+                <p>@updateDialogMessage</p>
+                <div class="update-progress-shell" aria-label="LMS restart countdown">
+                    <div class="update-progress-bar" style="@($"width: {UpdateCountdownProgressPercent}%;")"></div>
+                </div>
+            }
+            else
+            {
+                <div class="updates-install-status">
+                    <UiPill Tone="@(updateRestartExpected ? UiPillTone.Warning : GetLmsStateTone())">
+                        @(updateRestartExpected ? "Restart pending" : GetLmsStateLabel())
+                    </UiPill>
+                    <strong>@updateDialogMessage</strong>
+                    <span>@lmsStatus.Detail</span>
+                </div>
+            }
+        </div>
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Close"
+                         Variant="UiButtonVariant.Ghost"
+                         OnClick="CloseUpdateDialogAsync"
+                         Disabled="@(updateCountdownSeconds > 0 || IsLmsBusy)" />
+    </Footer>
+</UiModal>
+
 <UpdateAiRepairDialog IsOpen="@isAiRepairOpen"
                       FailureSummary="@hostSnapshot.Job.Summary"
                       FailureLog="@hostSnapshot.Job.LogLines"
@@ -650,6 +690,11 @@
     private bool releaseAcknowledged;
     private bool isSavingSchedule;
     private bool isAiRepairOpen;
+    private bool isUpdateDialogOpen;
+    private bool updateRestartExpected;
+    private int updateCountdownSeconds;
+    private const int UpdateCountdownStartSeconds = 15;
+    private string updateDialogMessage = string.Empty;
     private string aiRepairProviderLabel = string.Empty;
     private string? scheduleMessage;
     private string? releaseActionMessage;
@@ -666,6 +711,8 @@
         (lmsStatus.IsUpdateAvailable || lmsStatus.State is ApplicationUpdateState.Failed or ApplicationUpdateState.Idle);
 
     private int LmsProgressPercent => Math.Clamp(lmsStatus.ProgressPercent, 0, 100);
+    private int UpdateCountdownProgressPercent =>
+        Math.Clamp((UpdateCountdownStartSeconds - updateCountdownSeconds) * 100 / UpdateCountdownStartSeconds, 0, 100);
     private int HostProgressPercent => Math.Clamp(hostSnapshot.Job.ProgressPercent, 0, 100);
     private bool HasAiRepairProvider => !string.IsNullOrWhiteSpace(aiRepairProviderLabel);
     private static string LocalTerminalHref => $"/hosts/{AiLocalMachine.ManagedHostId}/terminal";
@@ -696,10 +743,12 @@
             return;
         }
 
-        _ = LmsUpdateService.CheckForUpdatesAsync(CancellationToken.None);
-        RefreshLmsStatus();
-        StateHasChanged();
-        await Task.CompletedTask;
+        await LmsUpdateService.CheckForUpdatesAsync(CancellationToken.None);
+        if (!disposed)
+        {
+            RefreshLmsStatus();
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -745,17 +794,88 @@
         return Task.CompletedTask;
     }
 
-    private Task CheckLmsAsync()
+    private async Task CheckLmsAsync()
     {
-        _ = LmsUpdateService.CheckForUpdatesAsync(CancellationToken.None);
+        await LmsUpdateService.CheckForUpdatesAsync(CancellationToken.None);
         RefreshLmsStatus();
-        return Task.CompletedTask;
     }
 
-    private Task InstallLmsAsync()
+    private async Task InstallLmsAsync()
     {
-        _ = LmsUpdateService.InstallLatestAsync(CancellationToken.None);
-        RefreshLmsStatus();
+        if (!CanInstallLms)
+        {
+            return;
+        }
+
+        isUpdateDialogOpen = true;
+        updateRestartExpected = false;
+        updateCountdownSeconds = 0;
+        updateDialogMessage = "Preparing the LMS update…";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var result = await LmsUpdateService.InstallLatestAsync(CancellationToken.None);
+            lmsStatus = result;
+
+            if (result.State == ApplicationUpdateState.Installing &&
+                result.Detail.Contains("outside the LMS web process", StringComparison.OrdinalIgnoreCase))
+            {
+                updateRestartExpected = true;
+                updateDialogMessage = "The update has been handed to the system updater. LMS will restart automatically.";
+                await RunUpdateCountdownAsync();
+            }
+            else
+            {
+                updateDialogMessage = result.State switch
+                {
+                    ApplicationUpdateState.Completed => "The LMS update completed successfully.",
+                    ApplicationUpdateState.Failed => "The LMS update failed. Review the updater log below.",
+                    ApplicationUpdateState.UpToDate => "LMS is already up to date.",
+                    _ => result.Summary
+                };
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            updateDialogMessage = "The LMS update was cancelled.";
+            RefreshLmsStatus();
+        }
+        catch (Exception ex)
+        {
+            updateDialogMessage = $"The LMS update failed: {ex.Message}";
+            RefreshLmsStatus();
+        }
+    }
+
+    private async Task RunUpdateCountdownAsync()
+    {
+        var cancellationToken = pollingCancellationTokenSource?.Token ?? CancellationToken.None;
+        for (updateCountdownSeconds = UpdateCountdownStartSeconds;
+             updateCountdownSeconds > 0;
+             updateCountdownSeconds--)
+        {
+            if (disposed || cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            await InvokeAsync(StateHasChanged);
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+        }
+
+        updateDialogMessage = "LMS is restarting to finish the update. This page will reconnect when it is ready.";
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private Task CloseUpdateDialogAsync()
+    {
+        if (updateCountdownSeconds > 0 || IsLmsBusy)
+        {
+            return Task.CompletedTask;
+        }
+
+        isUpdateDialogOpen = false;
         return Task.CompletedTask;
     }
 
