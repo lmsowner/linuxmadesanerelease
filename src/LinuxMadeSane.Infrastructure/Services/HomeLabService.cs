@@ -327,10 +327,75 @@ public sealed class HomeLabService(
             ["logs", "--tail", "200", installation.ContainerName],
             $"Read Home Lab logs for {installation.ContainerName}",
             cancellationToken);
+        var logs = string.Join(
+            Environment.NewLine,
+            new[] { result.StandardOutput, result.StandardError }.Where(value => !string.IsNullOrWhiteSpace(value)));
         return new HomeLabLogsResult(
             result.ExitCode == 0,
-            result.StandardOutput,
+            logs,
             result.ExitCode == 0 ? string.Empty : NormalizeFailure(result));
+    }
+
+    public async Task<HomeLabOperationResult> ResetCredentialsAsync(
+        Guid installationId,
+        CancellationToken cancellationToken = default)
+    {
+        var installation = await dbContext.HomeLabInstallations
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        if (!app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+        {
+            return Failure(
+                "Credential reset is not available.",
+                $"{app.Name} does not expose an LMS credential reset integration.",
+                [],
+                ToHealth(installation.HealthState));
+        }
+
+        var output = new List<string>();
+        var stop = await RunDockerAsync(
+            ["stop", installation.ContainerName],
+            $"Stop {app.Name} before resetting credentials",
+            cancellationToken);
+        AppendOutput(output, stop);
+        if (stop.ExitCode != 0 && !ContainsNoSuchContainer(stop))
+        {
+            return Failure("Credential reset failed.", NormalizeFailure(stop), output, HomeLabHealthState.Failed);
+        }
+
+        var reset = await ResetQbittorrentCredentialsAsync(
+            DeserializeBindings(installation.VolumeMappingsJson),
+            cancellationToken);
+        AppendOutput(output, reset);
+
+        var start = await RunDockerAsync(
+            ["start", installation.ContainerName],
+            $"Start {app.Name} after resetting credentials",
+            cancellationToken);
+        AppendOutput(output, start);
+        if (reset.ExitCode != 0)
+        {
+            await RefreshHealthInternalAsync(installation, cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return Failure("Credential reset failed.", NormalizeFailure(reset), output, HomeLabHealthState.Failed);
+        }
+        if (start.ExitCode != 0)
+        {
+            installation.HealthState = (int)HomeLabHealthState.Failed;
+            installation.HealthDetail = NormalizeFailure(start);
+            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return Failure("Credential reset restart failed.", installation.HealthDetail, output, HomeLabHealthState.Failed);
+        }
+
+        await RefreshHealthInternalAsync(installation, cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Success(
+            "qBittorrent credentials reset.",
+            "Username: admin. qBittorrent generated a new temporary password; open the container logs below to copy it, then change it in qBittorrent settings.",
+            output,
+            ToHealth(installation.HealthState));
     }
 
     public async Task<HomeLabEffectiveConfiguration?> GetEffectiveConfigurationAsync(
@@ -1059,6 +1124,46 @@ public sealed class HomeLabService(
         }
 
         return result.StandardOutput.Trim().EndsWith("1", StringComparison.Ordinal);
+    }
+
+    private async Task<LinuxCommandResult> ResetQbittorrentCredentialsAsync(
+        IReadOnlyList<HomeLabVolumeBinding> bindings,
+        CancellationToken cancellationToken)
+    {
+        var configBinding = bindings.FirstOrDefault(binding =>
+            binding.ContainerPath.Equals("/config", StringComparison.OrdinalIgnoreCase));
+        if (configBinding is null)
+        {
+            throw new InvalidOperationException("qBittorrent requires a mounted /config volume for credential reset.");
+        }
+
+        var configFile = Path.Combine(configBinding.HostPath, "qBittorrent", "qBittorrent.conf");
+        var script = $"""
+            set -eu
+            config_file={ShellQuote(configFile)}
+            if [ ! -f "$config_file" ]; then
+                printf 'qBittorrent configuration was not found at %s\n' "$config_file" >&2
+                exit 1
+            fi
+            if grep -q '^WebUI\\Username=' "$config_file"; then
+                sed -i 's/^WebUI\\Username=.*/WebUI\\Username=admin/' "$config_file"
+            elif grep -q '^\\[Preferences\\]$' "$config_file"; then
+                sed -i '/^\\[Preferences\\]$/a WebUI\Username=admin' "$config_file"
+            else
+                printf '\n[Preferences]\nWebUI\Username=admin\n' >> "$config_file"
+            fi
+            sed -i '/^WebUI\\Password_PBKDF2=/d; /^WebUI\\Password_ha1=/d; /^WebUI\\Password=/d' "$config_file"
+            chown 1000:1000 "$config_file"
+            printf 'qBittorrent password hash removed.\n'
+            """;
+        return await RunAsync(
+            new LinuxCommandRequest(
+                "bash",
+                ["-c", script],
+                true,
+                TimeSpan.FromSeconds(30),
+                "Reset qBittorrent Web UI credentials"),
+            cancellationToken);
     }
 
     private static string ShellQuote(string value) =>

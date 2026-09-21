@@ -201,6 +201,53 @@
                                     </ul>
                                 }
                             </div>
+
+                            @if (selectedDetails.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+                            {
+                                <div class="home-lab-credential-panel">
+                                    <div>
+                                        <h3>qBittorrent login</h3>
+                                        <p class="meta-text">Username: <code>admin</code></p>
+                                        <p class="meta-text">There is no fixed default password in the current qBittorrent image. Until you change it in qBittorrent, a temporary password is generated on startup and printed in the container logs.</p>
+                                        @if (TryGetTemporaryPassword() is { } temporaryPassword)
+                                        {
+                                            <p class="home-lab-temporary-password">Current temporary password: <code>@temporaryPassword</code></p>
+                                        }
+                                        else
+                                        {
+                                            <p class="home-lab-temporary-password">Current temporary password: <span>Load the container logs to reveal it.</span></p>
+                                        }
+                                    </div>
+                                    <div class="home-lab-action-row">
+                                        <CompactUIButton Label="View login logs"
+                                                         Glyph="UiIconGlyph.Terminal"
+                                                         Disabled="@busy"
+                                                         OnClick="LoadSelectedLogsAsync" />
+                                        <CompactUIButton Label="Reset to temporary password"
+                                                         Glyph="UiIconGlyph.Restart"
+                                                         Disabled="@busy"
+                                                         OnClick="ResetSelectedCredentialsAsync" />
+                                    </div>
+                                    <p class="meta-text">Reset stops qBittorrent, removes its stored password hash, starts it again, and loads the new generated password below. Change it in qBittorrent settings afterwards.</p>
+                                </div>
+                            }
+
+                            <div class="home-lab-detail-block">
+                                <div class="home-lab-logs-heading">
+                                    <div>
+                                        <h3>Container logs</h3>
+                                        <p class="meta-text">Use these logs for startup passwords, provider errors, health failures, and application diagnostics.</p>
+                                    </div>
+                                    <CompactUIButton Label="View logs"
+                                                     Glyph="UiIconGlyph.Terminal"
+                                                     Disabled="@busy"
+                                                     OnClick="LoadSelectedLogsAsync" />
+                                </div>
+                                @if (selectedLogs is not null)
+                                {
+                                    <pre class="home-lab-detail-code home-lab-logs">@selectedLogs</pre>
+                                }
+                            </div>
                         </section>
                     }
                 }
@@ -320,6 +367,7 @@
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
     private HomeLabAppInstallation? selectedInstallation;
     private HomeLabEffectiveConfiguration? effectiveConfiguration;
+    private string? selectedLogs;
 
     private static readonly HomeLabAppCategory?[] Categories =
     [
@@ -438,6 +486,7 @@
         {
             selectedInstallation = installation;
             effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
+            selectedLogs = null;
             activeTab = "apps";
         }
         catch (Exception exception)
@@ -454,6 +503,77 @@
     {
         selectedInstallation = null;
         effectiveConfiguration = null;
+        selectedLogs = null;
+    }
+
+    private async Task LoadSelectedLogsAsync()
+    {
+        if (selectedInstallation is null || busy)
+        {
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            var result = await HomeLabService.GetLogsAsync(selectedInstallation.Id);
+            selectedLogs = result.Succeeded
+                ? result.Logs
+                : $"Could not read container logs: {result.Error}";
+            if (!result.Succeeded)
+            {
+                SetMessage(result.Error, true);
+            }
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task ResetSelectedCredentialsAsync()
+    {
+        if (selectedInstallation is null || busy)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.ResetCredentialsAsync(selectedInstallation.Id);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            if (result.Succeeded)
+            {
+                var logs = await HomeLabService.GetLogsAsync(selectedInstallation.Id);
+                selectedLogs = logs.Succeeded ? logs.Logs : $"Could not read container logs: {logs.Error}";
+            }
+        });
+    }
+
+    private string? TryGetTemporaryPassword()
+    {
+        if (string.IsNullOrWhiteSpace(selectedLogs))
+        {
+            return null;
+        }
+
+        const string marker = "temporary password is generated for this session:";
+        var lines = selectedLogs.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        for (var index = lines.Length - 1; index >= 0; index--)
+        {
+            var markerIndex = lines[index].IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (markerIndex >= 0)
+            {
+                var password = lines[index][(markerIndex + marker.Length)..].Trim().TrimEnd('.', '\r');
+                return password.Length > 0 ? password : null;
+            }
+        }
+
+        return null;
     }
 
     private void CancelConfiguration()
