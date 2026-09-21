@@ -73,6 +73,14 @@
                                             }
                                         </select>
                                     }
+                                    else if (field.Type.Equals("secret-textarea", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <textarea id="home-lab-@field.Id"
+                                                  class="ui-control-input ui-control-textarea"
+                                                  rows="8"
+                                                  autocomplete="off"
+                                                  @oninput="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString(), true)">@GetSecretConfigurationValue(field.Id)</textarea>
+                                    }
                                     else
                                     {
                                         <input id="home-lab-@field.Id"
@@ -262,6 +270,7 @@
             secretConfigurationValues.Clear();
             if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             {
+                configurationValues["configuration-mode"] = "Guided";
                 configurationValues["provider"] = "ProtonVPN";
                 configurationValues["protocol"] = "WireGuard";
             }
@@ -318,6 +327,23 @@
         if (configuringApp is null || !configuringApp.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
         {
             return true;
+        }
+
+        var setupMode = GetConfigurationValue("configuration-mode");
+        if (field.Id.Equals("vpn-config", StringComparison.OrdinalIgnoreCase))
+        {
+            return setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase);
+        }
+        if (field.Id.Equals("provider", StringComparison.OrdinalIgnoreCase))
+        {
+            return !setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase);
+        }
+        if (setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("configuration-mode", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("protocol", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
         }
 
         var protocol = GetConfigurationValue("protocol");

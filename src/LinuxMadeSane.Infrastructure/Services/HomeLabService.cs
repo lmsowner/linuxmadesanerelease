@@ -587,6 +587,13 @@ public sealed class HomeLabService(
             {
                 return ContainerRunResult.Failed(Failure("Home Lab secret resolution failed.", $"The secret for '{secretReference.Key}' is unavailable. Re-enter the VPN credentials.", output, HomeLabHealthState.Failed));
             }
+            if (secretReference.Key.StartsWith("FILE:", StringComparison.OrdinalIgnoreCase))
+            {
+                var containerPath = secretReference.Key["FILE:".Length..];
+                var hostPath = ResolveSecretFileHostPath(bindings, containerPath);
+                await WriteSecretFileAsync(hostPath, secret, cancellationToken);
+                continue;
+            }
             resolvedSecrets[secretReference.Key] = secret;
         }
 
@@ -831,8 +838,40 @@ public sealed class HomeLabService(
 
         if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
         {
-            var provider = RequiredValue(supplied, "provider", "Choose a VPN provider.");
+            var setupMode = supplied.TryGetValue("configuration-mode", out var suppliedMode) && !string.IsNullOrWhiteSpace(suppliedMode)
+                ? suppliedMode.Trim()
+                : "Guided";
             var protocol = RequiredValue(supplied, "protocol", "Choose a VPN protocol.");
+            var protocolValue = protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase) ? "wireguard" :
+                protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase) ? "openvpn" :
+                throw new InvalidOperationException("Choose WireGuard or OpenVPN.");
+
+            if (setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase))
+            {
+                values["VPN_SERVICE_PROVIDER"] = "custom";
+                values["VPN_TYPE"] = protocolValue;
+                if (!suppliedSecrets.TryGetValue("vpn-config", out var pastedConfig) || string.IsNullOrWhiteSpace(pastedConfig))
+                {
+                    throw new InvalidOperationException("Paste the provider configuration file.");
+                }
+
+                var configPath = protocolValue == "openvpn"
+                    ? "/gluetun/custom.conf"
+                    : "/gluetun/wireguard/wg0.conf";
+                secretReferences[$"FILE:{configPath}"] = await secretStore.StoreSecretAsync(
+                    pastedConfig,
+                    $"Home Lab VPN Gateway: pasted {protocolValue} provider configuration",
+                    cancellationToken);
+                if (protocolValue == "openvpn")
+                {
+                    values["OPENVPN_CUSTOM_CONFIG"] = configPath;
+                    await AddOptionalSecretAsync(secretReferences, suppliedSecrets, "openvpn-username", "OPENVPN_USER", cancellationToken);
+                    await AddOptionalSecretAsync(secretReferences, suppliedSecrets, "openvpn-password", "OPENVPN_PASSWORD", cancellationToken);
+                }
+                return new PreparedConfiguration(values, secretReferences);
+            }
+
+            var provider = RequiredValue(supplied, "provider", "Choose a VPN provider.");
             var providerValue = provider switch
             {
                 "ProtonVPN" => "protonvpn",
@@ -843,9 +882,6 @@ public sealed class HomeLabService(
                 "Custom WireGuard" or "Custom OpenVPN" => "custom",
                 _ => throw new InvalidOperationException($"VPN provider '{provider}' is not supported by this LMS definition.")
             };
-            var protocolValue = protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase) ? "wireguard" :
-                protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase) ? "openvpn" :
-                throw new InvalidOperationException("Choose WireGuard or OpenVPN.");
 
             if (provider.Equals("Custom WireGuard", StringComparison.OrdinalIgnoreCase) && protocolValue != "wireguard" ||
                 provider.Equals("Custom OpenVPN", StringComparison.OrdinalIgnoreCase) && protocolValue != "openvpn")
@@ -950,6 +986,53 @@ public sealed class HomeLabService(
             throw new InvalidOperationException($"{fieldId} cannot contain line breaks.");
         }
         references[environmentName] = await secretStore.StoreSecretAsync(value, $"Home Lab VPN Gateway: {fieldId}", cancellationToken);
+    }
+
+    private static string ResolveSecretFileHostPath(
+        IReadOnlyList<HomeLabVolumeBinding> bindings,
+        string containerPath)
+    {
+        var normalizedContainerPath = containerPath.Trim();
+        var binding = bindings
+            .Where(item => normalizedContainerPath.Equals(item.ContainerPath, StringComparison.Ordinal) ||
+                           normalizedContainerPath.StartsWith(item.ContainerPath.TrimEnd('/') + "/", StringComparison.Ordinal))
+            .OrderByDescending(item => item.ContainerPath.Length)
+            .FirstOrDefault()
+            ?? throw new InvalidOperationException($"The VPN configuration path '{containerPath}' is not inside a mounted LMS volume.");
+        var relativePath = normalizedContainerPath[binding.ContainerPath.TrimEnd('/').Length..].TrimStart('/');
+        if (relativePath.Length == 0 || relativePath.Contains("..", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The VPN configuration file path is invalid.");
+        }
+        var hostRoot = Path.GetFullPath(binding.HostPath);
+        var hostPath = Path.GetFullPath(Path.Combine(hostRoot, relativePath));
+        var rootWithSeparator = hostRoot.EndsWith(Path.DirectorySeparatorChar) ? hostRoot : hostRoot + Path.DirectorySeparatorChar;
+        if (!hostPath.StartsWith(rootWithSeparator, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The VPN configuration file path escapes its LMS volume.");
+        }
+        return hostPath;
+    }
+
+    private static async Task WriteSecretFileAsync(string hostPath, string content, CancellationToken cancellationToken)
+    {
+        var directory = Path.GetDirectoryName(hostPath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+        await File.WriteAllTextAsync(hostPath, content, new System.Text.UTF8Encoding(false), cancellationToken);
+        try
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(hostPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+        }
+        catch (PlatformNotSupportedException)
+        {
+            // Windows development hosts do not expose Unix file modes.
+        }
     }
 
     private sealed record PreparedConfiguration(

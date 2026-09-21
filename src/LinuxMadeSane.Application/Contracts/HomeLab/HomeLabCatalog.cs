@@ -31,8 +31,10 @@ public static class HomeLabCatalog
             [],
             new HomeLabHealthCheckManifest(DockerCommand: "wget -qO- http://127.0.0.1:9999/ >/dev/null || exit 1"),
             [
-                new("provider", "Provider", "select", true, Help: "These provider names are Gluetun provider profiles; LMS does not implement the VPN protocol." , Options: ["ProtonVPN", "NordVPN", "Mullvad", "Surfshark", "Private Internet Access", "Custom WireGuard"]),
+                new("configuration-mode", "Setup method", "select", true, Help: "Use Guided setup for Gluetun provider profiles, or paste the provider file you downloaded.", Options: ["Guided", "Paste provider config"]),
+                new("provider", "Provider", "select", true, Help: "These provider names are Gluetun provider profiles; LMS does not implement the VPN protocol.", Options: ["ProtonVPN", "NordVPN", "Mullvad", "Surfshark", "Private Internet Access", "Custom WireGuard"]),
                 new("protocol", "Protocol", "select", true, Help: "Choose the protocol supported by your provider credentials.", Options: ["WireGuard", "OpenVPN"]),
+                new("vpn-config", "Provider configuration", "secret-textarea", true, Secret: true, Help: "Paste the complete .ovpn file or WireGuard INI downloaded from your VPN provider. It is stored as a secret and is never shown again."),
                 new("server-countries", "Server countries", Help: "Optional comma-separated Gluetun server country filter, for example Netherlands, Switzerland."),
                 new("wireguard-private-key", "WireGuard private key", "secret", true, Secret: true, Help: "Required for WireGuard. Stored in the LMS secret store."),
                 new("wireguard-addresses", "WireGuard addresses", Required: true, Help: "The tunnel address from your provider, for example 10.2.0.2/32."),
