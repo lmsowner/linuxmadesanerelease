@@ -55,6 +55,7 @@ public sealed record HomeLabAppManifest(
     IReadOnlyList<HomeLabConfigurationField> ConfigurationSchema,
     bool SupportsDirectNetwork = true,
     bool SupportsVpnGateway = false,
+    bool RequiresVpnGateway = false,
     bool EdgeGatewaySupported = true,
     bool IsInstallable = true,
     IReadOnlyList<string>? DockerCapabilities = null,

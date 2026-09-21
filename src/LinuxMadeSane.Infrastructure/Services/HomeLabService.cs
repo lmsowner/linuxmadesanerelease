@@ -45,6 +45,7 @@ public sealed class HomeLabService(
             try
             {
                 var app = HomeLabCatalog.GetApp(entity.AppId);
+                await EnforceRequiredVpnRouteAsync(entity, app, cancellationToken);
                 var applicationConfigurationChanged = await EnsureApplicationConfigurationAsync(
                     app,
                     DeserializeBindings(entity.VolumeMappingsJson),
@@ -191,6 +192,15 @@ public sealed class HomeLabService(
                 ToHealth(installation.HealthState));
         }
 
+        if (app.RequiresVpnGateway && !useVpnGateway)
+        {
+            return Failure(
+                "Direct route is blocked.",
+                $"{app.Name} must remain behind VPN Gateway (Gluetun).",
+                [],
+                HomeLabHealthState.Blocked);
+        }
+
         var newNetworkMode = "bridge";
         if (useVpnGateway)
         {
@@ -279,6 +289,113 @@ public sealed class HomeLabService(
             ToHealth(installation.HealthState));
     }
 
+    public async Task<HomeLabNetworkSecurity> GetNetworkSecurityAsync(
+        Guid installationId,
+        CancellationToken cancellationToken = default)
+    {
+        var installation = await dbContext.HomeLabInstallations
+            .AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        var checkedAtUtc = DateTimeOffset.UtcNow;
+        var isVpnRouted = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
+        var gatewayContainer = isVpnRouted
+            ? installation.NetworkMode["container:".Length..]
+            : string.Empty;
+
+        if (!isVpnRouted)
+        {
+            var publicIp = await ResolvePublicIpAsync(installation.ContainerName, cancellationToken);
+            var detail = app.RequiresVpnGateway
+                ? $"{app.Name} is on a direct Docker network. It is not protected by Gluetun and has been blocked."
+                : $"{app.Name} is using a direct Docker network. No VPN gateway is active.";
+            return new HomeLabNetworkSecurity(
+                app.RequiresVpnGateway ? "UNSAFE" : "DIRECT",
+                false,
+                false,
+                "Direct (NO VPN)",
+                string.Empty,
+                "Not used",
+                publicIp,
+                detail,
+                checkedAtUtc);
+        }
+
+        var gatewayInspect = await InspectContainerAsync(gatewayContainer, cancellationToken);
+        if (gatewayInspect is null)
+        {
+            return new HomeLabNetworkSecurity(
+                "BLOCKED",
+                true,
+                false,
+                $"VPN Gateway (Gluetun): {gatewayContainer}",
+                gatewayContainer,
+                "Unavailable",
+                null,
+                "The configured Gluetun gateway container cannot be inspected. Internet access is blocked by the dependency state.",
+                checkedAtUtc);
+        }
+
+        var gatewayHealth = ResolveHealth(gatewayInspect);
+        var appInspect = await InspectContainerAsync(installation.ContainerName, cancellationToken);
+        var actualNetworkMode = appInspect?["HostConfig"]?["NetworkMode"]?.GetValue<string>();
+        var expectedNetworkMode = $"container:{gatewayContainer}";
+        if (!string.Equals(actualNetworkMode, expectedNetworkMode, StringComparison.OrdinalIgnoreCase))
+        {
+            return new HomeLabNetworkSecurity(
+                "UNVERIFIED",
+                true,
+                false,
+                $"VPN Gateway (Gluetun): {gatewayContainer}",
+                gatewayContainer,
+                gatewayHealth.Item1.ToString(),
+                null,
+                $"LMS expects Docker network mode '{expectedNetworkMode}', but the running container reports '{actualNetworkMode ?? "unknown"}'.",
+                checkedAtUtc);
+        }
+
+        if (gatewayHealth.Item1 is not (HomeLabHealthState.Healthy or HomeLabHealthState.Starting))
+        {
+            return new HomeLabNetworkSecurity(
+                "BLOCKED",
+                true,
+                false,
+                $"VPN Gateway (Gluetun): {gatewayContainer}",
+                gatewayContainer,
+                gatewayHealth.Item1.ToString(),
+                null,
+                $"Gluetun is {gatewayHealth.Item1}. LMS will not fall back to a direct route.",
+                checkedAtUtc);
+        }
+
+        var publicIpFromGateway = await ResolvePublicIpAsync(gatewayContainer, cancellationToken);
+        if (string.IsNullOrWhiteSpace(publicIpFromGateway))
+        {
+            return new HomeLabNetworkSecurity(
+                "UNVERIFIED",
+                true,
+                false,
+                $"VPN Gateway (Gluetun): {gatewayContainer}",
+                gatewayContainer,
+                gatewayHealth.Item1.ToString(),
+                null,
+                "Docker confirms the app shares Gluetun's network namespace, but LMS could not retrieve the gateway's public IP.",
+                checkedAtUtc);
+        }
+
+        return new HomeLabNetworkSecurity(
+            "SECURED",
+            true,
+            true,
+            $"VPN Gateway (Gluetun): {gatewayContainer}",
+            gatewayContainer,
+            gatewayHealth.Item1.ToString(),
+            publicIpFromGateway,
+            "Docker network mode, Gluetun health, and the gateway egress IP were verified.",
+            checkedAtUtc);
+    }
+
     public async Task<HomeLabOperationResult> ExecuteAsync(
         Guid installationId,
         HomeLabLifecycleAction action,
@@ -288,6 +405,17 @@ public sealed class HomeLabService(
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
         var app = HomeLabCatalog.GetApp(installation.AppId);
+        if (app.RequiresVpnGateway &&
+            !installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
+            action != HomeLabLifecycleAction.Remove &&
+            action != HomeLabLifecycleAction.RefreshHealth)
+        {
+            return Failure(
+                "App is blocked for safety.",
+                $"{app.Name} requires VPN Gateway (Gluetun) routing and cannot be started or updated on a direct network.",
+                [],
+                HomeLabHealthState.Blocked);
+        }
         var output = new List<string>();
 
         if (action == HomeLabLifecycleAction.Remove)
@@ -832,6 +960,10 @@ public sealed class HomeLabService(
     {
         var standaloneApp = recipeId is null ? HomeLabCatalog.GetApp(id) : null;
         var standaloneUsesVpn = recipeId is null && IsVpnRouteSelected(configuration);
+        if (standaloneApp?.RequiresVpnGateway == true && !standaloneUsesVpn)
+        {
+            throw new InvalidOperationException($"{standaloneApp.Name} requires VPN Gateway (Gluetun) routing. Direct installation is blocked for safety.");
+        }
         if (standaloneUsesVpn && standaloneApp is not null && !standaloneApp.SupportsVpnGateway)
         {
             throw new InvalidOperationException($"{standaloneApp.Name} does not support VPN Gateway routing.");
@@ -1354,6 +1486,16 @@ public sealed class HomeLabService(
 
     private async Task RefreshHealthInternalAsync(HomeLabInstallationEntity installation, CancellationToken cancellationToken)
     {
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        if (app.RequiresVpnGateway &&
+            !installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            installation.HealthState = (int)HomeLabHealthState.Blocked;
+            installation.HealthDetail = $"Blocked: {app.Name} requires VPN Gateway (Gluetun) routing.";
+            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            return;
+        }
+
         if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
         {
             var gatewayName = installation.NetworkMode["container:".Length..];
@@ -1383,6 +1525,60 @@ public sealed class HomeLabService(
         installation.HealthState = (int)health.Item1;
         installation.HealthDetail = health.Item2;
         installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+    }
+
+    private async Task EnforceRequiredVpnRouteAsync(
+        HomeLabInstallationEntity installation,
+        HomeLabAppManifest app,
+        CancellationToken cancellationToken)
+    {
+        if (!app.RequiresVpnGateway ||
+            installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var inspect = await InspectContainerAsync(installation.ContainerName, cancellationToken);
+        var isRunning = inspect?["State"]?["Running"]?.GetValue<bool>() == true;
+        if (isRunning)
+        {
+            var stop = await RunDockerAsync(
+                ["stop", installation.ContainerName],
+                $"Stop unsafe direct {app.Name} container",
+                cancellationToken);
+            if (stop.ExitCode != 0)
+            {
+                logger.LogWarning(
+                    "Could not stop unsafe direct Home Lab app {AppId}: {Error}",
+                    app.Id,
+                    NormalizeFailure(stop));
+            }
+        }
+    }
+
+    private async Task<string?> ResolvePublicIpAsync(
+        string containerName,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunDockerAsync(
+            [
+                "exec",
+                containerName,
+                "sh",
+                "-c",
+                "if command -v wget >/dev/null 2>&1; then wget -qO- -T 10 https://api.ipify.org; elif command -v curl >/dev/null 2>&1; then curl -fsS --max-time 10 https://api.ipify.org; else exit 127; fi"
+            ],
+            $"Verify public IP through Home Lab container {containerName}",
+            cancellationToken);
+        if (result.ExitCode != 0)
+        {
+            return null;
+        }
+
+        var candidate = result.StandardOutput
+            .Split(['\r', '\n', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault();
+        return IPAddress.TryParse(candidate, out _) ? candidate : null;
     }
 
     private async Task<JsonObject?> InspectContainerAsync(string containerName, CancellationToken cancellationToken)
@@ -1596,6 +1792,10 @@ public sealed class HomeLabService(
                     !route.Equals("Direct (no VPN)", StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException($"The Internet route '{route}' is not supported for {app.Name}.");
+                }
+                if (app.RequiresVpnGateway && route.Equals("Direct (no VPN)", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException($"{app.Name} must use VPN Gateway (Gluetun). Direct routing is blocked for safety.");
                 }
             }
 

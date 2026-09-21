@@ -213,8 +213,9 @@ public static class HomeLabCatalog
             [new("web", 8080, Primary: true)],
             [new("data", "/data", HomeLabStorageKind.UserData), new("database", "/pgdata", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(), [], null,
-            [new("network-route", "Internet route", "select", true, Help: "Direct exposes Webtor without a VPN. VPN Gateway routes its traffic through Gluetun.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"])],
-            SupportsVpnGateway: true)
+            [new("network-route", "Internet route", "select", true, Help: "Webtor must use VPN Gateway routing. LMS blocks direct Webtor installations.", Options: new[] { "VPN Gateway (Gluetun)" })],
+            SupportsVpnGateway: true,
+            RequiresVpnGateway: true)
         ,
         new(
             "prowlarr",

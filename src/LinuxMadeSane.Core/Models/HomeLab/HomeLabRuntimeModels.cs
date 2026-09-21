@@ -61,3 +61,14 @@ public sealed record HomeLabEffectiveContainer(
     IReadOnlyList<string> Environment,
     IReadOnlyList<string> Connections,
     IReadOnlyList<string> Dependencies);
+
+public sealed record HomeLabNetworkSecurity(
+    string Status,
+    bool IsVpnRouted,
+    bool IsSecured,
+    string Route,
+    string GatewayContainer,
+    string GatewayHealth,
+    string? PublicIp,
+    string Detail,
+    DateTimeOffset CheckedAtUtc);

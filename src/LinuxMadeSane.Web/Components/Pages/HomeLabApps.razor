@@ -163,6 +163,31 @@
                                 </div>
                             </div>
 
+                            @if (networkSecurity is { } security)
+                            {
+                                <div class="home-lab-credential-panel">
+                                    <div class="home-lab-details-heading">
+                                        <div>
+                                            <h3>VPN security verification</h3>
+                                            <p class="meta-text">LMS checks the live Docker network mode, Gluetun health, and the observed public egress IP.</p>
+                                        </div>
+                                        <UiPill Tone="@GetSecurityTone(security.Status)">@security.Status</UiPill>
+                                    </div>
+                                    <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                        <dt>Route</dt><dd><strong>@security.Route</strong></dd>
+                                        <dt>Gluetun gateway</dt><dd><code>@(string.IsNullOrWhiteSpace(security.GatewayContainer) ? "None" : security.GatewayContainer)</code></dd>
+                                        <dt>Gateway health</dt><dd>@security.GatewayHealth</dd>
+                                        <dt>Observed public IP</dt><dd><code>@(security.PublicIp ?? "Unavailable")</code></dd>
+                                        <dt>Checked</dt><dd>@security.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</dd>
+                                    </dl>
+                                    <p class="meta-text">@security.Detail</p>
+                                    <CompactUIButton Label="Verify again"
+                                                     Glyph="UiIconGlyph.Refresh"
+                                                     Disabled="@busy"
+                                                     OnClick="VerifySecurityAsync" />
+                                </div>
+                            }
+
                             <div class="home-lab-detail-block">
                                 <h3>Environment and settings</h3>
                                 <pre class="home-lab-detail-code">@string.Join(Environment.NewLine, selectedDetails.Environment)</pre>
@@ -216,20 +241,24 @@
                                         {
                                             <p class="meta-text">This container shares the VPN gateway network namespace. If Gluetun is unhealthy, LMS marks the app blocked and does not fall back to direct Internet access.</p>
                                         }
+                                        else if (GetApp(selectedDetails.AppId).RequiresVpnGateway)
+                                        {
+                                            <p class="meta-text"><strong>UNSAFE:</strong> this app requires Gluetun. LMS has blocked its direct route; route it through Gluetun before starting it.</p>
+                                        }
                                         else
                                         {
                                             <p class="meta-text">This container has direct Internet access. Use the VPN route button before using it for privacy-sensitive traffic.</p>
                                         }
                                     </div>
                                     <div class="home-lab-action-row">
-                                        @if (IsVpnRoute(selectedInstallation.NetworkMode))
+                                        @if (IsVpnRoute(selectedInstallation.NetworkMode) && !GetApp(selectedDetails.AppId).RequiresVpnGateway)
                                         {
                                             <CompactUIButton Label="Use direct route"
                                                              Glyph="UiIconGlyph.Connection"
                                                              Disabled="@busy"
                                                              OnClick="() => ChangeRouteAsync(false)" />
                                         }
-                                        else
+                                        else if (!IsVpnRoute(selectedInstallation.NetworkMode))
                                         {
                                             <CompactUIButton Label="Route through Gluetun"
                                                              Glyph="UiIconGlyph.Connection"
@@ -418,6 +447,7 @@
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
     private HomeLabAppInstallation? selectedInstallation;
     private HomeLabEffectiveConfiguration? effectiveConfiguration;
+    private HomeLabNetworkSecurity? networkSecurity;
     private string? selectedLogs;
 
     private static readonly HomeLabAppCategory?[] Categories =
@@ -539,9 +569,10 @@
         busy = true;
         try
         {
-            selectedInstallation = installation;
-            effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
-            selectedLogs = null;
+                            selectedInstallation = installation;
+                            effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
+                            networkSecurity = await HomeLabService.GetNetworkSecurityAsync(installation.Id);
+                            selectedLogs = null;
             if (installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
             {
                 var logs = await HomeLabService.GetLogsAsync(installation.Id);
@@ -565,6 +596,7 @@
     {
         selectedInstallation = null;
         effectiveConfiguration = null;
+        networkSecurity = null;
         selectedLogs = null;
     }
 
@@ -705,11 +737,18 @@
 
     private static string FormatNetwork(string networkMode) =>
         networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
-            ? "VPN ROUTE: Gluetun"
-            : "DIRECT ROUTE: no VPN";
+            ? "VPN GATEWAY: GLUETUN"
+            : "NO VPN: DIRECT NETWORK";
 
     private static bool IsVpnRoute(string networkMode) =>
         networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
+
+    private static UiPillTone GetSecurityTone(string status) =>
+        status.Equals("SECURED", StringComparison.OrdinalIgnoreCase)
+            ? UiPillTone.Success
+            : status is "BLOCKED" or "UNSAFE"
+                ? UiPillTone.Failure
+                : UiPillTone.Warning;
 
     private static string DescribeHealthCheck(HomeLabAppManifest app)
     {
@@ -757,8 +796,31 @@
             if (selectedInstallation is not null)
             {
                 effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(selectedInstallation.DeploymentId);
+                networkSecurity = await HomeLabService.GetNetworkSecurityAsync(selectedInstallation.Id);
             }
         });
+    }
+
+    private async Task VerifySecurityAsync()
+    {
+        if (selectedInstallation is null || busy)
+        {
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            networkSecurity = await HomeLabService.GetNetworkSecurityAsync(selectedInstallation.Id);
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
     }
 
     private async Task RunUiOperationAsync(Func<Task> operation)
