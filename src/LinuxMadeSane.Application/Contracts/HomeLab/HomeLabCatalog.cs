@@ -31,6 +31,7 @@ public static class HomeLabCatalog
             [],
             new HomeLabHealthCheckManifest(DockerCommand: "wget -qO- http://127.0.0.1:9999/ >/dev/null || exit 1"),
             [
+                new("gateway-name", "Gateway name", Help: "A label such as ProtonVPN, Mullvad, or NordVPN so apps can select the right gateway."),
                 new("configuration-mode", "Setup method", "select", true, Help: "Use Guided setup for Gluetun provider profiles, or paste the provider file you downloaded.", Options: ["Guided", "Paste provider config"]),
                 new("provider", "Provider", "select", true, Help: "These provider names are Gluetun provider profiles; LMS does not implement the VPN protocol.", Options: ["ProtonVPN", "NordVPN", "Mullvad", "Surfshark", "Private Internet Access", "Custom WireGuard"]),
                 new("protocol", "Protocol", "select", true, Help: "Choose the protocol supported by your provider credentials.", Options: ["WireGuard", "OpenVPN"]),
@@ -72,7 +73,7 @@ public static class HomeLabCatalog
             },
             [],
             new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8080),
-            [new("network-route", "Internet route", "select", true, Help: "Direct exposes qBittorrent through the deployment network. VPN Gateway routes its traffic through Gluetun.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"])],
+            [new("network-route", "Internet route", "select", true, Help: "Direct exposes qBittorrent through the deployment network. VPN Gateway routes its traffic through the selected Gluetun gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries qBittorrent traffic.")],
             SupportsVpnGateway: true),
         new(
             "jellyfin",
@@ -113,7 +114,7 @@ public static class HomeLabCatalog
             [new("web", 11470, Primary: true)],
             [new("config", "/root/.stremio-server", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(), [], null,
-            [new("network-route", "Internet route", "select", true, Help: "Stremio must use VPN Gateway routing. LMS blocks direct Stremio installations.", Options: new[] { "VPN Gateway (Gluetun)" })],
+            [new("network-route", "Internet route", "select", true, Help: "Stremio must use VPN Gateway routing. LMS blocks direct Stremio installations.", Options: new[] { "VPN Gateway (Gluetun)" }), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Stremio traffic.")],
             SupportsVpnGateway: true,
             RequiresVpnGateway: true),
         new(
@@ -214,7 +215,7 @@ public static class HomeLabCatalog
             [new("web", 8080, Primary: true)],
             [new("data", "/data", HomeLabStorageKind.UserData), new("database", "/pgdata", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(), [], null,
-            [new("network-route", "Internet route", "select", true, Help: "Webtor must use VPN Gateway routing. LMS blocks direct Webtor installations.", Options: new[] { "VPN Gateway (Gluetun)" })],
+            [new("network-route", "Internet route", "select", true, Help: "Webtor must use VPN Gateway routing. LMS blocks direct Webtor installations.", Options: new[] { "VPN Gateway (Gluetun)" }), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Webtor traffic.")],
             SupportsVpnGateway: true,
             RequiresVpnGateway: true)
         ,

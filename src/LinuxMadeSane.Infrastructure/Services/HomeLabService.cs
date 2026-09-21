@@ -168,6 +168,7 @@ public sealed class HomeLabService(
     public async Task<HomeLabOperationResult> SetNetworkRouteAsync(
         Guid installationId,
         bool useVpnGateway,
+        Guid? gatewayInstallationId = null,
         CancellationToken cancellationToken = default)
     {
         var installation = await dbContext.HomeLabInstallations
@@ -202,14 +203,11 @@ public sealed class HomeLabService(
         }
 
         var newNetworkMode = "bridge";
+        HomeLabInstallationEntity? selectedGateway = null;
         if (useVpnGateway)
         {
-            var gateway = await dbContext.HomeLabInstallations
-                .AsNoTracking()
-                .Where(item => item.AppId == "vpn-gateway")
-                .OrderBy(item => item.CreatedAtUtc)
-                .FirstOrDefaultAsync(cancellationToken);
-            if (gateway is null)
+            selectedGateway = await ResolveVpnGatewayAsync(gatewayInstallationId, cancellationToken);
+            if (selectedGateway is null)
             {
                 return Failure(
                     "VPN route was not applied.",
@@ -218,12 +216,13 @@ public sealed class HomeLabService(
                     HomeLabHealthState.Blocked);
             }
 
-            await EnsureVpnNamespacePortAvailabilityAsync(app, gateway.ContainerName, installation.Id, cancellationToken);
-            newNetworkMode = $"container:{gateway.ContainerName}";
+            await EnsureVpnNamespacePortAvailabilityAsync(app, selectedGateway.ContainerName, installation.Id, cancellationToken);
+            newNetworkMode = $"container:{selectedGateway.ContainerName}";
         }
 
         if (installation.NetworkMode.Equals(newNetworkMode, StringComparison.OrdinalIgnoreCase))
         {
+            PersistNetworkRouteConfiguration(installation, useVpnGateway, selectedGateway?.Id);
             await RefreshHealthInternalAsync(installation, cancellationToken);
             await dbContext.SaveChangesAsync(cancellationToken);
             return Success(
@@ -235,6 +234,7 @@ public sealed class HomeLabService(
 
         var output = new List<string>();
         var oldNetworkMode = installation.NetworkMode;
+        var oldConfigurationJson = installation.ConfigurationJson;
         var remove = await RunDockerAsync(
             ["rm", "--force", installation.ContainerName],
             $"Recreate {app.Name} with the selected network route",
@@ -246,6 +246,7 @@ public sealed class HomeLabService(
         }
 
         installation.NetworkMode = newNetworkMode;
+        PersistNetworkRouteConfiguration(installation, useVpnGateway, selectedGateway?.Id);
         var run = await RunContainerAsync(
             installation,
             app,
@@ -257,6 +258,7 @@ public sealed class HomeLabService(
         if (!run.Succeeded)
         {
             installation.NetworkMode = oldNetworkMode;
+            installation.ConfigurationJson = oldConfigurationJson;
             var rollback = await RunContainerAsync(
                 installation,
                 app,
@@ -970,11 +972,9 @@ public sealed class HomeLabService(
         }
 
         var reusableVpnGateway = standaloneUsesVpn
-            ? await dbContext.HomeLabInstallations
-                .AsNoTracking()
-                .Where(item => item.AppId == "vpn-gateway")
-                .OrderBy(item => item.CreatedAtUtc)
-                .FirstOrDefaultAsync(cancellationToken)
+            ? await ResolveVpnGatewayAsync(
+                ResolveVpnGatewayId(configuration),
+                cancellationToken)
             : null;
         if (standaloneUsesVpn && reusableVpnGateway is null)
         {
@@ -1057,7 +1057,7 @@ public sealed class HomeLabService(
                     deployment,
                     app,
                     storagePaths,
-                    preparedConfiguration.Configuration,
+                    AddStandaloneRouteConfiguration(preparedConfiguration.Configuration, configuration, app, recipeId),
                     preparedConfiguration.SecretReferences,
                     ResolveNetworkMode(
                         deployment.Id,
@@ -1180,7 +1180,11 @@ public sealed class HomeLabService(
             Id = Guid.NewGuid(),
             DeploymentId = deployment.Id,
             AppId = app.Id,
-            DisplayName = app.Name,
+            DisplayName = app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) &&
+                          configuration.TryGetValue("gateway-name", out var gatewayName) &&
+                          !string.IsNullOrWhiteSpace(gatewayName)
+                ? gatewayName.Trim()
+                : app.Name,
             ContainerName = BuildContainerName(deployment.Id, app.Id),
             NetworkName = deployment.NetworkName,
             Image = $"{app.ImageRepository}:{app.ImageTag}",
@@ -1696,6 +1700,11 @@ public sealed class HomeLabService(
 
         if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
         {
+            if (supplied.TryGetValue("gateway-name", out var suppliedGatewayName) && !string.IsNullOrWhiteSpace(suppliedGatewayName))
+            {
+                values["gateway-name"] = suppliedGatewayName.Trim();
+            }
+
             var setupMode = supplied.TryGetValue("configuration-mode", out var suppliedMode) && !string.IsNullOrWhiteSpace(suppliedMode)
                 ? suppliedMode.Trim()
                 : "Guided";
@@ -2014,8 +2023,84 @@ public sealed class HomeLabService(
         configuration?.TryGetValue("network-route", out var route) == true &&
         route.Equals("VPN Gateway (Gluetun)", StringComparison.OrdinalIgnoreCase);
 
+    private static Guid? ResolveVpnGatewayId(IReadOnlyDictionary<string, string>? configuration) =>
+        configuration?.TryGetValue("vpn-gateway", out var value) == true &&
+        Guid.TryParse(value, out var gatewayId)
+            ? gatewayId
+            : null;
+
     private static bool IsInternalConfigurationKey(string key) =>
-        key.Equals("network-route", StringComparison.OrdinalIgnoreCase);
+        key.Equals("network-route", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase);
+
+    private static IReadOnlyDictionary<string, string> AddStandaloneRouteConfiguration(
+        IReadOnlyDictionary<string, string> preparedConfiguration,
+        IReadOnlyDictionary<string, string>? suppliedConfiguration,
+        HomeLabAppManifest app,
+        string? recipeId)
+    {
+        if (recipeId is not null || !app.SupportsVpnGateway || suppliedConfiguration is null)
+        {
+            return preparedConfiguration;
+        }
+
+        var persisted = new Dictionary<string, string>(preparedConfiguration, StringComparer.OrdinalIgnoreCase);
+        foreach (var key in new[] { "network-route", "vpn-gateway" })
+        {
+            if (suppliedConfiguration.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value))
+            {
+                persisted[key] = value.Trim();
+            }
+        }
+
+        return persisted;
+    }
+
+    private static void PersistNetworkRouteConfiguration(
+        HomeLabInstallationEntity installation,
+        bool useVpnGateway,
+        Guid? gatewayInstallationId)
+    {
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        configuration["network-route"] = useVpnGateway ? "VPN Gateway (Gluetun)" : "Direct (no VPN)";
+        if (useVpnGateway && gatewayInstallationId is Guid gatewayId)
+        {
+            configuration["vpn-gateway"] = gatewayId.ToString();
+        }
+        else
+        {
+            configuration.Remove("vpn-gateway");
+        }
+
+        installation.ConfigurationJson = JsonSerializer.Serialize(configuration, JsonOptions);
+    }
+
+    private async Task<HomeLabInstallationEntity?> ResolveVpnGatewayAsync(
+        Guid? gatewayInstallationId,
+        CancellationToken cancellationToken)
+    {
+        var gateways = await dbContext.HomeLabInstallations
+            .AsNoTracking()
+            .Where(item => item.AppId == "vpn-gateway")
+            .ToListAsync(cancellationToken);
+        if (gatewayInstallationId is Guid requestedId)
+        {
+            var requested = gateways.FirstOrDefault(item => item.Id == requestedId);
+            if (requested is null)
+            {
+                throw new InvalidOperationException("The selected VPN Gateway installation no longer exists.");
+            }
+            return requested;
+        }
+
+        return gateways.Count switch
+        {
+            0 => null,
+            1 => gateways[0],
+            _ => throw new InvalidOperationException("Multiple VPN Gateways are installed. Select the gateway this app should use.")
+        };
+    }
 
     private async Task EnsureVpnNamespacePortAvailabilityAsync(
         HomeLabAppManifest app,
