@@ -20,7 +20,7 @@ public static class HomeLabCatalog
             "https://github.com/qdm12/gluetun-wiki",
             "qmcgaw/gluetun",
             "latest",
-            "4",
+            "5",
             [],
             [new("config", "/gluetun", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(),

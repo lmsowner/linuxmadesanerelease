@@ -1648,6 +1648,7 @@ public sealed class HomeLabService(
 
         foreach (var environment in app.Environment
                      .Concat(configuration.Where(item => !IsInternalConfigurationKey(item.Key)))
+                     .Concat(BuildGatewayEnvironment(app))
                      .Concat(BuildVpnPortEnvironment(app, installation.NetworkMode))
                      .Concat(BuildPublicUrlEnvironment(app, installation))
                      .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
@@ -2174,6 +2175,21 @@ public sealed class HomeLabService(
             .Select(port => new KeyValuePair<string, string>(
                 port.VpnEnvironmentVariable!,
                 HomeLabContainerPortPlan.Resolve(port, true).ToString()));
+    }
+
+    private static IEnumerable<KeyValuePair<string, string>> BuildGatewayEnvironment(HomeLabAppManifest app)
+    {
+        if (!app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return [];
+        }
+
+        return
+        [
+            new KeyValuePair<string, string>(
+                "FIREWALL_INPUT_PORTS",
+                HomeLabContainerPortPlan.GatewayFirewallInputPorts())
+        ];
     }
 
     private static IEnumerable<KeyValuePair<string, string>> BuildPublicUrlEnvironment(

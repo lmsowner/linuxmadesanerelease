@@ -24,6 +24,12 @@ internal static partial class HomeLabContainerPortPlan
             .ThenBy(port => port.Item1, StringComparer.Ordinal)
             .ToArray();
 
+    public static string GatewayFirewallInputPorts() =>
+        string.Join(",", GatewayPublishedPorts()
+            .Select(port => port.Port)
+            .Distinct()
+            .Order());
+
     public static string? BuildVpnFileOverrideCommand(HomeLabAppManifest app, bool usesVpnNamespace)
     {
         if (!usesVpnNamespace)

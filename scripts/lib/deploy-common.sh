@@ -1130,6 +1130,30 @@ if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]] && syste
   SERVICE_WAS_ACTIVE=true
 fi
 
+HOME_LAB_DATA_PATH="\$DATA_ROOT/home-lab"
+HOME_LAB_HOLD_PATH="\$(dirname "\$DATA_ROOT")/.lms-home-lab-preserve-\$(basename "\$DATA_ROOT")-\$\$"
+HOME_LAB_DATA_PRESERVED=false
+
+preserve_home_lab_data() {
+  if [[ -d "\$HOME_LAB_DATA_PATH" ]]; then
+    [[ ! -e "\$HOME_LAB_HOLD_PATH" ]] || return 1
+    mv "\$HOME_LAB_DATA_PATH" "\$HOME_LAB_HOLD_PATH"
+    HOME_LAB_DATA_PRESERVED=true
+  fi
+}
+
+restore_home_lab_data() {
+  [[ "\$HOME_LAB_DATA_PRESERVED" == "true" ]] || return 0
+  if [[ -d "\$HOME_LAB_DATA_PATH" ]]; then
+    rmdir "\$HOME_LAB_DATA_PATH" || {
+      echo "Cannot restore Home Lab data because \$HOME_LAB_DATA_PATH is not empty." >&2
+      return 1
+    }
+  fi
+  mv "\$HOME_LAB_HOLD_PATH" "\$HOME_LAB_DATA_PATH"
+  HOME_LAB_DATA_PRESERVED=false
+}
+
 rollback_self_update() {
   local reason="\$1"
   echo "Linux Made Sane self-update failed: \$reason" >&2
@@ -1159,6 +1183,11 @@ verify_self_update_active() {
   return 1
 }
 
+if ! preserve_home_lab_data; then
+  rollback_self_update "Home Lab data could not be protected before install"
+  exit 1
+fi
+
 if ! curl -fsSL "\$INSTALL_URL" | env \
   LMS_INSTALL_SECOND_STAGE=1 \
   LMS_SOURCE="\$SOURCE" \
@@ -1173,7 +1202,13 @@ if ! curl -fsSL "\$INSTALL_URL" | env \
   LMS_SERVICE_UNIT="\$SERVICE_UNIT" \
   LMS_SERVICE_PORT="\$SERVICE_PORT" \
   bash -s -- --install "\${INSTALL_ARGS[@]}"; then
+  restore_home_lab_data || true
   rollback_self_update "installer returned a non-zero exit code"
+  exit 1
+fi
+
+if ! restore_home_lab_data; then
+  rollback_self_update "Home Lab data could not be restored after install"
   exit 1
 fi
 
