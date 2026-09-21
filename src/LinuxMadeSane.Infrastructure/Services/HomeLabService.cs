@@ -42,6 +42,33 @@ public sealed class HomeLabService(
 
         foreach (var entity in entities)
         {
+            try
+            {
+                var app = HomeLabCatalog.GetApp(entity.AppId);
+                var applicationConfigurationChanged = await EnsureApplicationConfigurationAsync(
+                    app,
+                    DeserializeBindings(entity.VolumeMappingsJson),
+                    cancellationToken);
+                if (applicationConfigurationChanged && entity.HealthState != (int)HomeLabHealthState.Stopped)
+                {
+                    var restart = await RunDockerAsync(
+                        ["restart", entity.ContainerName],
+                        $"Restart Home Lab app {entity.DisplayName} after applying proxy compatibility settings",
+                        cancellationToken);
+                    if (restart.ExitCode != 0)
+                    {
+                        logger.LogWarning(
+                            "Could not restart Home Lab app {AppId} after applying compatibility settings: {Error}",
+                            entity.AppId,
+                            NormalizeFailure(restart));
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Could not apply application compatibility settings for Home Lab app {AppId}.", entity.AppId);
+            }
+
             await RefreshHealthInternalAsync(entity, cancellationToken);
             try
             {
@@ -421,6 +448,14 @@ public sealed class HomeLabService(
             {
                 connections.Add($"Routed apps: {string.Join(", ", routedApps)}");
             }
+        }
+
+        if (app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+        {
+            environment.Add("WebUI\\ReverseProxySupportEnabled=true");
+            environment.Add("WebUI\\HostHeaderValidation=false");
+            connections.Add("Web UI proxy support: enabled for the LMS Caddy route");
+            connections.Add("Application login: use qBittorrent credentials; the initial admin password is in the container logs until changed");
         }
 
         if (recipeId is not null)
@@ -836,6 +871,8 @@ public sealed class HomeLabService(
             }
         }
 
+        await EnsureApplicationConfigurationAsync(app, bindings, cancellationToken);
+
         var args = new List<string>
         {
             "run", "--detach", "--name", installation.ContainerName,
@@ -950,6 +987,82 @@ public sealed class HomeLabService(
 
         return ContainerRunResult.Completed(ports);
     }
+
+    private async Task<bool> EnsureApplicationConfigurationAsync(
+        HomeLabAppManifest app,
+        IReadOnlyList<HomeLabVolumeBinding> bindings,
+        CancellationToken cancellationToken)
+    {
+        if (!app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var configBinding = bindings.FirstOrDefault(binding =>
+            binding.ContainerPath.Equals("/config", StringComparison.OrdinalIgnoreCase));
+        if (configBinding is null)
+        {
+            throw new InvalidOperationException("qBittorrent requires a mounted /config volume for LMS proxy compatibility settings.");
+        }
+
+        var configFile = Path.Combine(configBinding.HostPath, "qBittorrent", "qBittorrent.conf");
+        var quotedConfigFile = ShellQuote(configFile);
+        var script = $"""
+            set -eu
+            config_file={quotedConfigFile}
+            config_dir=$(dirname "$config_file")
+            mkdir -p "$config_dir"
+            changed=0
+            if [ ! -f "$config_file" ]; then
+                cat > "$config_file" <<'LMS_QBITTORRENT_CONFIG'
+            [Preferences]
+            WebUI\ReverseProxySupportEnabled=true
+            WebUI\HostHeaderValidation=false
+            LMS_QBITTORRENT_CONFIG
+                changed=1
+            else
+                if ! grep -q '^WebUI\\ReverseProxySupportEnabled=true$' "$config_file"; then
+                    if grep -q '^WebUI\\ReverseProxySupportEnabled=' "$config_file"; then
+                        sed -i 's/^WebUI\\ReverseProxySupportEnabled=.*/WebUI\\ReverseProxySupportEnabled=true/' "$config_file"
+                    elif grep -q '^\\[Preferences\\]$' "$config_file"; then
+                        sed -i '/^\\[Preferences\\]$/a WebUI\\ReverseProxySupportEnabled=true' "$config_file"
+                    else
+                        printf '\n[Preferences]\nWebUI\ReverseProxySupportEnabled=true\n' >> "$config_file"
+                    fi
+                    changed=1
+                fi
+                if ! grep -q '^WebUI\\HostHeaderValidation=false$' "$config_file"; then
+                    if grep -q '^WebUI\\HostHeaderValidation=' "$config_file"; then
+                        sed -i 's/^WebUI\\HostHeaderValidation=.*/WebUI\\HostHeaderValidation=false/' "$config_file"
+                    elif grep -q '^\\[Preferences\\]$' "$config_file"; then
+                        sed -i '/^\\[Preferences\\]$/a WebUI\\HostHeaderValidation=false' "$config_file"
+                    else
+                        printf '\n[Preferences]\nWebUI\HostHeaderValidation=false\n' >> "$config_file"
+                    fi
+                    changed=1
+                fi
+            fi
+            chown 1000:1000 "$config_file"
+            printf '%s\n' "$changed"
+            """;
+        var result = await RunAsync(
+            new LinuxCommandRequest(
+                "bash",
+                ["-c", script],
+                true,
+                TimeSpan.FromSeconds(30),
+                "Configure qBittorrent for LMS browser access"),
+            cancellationToken);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"qBittorrent proxy compatibility settings could not be applied: {NormalizeFailure(result)}");
+        }
+
+        return result.StandardOutput.Trim().EndsWith("1", StringComparison.Ordinal);
+    }
+
+    private static string ShellQuote(string value) =>
+        $"'{value.Replace("'", "'\\\"'\\\"'", StringComparison.Ordinal)}'";
 
     private async Task<IReadOnlyList<HomeLabPortBinding>> ParseSharedNamespacePortBindingsAsync(
         string networkMode,
