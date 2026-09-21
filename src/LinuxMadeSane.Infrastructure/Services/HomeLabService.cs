@@ -305,21 +305,136 @@ public sealed class HomeLabService(
             .OrderBy(item => item.AppId)
             .ToListAsync(cancellationToken);
 
+        var edgeGatewayRoutes = await Task.WhenAll(
+            installations
+                .Where(item => item.EdgeGatewayRouteId.HasValue)
+                .Select(async item =>
+                {
+                    var editor = await edgeGatewayService.GetEditorAsync(item.EdgeGatewayRouteId, cancellationToken);
+                    return (item.Id, Editor: editor);
+                }));
+        var edgeGatewayRoutesByInstallation = edgeGatewayRoutes
+            .ToDictionary(item => item.Id, item => item.Editor);
+
         return new HomeLabEffectiveConfiguration(
             deployment.Id,
             deployment.NetworkName,
-            installations.Select(item => new HomeLabEffectiveContainer(
-                item.AppId,
-                item.ContainerName,
-                item.Image,
-                item.NetworkMode,
-                DeserializeBindings(item.VolumeMappingsJson)
-                    .Select(binding => $"{binding.HostPath}:{binding.ContainerPath}{(binding.ReadOnly ? ":ro" : string.Empty)}")
-                    .ToArray(),
-                DeserializePortBindings(item.PortMappingsJson)
-                    .Select(binding => $"127.0.0.1:{binding.HostPort}:{binding.ContainerPort}")
-                    .ToArray(),
-                HomeLabCatalog.GetApp(item.AppId).Dependencies)).ToArray());
+            installations.Select(item => BuildEffectiveContainer(
+                item,
+                installations,
+                deployment.RecipeId,
+                edgeGatewayRoutesByInstallation.GetValueOrDefault(item.Id))).ToArray());
+    }
+
+    private static HomeLabEffectiveContainer BuildEffectiveContainer(
+        HomeLabInstallationEntity installation,
+        IReadOnlyList<HomeLabInstallationEntity> installations,
+        string? recipeId,
+        EdgeGatewayRouteEditor? edgeGatewayRoute)
+    {
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        var bindings = DeserializeBindings(installation.VolumeMappingsJson);
+        var ports = DeserializePortBindings(installation.PortMappingsJson);
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        var secretConfiguration = DeserializeDictionary(installation.SecretConfigurationJson);
+        var environment = app.Environment
+            .Concat(configuration)
+            .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => $"{group.Key}={group.Last().Value}")
+            .ToList();
+
+        foreach (var secretKey in secretConfiguration.Keys)
+        {
+            environment.Add(secretKey.StartsWith("FILE:", StringComparison.OrdinalIgnoreCase)
+                ? $"File {secretKey["FILE:".Length..]}=<redacted secret file>"
+                : $"{secretKey}=<redacted secret>");
+        }
+
+        var access = new List<string>();
+        foreach (var port in ports)
+        {
+            var manifest = app.Ports.FirstOrDefault(candidate => candidate.Name.Equals(port.Name, StringComparison.OrdinalIgnoreCase));
+            var isWeb = manifest?.Name.Equals("web", StringComparison.OrdinalIgnoreCase) == true;
+            access.Add(isWeb
+                ? $"Docker UI: http://{app.Id}:{port.ContainerPort}"
+                : $"Docker port: {app.Id}:{port.ContainerPort}/{manifest?.Protocol ?? "tcp"}");
+            if (port.HostPort > 0)
+            {
+                access.Add(isWeb
+                    ? $"Host UI: http://127.0.0.1:{port.HostPort}"
+                    : $"Host port: 127.0.0.1:{port.HostPort}");
+            }
+        }
+
+        if (edgeGatewayRoute?.Id is not null &&
+            !string.IsNullOrWhiteSpace(edgeGatewayRoute.Hostname) &&
+            !string.IsNullOrWhiteSpace(edgeGatewayRoute.DomainName))
+        {
+            var hostname = edgeGatewayRoute.Hostname.Trim().TrimEnd('.');
+            var domainName = edgeGatewayRoute.DomainName.Trim().TrimEnd('.');
+            var publicHostname = hostname.EndsWith(domainName, StringComparison.OrdinalIgnoreCase)
+                ? hostname
+                : $"{hostname}.{domainName}";
+            var path = edgeGatewayRoute.TargetPathPrefix.Trim();
+            access.Add($"Edge Gateway: https://{publicHostname}{(string.IsNullOrWhiteSpace(path) ? string.Empty : path.StartsWith('/') ? path : $"/{path}")}");
+            access.Add($"Edge Gateway auth: {edgeGatewayRoute.AuthMode}");
+        }
+
+        var connections = new List<string>
+        {
+            installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
+                ? $"VPN route: {installation.NetworkMode["container:".Length..]}"
+                : $"Docker network: {installation.NetworkName}",
+            installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
+                ? $"Docker DNS name: {app.Id} is provided by the VPN gateway network namespace"
+                : $"Docker DNS name: {app.Id}"
+        };
+
+        if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            var routedApps = installations
+                .Where(item => item.NetworkMode.Equals($"container:{installation.ContainerName}", StringComparison.OrdinalIgnoreCase))
+                .Select(item => HomeLabCatalog.GetApp(item.AppId).Name)
+                .ToArray();
+            if (routedApps.Length > 0)
+            {
+                connections.Add($"Routed apps: {string.Join(", ", routedApps)}");
+            }
+        }
+
+        if (recipeId is not null)
+        {
+            var relationship = HomeLabCatalog.GetRecipe(recipeId).Relationships
+                .FirstOrDefault(item => item.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase));
+            if (relationship is not null)
+            {
+                AddConnection("VPN route", relationship.RouteVia);
+                AddConnection("Download client", relationship.DownloadClient);
+                AddConnection("Indexer manager", relationship.IndexerManager);
+                AddConnection("Sonarr", relationship.Sonarr);
+                AddConnection("Radarr", relationship.Radarr);
+            }
+        }
+
+        void AddConnection(string label, string? appId)
+        {
+            if (!string.IsNullOrWhiteSpace(appId))
+            {
+                connections.Add($"{label}: {HomeLabCatalog.GetApp(appId).Name} ({appId})");
+            }
+        }
+
+        return new HomeLabEffectiveContainer(
+            installation.AppId,
+            installation.ContainerName,
+            installation.Image,
+            installation.NetworkMode,
+            bindings.Select(binding => $"{binding.HostPath}:{binding.ContainerPath}{(binding.ReadOnly ? ":ro" : string.Empty)}").ToArray(),
+            ports.Select(binding => $"127.0.0.1:{binding.HostPort}:{binding.ContainerPort}").ToArray(),
+            access,
+            environment,
+            connections,
+            app.Dependencies);
     }
 
     private async Task<HomeLabOperationResult> InstallDeploymentAsync(

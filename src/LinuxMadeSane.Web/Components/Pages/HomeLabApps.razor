@@ -104,6 +104,76 @@
                     </section>
                 }
 
+                @if (selectedInstallation is not null && effectiveConfiguration is not null)
+                {
+                    var selectedDetails = effectiveConfiguration.Containers.FirstOrDefault(item => item.AppId.Equals(selectedInstallation.AppId, StringComparison.OrdinalIgnoreCase));
+                    if (selectedDetails is not null)
+                    {
+                        <section class="surface-card home-lab-details-panel">
+                            <div class="home-lab-details-heading">
+                                <div>
+                                    <p class="eyebrow">Effective configuration</p>
+                                    <h2>@GetApp(selectedDetails.AppId).Name</h2>
+                                    <p class="meta-text">This is what LMS actually created for Docker. Secret values are shown as redacted.</p>
+                                </div>
+                                <CompactUIButton Label="Close" Glyph="UiIconGlyph.Clear" Disabled="@busy" OnClick="CloseDetails" />
+                            </div>
+
+                            <div class="home-lab-details-grid">
+                                <div class="home-lab-detail-block">
+                                    <h3>Access</h3>
+                                    <ul class="home-lab-detail-list">
+                                        @foreach (var item in selectedDetails.Access)
+                                        {
+                                            <li><code>@item</code></li>
+                                        }
+                                    </ul>
+                                </div>
+                                <div class="home-lab-detail-block">
+                                    <h3>Connections</h3>
+                                    <ul class="home-lab-detail-list">
+                                        @foreach (var item in selectedDetails.Connections)
+                                        {
+                                            <li>@item</li>
+                                        }
+                                    </ul>
+                                </div>
+                                <div class="home-lab-detail-block">
+                                    <h3>Runtime</h3>
+                                    <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                        <dt>Container</dt><dd><code>@selectedDetails.ContainerName</code></dd>
+                                        <dt>Image</dt><dd><code>@selectedDetails.Image</code></dd>
+                                        <dt>Network mode</dt><dd><code>@selectedDetails.NetworkMode</code></dd>
+                                        <dt>Network</dt><dd><code>@effectiveConfiguration.NetworkName</code></dd>
+                                    </dl>
+                                </div>
+                            </div>
+
+                            <div class="home-lab-detail-block">
+                                <h3>Environment and settings</h3>
+                                <pre class="home-lab-detail-code">@string.Join(Environment.NewLine, selectedDetails.Environment)</pre>
+                            </div>
+                            <div class="home-lab-detail-block">
+                                <h3>Volume mappings</h3>
+                                <pre class="home-lab-detail-code">@string.Join(Environment.NewLine, selectedDetails.Volumes)</pre>
+                            </div>
+
+                            <div class="home-lab-detail-block">
+                                <h3>Deployment topology</h3>
+                                <div class="home-lab-topology-list">
+                                    @foreach (var container in effectiveConfiguration.Containers)
+                                    {
+                                        <div class="home-lab-topology-row">
+                                            <strong>@GetApp(container.AppId).Name</strong>
+                                            <span>@string.Join(" · ", container.Connections)</span>
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                        </section>
+                    }
+                }
+
                 <div class="home-lab-filter-tabs" role="tablist" aria-label="App categories">
                     @foreach (var category in Categories)
                     {
@@ -129,6 +199,10 @@
                             <div class="home-lab-app-name">
                                 <strong>@app.Name</strong>
                                 <span>@app.Description</span>
+                                @if (installation is not null)
+                                {
+                                    <span>Network: @FormatNetwork(installation.NetworkMode)</span>
+                                }
                             </div>
                             <span class="home-lab-image">@app.ImageRepository:@app.ImageTag</span>
                             <UiPill Tone="@(installation is null ? UiPillTone.Neutral : GetHealthTone(installation.HealthState))">
@@ -141,6 +215,7 @@
                                     {
                                         <CompactUIButton Label="Open" Glyph="UiIconGlyph.Website" Href="@localUrl" Target="_blank" Rel="noopener" />
                                     }
+                                    <CompactUIButton Label="Manage" Glyph="UiIconGlyph.Info" Disabled="@busy" OnClick="() => ManageAsync(installation)" />
                                     <CompactUIButton Label="Start" Glyph="UiIconGlyph.Run" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
                                     <CompactUIButton Label="Stop" Glyph="UiIconGlyph.Stop" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
                                     <CompactUIButton Label="Update" Glyph="UiIconGlyph.Refresh" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
@@ -208,6 +283,8 @@
     private HomeLabAppManifest? configuringApp;
     private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
+    private HomeLabAppInstallation? selectedInstallation;
+    private HomeLabEffectiveConfiguration? effectiveConfiguration;
 
     private static readonly HomeLabAppCategory?[] Categories =
     [
@@ -315,6 +392,35 @@
         });
     }
 
+    private async Task ManageAsync(HomeLabAppInstallation installation)
+    {
+        if (busy)
+        {
+            return;
+        }
+        busy = true;
+        try
+        {
+            selectedInstallation = installation;
+            effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
+            activeTab = "apps";
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private void CloseDetails()
+    {
+        selectedInstallation = null;
+        effectiveConfiguration = null;
+    }
+
     private void CancelConfiguration()
     {
         configuringApp = null;
@@ -369,6 +475,13 @@
         var target = secret ? secretConfigurationValues : configurationValues;
         target[key] = value ?? string.Empty;
     }
+
+    private static HomeLabAppManifest GetApp(string appId) => HomeLabCatalog.GetApp(appId);
+
+    private static string FormatNetwork(string networkMode) =>
+        networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
+            ? "VPN Gateway namespace"
+            : "Direct on deployment network";
 
     private async Task RunAsync(Guid installationId, HomeLabLifecycleAction action)
     {

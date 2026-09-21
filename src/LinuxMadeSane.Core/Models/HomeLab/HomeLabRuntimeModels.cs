@@ -55,4 +55,7 @@ public sealed record HomeLabEffectiveContainer(
     string NetworkMode,
     IReadOnlyList<string> Volumes,
     IReadOnlyList<string> Ports,
+    IReadOnlyList<string> Access,
+    IReadOnlyList<string> Environment,
+    IReadOnlyList<string> Connections,
     IReadOnlyList<string> Dependencies);
