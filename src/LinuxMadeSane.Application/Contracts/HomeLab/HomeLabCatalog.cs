@@ -113,8 +113,9 @@ public static class HomeLabCatalog
             [new("web", 11470, Primary: true)],
             [new("config", "/root/.stremio-server", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(), [], null,
-            [new("network-route", "Internet route", "select", true, Help: "Direct exposes Stremio without a VPN. VPN Gateway routes its traffic through Gluetun.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"])],
-            SupportsVpnGateway: true),
+            [new("network-route", "Internet route", "select", true, Help: "Stremio must use VPN Gateway routing. LMS blocks direct Stremio installations.", Options: new[] { "VPN Gateway (Gluetun)" })],
+            SupportsVpnGateway: true,
+            RequiresVpnGateway: true),
         new(
             "immich",
             "Immich",
