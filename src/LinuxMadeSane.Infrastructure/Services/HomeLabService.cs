@@ -1014,25 +1014,45 @@ public sealed class HomeLabService(
         return hostPath;
     }
 
-    private static async Task WriteSecretFileAsync(string hostPath, string content, CancellationToken cancellationToken)
+    private async Task WriteSecretFileAsync(string hostPath, string content, CancellationToken cancellationToken)
     {
         var directory = Path.GetDirectoryName(hostPath);
         if (!string.IsNullOrWhiteSpace(directory))
         {
-            Directory.CreateDirectory(directory);
+            var mkdir = await RunAsync(
+                new LinuxCommandRequest(
+                    "mkdir",
+                    ["-p", directory],
+                    true,
+                    TimeSpan.FromSeconds(30),
+                    $"Prepare Home Lab secret file directory {Path.GetFileName(directory)}"),
+                cancellationToken);
+            EnsureSuccess(mkdir, "The VPN configuration directory could not be prepared.");
         }
-        await File.WriteAllTextAsync(hostPath, content, new System.Text.UTF8Encoding(false), cancellationToken);
-        try
-        {
-            if (!OperatingSystem.IsWindows())
+
+        var write = await RunAsync(
+            new LinuxCommandRequest(
+                "dd",
+                [$"of={hostPath}", "status=none"],
+                true,
+                TimeSpan.FromSeconds(30),
+                $"Write Home Lab secret file {Path.GetFileName(hostPath)}")
             {
-                File.SetUnixFileMode(hostPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-            }
-        }
-        catch (PlatformNotSupportedException)
-        {
-            // Windows development hosts do not expose Unix file modes.
-        }
+                StandardInputBytes = new System.Text.UTF8Encoding(false).GetBytes(content)
+            },
+            cancellationToken);
+        EnsureSuccess(write, "The VPN provider configuration could not be written.");
+
+        var chmod = await RunAsync(
+            new LinuxCommandRequest(
+                "chmod",
+                ["600", hostPath],
+                true,
+                TimeSpan.FromSeconds(30),
+                $"Protect Home Lab secret file {Path.GetFileName(hostPath)}"),
+            cancellationToken);
+        EnsureSuccess(chmod, "The VPN provider configuration permissions could not be secured.");
+
     }
 
     private sealed record PreparedConfiguration(
