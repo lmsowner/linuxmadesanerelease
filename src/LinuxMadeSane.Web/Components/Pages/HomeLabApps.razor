@@ -119,7 +119,15 @@
                     var selectedDetails = effectiveConfiguration.Containers.FirstOrDefault(item => item.AppId.Equals(selectedInstallation.AppId, StringComparison.OrdinalIgnoreCase));
                     if (selectedDetails is not null)
                     {
-                        <section class="surface-card home-lab-details-panel">
+                        <UiModal IsOpen="true"
+                                 Title="@($"Docker settings · {GetApp(selectedDetails.AppId).Name}")"
+                                 Subtitle="Effective LMS configuration for this Home Lab container. Secrets remain redacted."
+                                 Class="home-lab-settings-modal"
+                                 Resizable="true"
+                                 CloseOnBackdrop="false"
+                                 OnClose="CloseDetails">
+                            <ChildContent>
+                        <section class="home-lab-details-panel">
                             <div class="home-lab-details-heading">
                                 <div>
                                     <p class="eyebrow">Docker settings</p>
@@ -260,37 +268,21 @@
                                         {
                                             <p class="meta-text">This container has direct Internet access. Use the VPN route button before using it for privacy-sensitive traffic.</p>
                                         }
-                                        @if (GetApp(selectedDetails.AppId).SupportsVpnGateway &&
-                                             (IsVpnRoute(selectedInstallation.NetworkMode) || GetApp(selectedDetails.AppId).RequiresVpnGateway))
+                                        @if (GetApp(selectedDetails.AppId).SupportsVpnGateway)
                                         {
-                                            <label class="home-lab-password-label" for="home-lab-selected-gateway">VPN Gateway</label>
-                                            <select id="home-lab-selected-gateway"
+                                            <label class="home-lab-password-label" for="home-lab-selected-route">Internet route</label>
+                                            <select id="home-lab-selected-route"
                                                     class="ui-control-input"
-                                                    value="@selectedGatewayId"
-                                                    @onchange="eventArgs => selectedGatewayId = eventArgs.Value?.ToString() ?? string.Empty">
-                                                <option value="">Choose an installed Gluetun gateway...</option>
+                                                    value="@GetRouteSelection(selectedInstallation)"
+                                                    disabled="@busy"
+                                                    @onchange="eventArgs => ChangeSelectedRouteAsync(eventArgs.Value?.ToString())">
+                                                <option value="direct" disabled="@GetApp(selectedDetails.AppId).RequiresVpnGateway">Direct (no VPN)</option>
                                                 @foreach (var gateway in InstalledVpnGateways)
                                                 {
-                                                    <option value="@gateway.Id">@gateway.DisplayName (@gateway.HealthState)</option>
+                                                    <option value="@gateway.Id">VPN · @gateway.DisplayName (@gateway.HealthState)</option>
                                                 }
                                             </select>
-                                            <p class="meta-text">The app shares this gateway's Docker network namespace. Select the gateway explicitly when more than one is installed.</p>
-                                        }
-                                    </div>
-                                    <div class="home-lab-action-row">
-                                        @if (IsVpnRoute(selectedInstallation.NetworkMode) && !GetApp(selectedDetails.AppId).RequiresVpnGateway)
-                                        {
-                                            <CompactUIButton Label="Use direct route"
-                                                             Glyph="UiIconGlyph.Connection"
-                                                             Disabled="@busy"
-                                                             OnClick="() => ChangeRouteAsync(false)" />
-                                        }
-                                        else if (!IsVpnRoute(selectedInstallation.NetworkMode))
-                                        {
-                                            <CompactUIButton Label="Route through Gluetun"
-                                                             Glyph="UiIconGlyph.Connection"
-                                                             Disabled="@busy"
-                                                             OnClick="() => ChangeRouteAsync(true)" />
+                                            <p class="meta-text">Changes apply immediately and recreate the container with the selected route. No Apply button is required.</p>
                                         }
                                     </div>
                                 </div>
@@ -359,6 +351,8 @@
                                 </div>
                             </details>
                         </section>
+                            </ChildContent>
+                        </UiModal>
                     }
                 }
 
@@ -377,6 +371,7 @@
                     <div class="home-lab-app-list-header">
                         <span>Application</span>
                         <span>Image</span>
+                        <span>Network</span>
                         <span>Status</span>
                         <span>Actions</span>
                     </div>
@@ -401,6 +396,30 @@
                                 }
                             </div>
                             <span class="home-lab-image">@app.ImageRepository:@app.ImageTag</span>
+                            @if (installation is not null)
+                            {
+                                <div class="home-lab-network-summary">
+                                    <div class="home-lab-network-summary-heading">
+                                        <UiPill Tone="@GetNetworkSummaryTone(installation)">@GetNetworkSummaryState(installation)</UiPill>
+                                        <strong>@GetNetworkSummaryRoute(installation)</strong>
+                                    </div>
+                                    <span>Public IP: <code>@GetNetworkSummaryPublicIp(installation)</code></span>
+                                    @if (app.SupportsVpnGateway && !app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <select class="ui-control-input home-lab-route-select"
+                                                aria-label="Internet route for @app.Name"
+                                                value="@GetRouteSelection(installation)"
+                                                disabled="@busy"
+                                                @onchange="eventArgs => ChangeSummaryRouteAsync(installation, eventArgs.Value?.ToString())">
+                                            <option value="direct" disabled="@app.RequiresVpnGateway">Direct (no VPN)</option>
+                                            @foreach (var gateway in InstalledVpnGateways)
+                                            {
+                                                <option value="@gateway.Id">VPN · @gateway.DisplayName</option>
+                                            }
+                                        </select>
+                                    }
+                                </div>
+                            }
                             <UiPill Tone="@(installation is null ? UiPillTone.Neutral : GetHealthTone(installation.HealthState))">
                                 @(installation is null ? "Available" : installation.HealthState.ToString())
                             </UiPill>
@@ -507,8 +526,8 @@
     private HomeLabAppInstallation? selectedInstallation;
     private HomeLabEffectiveConfiguration? effectiveConfiguration;
     private HomeLabNetworkSecurity? networkSecurity;
+    private readonly Dictionary<Guid, HomeLabNetworkSecurity> summaryNetworkSecurity = [];
     private string? selectedLogs;
-    private string selectedGatewayId = string.Empty;
 
     private static readonly HomeLabAppCategory?[] Categories =
     [
@@ -542,6 +561,7 @@
             {
                 storagePaths[role.Role] = role.HostPath;
             }
+            await RefreshSummaryNetworkSecurityAsync();
         }
         catch (Exception exception)
         {
@@ -645,7 +665,6 @@
                             effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
                             networkSecurity = await HomeLabService.GetNetworkSecurityAsync(installation.Id);
                             selectedLogs = null;
-                            selectedGatewayId = GetGatewayIdFromNetworkMode(installation.NetworkMode);
             if (installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
             {
                 var logs = await HomeLabService.GetLogsAsync(installation.Id);
@@ -671,8 +690,123 @@
         effectiveConfiguration = null;
         networkSecurity = null;
         selectedLogs = null;
-        selectedGatewayId = string.Empty;
     }
+
+    private async Task RefreshSummaryNetworkSecurityAsync()
+    {
+        summaryNetworkSecurity.Clear();
+        if (workspace is null)
+        {
+            return;
+        }
+
+        foreach (var installation in workspace.Installations)
+        {
+            try
+            {
+                summaryNetworkSecurity[installation.Id] = await HomeLabService.GetNetworkSecurityAsync(installation.Id);
+            }
+            catch
+            {
+                // A stopped or unavailable container is represented in the summary as unverified.
+            }
+        }
+    }
+
+    private HomeLabNetworkSecurity? GetSummaryNetworkSecurity(HomeLabAppInstallation installation) =>
+        summaryNetworkSecurity.TryGetValue(installation.Id, out var security) ? security : null;
+
+    private string GetNetworkSummaryState(HomeLabAppInstallation installation)
+    {
+        var security = GetSummaryNetworkSecurity(installation);
+        if (installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return installation.HealthState == HomeLabHealthState.Healthy
+                ? "VPN GATEWAY ACTIVE"
+                : $"VPN GATEWAY {installation.HealthState.ToString().ToUpperInvariant()}";
+        }
+
+        return security is null
+            ? "UNVERIFIED"
+            : security.IsSecured
+                ? "VPN SECURED"
+                : security.Status.Equals("DIRECT", StringComparison.OrdinalIgnoreCase)
+                    ? "DIRECT / NO VPN"
+                    : security.Status;
+    }
+
+    private string GetNetworkSummaryRoute(HomeLabAppInstallation installation)
+    {
+        var security = GetSummaryNetworkSecurity(installation);
+        if (installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return "VPN gateway container · provider tunnel";
+        }
+
+        if (security is null)
+        {
+            return IsVpnRoute(installation.NetworkMode) ? "VPN gateway · checking" : "Direct internet · checking";
+        }
+
+        return security.IsVpnRouted
+            ? $"VPN gateway · {FormatGatewayLabel(security.GatewayContainer)}"
+            : "Direct internet · no VPN";
+    }
+
+    private string GetNetworkSummaryPublicIp(HomeLabAppInstallation installation) =>
+        GetSummaryNetworkSecurity(installation)?.PublicIp ?? "Unavailable";
+
+    private UiPillTone GetNetworkSummaryTone(HomeLabAppInstallation installation)
+    {
+        var security = GetSummaryNetworkSecurity(installation);
+        if (installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return installation.HealthState == HomeLabHealthState.Healthy
+                ? UiPillTone.Success
+                : GetHealthTone(installation.HealthState);
+        }
+
+        if (security is null)
+        {
+            return UiPillTone.Warning;
+        }
+
+        return security.IsSecured
+            ? UiPillTone.Success
+            : security.Status.Equals("DIRECT", StringComparison.OrdinalIgnoreCase)
+                ? UiPillTone.Warning
+                : UiPillTone.Failure;
+    }
+
+    private string GetRouteSelection(HomeLabAppInstallation installation) =>
+        GetGatewayIdFromNetworkMode(installation.NetworkMode) is { Length: > 0 } gatewayId
+            ? gatewayId
+            : "direct";
+
+    private async Task ChangeSummaryRouteAsync(HomeLabAppInstallation installation, string? selection)
+    {
+        var value = selection?.Trim() ?? string.Empty;
+        var useVpnGateway = !value.Equals("direct", StringComparison.OrdinalIgnoreCase);
+        Guid? gatewayInstallationId = Guid.TryParse(value, out var parsedGatewayId) ? parsedGatewayId : null;
+        if (useVpnGateway && gatewayInstallationId is null)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.SetNetworkRouteAsync(
+                installation.Id,
+                useVpnGateway,
+                gatewayInstallationId);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private Task ChangeSelectedRouteAsync(string? selection) =>
+        selectedInstallation is null
+            ? Task.CompletedTask
+            : ChangeSummaryRouteAsync(selectedInstallation, selection);
 
     private async Task LoadSelectedLogsAsync()
     {
@@ -886,30 +1020,6 @@
         });
     }
 
-    private async Task ChangeRouteAsync(bool useVpnGateway)
-    {
-        if (selectedInstallation is null)
-        {
-            return;
-        }
-
-        await RunUiOperationAsync(async () =>
-        {
-            var installationId = selectedInstallation.Id;
-            Guid? gatewayInstallationId = Guid.TryParse(selectedGatewayId, out var parsedGatewayId) ? parsedGatewayId : null;
-            var result = await HomeLabService.SetNetworkRouteAsync(installationId, useVpnGateway, gatewayInstallationId);
-            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
-            workspace = await HomeLabService.GetWorkspaceAsync();
-            selectedInstallation = workspace?.Installations.FirstOrDefault(item => item.Id == installationId);
-            if (selectedInstallation is not null)
-            {
-                effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(selectedInstallation.DeploymentId);
-                networkSecurity = await HomeLabService.GetNetworkSecurityAsync(selectedInstallation.Id);
-                selectedGatewayId = GetGatewayIdFromNetworkMode(selectedInstallation.NetworkMode);
-            }
-        });
-    }
-
     private async Task VerifySecurityAsync()
     {
         if (selectedInstallation is null || busy)
@@ -940,6 +1050,20 @@
         {
             await operation();
             workspace = await HomeLabService.GetWorkspaceAsync();
+            await RefreshSummaryNetworkSecurityAsync();
+            if (selectedInstallation is { } openInstallation)
+            {
+                selectedInstallation = workspace.Installations.FirstOrDefault(item => item.Id == openInstallation.Id);
+                if (selectedInstallation is null)
+                {
+                    CloseDetails();
+                }
+                else
+                {
+                    networkSecurity = GetSummaryNetworkSecurity(selectedInstallation);
+                    effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(selectedInstallation.DeploymentId);
+                }
+            }
         }
         catch (Exception exception)
         {
