@@ -581,15 +581,23 @@
             return null;
         }
 
-        const string marker = "temporary password is generated for this session:";
         var lines = selectedLogs.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
         for (var index = lines.Length - 1; index >= 0; index--)
         {
-            var markerIndex = lines[index].IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (markerIndex >= 0)
+            var line = lines[index];
+            var passwordIndex = line.IndexOf("temporary password", StringComparison.OrdinalIgnoreCase);
+            var sessionMarker = "for this session:";
+            var sessionIndex = passwordIndex >= 0
+                ? line.IndexOf(sessionMarker, passwordIndex, StringComparison.OrdinalIgnoreCase)
+                : -1;
+            if (sessionIndex >= 0)
             {
-                var password = lines[index][(markerIndex + marker.Length)..].Trim().TrimEnd('.', '\r');
-                return password.Length > 0 ? password : null;
+                var password = line[(sessionIndex + sessionMarker.Length)..]
+                    .Trim()
+                    .Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault()
+                    ?.TrimEnd('.', '\r');
+                return string.IsNullOrWhiteSpace(password) ? null : password;
             }
         }
 
