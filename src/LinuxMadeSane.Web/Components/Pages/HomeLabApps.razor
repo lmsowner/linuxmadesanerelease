@@ -238,7 +238,7 @@
                                     <div class="home-lab-credential-panel">
                                         <h3>qBittorrent login</h3>
                                         <p class="meta-text">Username: <code>admin</code></p>
-                                        <p class="meta-text">The current image generates a temporary password on startup. LMS reads it from the container logs until you change it in qBittorrent.</p>
+                                        <p class="meta-text">The current image generates a new temporary password on every startup. After Start, Update, a gateway change, or a credential reset, use the newest password below. Set a permanent password in qBittorrent to keep it across restarts.</p>
                                         @if (TryGetTemporaryPassword() is { } temporaryPassword)
                                         {
                                             <label class="home-lab-password-label" for="qbittorrent-temporary-password">Current temporary password</label>
@@ -261,6 +261,15 @@
                                             <p class="home-lab-temporary-password">Reading the current qBittorrent startup logs...</p>
                                         }
                                         <div class="home-lab-action-row">
+                                            @if (BuildLocalUrl(selectedInstallation) is { } qbittorrentUrl)
+                                            {
+                                                <UiCommandButton Label="Open qBittorrent"
+                                                                 Glyph="UiIconGlyph.Website"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 Href="@qbittorrentUrl"
+                                                                 Target="_blank"
+                                                                 Rel="noopener" />
+                                            }
                                             <UiCommandButton Label="View login logs"
                                                              Glyph="UiIconGlyph.Terminal"
                                                              Variant="UiButtonVariant.Ghost"
@@ -518,7 +527,13 @@
                                 {
                                         @if (BuildLocalUrl(installation) is { } localUrl)
                                         {
-                                            <UiCommandButton Label="Open" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.Action" Href="@localUrl" Target="_blank" Rel="noopener" />
+                                            <UiCommandButton Label="Open"
+                                                             Glyph="UiIconGlyph.Website"
+                                                             Variant="UiButtonVariant.Action"
+                                                             Href="@localUrl"
+                                                             Target="_blank"
+                                                             Rel="noopener"
+                                                             Title="@(installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) ? "qBittorrent requires its own login. Open Settings for the current temporary password." : null)" />
                                         }
                                         <UiCommandButton Label="Settings"
                                                          Glyph="UiIconGlyph.ListView"
@@ -1210,6 +1225,11 @@
                 {
                     networkSecurity = GetSummaryNetworkSecurity(selectedInstallation);
                     effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(selectedInstallation.DeploymentId);
+                    if (selectedInstallation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var logs = await HomeLabService.GetLogsAsync(selectedInstallation.Id);
+                        selectedLogs = logs.Succeeded ? logs.Logs : $"Could not read container logs: {logs.Error}";
+                    }
                 }
             }
         }

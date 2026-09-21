@@ -390,7 +390,7 @@ public sealed class HomeLabService(
         return Success(
             "Network route updated.",
             useVpnGateway
-                ? $"{app.Name} now uses {selectedGateway!.DisplayName}. It will remain blocked if that gateway is unavailable."
+                ? $"{app.Name} now uses {selectedGateway!.DisplayName}. It will remain blocked if that gateway is unavailable.{QbittorrentRestartLoginNote(app)}"
                 : $"{app.Name} now uses a direct route without VPN.",
             output,
             ToHealth(installation.HealthState));
@@ -556,26 +556,57 @@ public sealed class HomeLabService(
                     : $"Gluetun could not obtain an incoming VPN port: {forwardingError[(forwardingError.IndexOf("ERROR", StringComparison.OrdinalIgnoreCase) + 5)..].Trim()}");
         }
 
-        var preferences = await RunDockerAsync(
-            ["exec", qbittorrentContainer, "curl", "-fsS", "http://127.0.0.1:8080/api/v2/app/preferences"],
-            $"Verify qBittorrent listening port in {qbittorrentContainer}",
-            cancellationToken);
-        try
+        var preferences = await ReadQbittorrentPreferencesAsync(qbittorrentContainer, cancellationToken);
+        if (preferences.Result.ExitCode != 0 || preferences.Settings is not { } settings)
         {
-            var json = JsonNode.Parse(preferences.StandardOutput)?.AsObject();
-            var listeningPort = json?["listen_port"]?.GetValue<int>();
-            var networkInterface = json?["current_network_interface"]?.GetValue<string>();
-            if (preferences.ExitCode != 0 || listeningPort != forwardedPort || !string.Equals(networkInterface, "tun0", StringComparison.OrdinalIgnoreCase))
-            {
-                return ("MISMATCH", forwardedPort, $"Gluetun opened VPN port {forwardedPort}, but qBittorrent is not listening on that port through tun0.");
-            }
+            return ("UNVERIFIED", forwardedPort, $"Gluetun opened VPN port {forwardedPort}, but LMS could not read qBittorrent's listening settings.");
         }
-        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+
+        if (!HomeLabQbittorrentPortForwarding.Matches(settings, forwardedPort))
         {
-            return ("UNVERIFIED", forwardedPort, $"Gluetun opened VPN port {forwardedPort}, but LMS could not verify qBittorrent's listening port.");
+            var synchronization = await RunDockerAsync(
+                [
+                    "exec", qbittorrentContainer,
+                    "curl", "-fsS",
+                    "--retry", "10",
+                    "--retry-connrefused",
+                    "--retry-delay", "1",
+                    "--request", "POST",
+                    "--data-urlencode", HomeLabQbittorrentPortForwarding.BuildPreferencesFormValue(forwardedPort),
+                    "http://127.0.0.1:8080/api/v2/app/setPreferences"
+                ],
+                $"Synchronize qBittorrent with VPN forwarded port {forwardedPort}",
+                cancellationToken);
+            if (synchronization.ExitCode != 0)
+            {
+                return ("MISMATCH", forwardedPort, $"Gluetun opened VPN port {forwardedPort}, but qBittorrent could not be synchronized: {NormalizeFailure(synchronization)}");
+            }
+
+            preferences = await ReadQbittorrentPreferencesAsync(qbittorrentContainer, cancellationToken);
+            if (preferences.Settings is not { } synchronizedSettings ||
+                !HomeLabQbittorrentPortForwarding.Matches(synchronizedSettings, forwardedPort))
+            {
+                return ("MISMATCH", forwardedPort, $"Gluetun opened VPN port {forwardedPort}, but qBittorrent did not retain the matching tun0 listening settings.");
+            }
+
+            return ("ACTIVE", forwardedPort, $"LMS synchronized qBittorrent with Gluetun's forwarded VPN port {forwardedPort} through tun0.");
         }
 
         return ("ACTIVE", forwardedPort, $"Gluetun forwarded VPN port {forwardedPort} and qBittorrent is listening on the same port through tun0.");
+    }
+
+    private async Task<(LinuxCommandResult Result, HomeLabQbittorrentPortSettings? Settings)> ReadQbittorrentPreferencesAsync(
+        string qbittorrentContainer,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunDockerAsync(
+            ["exec", qbittorrentContainer, "curl", "-fsS", "http://127.0.0.1:8080/api/v2/app/preferences"],
+            $"Verify qBittorrent listening port in {qbittorrentContainer}",
+            cancellationToken);
+        return result.ExitCode == 0 &&
+               HomeLabQbittorrentPortForwarding.TryReadSettings(result.StandardOutput, out var settings)
+            ? (result, settings)
+            : (result, null);
     }
 
     public async Task<HomeLabOperationResult> ExecuteAsync(
@@ -2818,6 +2849,11 @@ public sealed class HomeLabService(
 
     private static string FirstNonEmpty(params string[] values) =>
         values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? "The Docker command failed.";
+
+    private static string QbittorrentRestartLoginNote(HomeLabAppManifest app) =>
+        app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase)
+            ? " If qBittorrent still uses its temporary WebUI password, open Settings and use the new password generated by this restart."
+            : string.Empty;
 
     private static void EnsureSuccess(LinuxCommandResult result, string message)
     {
