@@ -474,6 +474,11 @@ public sealed class HomeLabService(
 
         if (action == HomeLabLifecycleAction.Update)
         {
+            if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+            {
+                return await UpdateVpnGatewayAsync(installation, output, cancellationToken);
+            }
+
             var pull = await RunDockerAsync(
                 ["pull", installation.Image],
                 $"Pull updated Home Lab image {installation.Image}",
@@ -556,6 +561,130 @@ public sealed class HomeLabService(
             installation.HealthDetail,
             output,
             ToHealth(installation.HealthState));
+    }
+
+    private async Task<HomeLabOperationResult> UpdateVpnGatewayAsync(
+        HomeLabInstallationEntity gateway,
+        List<string> output,
+        CancellationToken cancellationToken)
+    {
+        var routedInstallations = await dbContext.HomeLabInstallations
+            .Where(item => item.NetworkMode == $"container:{gateway.ContainerName}")
+            .ToListAsync(cancellationToken);
+
+        var pull = await RunDockerAsync(
+            ["pull", gateway.Image],
+            $"Pull updated Home Lab VPN Gateway image {gateway.Image}",
+            cancellationToken);
+        AppendOutput(output, pull);
+        if (pull.ExitCode != 0)
+        {
+            return Failure("VPN Gateway update failed.", NormalizeFailure(pull), output, HomeLabHealthState.Failed);
+        }
+
+        foreach (var routed in routedInstallations)
+        {
+            var removeRouted = await RunDockerAsync(
+                ["rm", "--force", routed.ContainerName],
+                $"Pause routed Home Lab app {routed.ContainerName} for VPN Gateway update",
+                cancellationToken);
+            AppendOutput(output, removeRouted);
+            if (removeRouted.ExitCode != 0 && !ContainsNoSuchContainer(removeRouted))
+            {
+                MarkVpnDependentsBlocked(routedInstallations, "VPN Gateway update could not pause all routed apps.");
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return Failure("VPN Gateway update could not pause routed apps.", NormalizeFailure(removeRouted), output, HomeLabHealthState.Failed);
+            }
+        }
+
+        var removeGateway = await RunDockerAsync(
+            ["rm", "--force", gateway.ContainerName],
+            $"Replace Home Lab VPN Gateway container {gateway.ContainerName}",
+            cancellationToken);
+        AppendOutput(output, removeGateway);
+        if (removeGateway.ExitCode != 0 && !ContainsNoSuchContainer(removeGateway))
+        {
+            MarkVpnDependentsBlocked(routedInstallations, "VPN Gateway update could not replace the gateway container.");
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return Failure("VPN Gateway container replacement failed.", NormalizeFailure(removeGateway), output, HomeLabHealthState.Failed);
+        }
+
+        var gatewayRun = await RunContainerAsync(
+            gateway,
+            HomeLabCatalog.GetApp(gateway.AppId),
+            DeserializeBindings(gateway.VolumeMappingsJson),
+            DeserializeDictionary(gateway.ConfigurationJson),
+            DeserializeDictionary(gateway.SecretConfigurationJson),
+            output,
+            cancellationToken);
+        if (!gatewayRun.Succeeded)
+        {
+            gateway.HealthState = (int)HomeLabHealthState.Failed;
+            gateway.HealthDetail = "VPN Gateway replacement failed; routed apps remain blocked.";
+            MarkVpnDependentsBlocked(routedInstallations, gateway.HealthDetail);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return gatewayRun.Result!;
+        }
+
+        gateway.PortMappingsJson = JsonSerializer.Serialize(gatewayRun.PortBindings, JsonOptions);
+        gateway.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await RefreshHealthInternalAsync(gateway, cancellationToken);
+
+        var failedRoutedApps = new List<string>();
+        foreach (var routed in routedInstallations)
+        {
+            var app = HomeLabCatalog.GetApp(routed.AppId);
+            var routedRun = await RunContainerAsync(
+                routed,
+                app,
+                DeserializeBindings(routed.VolumeMappingsJson),
+                DeserializeDictionary(routed.ConfigurationJson),
+                DeserializeDictionary(routed.SecretConfigurationJson),
+                output,
+                cancellationToken);
+            if (!routedRun.Succeeded)
+            {
+                routed.HealthState = (int)HomeLabHealthState.Blocked;
+                routed.HealthDetail = "Blocked: VPN Gateway was updated, but this app could not be recreated.";
+                failedRoutedApps.Add(app.Name);
+                continue;
+            }
+
+            routed.PortMappingsJson = JsonSerializer.Serialize(routedRun.PortBindings, JsonOptions);
+            await UpdateCaddyAccessAsync(routed, app, routedRun.PortBindings, cancellationToken);
+            routed.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await RefreshHealthInternalAsync(routed, cancellationToken);
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        if (failedRoutedApps.Count > 0)
+        {
+            return Failure(
+                "VPN Gateway updated with blocked routed apps.",
+                $"The gateway was updated, but these apps need attention: {string.Join(", ", failedRoutedApps)}.",
+                output,
+                HomeLabHealthState.Degraded);
+        }
+
+        return Success(
+            "VPN Gateway updated.",
+            routedInstallations.Count == 0
+                ? $"{gateway.DisplayName} was recreated from {gateway.Image}."
+                : $"{gateway.DisplayName} was recreated and {routedInstallations.Count} routed app(s) were reconnected.",
+            output,
+            ToHealth(gateway.HealthState));
+    }
+
+    private static void MarkVpnDependentsBlocked(
+        IEnumerable<HomeLabInstallationEntity> installations,
+        string detail)
+    {
+        foreach (var installation in installations)
+        {
+            installation.HealthState = (int)HomeLabHealthState.Blocked;
+            installation.HealthDetail = $"Blocked: {detail}";
+            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        }
     }
 
     public async Task<HomeLabLogsResult> GetLogsAsync(Guid installationId, CancellationToken cancellationToken = default)
