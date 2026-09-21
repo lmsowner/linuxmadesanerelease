@@ -19,4 +19,5 @@ public sealed record CaddyProxyRouteDefinition(
     int SourcePort = 0,
     string DestinationIp = "",
     int DestinationPort = 0,
-    CaddyProxyTargetScheme DestinationScheme = CaddyProxyTargetScheme.Http);
+    CaddyProxyTargetScheme DestinationScheme = CaddyProxyTargetScheme.Http,
+    bool RewriteSecureCookiesForHttp = false);

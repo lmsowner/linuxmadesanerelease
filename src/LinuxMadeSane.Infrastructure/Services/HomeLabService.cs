@@ -1205,11 +1205,21 @@ public sealed class HomeLabService(
         }
 
         var routeName = BuildCaddyRouteName(installation, app);
+        var rewriteSecureCookiesForHttp = app.Id.Equals("webtor", StringComparison.OrdinalIgnoreCase);
         if (installation.CaddyRouteId is Guid routeId)
         {
             var existing = await caddyIntegrationService.GetEditorAsync(routeId, cancellationToken);
             if (existing.Id == routeId)
             {
+                if (existing.DestinationIp != "127.0.0.1" ||
+                    existing.DestinationPort != primaryPort.HostPort ||
+                    existing.RewriteSecureCookiesForHttp != rewriteSecureCookiesForHttp)
+                {
+                    existing.DestinationIp = "127.0.0.1";
+                    existing.DestinationPort = primaryPort.HostPort;
+                    existing.RewriteSecureCookiesForHttp = rewriteSecureCookiesForHttp;
+                    await caddyIntegrationService.SaveRouteAsync(existing, cancellationToken);
+                }
                 installation.CaddySourcePort = existing.SourcePort;
                 return;
             }
@@ -1229,6 +1239,7 @@ public sealed class HomeLabService(
             {
                 existing.DestinationIp = "127.0.0.1";
                 existing.DestinationPort = primaryPort.HostPort;
+                existing.RewriteSecureCookiesForHttp = rewriteSecureCookiesForHttp;
                 installation.CaddyRouteId = savedRoute.Id;
                 await caddyIntegrationService.SaveRouteAsync(existing, cancellationToken);
                 installation.CaddySourcePort = existing.SourcePort;
@@ -1247,7 +1258,8 @@ public sealed class HomeLabService(
             SourcePort = sourcePort,
             DestinationIp = "127.0.0.1",
             DestinationPort = primaryPort.HostPort,
-            DestinationScheme = CaddyProxyTargetScheme.Http
+            DestinationScheme = CaddyProxyTargetScheme.Http,
+            RewriteSecureCookiesForHttp = rewriteSecureCookiesForHttp
         };
         installation.CaddyRouteId = await caddyIntegrationService.SaveRouteAsync(editor, cancellationToken);
         installation.CaddySourcePort = sourcePort;
@@ -1291,6 +1303,7 @@ public sealed class HomeLabService(
 
         editor.DestinationIp = "127.0.0.1";
         editor.DestinationPort = primaryPort.HostPort;
+        editor.RewriteSecureCookiesForHttp = app.Id.Equals("webtor", StringComparison.OrdinalIgnoreCase);
         await caddyIntegrationService.SaveRouteAsync(editor, cancellationToken);
         installation.CaddySourcePort = editor.SourcePort;
     }

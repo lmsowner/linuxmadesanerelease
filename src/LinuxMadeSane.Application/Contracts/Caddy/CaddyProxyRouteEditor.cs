@@ -40,4 +40,6 @@ public sealed class CaddyProxyRouteEditor
     public int DestinationPort { get; set; } = 80;
 
     public CaddyProxyTargetScheme DestinationScheme { get; set; } = CaddyProxyTargetScheme.Http;
+
+    public bool RewriteSecureCookiesForHttp { get; set; }
 }

@@ -81,7 +81,8 @@ public sealed class CaddyIntegrationService(
                 SourcePort = route.SourcePort > 0 ? route.SourcePort : 8080,
                 DestinationIp = string.IsNullOrWhiteSpace(route.DestinationIp) ? "127.0.0.1" : route.DestinationIp,
                 DestinationPort = route.DestinationPort > 0 ? route.DestinationPort : 80,
-                DestinationScheme = route.DestinationScheme
+                DestinationScheme = route.DestinationScheme,
+                RewriteSecureCookiesForHttp = route.RewriteSecureCookiesForHttp
             };
     }
 
@@ -168,12 +169,19 @@ public sealed class CaddyIntegrationService(
         }
 
         builder.AppendLine("    encode zstd gzip");
-        if (route.DestinationScheme == CaddyProxyTargetScheme.Https)
+        if (route.DestinationScheme == CaddyProxyTargetScheme.Https || route.RewriteSecureCookiesForHttp)
         {
             builder.AppendLine($"    reverse_proxy {targetUrl} {{");
-            builder.AppendLine("        transport http {");
-            builder.AppendLine("            tls_insecure_skip_verify");
-            builder.AppendLine("        }");
+            if (route.RewriteSecureCookiesForHttp)
+            {
+                builder.AppendLine("        header_down Set-Cookie \"Secure; SameSite=None\" \"SameSite=Lax\"");
+            }
+            if (route.DestinationScheme == CaddyProxyTargetScheme.Https)
+            {
+                builder.AppendLine("        transport http {");
+                builder.AppendLine("            tls_insecure_skip_verify");
+                builder.AppendLine("        }");
+            }
             builder.AppendLine("    }");
         }
         else
@@ -230,7 +238,8 @@ public sealed class CaddyIntegrationService(
             sourcePort,
             destinationIp,
             destinationPort,
-            editor.DestinationScheme);
+            editor.DestinationScheme,
+            editor.RewriteSecureCookiesForHttp);
     }
 
     private string? BuildBlockingWarning(CaddyProxyRouteDefinition route)

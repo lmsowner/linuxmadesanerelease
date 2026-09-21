@@ -649,6 +649,7 @@ public sealed class SqliteDatabaseInitializer(
                 DestinationIp TEXT NOT NULL DEFAULT '',
                 DestinationPort INTEGER NOT NULL DEFAULT 0,
                 DestinationScheme INTEGER NOT NULL DEFAULT 0,
+                RewriteSecureCookiesForHttp INTEGER NOT NULL DEFAULT 0,
                 Description TEXT NOT NULL,
                 EnableTls INTEGER NOT NULL,
                 CreatedAtUtc TEXT NOT NULL,
@@ -663,6 +664,7 @@ public sealed class SqliteDatabaseInitializer(
         await EnsureColumnExistsAsync("caddy_proxy_routes", "DestinationIp", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync("caddy_proxy_routes", "DestinationPort", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnExistsAsync("caddy_proxy_routes", "DestinationScheme", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnExistsAsync("caddy_proxy_routes", "RewriteSecureCookiesForHttp", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
     }
 
     private async Task EnsureEdgeGatewayTablesAsync(CancellationToken cancellationToken)

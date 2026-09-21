@@ -15,6 +15,7 @@ public sealed class CaddyProxyRouteEntity
     public string DestinationIp { get; set; } = string.Empty;
     public int DestinationPort { get; set; }
     public int DestinationScheme { get; set; }
+    public bool RewriteSecureCookiesForHttp { get; set; }
     public string Description { get; set; } = string.Empty;
     public bool EnableTls { get; set; } = true;
     public DateTimeOffset CreatedAtUtc { get; set; }

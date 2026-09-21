@@ -445,7 +445,7 @@ public sealed class SqliteCaddyIntegrationDataService(
             FirstCaddyProblemLine(result.StandardError, result.StandardOutput) ?? "Caddy rejected the staged configuration.");
     }
 
-    private static string RenderManagedConfiguration(IReadOnlyList<CaddyProxyRouteDefinition> routes)
+    internal static string RenderManagedConfiguration(IReadOnlyList<CaddyProxyRouteDefinition> routes)
     {
         var builder = new StringBuilder();
         builder.AppendLine("# Managed by Linux Made Sane");
@@ -485,7 +485,8 @@ public sealed class SqliteCaddyIntegrationDataService(
                 group.SourcePort,
                 group.DestinationIp,
                 group.DestinationPort,
-                group.DestinationScheme));
+                group.DestinationScheme,
+                group.RewriteSecureCookiesForHttp));
             builder.AppendLine();
         }
 
@@ -537,6 +538,7 @@ public sealed class SqliteCaddyIntegrationDataService(
                     group.Key.DestinationIp,
                     group.Key.DestinationPort,
                     group.Key.DestinationScheme,
+                    orderedRoutes.Any(route => route.RewriteSecureCookiesForHttp),
                     orderedRoutes);
             })
             .ToArray();
@@ -565,14 +567,16 @@ public sealed class SqliteCaddyIntegrationDataService(
             route.SourcePort,
             route.DestinationIp,
             route.DestinationPort,
-            route.DestinationScheme);
+            route.DestinationScheme,
+            route.RewriteSecureCookiesForHttp);
 
     private static string RenderPortForwardBlock(
         string sourceIpValue,
         int sourcePort,
         string destinationIp,
         int destinationPort,
-        CaddyProxyTargetScheme destinationScheme)
+        CaddyProxyTargetScheme destinationScheme,
+        bool rewriteSecureCookiesForHttp)
     {
         var builder = new StringBuilder();
         var listenPort = Math.Clamp(sourcePort, 1, 65535);
@@ -586,12 +590,19 @@ public sealed class SqliteCaddyIntegrationDataService(
         }
 
         builder.AppendLine("    encode zstd gzip");
-        if (destinationScheme == CaddyProxyTargetScheme.Https)
+        if (destinationScheme == CaddyProxyTargetScheme.Https || rewriteSecureCookiesForHttp)
         {
             builder.AppendLine($"    reverse_proxy {targetUrl} {{");
-            builder.AppendLine("        transport http {");
-            builder.AppendLine("            tls_insecure_skip_verify");
-            builder.AppendLine("        }");
+            if (rewriteSecureCookiesForHttp)
+            {
+                builder.AppendLine("        header_down Set-Cookie \"Secure; SameSite=None\" \"SameSite=Lax\"");
+            }
+            if (destinationScheme == CaddyProxyTargetScheme.Https)
+            {
+                builder.AppendLine("        transport http {");
+                builder.AppendLine("            tls_insecure_skip_verify");
+                builder.AppendLine("        }");
+            }
             builder.AppendLine("    }");
         }
         else
@@ -803,7 +814,8 @@ public sealed class SqliteCaddyIntegrationDataService(
             entity.SourcePort,
             entity.DestinationIp,
             entity.DestinationPort,
-            (CaddyProxyTargetScheme)entity.DestinationScheme);
+            (CaddyProxyTargetScheme)entity.DestinationScheme,
+            entity.RewriteSecureCookiesForHttp);
 
     private static CaddyProxyRouteDefinition? MapOrNull(CaddyProxyRouteEntity? entity) =>
         entity is null ? null : Map(entity);
@@ -821,6 +833,7 @@ public sealed class SqliteCaddyIntegrationDataService(
             DestinationIp = route.DestinationIp,
             DestinationPort = route.DestinationPort,
             DestinationScheme = (int)route.DestinationScheme,
+            RewriteSecureCookiesForHttp = route.RewriteSecureCookiesForHttp,
             Description = route.Description,
             EnableTls = route.EnableTls,
             CreatedAtUtc = route.CreatedAtUtc,
@@ -838,6 +851,7 @@ public sealed class SqliteCaddyIntegrationDataService(
         entity.DestinationIp = route.DestinationIp;
         entity.DestinationPort = route.DestinationPort;
         entity.DestinationScheme = (int)route.DestinationScheme;
+        entity.RewriteSecureCookiesForHttp = route.RewriteSecureCookiesForHttp;
         entity.Description = route.Description;
         entity.EnableTls = route.EnableTls;
         entity.CreatedAtUtc = route.CreatedAtUtc;
@@ -1237,6 +1251,7 @@ public sealed class SqliteCaddyIntegrationDataService(
         string DestinationIp,
         int DestinationPort,
         CaddyProxyTargetScheme DestinationScheme,
+        bool RewriteSecureCookiesForHttp,
         IReadOnlyList<CaddyProxyRouteDefinition> Routes);
 
     private static string FormatHostForUri(string host)
