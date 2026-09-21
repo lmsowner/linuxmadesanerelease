@@ -10,12 +10,12 @@
 @inject IHomeLabService HomeLabService
 @inject NavigationManager Navigation
 
-<PageTitle>Home Lab Apps | Linux Made Sane</PageTitle>
+<PageTitle>Home Lab | Linux Made Sane</PageTitle>
 
 <div class="page-shell home-lab-page">
     <UiHeroPanel Eyebrow="Home Lab"
-                  Title="Apps"
-                  Description="Compose established Docker applications on private LMS-managed networks."
+                  Title="Home Lab"
+                  Description="Install apps and recipes, manage shared storage, and get planning help."
                   Compact="true">
         <Actions>
             <UiCommandButton Label="Refresh"
@@ -25,11 +25,6 @@
                              OnClick="LoadAsync" />
         </Actions>
     </UiHeroPanel>
-
-    <nav class="home-lab-section-tabs" aria-label="Home Lab">
-        <a class="active" href="/home-lab/apps">Apps</a>
-        <a href="/home-lab/recipes">Recipes</a>
-    </nav>
 
     @if (!string.IsNullOrWhiteSpace(message))
     {
@@ -574,6 +569,107 @@
                 </div>
             </TabPage>
 
+            <TabPage Value="recipes" Title="Recipes">
+                @if (configuringRecipe is { } recipeToConfigure)
+                {
+                    var vpn = HomeLabCatalog.GetApp("vpn-gateway");
+                    <UiModal IsOpen="true"
+                             Title="@($"Configure {recipeToConfigure.Name}")"
+                             Subtitle="This recipe installs Gluetun and routes the selected apps through it. Secrets are stored securely."
+                             Class="home-lab-settings-modal"
+                             Resizable="true"
+                             CloseOnBackdrop="false"
+                             OnClose="CancelRecipeConfiguration">
+                        <ChildContent>
+                            <section class="home-lab-config-panel">
+                                <div class="home-lab-config-heading">
+                                    <div>
+                                        <p class="eyebrow">VPN gateway setup</p>
+                                        <h2>Configure @recipeToConfigure.Name</h2>
+                                        <p class="meta-text">The recipe remains blocked if its VPN gateway is unhealthy.</p>
+                                    </div>
+                                    <UiCommandButton Label="Cancel"
+                                                     Glyph="UiIconGlyph.Clear"
+                                                     Variant="UiButtonVariant.Ghost"
+                                                     Disabled="@busy"
+                                                     OnClick="CancelRecipeConfiguration" />
+                                </div>
+                                <div class="home-lab-config-grid">
+                                    @foreach (var field in vpn.ConfigurationSchema.Where(ShouldShowRecipeConfigurationField))
+                                    {
+                                        <div class="home-lab-config-field">
+                                            <label for="recipe-vpn-@field.Id">@field.Label</label>
+                                            @if (field.Type.Equals("select", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                <select id="recipe-vpn-@field.Id" class="ui-control-input" value="@GetConfigurationValue(field.Id)" @onchange="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString())">
+                                                    <option value="">Choose...</option>
+                                                    @foreach (var option in field.Options ?? [])
+                                                    {
+                                                        <option value="@option">@option</option>
+                                                    }
+                                                </select>
+                                            }
+                                            else if (field.Type.Equals("secret-textarea", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                <textarea id="recipe-vpn-@field.Id"
+                                                          class="ui-control-input ui-control-textarea"
+                                                          rows="8"
+                                                          autocomplete="off"
+                                                          @oninput="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString(), true)">@GetSecretConfigurationValue(field.Id)</textarea>
+                                            }
+                                            else
+                                            {
+                                                <input id="recipe-vpn-@field.Id"
+                                                       class="ui-control-input"
+                                                       type="@(field.Secret ? "password" : "text")"
+                                                       value="@(field.Secret ? GetSecretConfigurationValue(field.Id) : GetConfigurationValue(field.Id))"
+                                                       autocomplete="@(field.Secret ? "new-password" : "off")"
+                                                       @oninput="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString(), field.Secret)" />
+                                            }
+                                            @if (!string.IsNullOrWhiteSpace(field.Help))
+                                            {
+                                                <span class="meta-text">@field.Help</span>
+                                            }
+                                        </div>
+                                    }
+                                </div>
+                                <div class="home-lab-config-footer">
+                                    <span class="meta-text">LMS recreates the complete recipe from these settings.</span>
+                                    <UiCommandButton Label="Install configured recipe"
+                                                     Glyph="UiIconGlyph.Download"
+                                                     Variant="UiButtonVariant.Primary"
+                                                     Disabled="@busy"
+                                                     OnClick="InstallConfiguredRecipeAsync" />
+                                </div>
+                            </section>
+                        </ChildContent>
+                    </UiModal>
+                }
+
+                <div class="surface-card home-lab-recipe-list">
+                    @foreach (var recipe in workspace.Recipes)
+                    {
+                        <div class="home-lab-recipe-row">
+                            <div>
+                                <strong>@recipe.Name</strong>
+                                <span>@recipe.Description</span>
+                            </div>
+                            <div class="home-lab-recipe-apps">
+                                @foreach (var appId in recipe.AppIds)
+                                {
+                                    <span>@HomeLabCatalog.GetApp(appId).Name</span>
+                                }
+                            </div>
+                            <UiCommandButton Label="Install"
+                                             Glyph="UiIconGlyph.Download"
+                                             Variant="UiButtonVariant.PrimaryMuted"
+                                             Disabled="@busy"
+                                             OnClick="() => InstallRecipeAsync(recipe)" />
+                        </div>
+                    }
+                </div>
+            </TabPage>
+
             <TabPage Value="storage" Title="Storage">
                 <section class="surface-subcard home-lab-storage-panel">
                     <div>
@@ -594,7 +690,7 @@
                 </section>
             </TabPage>
 
-            <TabPage Value="ai" Title="AI help">
+            <TabPage Value="ai" Title="AI Help">
                 <section class="surface-subcard home-lab-ai-panel">
                     <div>
                         <p class="eyebrow">Home Lab assistant</p>
@@ -625,6 +721,7 @@
     private HomeLabAppCategory? activeCategory;
     private HomeLabAppManifest? configuringApp;
     private HomeLabAppInstallation? configuringInstallation;
+    private HomeLabRecipeManifest? configuringRecipe;
     private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
     private HomeLabAppInstallation? selectedInstallation;
@@ -632,6 +729,9 @@
     private HomeLabNetworkSecurity? networkSecurity;
     private readonly Dictionary<Guid, HomeLabNetworkSecurity> summaryNetworkSecurity = [];
     private string? selectedLogs;
+
+    [SupplyParameterFromQuery(Name = "tab")]
+    public string? RequestedTab { get; set; }
 
     private static readonly HomeLabAppCategory?[] Categories =
     [
@@ -654,6 +754,11 @@
         ?? Enumerable.Empty<HomeLabAppInstallation>();
 
     protected override Task OnInitializedAsync() => LoadAsync();
+
+    protected override void OnParametersSet()
+    {
+        activeTab = RequestedTab is "recipes" or "storage" or "ai" ? RequestedTab : "apps";
+    }
 
     private async Task LoadAsync()
     {
@@ -679,7 +784,8 @@
 
     private Task HandleTabChangedAsync(string? value)
     {
-        activeTab = value is "storage" or "ai" ? value : "apps";
+        activeTab = value is "recipes" or "storage" or "ai" ? value : "apps";
+        Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("tab", activeTab), replace: true);
         return Task.CompletedTask;
     }
 
@@ -692,10 +798,69 @@
         });
     }
 
+    private async Task InstallRecipeAsync(HomeLabRecipeManifest recipe)
+    {
+        if (recipe.RequiresVpnGateway)
+        {
+            configuringRecipe = recipe;
+            configuringApp = null;
+            configuringInstallation = null;
+            configurationValues.Clear();
+            secretConfigurationValues.Clear();
+            configurationValues["gateway-name"] = NextGatewayName();
+            configurationValues["configuration-mode"] = "Paste provider config";
+            configurationValues["provider"] = "ProtonVPN";
+            configurationValues["protocol"] = "WireGuard";
+            configurationValues["port-forwarding"] = "Required for qBittorrent/P2P";
+            activeTab = "recipes";
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.InstallRecipeAsync(new HomeLabRecipeInstallRequest(
+                recipe.Id,
+                new Dictionary<string, string>(storagePaths, StringComparer.OrdinalIgnoreCase)));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private async Task InstallConfiguredRecipeAsync()
+    {
+        if (configuringRecipe is not { } recipe)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.InstallRecipeAsync(new HomeLabRecipeInstallRequest(
+                recipe.Id,
+                new Dictionary<string, string>(storagePaths, StringComparer.OrdinalIgnoreCase),
+                configurationValues,
+                SecretConfiguration: secretConfigurationValues));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            if (result.Succeeded)
+            {
+                configuringRecipe = null;
+                configurationValues.Clear();
+                secretConfigurationValues.Clear();
+            }
+        });
+    }
+
+    private void CancelRecipeConfiguration()
+    {
+        configuringRecipe = null;
+        configurationValues.Clear();
+        secretConfigurationValues.Clear();
+    }
+
     private async Task InstallAsync(HomeLabAppManifest app)
     {
         if (app.ConfigurationSchema.Count > 0 || app.SupportsVpnGateway)
         {
+            configuringRecipe = null;
             configuringApp = app;
             configuringInstallation = null;
             configurationValues.Clear();
@@ -1053,6 +1218,35 @@
             return true;
         }
 
+        var setupMode = GetConfigurationValue("configuration-mode");
+        if (field.Id.Equals("vpn-config", StringComparison.OrdinalIgnoreCase))
+        {
+            return setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase);
+        }
+        if (setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("configuration-mode", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("protocol", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("provider", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("port-forwarding", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var protocol = GetConfigurationValue("protocol");
+        if (field.Id.StartsWith("wireguard-", StringComparison.OrdinalIgnoreCase))
+        {
+            return protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase);
+        }
+        if (field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
+        {
+            return protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase);
+        }
+        return true;
+    }
+
+    private bool ShouldShowRecipeConfigurationField(HomeLabConfigurationField field)
+    {
         var setupMode = GetConfigurationValue("configuration-mode");
         if (field.Id.Equals("vpn-config", StringComparison.OrdinalIgnoreCase))
         {
