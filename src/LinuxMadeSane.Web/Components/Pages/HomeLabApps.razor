@@ -56,7 +56,7 @@
                                 <h2>Configure @appToConfigure.Name</h2>
                                 <p class="meta-text">These values are applied to the Docker container. Secret fields are stored by LMS and are not shown again.</p>
                             </div>
-                            <CompactUIButton Label="Cancel" Glyph="UiIconGlyph.Clear" Disabled="@busy" OnClick="CancelConfiguration" />
+                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelConfiguration" />
                         </div>
                         <div class="home-lab-config-grid">
                             @foreach (var field in appToConfigure.ConfigurationSchema.Where(ShouldShowConfigurationField))
@@ -109,7 +109,7 @@
                         </div>
                         <div class="home-lab-config-footer">
                             <span class="meta-text">VPN routing and the kill switch are applied by Gluetun and the LMS dependency state.</span>
-                            <CompactUIButton Label="Install configured app" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="InstallConfiguredAsync" />
+                            <UiCommandButton Label="Install configured app" Glyph="UiIconGlyph.Download" Variant="UiButtonVariant.Primary" Disabled="@busy" OnClick="InstallConfiguredAsync" />
                         </div>
                     </section>
                 }
@@ -134,8 +134,126 @@
                                     <h2>@GetApp(selectedDetails.AppId).Name</h2>
                                     <p class="meta-text">This is the effective Docker configuration LMS created. Secrets are shown as redacted and are never included here.</p>
                                 </div>
-                                <CompactUIButton Label="Close" Glyph="UiIconGlyph.Clear" Disabled="@busy" OnClick="CloseDetails" />
+                                <UiCommandButton Label="Close" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CloseDetails" />
                             </div>
+
+                            <section class="home-lab-important-settings" aria-label="Important Docker settings">
+                                @if (selectedDetails.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    <div class="home-lab-credential-panel home-lab-security-summary">
+                                        <p class="eyebrow">Infrastructure configuration</p>
+                                        <h3>VPN Gateway</h3>
+                                        <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                            <dt>Gateway name</dt><dd>@selectedInstallation.DisplayName</dd>
+                                            <dt>Provider</dt><dd>@FormatProvider(GetEffectiveEnvironmentValue(selectedDetails, "VPN_SERVICE_PROVIDER"))</dd>
+                                            <dt>Protocol</dt><dd>@FormatProtocol(GetEffectiveEnvironmentValue(selectedDetails, "VPN_TYPE"))</dd>
+                                            <dt>Public IP</dt><dd><code>@(networkSecurity?.PublicIp ?? "Checking…")</code></dd>
+                                        </dl>
+                                    </div>
+                                }
+
+                                @if (networkSecurity is { } security)
+                                {
+                                    <div class="home-lab-credential-panel home-lab-security-summary">
+                                        <div class="home-lab-details-heading">
+                                            <div>
+                                                <p class="eyebrow">Network protection</p>
+                                                <h3>VPN security</h3>
+                                                <p class="meta-text">This is the live route LMS verified for this container.</p>
+                                            </div>
+                                            <UiPill Tone="@GetSecurityTone(security.Status)">@security.Status</UiPill>
+                                        </div>
+                                        <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                            <dt>Route</dt><dd><strong>@security.Route</strong></dd>
+                                            <dt>Gluetun gateway</dt><dd><code>@FormatGatewayLabel(security.GatewayContainer)</code></dd>
+                                            <dt>Gateway health</dt><dd>@security.GatewayHealth</dd>
+                                            <dt>Public IP</dt><dd><code>@(security.PublicIp ?? "Unavailable")</code></dd>
+                                            <dt>Checked</dt><dd>@security.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</dd>
+                                        </dl>
+                                        <p class="meta-text">@security.Detail</p>
+                                        <UiCommandButton Label="Check VPN now"
+                                                         Title="Re-check the live Docker route, Gluetun health, and public egress IP"
+                                                         Glyph="UiIconGlyph.Refresh"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         Disabled="@busy"
+                                                         OnClick="VerifySecurityAsync" />
+                                    </div>
+                                }
+
+                                @if (GetApp(selectedDetails.AppId).SupportsVpnGateway && !selectedInstallation.IsRecipeInstallation)
+                                {
+                                    <div class="home-lab-credential-panel">
+                                        <h3>Internet route</h3>
+                                        <p class="meta-text">
+                                            Current route:
+                                            <strong>@(IsVpnRoute(selectedInstallation.NetworkMode) ? "VPN Gateway (Gluetun)" : "Direct (NO VPN)")</strong>.
+                                            This selection applies immediately and recreates the container with the selected route.
+                                        </p>
+                                        @if (IsVpnRoute(selectedInstallation.NetworkMode))
+                                        {
+                                            <p class="meta-text">The container shares the selected Gluetun network namespace. If the gateway is unhealthy, LMS blocks this app and does not fall back to direct Internet access.</p>
+                                        }
+                                        else if (GetApp(selectedDetails.AppId).RequiresVpnGateway)
+                                        {
+                                            <p class="meta-text"><strong>UNSAFE:</strong> this app requires Gluetun and is blocked until it is routed through a VPN gateway.</p>
+                                        }
+                                        <label class="home-lab-password-label" for="home-lab-selected-route">Internet route</label>
+                                        <select id="home-lab-selected-route"
+                                                class="ui-control-input"
+                                                value="@GetRouteSelection(selectedInstallation)"
+                                                disabled="@busy"
+                                                @onchange="eventArgs => ChangeSelectedRouteAsync(eventArgs.Value?.ToString())">
+                                            <option value="direct" disabled="@GetApp(selectedDetails.AppId).RequiresVpnGateway">Direct (no VPN)</option>
+                                            @foreach (var gateway in InstalledVpnGateways)
+                                            {
+                                                <option value="@gateway.Id">VPN · @gateway.DisplayName (@gateway.HealthState)</option>
+                                            }
+                                        </select>
+                                    </div>
+                                }
+
+                                @if (selectedDetails.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    <div class="home-lab-credential-panel">
+                                        <h3>qBittorrent login</h3>
+                                        <p class="meta-text">Username: <code>admin</code></p>
+                                        <p class="meta-text">The current image generates a temporary password on startup. LMS reads it from the container logs until you change it in qBittorrent.</p>
+                                        @if (TryGetTemporaryPassword() is { } temporaryPassword)
+                                        {
+                                            <label class="home-lab-password-label" for="qbittorrent-temporary-password">Current temporary password</label>
+                                            <input id="qbittorrent-temporary-password"
+                                                   class="ui-control-input home-lab-password-field"
+                                                   value="@temporaryPassword"
+                                                   readonly
+                                                   aria-label="Current qBittorrent temporary password" />
+                                        }
+                                        else if (selectedLogs?.StartsWith("Could not read container logs", StringComparison.OrdinalIgnoreCase) == true)
+                                        {
+                                            <p class="home-lab-temporary-password">@selectedLogs</p>
+                                        }
+                                        else if (selectedLogs is not null)
+                                        {
+                                            <p class="home-lab-temporary-password">No temporary password was found. qBittorrent appears to have a persistent password configured.</p>
+                                        }
+                                        else
+                                        {
+                                            <p class="home-lab-temporary-password">Reading the current qBittorrent startup logs...</p>
+                                        }
+                                        <div class="home-lab-action-row">
+                                            <UiCommandButton Label="View login logs"
+                                                             Glyph="UiIconGlyph.Terminal"
+                                                             Variant="UiButtonVariant.Ghost"
+                                                             Disabled="@busy"
+                                                             OnClick="LoadSelectedLogsAsync" />
+                                            <UiCommandButton Label="Reset to temporary password"
+                                                             Glyph="UiIconGlyph.Restart"
+                                                             Variant="UiButtonVariant.ActionSubtle"
+                                                             Disabled="@busy"
+                                                             OnClick="ResetSelectedCredentialsAsync" />
+                                        </div>
+                                    </div>
+                                }
+                            </section>
 
                             <div class="home-lab-details-grid">
                                 <div class="home-lab-detail-block">
@@ -181,31 +299,6 @@
                                 </div>
                             </div>
 
-                            @if (networkSecurity is { } security)
-                            {
-                                <div class="home-lab-credential-panel">
-                                    <div class="home-lab-details-heading">
-                                        <div>
-                                            <h3>VPN security verification</h3>
-                                            <p class="meta-text">LMS checks the live Docker network mode, Gluetun health, and the observed public egress IP.</p>
-                                        </div>
-                                        <UiPill Tone="@GetSecurityTone(security.Status)">@security.Status</UiPill>
-                                    </div>
-                                    <dl class="home-lab-detail-list home-lab-detail-definition-list">
-                                        <dt>Route</dt><dd><strong>@security.Route</strong></dd>
-                                        <dt>Gluetun gateway</dt><dd><code>@FormatGatewayLabel(security.GatewayContainer)</code></dd>
-                                        <dt>Gateway health</dt><dd>@security.GatewayHealth</dd>
-                                        <dt>Observed public IP</dt><dd><code>@(security.PublicIp ?? "Unavailable")</code></dd>
-                                        <dt>Checked</dt><dd>@security.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</dd>
-                                    </dl>
-                                    <p class="meta-text">@security.Detail</p>
-                                    <CompactUIButton Label="Verify again"
-                                                     Glyph="UiIconGlyph.Refresh"
-                                                     Disabled="@busy"
-                                                     OnClick="VerifySecurityAsync" />
-                                </div>
-                            }
-
                             <details class="home-lab-advanced-details">
                                 <summary>Technical Docker details</summary>
                                 <div class="home-lab-detail-block">
@@ -246,91 +339,6 @@
                                 </div>
                             </details>
 
-                            @if (GetApp(selectedDetails.AppId).SupportsVpnGateway && !selectedInstallation.IsRecipeInstallation)
-                            {
-                                <div class="home-lab-credential-panel">
-                                    <div>
-                                        <h3>Internet route</h3>
-                                        <p class="meta-text">
-                                            Current route:
-                                            <strong>@(IsVpnRoute(selectedInstallation.NetworkMode) ? "VPN Gateway (Gluetun)" : "Direct (NO VPN)")</strong>.
-                                            Changing this recreates the container with the selected Docker network mode.
-                                        </p>
-                                        @if (IsVpnRoute(selectedInstallation.NetworkMode))
-                                        {
-                                            <p class="meta-text">This container shares the VPN gateway network namespace. If Gluetun is unhealthy, LMS marks the app blocked and does not fall back to direct Internet access.</p>
-                                        }
-                                        else if (GetApp(selectedDetails.AppId).RequiresVpnGateway)
-                                        {
-                                            <p class="meta-text"><strong>UNSAFE:</strong> this app requires Gluetun. LMS has blocked its direct route; route it through Gluetun before starting it.</p>
-                                        }
-                                        else
-                                        {
-                                            <p class="meta-text">This container has direct Internet access. Use the VPN route button before using it for privacy-sensitive traffic.</p>
-                                        }
-                                        @if (GetApp(selectedDetails.AppId).SupportsVpnGateway)
-                                        {
-                                            <label class="home-lab-password-label" for="home-lab-selected-route">Internet route</label>
-                                            <select id="home-lab-selected-route"
-                                                    class="ui-control-input"
-                                                    value="@GetRouteSelection(selectedInstallation)"
-                                                    disabled="@busy"
-                                                    @onchange="eventArgs => ChangeSelectedRouteAsync(eventArgs.Value?.ToString())">
-                                                <option value="direct" disabled="@GetApp(selectedDetails.AppId).RequiresVpnGateway">Direct (no VPN)</option>
-                                                @foreach (var gateway in InstalledVpnGateways)
-                                                {
-                                                    <option value="@gateway.Id">VPN · @gateway.DisplayName (@gateway.HealthState)</option>
-                                                }
-                                            </select>
-                                            <p class="meta-text">Changes apply immediately and recreate the container with the selected route. No Apply button is required.</p>
-                                        }
-                                    </div>
-                                </div>
-                            }
-
-                            @if (selectedDetails.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
-                            {
-                                <div class="home-lab-credential-panel">
-                                    <div>
-                                        <h3>qBittorrent login</h3>
-                                        <p class="meta-text">Username: <code>admin</code></p>
-                                        <p class="meta-text">There is no fixed default password in the current qBittorrent image. Until you change it in qBittorrent, a temporary password is generated on startup and printed in the container logs.</p>
-                                        @if (TryGetTemporaryPassword() is { } temporaryPassword)
-                                        {
-                                            <label class="home-lab-password-label" for="qbittorrent-temporary-password">Current temporary password</label>
-                                            <input id="qbittorrent-temporary-password"
-                                                   class="ui-control-input home-lab-password-field"
-                                                   value="@temporaryPassword"
-                                                   readonly
-                                                   aria-label="Current qBittorrent temporary password" />
-                                        }
-                                        else if (selectedLogs?.StartsWith("Could not read container logs", StringComparison.OrdinalIgnoreCase) == true)
-                                        {
-                                            <p class="home-lab-temporary-password">@selectedLogs</p>
-                                        }
-                                        else if (selectedLogs is not null)
-                                        {
-                                            <p class="home-lab-temporary-password">No temporary password was found. qBittorrent appears to have a persistent password configured.</p>
-                                        }
-                                        else
-                                        {
-                                            <p class="home-lab-temporary-password">Reading the current qBittorrent startup logs...</p>
-                                        }
-                                    </div>
-                                    <div class="home-lab-action-row">
-                                        <CompactUIButton Label="View login logs"
-                                                         Glyph="UiIconGlyph.Terminal"
-                                                         Disabled="@busy"
-                                                         OnClick="LoadSelectedLogsAsync" />
-                                        <CompactUIButton Label="Reset to temporary password"
-                                                         Glyph="UiIconGlyph.Restart"
-                                                         Disabled="@busy"
-                                                         OnClick="ResetSelectedCredentialsAsync" />
-                                    </div>
-                                    <p class="meta-text">Reset stops qBittorrent, removes its stored password hash, starts it again, and loads the new generated password below. Change it in qBittorrent settings afterwards.</p>
-                                </div>
-                            }
-
                             <details class="home-lab-advanced-details">
                                 <summary>Container logs and diagnostics</summary>
                                 <div class="home-lab-detail-block">
@@ -339,8 +347,9 @@
                                             <h3>Container logs</h3>
                                             <p class="meta-text">Use these logs for startup passwords, provider errors, health failures, and application diagnostics.</p>
                                         </div>
-                                        <CompactUIButton Label="View logs"
+                                        <UiCommandButton Label="View logs"
                                                          Glyph="UiIconGlyph.Terminal"
+                                                         Variant="UiButtonVariant.Ghost"
                                                          Disabled="@busy"
                                                          OnClick="LoadSelectedLogsAsync" />
                                     </div>
@@ -432,38 +441,40 @@
                                         {
                                             @if (BuildLocalUrl(gateway) is { } gatewayUrl)
                                             {
-                                                <CompactUIButton Label="Open" Glyph="UiIconGlyph.Website" Href="@gatewayUrl" Target="_blank" Rel="noopener" />
+                                                <UiCommandButton Label="Open" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.Action" Href="@gatewayUrl" Target="_blank" Rel="noopener" />
                                             }
-                                            <CompactUIButton Label="@($"Settings: {gateway.DisplayName}")"
+                                            <UiCommandButton Label="@($"Settings: {gateway.DisplayName}")"
                                                              Glyph="UiIconGlyph.ListView"
+                                                             Variant="UiButtonVariant.Ghost"
                                                              Disabled="@busy"
                                                              OnClick="() => ManageAsync(gateway)" />
-                                            <CompactUIButton Label="Start" Glyph="UiIconGlyph.Run" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Start)" />
-                                            <CompactUIButton Label="Stop" Glyph="UiIconGlyph.Stop" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Stop)" />
-                                            <CompactUIButton Label="Update" Glyph="UiIconGlyph.Refresh" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Update)" />
-                                            <CompactUIButton Label="Remove" Glyph="UiIconGlyph.Delete" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Remove)" />
+                                            <UiCommandButton Label="Start" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Start)" />
+                                            <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Stop)" />
+                                            <UiCommandButton Label="Update" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Update)" />
+                                            <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Remove)" />
                                         }
                                     }
                                     else
                                     {
                                         @if (BuildLocalUrl(installation) is { } localUrl)
                                         {
-                                            <CompactUIButton Label="Open" Glyph="UiIconGlyph.Website" Href="@localUrl" Target="_blank" Rel="noopener" />
+                                            <UiCommandButton Label="Open" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.Action" Href="@localUrl" Target="_blank" Rel="noopener" />
                                         }
-                                        <CompactUIButton Label="Settings"
+                                        <UiCommandButton Label="Settings"
                                                          Glyph="UiIconGlyph.ListView"
+                                                         Variant="UiButtonVariant.Ghost"
                                                          Title="View effective Docker settings"
                                                          Disabled="@busy"
                                                          OnClick="() => ManageAsync(installation)" />
-                                        <CompactUIButton Label="Start" Glyph="UiIconGlyph.Run" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
-                                        <CompactUIButton Label="Stop" Glyph="UiIconGlyph.Stop" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
-                                        <CompactUIButton Label="Update" Glyph="UiIconGlyph.Refresh" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
-                                        <CompactUIButton Label="Remove" Glyph="UiIconGlyph.Delete" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Remove)" />
+                                        <UiCommandButton Label="Start" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
+                                        <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
+                                        <UiCommandButton Label="Update" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
+                                        <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Remove)" />
                                     }
                                 }
                                 else
                                 {
-                                    <CompactUIButton Label="Install" Glyph="UiIconGlyph.Download" Disabled="@busy" OnClick="() => InstallAsync(app)" />
+                                    <UiCommandButton Label="Install" Glyph="UiIconGlyph.Download" Variant="UiButtonVariant.PrimaryMuted" Disabled="@busy" OnClick="() => InstallAsync(app)" />
                                 }
                             </div>
                         </div>
@@ -484,7 +495,7 @@
                             <div class="home-lab-storage-row">
                                 <label for="storage-@role">@role</label>
                                 <input id="storage-@role" class="ui-control-input" @bind="storagePaths[role]" placeholder="/mnt/storage/@role" />
-                                <CompactUIButton Label="Save" Glyph="UiIconGlyph.Save" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(role)" />
+                                <UiCommandButton Label="Save" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(role)" />
                             </div>
                         }
                     </div>
@@ -498,7 +509,7 @@
                         <h2>Use AI to plan and troubleshoot</h2>
                         <p class="meta-text">Ask about choosing a recipe, storage layout, Docker health, or an app’s effective configuration. AI suggestions do not install or change anything automatically.</p>
                     </div>
-                    <CompactUIButton Label="Open AI assistant" Glyph="UiIconGlyph.Ai" Href="/ai" />
+                    <UiCommandButton Label="Open AI assistant" Glyph="UiIconGlyph.Ai" Variant="UiButtonVariant.PrimaryMuted" Href="/ai" />
                 </section>
             </TabPage>
         </TabControl>
@@ -948,6 +959,26 @@
 
     private static HomeLabAppManifest GetApp(string appId) => HomeLabCatalog.GetApp(appId);
 
+    private static string GetEffectiveEnvironmentValue(HomeLabEffectiveContainer container, string key)
+    {
+        var prefix = key + "=";
+        var value = container.Environment
+            .FirstOrDefault(item => item.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        return value is null ? "Not set" : value[prefix.Length..];
+    }
+
+    private static string FormatProvider(string value) =>
+        string.IsNullOrWhiteSpace(value) || value.Equals("custom", StringComparison.OrdinalIgnoreCase)
+            ? "Custom provider configuration"
+            : value;
+
+    private static string FormatProtocol(string value) =>
+        value.Equals("wireguard", StringComparison.OrdinalIgnoreCase)
+            ? "WireGuard"
+            : value.Equals("openvpn", StringComparison.OrdinalIgnoreCase)
+                ? "OpenVPN"
+                : string.IsNullOrWhiteSpace(value) ? "Not set" : value;
+
     private static string FormatNetwork(string networkMode) =>
         networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
             ? "VPN GATEWAY: GLUETUN"
@@ -1031,6 +1062,7 @@
         try
         {
             networkSecurity = await HomeLabService.GetNetworkSecurityAsync(selectedInstallation.Id);
+            summaryNetworkSecurity[selectedInstallation.Id] = networkSecurity;
         }
         catch (Exception exception)
         {

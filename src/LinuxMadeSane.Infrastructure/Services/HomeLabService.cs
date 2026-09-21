@@ -1719,7 +1719,23 @@ public sealed class HomeLabService(
                 containerName,
                 "sh",
                 "-c",
-                "if command -v wget >/dev/null 2>&1; then wget -qO- -T 10 https://api.ipify.org; elif command -v curl >/dev/null 2>&1; then curl -fsS --max-time 10 https://api.ipify.org; else exit 127; fi"
+                "set -u; " +
+                "for file in /tmp/gluetun/ip /gluetun/ip; do " +
+                "if [ -r \"$file\" ]; then cat \"$file\"; exit 0; fi; " +
+                "done; " +
+                "fetch() { " +
+                "if command -v wget >/dev/null 2>&1; then wget -qO- -T 10 \"$1\" 2>/dev/null && return 0; fi; " +
+                "if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 10 \"$1\" 2>/dev/null && return 0; fi; " +
+                "return 1; }; " +
+                "extract() { " +
+                "json_ip=$(printf '%s' \"$1\" | sed -nE 's/.*\"public_ip\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/p' | head -n 1); " +
+                "if [ -n \"$json_ip\" ]; then printf '%s\\n' \"$json_ip\"; else printf '%s\\n' \"$1\"; fi; " +
+                "}; " +
+                "for url in http://127.0.0.1:8000/v1/publicip/ip https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do " +
+                "response=$(fetch \"$url\" || true); " +
+                "candidate=$(extract \"$response\"); " +
+                "if [ -n \"$candidate\" ]; then printf '%s\\n' \"$candidate\"; exit 0; fi; " +
+                "done; exit 1;"
             ],
             $"Verify public IP through Home Lab container {containerName}",
             cancellationToken);

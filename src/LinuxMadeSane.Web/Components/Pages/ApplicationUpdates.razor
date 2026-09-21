@@ -634,14 +634,14 @@
         <div class="updates-install-dialog" aria-live="polite">
             @if (updateCountdownSeconds > 0)
             {
-                <div class="updates-install-countdown">
+                <div class="updates-install-countdown" data-lms-update-countdown>
                     <span class="updates-eyebrow">Restarting shortly</span>
-                    <strong>@updateCountdownSeconds</strong>
+                    <strong data-lms-update-countdown-value>@updateCountdownSeconds</strong>
                     <span>seconds</span>
                 </div>
                 <p>@updateDialogMessage</p>
                 <div class="update-progress-shell" aria-label="LMS restart countdown">
-                    <div class="update-progress-bar" style="@($"width: {UpdateCountdownProgressPercent}%;")"></div>
+                    <div class="update-progress-bar" data-lms-update-countdown-bar style="@($"width: {UpdateCountdownProgressPercent}%;")"></div>
                 </div>
             }
             else
@@ -692,6 +692,8 @@
     private bool isAiRepairOpen;
     private bool isUpdateDialogOpen;
     private bool updateRestartExpected;
+    private bool updateCountdownClientStarted;
+    private IJSObjectReference? updateCountdownModule;
     private int updateCountdownSeconds;
     private const int UpdateCountdownStartSeconds = 15;
     private string updateDialogMessage = string.Empty;
@@ -738,6 +740,22 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (isUpdateDialogOpen && updateCountdownSeconds > 0 && !updateCountdownClientStarted)
+        {
+            try
+            {
+                updateCountdownModule ??= await Js.InvokeAsync<IJSObjectReference>(
+                    "import",
+                    "./Components/Pages/ApplicationUpdates.razor.js");
+                await updateCountdownModule.InvokeVoidAsync("startCountdown", UpdateCountdownStartSeconds);
+                updateCountdownClientStarted = true;
+            }
+            catch (JSDisconnectedException)
+            {
+                // The service may be restarting; the reconnect page will take over.
+            }
+        }
+
         if (!firstRender)
         {
             return;
@@ -762,6 +780,10 @@
         await pollingCancellationTokenSource.CancelAsync();
         await pollingTask;
         pollingCancellationTokenSource.Dispose();
+        if (updateCountdownModule is not null)
+        {
+            await updateCountdownModule.DisposeAsync();
+        }
     }
 
     private Task ChangeTabAsync(string value)
@@ -810,6 +832,7 @@
         isUpdateDialogOpen = true;
         updateRestartExpected = false;
         updateCountdownSeconds = 0;
+        updateCountdownClientStarted = false;
         updateDialogMessage = "Preparing the LMS update…";
         await InvokeAsync(StateHasChanged);
 
@@ -823,6 +846,7 @@
             {
                 updateRestartExpected = true;
                 updateDialogMessage = "The update has been handed to the system updater. LMS will restart automatically.";
+                await InvokeAsync(StateHasChanged);
                 await RunUpdateCountdownAsync();
             }
             else
@@ -850,20 +874,21 @@
 
     private async Task RunUpdateCountdownAsync()
     {
-        var cancellationToken = pollingCancellationTokenSource?.Token ?? CancellationToken.None;
-        for (updateCountdownSeconds = UpdateCountdownStartSeconds;
-             updateCountdownSeconds > 0;
-             updateCountdownSeconds--)
+        try
         {
-            if (disposed || cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-
-            await InvokeAsync(StateHasChanged);
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            await Task.Delay(TimeSpan.FromSeconds(UpdateCountdownStartSeconds));
+        }
+        catch (OperationCanceledException)
+        {
+            return;
         }
 
+        if (disposed)
+        {
+            return;
+        }
+
+        updateCountdownSeconds = 0;
         updateDialogMessage = "LMS is restarting to finish the update. This page will reconnect when it is ready.";
         await InvokeAsync(StateHasChanged);
     }
