@@ -313,7 +313,7 @@ public sealed class HomeLabService(
 
         if (!isVpnRouted)
         {
-            var publicIp = await ResolvePublicIpAsync(installation.ContainerName, cancellationToken);
+            var publicIpProbe = await ResolvePublicIpAsync(installation.ContainerName, cancellationToken);
             var detail = app.RequiresVpnGateway
                 ? $"{app.Name} is on a direct Docker network. It is not protected by Gluetun and has been blocked."
                 : $"{app.Name} is using a direct Docker network. No VPN gateway is active.";
@@ -324,7 +324,7 @@ public sealed class HomeLabService(
                 "Direct (NO VPN)",
                 string.Empty,
                 "Not used",
-                publicIp,
+                publicIpProbe.PublicIp,
                 detail,
                 checkedAtUtc);
         }
@@ -376,8 +376,8 @@ public sealed class HomeLabService(
                 checkedAtUtc);
         }
 
-        var publicIpFromGateway = await ResolvePublicIpAsync(gatewayContainer, cancellationToken);
-        if (string.IsNullOrWhiteSpace(publicIpFromGateway))
+        var publicIpProbeFromGateway = await ResolvePublicIpAsync(gatewayContainer, cancellationToken);
+        if (string.IsNullOrWhiteSpace(publicIpProbeFromGateway.PublicIp))
         {
             return new HomeLabNetworkSecurity(
                 "UNVERIFIED",
@@ -387,7 +387,7 @@ public sealed class HomeLabService(
                 gatewayContainer,
                 gatewayHealth.Item1.ToString(),
                 null,
-                "Docker confirms the app shares Gluetun's network namespace, but LMS could not retrieve the gateway's public IP.",
+                $"Docker confirms the app shares Gluetun's network namespace, but the public IP probe failed: {publicIpProbeFromGateway.Detail}",
                 checkedAtUtc);
         }
 
@@ -398,7 +398,7 @@ public sealed class HomeLabService(
             $"VPN Gateway (Gluetun): {gatewayContainer}",
             gatewayContainer,
             gatewayHealth.Item1.ToString(),
-            publicIpFromGateway,
+            publicIpProbeFromGateway.PublicIp,
             "Docker network mode, Gluetun health, and the gateway egress IP were verified.",
             checkedAtUtc);
     }
@@ -1709,7 +1709,7 @@ public sealed class HomeLabService(
         }
     }
 
-    private async Task<string?> ResolvePublicIpAsync(
+    private async Task<HomeLabPublicIpProbeResult> ResolvePublicIpAsync(
         string containerName,
         CancellationToken cancellationToken)
     {
@@ -1721,34 +1721,51 @@ public sealed class HomeLabService(
                 "-c",
                 "set -u; " +
                 "for file in /tmp/gluetun/ip /gluetun/ip; do " +
-                "if [ -r \"$file\" ]; then cat \"$file\"; exit 0; fi; " +
+                "if [ -r \"$file\" ]; then value=$(cat \"$file\" 2>/dev/null | tr -d '[:space:]' || true); " +
+                "if [ -n \"$value\" ]; then printf '%s\\n' \"$value\"; exit 0; fi; fi; " +
                 "done; " +
                 "fetch() { " +
                 "if command -v wget >/dev/null 2>&1; then wget -qO- -T 10 \"$1\" 2>/dev/null && return 0; fi; " +
                 "if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 10 \"$1\" 2>/dev/null && return 0; fi; " +
                 "return 1; }; " +
-                "extract() { " +
-                "json_ip=$(printf '%s' \"$1\" | sed -nE 's/.*\"public_ip\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/p' | head -n 1); " +
-                "if [ -n \"$json_ip\" ]; then printf '%s\\n' \"$json_ip\"; else printf '%s\\n' \"$1\"; fi; " +
-                "}; " +
                 "for url in http://127.0.0.1:8000/v1/publicip/ip https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do " +
                 "response=$(fetch \"$url\" || true); " +
-                "candidate=$(extract \"$response\"); " +
-                "if [ -n \"$candidate\" ]; then printf '%s\\n' \"$candidate\"; exit 0; fi; " +
+                "if [ -n \"$response\" ]; then printf '%s\\n' \"$response\"; exit 0; fi; " +
                 "done; exit 1;"
             ],
             $"Verify public IP through Home Lab container {containerName}",
             cancellationToken);
-        if (result.ExitCode != 0)
+        var publicIp = HomeLabPublicIpParser.Parse(result.StandardOutput);
+        if (publicIp is not null)
         {
-            return null;
+            return new HomeLabPublicIpProbeResult(publicIp, "The gateway returned a valid egress IP.");
         }
 
-        var candidate = result.StandardOutput
-            .Split(['\r', '\n', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries)
-            .FirstOrDefault();
-        return IPAddress.TryParse(candidate, out _) ? candidate : null;
+        var logs = await RunDockerAsync(
+            ["logs", "--tail", "200", containerName],
+            $"Read Gluetun public IP status for {containerName}",
+            cancellationToken);
+        var loggedPublicIp = HomeLabPublicIpParser.ParseGluetunLogs(
+            $"{logs.StandardOutput}\n{logs.StandardError}");
+        if (loggedPublicIp is not null)
+        {
+            return new HomeLabPublicIpProbeResult(
+                loggedPublicIp,
+                "The gateway's latest Gluetun log reported a valid egress IP.");
+        }
+
+        var failure = result.ExitCode == 0
+            ? "Gluetun returned no valid IP value. The VPN may still be connecting, or public-IP detection may be disabled."
+            : FirstNonEmpty(result.StandardError, result.StandardOutput, $"Docker exited with code {result.ExitCode}.");
+        logger.LogWarning(
+            "Home Lab public IP probe failed for {ContainerName}: exit code {ExitCode}; {Failure}",
+            containerName,
+            result.ExitCode,
+            failure);
+        return new HomeLabPublicIpProbeResult(null, failure);
     }
+
+    private sealed record HomeLabPublicIpProbeResult(string? PublicIp, string Detail);
 
     private async Task<JsonObject?> InspectContainerAsync(string containerName, CancellationToken cancellationToken)
     {
