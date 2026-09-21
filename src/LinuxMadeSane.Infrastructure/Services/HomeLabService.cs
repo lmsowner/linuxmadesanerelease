@@ -488,6 +488,31 @@ public sealed class HomeLabService(
                 return await UpdateVpnGatewayAsync(installation, output, cancellationToken);
             }
 
+            if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+            {
+                var gatewayContainerName = installation.NetworkMode["container:".Length..];
+                var gateway = await dbContext.HomeLabInstallations
+                    .SingleOrDefaultAsync(item => item.ContainerName == gatewayContainerName, cancellationToken);
+                if (gateway is null)
+                {
+                    return Failure(
+                        "Home Lab app update blocked.",
+                        "The selected VPN Gateway installation no longer exists.",
+                        output,
+                        HomeLabHealthState.Blocked);
+                }
+
+                var gatewayPreparation = await EnsureVpnGatewayNamespacePortAsync(
+                    gateway,
+                    app,
+                    output,
+                    cancellationToken);
+                if (!gatewayPreparation.Succeeded)
+                {
+                    return gatewayPreparation;
+                }
+            }
+
             var pull = await RunDockerAsync(
                 ["pull", installation.Image],
                 $"Pull updated Home Lab image {installation.Image}",
@@ -637,6 +662,11 @@ public sealed class HomeLabService(
 
         gateway.PortMappingsJson = JsonSerializer.Serialize(gatewayRun.PortBindings, JsonOptions);
         gateway.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await UpdateCaddyAccessAsync(
+            gateway,
+            HomeLabCatalog.GetApp(gateway.AppId),
+            gatewayRun.PortBindings,
+            cancellationToken);
         await RefreshHealthInternalAsync(gateway, cancellationToken);
 
         var failedRoutedApps = new List<string>();
@@ -834,6 +864,7 @@ public sealed class HomeLabService(
         var environment = app.Environment
             .Concat(configuration.Where(item => !IsInternalConfigurationKey(item.Key)))
             .Concat(BuildVpnPortEnvironment(app, installation.NetworkMode))
+            .Concat(BuildPublicUrlEnvironment(app, installation))
             .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
             .Select(group => $"{group.Key}={group.Last().Value}")
             .ToList();
@@ -954,7 +985,8 @@ public sealed class HomeLabService(
     {
         var app = HomeLabCatalog.GetApp(installation.AppId);
         var primaryManifestPort = ResolvePrimaryPort(app);
-        if (!primaryManifestPort.Name.Equals("web", StringComparison.OrdinalIgnoreCase))
+        if (primaryManifestPort is null ||
+            !primaryManifestPort.Name.Equals("web", StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
@@ -999,7 +1031,8 @@ public sealed class HomeLabService(
             }
         }
 
-        var sourcePort = await ResolveCaddySourcePortAsync(cancellationToken);
+        var sourcePort = installation.CaddySourcePort
+            ?? await ResolveCaddySourcePortAsync(cancellationToken);
         var editor = new CaddyProxyRouteEditor
         {
             Kind = CaddyProxyRouteKind.PortForward,
@@ -1021,10 +1054,18 @@ public sealed class HomeLabService(
         IReadOnlyList<HomeLabPortBinding> ports,
         CancellationToken cancellationToken)
     {
+        var primaryManifestPort = ResolvePrimaryPort(app);
+        if (primaryManifestPort is null)
+        {
+            await RemoveCaddyAccessAsync(installation, cancellationToken);
+            return;
+        }
+
         var primaryPort = ports.FirstOrDefault(port =>
-            port.Name.Equals(ResolvePrimaryPort(app).Name, StringComparison.OrdinalIgnoreCase));
+            port.Name.Equals(primaryManifestPort.Name, StringComparison.OrdinalIgnoreCase));
         if (primaryPort is null || primaryPort.HostPort <= 0)
         {
+            await RemoveCaddyAccessAsync(installation, cancellationToken);
             return;
         }
 
@@ -1049,6 +1090,19 @@ public sealed class HomeLabService(
         installation.CaddySourcePort = editor.SourcePort;
     }
 
+    private async Task RemoveCaddyAccessAsync(
+        HomeLabInstallationEntity installation,
+        CancellationToken cancellationToken)
+    {
+        if (installation.CaddyRouteId is Guid routeId)
+        {
+            await caddyIntegrationService.DeleteRouteAsync(routeId, cancellationToken);
+        }
+
+        installation.CaddyRouteId = null;
+        installation.CaddySourcePort = null;
+    }
+
     private async Task<int> ResolveCaddySourcePortAsync(CancellationToken cancellationToken)
     {
         var dashboard = await caddyIntegrationService.GetDashboardAsync(cancellationToken);
@@ -1068,6 +1122,20 @@ public sealed class HomeLabService(
         }
 
         throw new InvalidOperationException("LMS could not find an available Caddy access port for the Home Lab app.");
+    }
+
+    private async Task ReserveCaddyAccessPortAsync(
+        HomeLabInstallationEntity installation,
+        HomeLabAppManifest app,
+        CancellationToken cancellationToken)
+    {
+        var primaryPort = ResolvePrimaryPort(app);
+        if (primaryPort?.Name.Equals("web", StringComparison.OrdinalIgnoreCase) != true)
+        {
+            return;
+        }
+
+        installation.CaddySourcePort ??= await ResolveCaddySourcePortAsync(cancellationToken);
     }
 
     private static bool IsTcpPortAvailable(int port)
@@ -1206,6 +1274,7 @@ public sealed class HomeLabService(
                         reusableVpnGateway?.ContainerName),
                     recipeId is not null,
                     now);
+                await ReserveCaddyAccessPortAsync(installation, app, cancellationToken);
                 if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
                     reusableVpnGateway is not null)
                 {
@@ -1238,8 +1307,10 @@ public sealed class HomeLabService(
 
                 if (edgeGateway is not null && app.Id == apps[0].Id)
                 {
+                    var primaryManifestPort = ResolvePrimaryPort(app);
                     var primaryPort = run.PortBindings.FirstOrDefault(port =>
-                        port.Name.Equals(ResolvePrimaryPort(app).Name, StringComparison.OrdinalIgnoreCase));
+                        primaryManifestPort is not null &&
+                        port.Name.Equals(primaryManifestPort.Name, StringComparison.OrdinalIgnoreCase));
                     if (primaryPort is null)
                     {
                         throw new InvalidOperationException($"{app.Name} did not publish a primary web port for Edge Gateway routing.");
@@ -1433,6 +1504,7 @@ public sealed class HomeLabService(
         foreach (var environment in app.Environment
                      .Concat(configuration.Where(item => !IsInternalConfigurationKey(item.Key)))
                      .Concat(BuildVpnPortEnvironment(app, installation.NetworkMode))
+                     .Concat(BuildPublicUrlEnvironment(app, installation))
                      .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
                      .Select(group => group.Last()))
         {
@@ -1446,9 +1518,12 @@ public sealed class HomeLabService(
 
         if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase))
         {
-            foreach (var port in app.Ports)
+            var publishedPorts = app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase)
+                ? HomeLabContainerPortPlan.GatewayPublishedPorts()
+                : app.Ports.Select(port => (port.Protocol, HomeLabContainerPortPlan.Resolve(port, false)));
+            foreach (var port in publishedPorts.Distinct())
             {
-                args.AddRange(["--publish", $"127.0.0.1::{ResolveContainerPort(app, port, false)}"]);
+                args.AddRange(["--publish", $"127.0.0.1::{port.Item2}/{port.Item1}"]);
             }
         }
 
@@ -1471,7 +1546,19 @@ public sealed class HomeLabService(
             sensitiveIndexes.Add(index + 1);
         }
 
+        var vpnFileOverrideCommand = HomeLabContainerPortPlan.BuildVpnFileOverrideCommand(
+            app,
+            installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase));
+        if (vpnFileOverrideCommand is not null)
+        {
+            args.AddRange(["--entrypoint", "/bin/sh"]);
+        }
+
         args.Add(installation.Image);
+        if (vpnFileOverrideCommand is not null)
+        {
+            args.AddRange(["-c", vpnFileOverrideCommand]);
+        }
         var run = await RunDockerAsync(args, $"Install Home Lab app {app.Name}", cancellationToken, sensitiveIndexes);
         AppendOutput(output, run);
         if (run.ExitCode != 0)
@@ -1679,9 +1766,71 @@ public sealed class HomeLabService(
         var health = inspect is null
             ? (HomeLabHealthState.Failed, "Container could not be inspected.")
             : ResolveHealth(inspect);
+        if (inspect is not null &&
+            health.Item1 == HomeLabHealthState.Healthy &&
+            app.HealthCheck?.HttpPath is { Length: > 0 } healthPath)
+        {
+            health = await ProbeHttpHealthAsync(
+                installation,
+                app,
+                inspect,
+                healthPath,
+                cancellationToken);
+        }
         installation.HealthState = (int)health.Item1;
         installation.HealthDetail = health.Item2;
         installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+    }
+
+    private async Task<(HomeLabHealthState, string)> ProbeHttpHealthAsync(
+        HomeLabInstallationEntity installation,
+        HomeLabAppManifest app,
+        JsonObject inspect,
+        string healthPath,
+        CancellationToken cancellationToken)
+    {
+        var healthPort = app.HealthCheck?.Port;
+        var manifestPort = app.Ports.FirstOrDefault(port => port.ContainerPort == healthPort)
+            ?? ResolvePrimaryPort(app);
+        var binding = manifestPort is null
+            ? null
+            : DeserializePortBindings(installation.PortMappingsJson).FirstOrDefault(port =>
+                port.Name.Equals(manifestPort.Name, StringComparison.OrdinalIgnoreCase));
+        if (binding is null || binding.HostPort <= 0)
+        {
+            return (HomeLabHealthState.Degraded, "The container is running, but LMS cannot resolve its HTTP health port.");
+        }
+
+        var path = healthPath.StartsWith('/') ? healthPath : $"/{healthPath}";
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(app.HealthCheck?.TimeoutSeconds ?? 5));
+            using var handler = new SocketsHttpHandler { UseProxy = false };
+            using var client = new HttpClient(handler);
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"http://127.0.0.1:{binding.HostPort}{path}");
+            using var response = await client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                timeout.Token);
+            if ((int)response.StatusCode < 500)
+            {
+                return (HomeLabHealthState.Healthy, $"Container is running and HTTP port {binding.ContainerPort} responded.");
+            }
+
+            return (HomeLabHealthState.Degraded, $"The container is running, but its HTTP health check returned {(int)response.StatusCode}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+        {
+            var startedAtText = inspect["State"]?["StartedAt"]?.GetValue<string>();
+            var withinStartPeriod = DateTimeOffset.TryParse(startedAtText, out var startedAt) &&
+                                    DateTimeOffset.UtcNow - startedAt < TimeSpan.FromSeconds(app.HealthCheck?.StartPeriodSeconds ?? 20);
+            return withinStartPeriod
+                ? (HomeLabHealthState.Starting, "Container is running; waiting for its HTTP endpoint to start.")
+                : (HomeLabHealthState.Degraded, $"The container is running, but its HTTP endpoint is unavailable: {exception.Message}");
+        }
     }
 
     private async Task EnforceRequiredVpnRouteAsync(
@@ -1818,7 +1967,7 @@ public sealed class HomeLabService(
         var result = new List<HomeLabPortBinding>();
         foreach (var port in app.Ports)
         {
-            var containerPort = ResolveContainerPort(app, port, useVpnNamespacePort);
+            var containerPort = HomeLabContainerPortPlan.Resolve(port, useVpnNamespacePort);
             var key = $"{containerPort}/{port.Protocol}";
             var published = ports[key]?.AsArray()?.FirstOrDefault()?.AsObject()?["HostPort"]?.GetValue<string>();
             if (!int.TryParse(published, out var hostPort))
@@ -1845,16 +1994,8 @@ public sealed class HomeLabService(
         return (HomeLabHealthState.Failed, $"Docker container state: {status}.");
     }
 
-    private static HomeLabPortManifest ResolvePrimaryPort(HomeLabAppManifest app) =>
-        app.Ports.FirstOrDefault(port => port.Primary) ?? app.Ports.First();
-
-    private static int ResolveContainerPort(
-        HomeLabAppManifest app,
-        HomeLabPortManifest port,
-        bool useVpnNamespacePort) =>
-        useVpnNamespacePort && port.VpnContainerPort is int vpnPort
-            ? vpnPort
-            : port.ContainerPort;
+    private static HomeLabPortManifest? ResolvePrimaryPort(HomeLabAppManifest app) =>
+        app.Ports.FirstOrDefault(port => port.Primary) ?? app.Ports.FirstOrDefault();
 
     private static IEnumerable<KeyValuePair<string, string>> BuildVpnPortEnvironment(
         HomeLabAppManifest app,
@@ -1869,7 +2010,25 @@ public sealed class HomeLabService(
             .Where(port => !string.IsNullOrWhiteSpace(port.VpnEnvironmentVariable) && port.VpnContainerPort is not null)
             .Select(port => new KeyValuePair<string, string>(
                 port.VpnEnvironmentVariable!,
-                ResolveContainerPort(app, port, true).ToString()));
+                HomeLabContainerPortPlan.Resolve(port, true).ToString()));
+    }
+
+    private static IEnumerable<KeyValuePair<string, string>> BuildPublicUrlEnvironment(
+        HomeLabAppManifest app,
+        HomeLabInstallationEntity installation)
+    {
+        if (string.IsNullOrWhiteSpace(app.PublicUrlEnvironmentVariable) ||
+            installation.CaddySourcePort is not int caddyPort)
+        {
+            return [];
+        }
+
+        return
+        [
+            new KeyValuePair<string, string>(
+                app.PublicUrlEnvironmentVariable,
+                $"http://{Dns.GetHostName()}:{caddyPort}")
+        ];
     }
 
     private string ResolveVolumeHostPath(
@@ -2344,13 +2503,13 @@ public sealed class HomeLabService(
                     var existingBinding = existingBindings.FirstOrDefault(binding =>
                         binding.Name.Equals(existingPort.Name, StringComparison.OrdinalIgnoreCase));
                     var existingContainerPort = existingBinding?.ContainerPort ??
-                        ResolveContainerPort(existingApp, existingPort, true);
-                    return existingContainerPort == ResolveContainerPort(app, port, true);
+                        HomeLabContainerPortPlan.Resolve(existingPort, true);
+                    return existingContainerPort == HomeLabContainerPortPlan.Resolve(port, true);
                 }));
             if (conflictingPort is not null)
             {
                 throw new InvalidOperationException(
-                    $"{app.Name} cannot share the VPN Gateway network namespace with {existingApp.Name}: both require {conflictingPort.Protocol.ToUpperInvariant()} port {ResolveContainerPort(app, conflictingPort, true)} and neither app has a separate configured listener. Update the app definition or use a separate VPN Gateway installation.");
+                    $"{app.Name} cannot share the VPN Gateway network namespace with {existingApp.Name}: both require {conflictingPort.Protocol.ToUpperInvariant()} port {HomeLabContainerPortPlan.Resolve(conflictingPort, true)} and neither app has a separate configured listener. Update the app definition or use a separate VPN Gateway installation.");
             }
         }
     }
@@ -2363,7 +2522,7 @@ public sealed class HomeLabService(
     {
         var requiredPorts = app.Ports
             .Where(port => port.VpnContainerPort is not null)
-            .Select(port => (port.Protocol, ContainerPort: ResolveContainerPort(app, port, true)))
+            .Select(port => (port.Protocol, ContainerPort: HomeLabContainerPortPlan.Resolve(port, true)))
             .ToArray();
         if (requiredPorts.Length == 0)
         {

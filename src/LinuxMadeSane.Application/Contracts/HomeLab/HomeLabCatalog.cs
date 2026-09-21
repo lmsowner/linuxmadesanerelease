@@ -20,13 +20,8 @@ public static class HomeLabCatalog
             "https://github.com/qdm12/gluetun-wiki",
             "qmcgaw/gluetun",
             "latest",
-            "2",
-            [
-                new("http-proxy", 8888, Primary: true),
-                new("routed-web", 8080),
-                new("routed-web-alt", 8081),
-                new("routed-stremio", 11470)
-            ],
+            "3",
+            [],
             [new("config", "/gluetun", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(),
             [],
@@ -212,13 +207,19 @@ public static class HomeLabCatalog
             "https://webtor.io/",
             "ghcr.io/webtor-io/self-hosted",
             "latest",
-            "2",
-            [new("web", 8080, Primary: true, VpnContainerPort: 8081, VpnEnvironmentVariable: "WEB_PORT")],
+            "3",
+            [new(
+                "web",
+                8080,
+                Primary: true,
+                VpnContainerPort: 18080,
+                VpnFileOverride: new("/etc/webtor/common.template.env", "WEB_PORT", "/init"))],
             [new("data", "/data", HomeLabStorageKind.UserData), new("database", "/pgdata", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(), [], null,
+            new Dictionary<string, string>(), [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8080, StartPeriodSeconds: 45),
             [new("network-route", "Internet route", "select", true, Help: "Webtor must use VPN Gateway routing. LMS blocks direct Webtor installations.", Options: new[] { "VPN Gateway (Gluetun)" }), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Webtor traffic.")],
             SupportsVpnGateway: true,
-            RequiresVpnGateway: true)
+            RequiresVpnGateway: true,
+            PublicUrlEnvironmentVariable: "DOMAIN")
         ,
         new(
             "prowlarr",

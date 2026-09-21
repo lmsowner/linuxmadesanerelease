@@ -11,7 +11,13 @@ public sealed record HomeLabPortManifest(
     string Protocol = "tcp",
     bool Primary = false,
     int? VpnContainerPort = null,
-    string? VpnEnvironmentVariable = null);
+    string? VpnEnvironmentVariable = null,
+    HomeLabVpnPortFileOverride? VpnFileOverride = null);
+
+public sealed record HomeLabVpnPortFileOverride(
+    string Path,
+    string Setting,
+    string OriginalEntrypoint);
 
 public sealed record HomeLabVolumeManifest(
     string Id,
@@ -62,7 +68,8 @@ public sealed record HomeLabAppManifest(
     bool IsInstallable = true,
     IReadOnlyList<string>? DockerCapabilities = null,
     IReadOnlyList<string>? DockerDevices = null,
-    bool IsSystemDependency = false);
+    bool IsSystemDependency = false,
+    string? PublicUrlEnvironmentVariable = null);
 
 public sealed record HomeLabRecipeRelationship(
     string AppId,
