@@ -1183,12 +1183,13 @@ verify_self_update_active() {
   return 1
 }
 
-if ! preserve_home_lab_data; then
-  rollback_self_update "Home Lab data could not be protected before install"
-  exit 1
-fi
+perform_self_update() {
+  if ! preserve_home_lab_data; then
+    rollback_self_update "Home Lab data could not be protected before install"
+    return 1
+  fi
 
-if ! curl -fsSL "\$INSTALL_URL" | env \
+  if ! curl -fsSL "\$INSTALL_URL" | env \
   LMS_INSTALL_SECOND_STAGE=1 \
   LMS_SOURCE="\$SOURCE" \
   LMS_BASE_URL="$base_url" \
@@ -1201,21 +1202,26 @@ if ! curl -fsSL "\$INSTALL_URL" | env \
   LMS_SERVICE_GROUP="\$SERVICE_GROUP" \
   LMS_SERVICE_UNIT="\$SERVICE_UNIT" \
   LMS_SERVICE_PORT="\$SERVICE_PORT" \
-  bash -s -- --install "\${INSTALL_ARGS[@]}"; then
-  restore_home_lab_data || true
-  rollback_self_update "installer returned a non-zero exit code"
-  exit 1
-fi
+    bash -s -- --install "\${INSTALL_ARGS[@]}"; then
+    restore_home_lab_data || true
+    rollback_self_update "installer returned a non-zero exit code"
+    return 1
+  fi
 
-if ! restore_home_lab_data; then
-  rollback_self_update "Home Lab data could not be restored after install"
-  exit 1
-fi
+  if ! restore_home_lab_data; then
+    rollback_self_update "Home Lab data could not be restored after install"
+    return 1
+  fi
 
-if [[ "\$EXPECT_SERVICE_ACTIVE" == "true" ]] && ! verify_self_update_active; then
-  rollback_self_update "service did not become active after install"
-  exit 1
-fi
+  if [[ "\$EXPECT_SERVICE_ACTIVE" == "true" ]] && ! verify_self_update_active; then
+    rollback_self_update "service did not become active after install"
+    return 1
+  fi
+}
+
+# The installer replaces this helper while it runs. Bash parses a function body
+# before executing it, so the restore path remains in memory after replacement.
+perform_self_update
 HELPER
   chmod 755 "$helper_path"
   chown root:root "$helper_path" 2>/dev/null || true
