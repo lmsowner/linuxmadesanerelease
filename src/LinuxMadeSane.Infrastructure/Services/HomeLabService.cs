@@ -283,15 +283,6 @@ public sealed class HomeLabService(
                 ToHealth(installation.HealthState));
         }
 
-        if (installation.IsRecipeInstallation)
-        {
-            return Failure(
-                "Network route is managed by the recipe.",
-                $"Remove and reinstall the recipe to change how {app.Name} is routed.",
-                [],
-                ToHealth(installation.HealthState));
-        }
-
         if (app.RequiresVpnGateway && !useVpnGateway)
         {
             return Failure(
@@ -340,7 +331,9 @@ public sealed class HomeLabService(
             await dbContext.SaveChangesAsync(cancellationToken);
             return Success(
                 "Network route already configured.",
-                useVpnGateway ? "This app is already routed through the VPN Gateway (Gluetun)." : "This app is already using a direct route without VPN.",
+                useVpnGateway
+                    ? $"{app.Name} is already routed through {selectedGateway!.DisplayName}."
+                    : $"{app.Name} is already using a direct route without VPN.",
                 [],
                 ToHealth(installation.HealthState));
         }
@@ -397,7 +390,7 @@ public sealed class HomeLabService(
         return Success(
             "Network route updated.",
             useVpnGateway
-                ? $"{app.Name} now uses VPN Gateway (Gluetun). It will remain blocked if the gateway is unavailable."
+                ? $"{app.Name} now uses {selectedGateway!.DisplayName}. It will remain blocked if that gateway is unavailable."
                 : $"{app.Name} now uses a direct route without VPN.",
             output,
             ToHealth(installation.HealthState));
