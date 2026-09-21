@@ -211,11 +211,24 @@
                                         <p class="meta-text">There is no fixed default password in the current qBittorrent image. Until you change it in qBittorrent, a temporary password is generated on startup and printed in the container logs.</p>
                                         @if (TryGetTemporaryPassword() is { } temporaryPassword)
                                         {
-                                            <p class="home-lab-temporary-password">Current temporary password: <code>@temporaryPassword</code></p>
+                                            <label class="home-lab-password-label" for="qbittorrent-temporary-password">Current temporary password</label>
+                                            <input id="qbittorrent-temporary-password"
+                                                   class="ui-control-input home-lab-password-field"
+                                                   value="@temporaryPassword"
+                                                   readonly
+                                                   aria-label="Current qBittorrent temporary password" />
+                                        }
+                                        else if (selectedLogs?.StartsWith("Could not read container logs", StringComparison.OrdinalIgnoreCase) == true)
+                                        {
+                                            <p class="home-lab-temporary-password">@selectedLogs</p>
+                                        }
+                                        else if (selectedLogs is not null)
+                                        {
+                                            <p class="home-lab-temporary-password">No temporary password was found. qBittorrent appears to have a persistent password configured.</p>
                                         }
                                         else
                                         {
-                                            <p class="home-lab-temporary-password">Current temporary password: <span>Load the container logs to reveal it.</span></p>
+                                            <p class="home-lab-temporary-password">Reading the current qBittorrent startup logs...</p>
                                         }
                                     </div>
                                     <div class="home-lab-action-row">
@@ -487,6 +500,13 @@
             selectedInstallation = installation;
             effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
             selectedLogs = null;
+            if (installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+            {
+                var logs = await HomeLabService.GetLogsAsync(installation.Id);
+                selectedLogs = logs.Succeeded
+                    ? logs.Logs
+                    : $"Could not read container logs: {logs.Error}";
+            }
             activeTab = "apps";
         }
         catch (Exception exception)
