@@ -3,11 +3,15 @@
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Net;
+using System.Net.Sockets;
+using LinuxMadeSane.Application.Contracts.Caddy;
 using LinuxMadeSane.Application.Contracts.EdgeGateway;
 using LinuxMadeSane.Application.Contracts.HomeLab;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models.Caddy;
 using LinuxMadeSane.Core.Models.HomeLab;
 using LinuxMadeSane.Core.Models.RdpOptimizer;
 using LinuxMadeSane.Infrastructure.Persistence;
@@ -22,6 +26,7 @@ public sealed class HomeLabService(
     LinuxMadeSaneDbContext dbContext,
     ILinuxCommandRunner commandRunner,
     IEdgeGatewayService edgeGatewayService,
+    ICaddyIntegrationService caddyIntegrationService,
     ISecretStore secretStore,
     HomeLabStorageOptions storageOptions,
     ILogger<HomeLabService> logger) : IHomeLabService
@@ -38,6 +43,14 @@ public sealed class HomeLabService(
         foreach (var entity in entities)
         {
             await RefreshHealthInternalAsync(entity, cancellationToken);
+            try
+            {
+                await EnsureCaddyAccessAsync(entity, cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Could not prepare the LMS Caddy access route for Home Lab app {AppId}.", entity.AppId);
+            }
         }
 
         if (entities.Count > 0)
@@ -153,6 +166,7 @@ public sealed class HomeLabService(
                 item => item.DeploymentId == deployment.Id && item.Id != installation.Id,
                 cancellationToken);
             var routeId = installation.EdgeGatewayRouteId;
+            var caddyRouteId = installation.CaddyRouteId;
             var secretReferences = DeserializeDictionary(installation.SecretConfigurationJson).Values.ToArray();
             dbContext.HomeLabInstallations.Remove(installation);
             if (isLast)
@@ -169,6 +183,10 @@ public sealed class HomeLabService(
             if (routeId.HasValue)
             {
                 await edgeGatewayService.DeleteRouteAsync(routeId.Value, cancellationToken);
+            }
+            if (caddyRouteId.HasValue)
+            {
+                await caddyIntegrationService.DeleteRouteAsync(caddyRouteId.Value, cancellationToken);
             }
             foreach (var secretReference in secretReferences)
             {
@@ -218,6 +236,7 @@ public sealed class HomeLabService(
             }
 
             installation.PortMappingsJson = JsonSerializer.Serialize(run.PortBindings, JsonOptions);
+            await UpdateCaddyAccessAsync(installation, app, run.PortBindings, cancellationToken);
             installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
             await RefreshHealthInternalAsync(installation, cancellationToken);
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -361,7 +380,9 @@ public sealed class HomeLabService(
             if (port.HostPort > 0)
             {
                 access.Add(isWeb
-                    ? $"Host UI: http://127.0.0.1:{port.HostPort}"
+                    ? installation.CaddySourcePort is int caddyPort
+                        ? $"LMS Caddy UI: http://<LMS host>:{caddyPort}"
+                        : $"Server-only UI: http://127.0.0.1:{port.HostPort}"
                     : $"Host port: 127.0.0.1:{port.HostPort}");
             }
         }
@@ -437,6 +458,146 @@ public sealed class HomeLabService(
             app.Dependencies);
     }
 
+    private async Task EnsureCaddyAccessAsync(
+        HomeLabInstallationEntity installation,
+        CancellationToken cancellationToken)
+    {
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        var primaryManifestPort = ResolvePrimaryPort(app);
+        if (!primaryManifestPort.Name.Equals("web", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var ports = DeserializePortBindings(installation.PortMappingsJson);
+        var primaryPort = ports.FirstOrDefault(port =>
+            port.Name.Equals(primaryManifestPort.Name, StringComparison.OrdinalIgnoreCase));
+        if (primaryPort is null || primaryPort.HostPort <= 0)
+        {
+            return;
+        }
+
+        var routeName = BuildCaddyRouteName(installation, app);
+        if (installation.CaddyRouteId is Guid routeId)
+        {
+            var existing = await caddyIntegrationService.GetEditorAsync(routeId, cancellationToken);
+            if (existing.Id == routeId)
+            {
+                installation.CaddySourcePort = existing.SourcePort;
+                return;
+            }
+
+            installation.CaddyRouteId = null;
+            installation.CaddySourcePort = null;
+        }
+
+        var dashboard = await caddyIntegrationService.GetDashboardAsync(cancellationToken);
+        var savedRoute = dashboard.Routes.FirstOrDefault(route =>
+            route.Kind == CaddyProxyRouteKind.PortForward &&
+            route.Name.Equals(routeName, StringComparison.OrdinalIgnoreCase));
+        if (savedRoute is not null)
+        {
+            var existing = await caddyIntegrationService.GetEditorAsync(savedRoute.Id, cancellationToken);
+            if (existing.Id == savedRoute.Id)
+            {
+                existing.DestinationIp = "127.0.0.1";
+                existing.DestinationPort = primaryPort.HostPort;
+                installation.CaddyRouteId = savedRoute.Id;
+                await caddyIntegrationService.SaveRouteAsync(existing, cancellationToken);
+                installation.CaddySourcePort = existing.SourcePort;
+                return;
+            }
+        }
+
+        var sourcePort = await ResolveCaddySourcePortAsync(cancellationToken);
+        var editor = new CaddyProxyRouteEditor
+        {
+            Kind = CaddyProxyRouteKind.PortForward,
+            Name = routeName,
+            Description = $"Home Lab browser access for {app.Name}. Managed by LMS.",
+            SourceIp = "0.0.0.0",
+            SourcePort = sourcePort,
+            DestinationIp = "127.0.0.1",
+            DestinationPort = primaryPort.HostPort,
+            DestinationScheme = CaddyProxyTargetScheme.Http
+        };
+        installation.CaddyRouteId = await caddyIntegrationService.SaveRouteAsync(editor, cancellationToken);
+        installation.CaddySourcePort = sourcePort;
+    }
+
+    private async Task UpdateCaddyAccessAsync(
+        HomeLabInstallationEntity installation,
+        HomeLabAppManifest app,
+        IReadOnlyList<HomeLabPortBinding> ports,
+        CancellationToken cancellationToken)
+    {
+        var primaryPort = ports.FirstOrDefault(port =>
+            port.Name.Equals(ResolvePrimaryPort(app).Name, StringComparison.OrdinalIgnoreCase));
+        if (primaryPort is null || primaryPort.HostPort <= 0)
+        {
+            return;
+        }
+
+        if (installation.CaddyRouteId is not Guid routeId)
+        {
+            await EnsureCaddyAccessAsync(installation, cancellationToken);
+            return;
+        }
+
+        var editor = await caddyIntegrationService.GetEditorAsync(routeId, cancellationToken);
+        if (editor.Id != routeId)
+        {
+            installation.CaddyRouteId = null;
+            installation.CaddySourcePort = null;
+            await EnsureCaddyAccessAsync(installation, cancellationToken);
+            return;
+        }
+
+        editor.DestinationIp = "127.0.0.1";
+        editor.DestinationPort = primaryPort.HostPort;
+        await caddyIntegrationService.SaveRouteAsync(editor, cancellationToken);
+        installation.CaddySourcePort = editor.SourcePort;
+    }
+
+    private async Task<int> ResolveCaddySourcePortAsync(CancellationToken cancellationToken)
+    {
+        var dashboard = await caddyIntegrationService.GetDashboardAsync(cancellationToken);
+        var portForwardEditors = await Task.WhenAll(dashboard.Routes
+            .Where(route => route.Kind == CaddyProxyRouteKind.PortForward)
+            .Select(route => caddyIntegrationService.GetEditorAsync(route.Id, cancellationToken)));
+        var usedPorts = portForwardEditors
+            .Select(route => route.SourcePort)
+            .ToHashSet();
+
+        for (var port = 39000; port <= 39999; port++)
+        {
+            if (!usedPorts.Contains(port) && IsTcpPortAvailable(port))
+            {
+                return port;
+            }
+        }
+
+        throw new InvalidOperationException("LMS could not find an available Caddy access port for the Home Lab app.");
+    }
+
+    private static bool IsTcpPortAvailable(int port)
+    {
+        try
+        {
+            using var listener = new TcpListener(IPAddress.Any, port);
+            listener.Start();
+            listener.Stop();
+            return true;
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
+    }
+
+    private static string BuildCaddyRouteName(HomeLabInstallationEntity installation, HomeLabAppManifest app) =>
+        $"Home Lab: {app.Name} ({installation.DeploymentId.ToString("N")[..8]})";
+
     private async Task<HomeLabOperationResult> InstallDeploymentAsync(
         string id,
         string? displayName,
@@ -487,6 +648,7 @@ public sealed class HomeLabService(
         var output = new List<string>();
         var createdContainers = new List<string>();
         var createdRoutes = new List<Guid>();
+        var createdCaddyRoutes = new List<Guid>();
         var createdSecretReferences = new List<string>();
         var relationships = recipeId is null
             ? new Dictionary<string, HomeLabRecipeRelationship>(StringComparer.OrdinalIgnoreCase)
@@ -564,6 +726,12 @@ public sealed class HomeLabService(
                     createdRoutes.Add(installation.EdgeGatewayRouteId.Value);
                 }
 
+                await EnsureCaddyAccessAsync(installation, cancellationToken);
+                if (installation.CaddyRouteId.HasValue)
+                {
+                    createdCaddyRoutes.Add(installation.CaddyRouteId.Value);
+                }
+
                 deployment.Installations.Add(installation);
             }
 
@@ -582,6 +750,12 @@ public sealed class HomeLabService(
             {
                 try { await edgeGatewayService.DeleteRouteAsync(routeId, cancellationToken); }
                 catch (Exception cleanupException) { logger.LogDebug(cleanupException, "Could not remove Home Lab Edge Gateway route {RouteId}.", routeId); }
+            }
+
+            foreach (var routeId in createdCaddyRoutes)
+            {
+                try { await caddyIntegrationService.DeleteRouteAsync(routeId, cancellationToken); }
+                catch (Exception cleanupException) { logger.LogDebug(cleanupException, "Could not remove Home Lab Caddy route {RouteId}.", routeId); }
             }
 
             foreach (var containerName in createdContainers)
@@ -1334,6 +1508,8 @@ public sealed class HomeLabService(
             item.PortMappingsJson,
             item.NetworkMode,
             item.EdgeGatewayRouteId,
+            item.CaddyRouteId,
+            item.CaddySourcePort,
             ToHealth(item.HealthState),
             item.HealthDetail,
             item.CreatedAtUtc,

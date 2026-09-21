@@ -879,6 +879,8 @@ public sealed class SqliteDatabaseInitializer(
         await EnsureColumnExistsAsync("home_lab_installations", "NetworkMode", "TEXT NOT NULL DEFAULT 'bridge'", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "ConfigurationJson", "TEXT NOT NULL DEFAULT '{{}}'", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "SecretConfigurationJson", "TEXT NOT NULL DEFAULT '{{}}'", cancellationToken);
+        await EnsureColumnExistsAsync("home_lab_installations", "CaddyRouteId", "TEXT NULL", cancellationToken);
+        await EnsureColumnExistsAsync("home_lab_installations", "CaddySourcePort", "INTEGER NULL", cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(storageSql, cancellationToken);
     }
 

@@ -3,12 +3,12 @@
 
 @page "/home-lab/apps"
 @rendermode InteractiveServer
-@using System.Text.Json
 @using LinuxMadeSane.Application.Contracts.HomeLab
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.HomeLab
 @inject IHomeLabService HomeLabService
+@inject NavigationManager Navigation
 
 <PageTitle>Home Lab Apps | Linux Made Sane</PageTitle>
 
@@ -145,6 +145,10 @@
                                         <dt>Image</dt><dd><code>@selectedDetails.Image</code></dd>
                                         <dt>Network mode</dt><dd><code>@selectedDetails.NetworkMode</code></dd>
                                         <dt>Network</dt><dd><code>@effectiveConfiguration.NetworkName</code></dd>
+                                        @if (selectedInstallation.CaddySourcePort is int caddyPort)
+                                        {
+                                            <dt>LMS Caddy port</dt><dd><code>@caddyPort</code></dd>
+                                        }
                                     </dl>
                                 </div>
                             </div>
@@ -535,25 +539,19 @@
         _ => UiPillTone.Failure
     };
 
-    private static string? BuildLocalUrl(HomeLabAppInstallation installation)
+    private string? BuildLocalUrl(HomeLabAppInstallation installation)
     {
-        try
-        {
-            using var document = JsonDocument.Parse(installation.PortMappingsJson);
-            var port = document.RootElement
-                .EnumerateArray()
-                .FirstOrDefault(item => item.TryGetProperty("name", out var name) &&
-                                        name.GetString()?.Equals("web", StringComparison.OrdinalIgnoreCase) == true);
-            return port.ValueKind == JsonValueKind.Object &&
-                   port.TryGetProperty("hostPort", out var hostPort) &&
-                   hostPort.TryGetInt32(out var value) &&
-                   value > 0
-                ? $"http://127.0.0.1:{value}"
-                : null;
-        }
-        catch (JsonException)
+        if (installation.CaddySourcePort is not int caddyPort || caddyPort <= 0)
         {
             return null;
         }
+
+        if (!Uri.TryCreate(Navigation.BaseUri, UriKind.Absolute, out var baseUri) ||
+            string.IsNullOrWhiteSpace(baseUri.Host))
+        {
+            return null;
+        }
+
+        return $"http://{baseUri.Host}:{caddyPort}";
     }
 }

@@ -18,6 +18,8 @@ public sealed class HomeLabInstallationEntity
     public string ConfigurationJson { get; set; } = "{}";
     public string SecretConfigurationJson { get; set; } = "{}";
     public Guid? EdgeGatewayRouteId { get; set; }
+    public Guid? CaddyRouteId { get; set; }
+    public int? CaddySourcePort { get; set; }
     public int HealthState { get; set; }
     public string HealthDetail { get; set; } = string.Empty;
     public DateTimeOffset CreatedAtUtc { get; set; }

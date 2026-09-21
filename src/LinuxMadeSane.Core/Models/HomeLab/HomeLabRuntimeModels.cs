@@ -22,6 +22,8 @@ public sealed record HomeLabAppInstallation(
     string PortMappingsJson,
     string NetworkMode,
     Guid? EdgeGatewayRouteId,
+    Guid? CaddyRouteId,
+    int? CaddySourcePort,
     HomeLabHealthState HealthState,
     string HealthDetail,
     DateTimeOffset CreatedAtUtc,
