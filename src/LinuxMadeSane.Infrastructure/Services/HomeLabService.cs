@@ -179,6 +179,45 @@ public sealed class HomeLabService(
             return Failure("VPN Gateway reconfiguration is unavailable.", "The selected installation is not a VPN Gateway.", [], HomeLabHealthState.Failed);
         }
 
+        var requestedName = configuration.TryGetValue("gateway-name", out var suppliedName)
+            ? suppliedName.Trim()
+            : gateway.DisplayName;
+        if (string.IsNullOrWhiteSpace(requestedName))
+        {
+            return Failure("VPN Gateway name was not changed.", "Enter a gateway name.", [], ToHealth(gateway.HealthState));
+        }
+        if (requestedName.Length > 160)
+        {
+            return Failure("VPN Gateway name was not changed.", "Gateway names can contain at most 160 characters.", [], ToHealth(gateway.HealthState));
+        }
+        var otherGatewayNames = await dbContext.HomeLabInstallations
+            .Where(item => item.AppId == "vpn-gateway" && item.Id != installationId)
+            .Select(item => item.DisplayName)
+            .ToListAsync(cancellationToken);
+        if (otherGatewayNames.Any(name => name.Equals(requestedName, StringComparison.OrdinalIgnoreCase)))
+        {
+            return Failure("VPN Gateway name was not changed.", $"A VPN Gateway named '{requestedName}' already exists.", [], ToHealth(gateway.HealthState));
+        }
+
+        var requestedSetupMode = configuration.TryGetValue("configuration-mode", out var configuredSetupMode)
+            ? configuredSetupMode
+            : "Paste provider config";
+        var hasReplacementSecret = secretConfiguration.Values.Any(value => !string.IsNullOrWhiteSpace(value));
+        if (requestedSetupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase) && !hasReplacementSecret)
+        {
+            var existingConfiguration = DeserializeDictionary(gateway.ConfigurationJson);
+            existingConfiguration["gateway-name"] = requestedName;
+            gateway.ConfigurationJson = JsonSerializer.Serialize(existingConfiguration, JsonOptions);
+            gateway.DisplayName = requestedName;
+            gateway.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return Success(
+                "VPN Gateway saved.",
+                $"This gateway is now named {requestedName}. Its existing provider configuration and routed apps were not changed.",
+                [],
+                ToHealth(gateway.HealthState));
+        }
+
         var app = HomeLabCatalog.GetApp(gateway.AppId);
         PreparedConfiguration prepared;
         try
@@ -2259,7 +2298,7 @@ public sealed class HomeLabService(
 
             var setupMode = supplied.TryGetValue("configuration-mode", out var suppliedMode) && !string.IsNullOrWhiteSpace(suppliedMode)
                 ? suppliedMode.Trim()
-                : "Guided";
+                : "Paste provider config";
             var protocol = RequiredValue(supplied, "protocol", "Choose a VPN protocol.");
             var protocolValue = protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase) ? "wireguard" :
                 protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase) ? "openvpn" :
