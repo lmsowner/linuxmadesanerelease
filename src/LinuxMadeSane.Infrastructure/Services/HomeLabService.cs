@@ -348,7 +348,11 @@ public sealed class HomeLabService(
         var appInspect = await InspectContainerAsync(installation.ContainerName, cancellationToken);
         var actualNetworkMode = appInspect?["HostConfig"]?["NetworkMode"]?.GetValue<string>();
         var expectedNetworkMode = $"container:{gatewayContainer}";
-        if (!string.Equals(actualNetworkMode, expectedNetworkMode, StringComparison.OrdinalIgnoreCase))
+        var gatewayContainerId = gatewayInspect["Id"]?.GetValue<string>();
+        if (!HomeLabDockerNetworkMode.UsesContainerNamespace(
+                actualNetworkMode,
+                gatewayContainer,
+                gatewayContainerId))
         {
             return new HomeLabNetworkSecurity(
                 "UNVERIFIED",
