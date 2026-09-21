@@ -9,7 +9,9 @@ public sealed record HomeLabPortManifest(
     string Name,
     int ContainerPort,
     string Protocol = "tcp",
-    bool Primary = false);
+    bool Primary = false,
+    int? VpnContainerPort = null,
+    string? VpnEnvironmentVariable = null);
 
 public sealed record HomeLabVolumeManifest(
     string Id,

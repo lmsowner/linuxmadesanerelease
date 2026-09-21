@@ -202,6 +202,7 @@ public sealed class HomeLabService(
                 HomeLabHealthState.Blocked);
         }
 
+        var output = new List<string>();
         var newNetworkMode = "bridge";
         HomeLabInstallationEntity? selectedGateway = null;
         if (useVpnGateway)
@@ -217,6 +218,11 @@ public sealed class HomeLabService(
             }
 
             await EnsureVpnNamespacePortAvailabilityAsync(app, selectedGateway.ContainerName, installation.Id, cancellationToken);
+            var gatewayPreparation = await EnsureVpnGatewayNamespacePortAsync(selectedGateway, app, output, cancellationToken);
+            if (!gatewayPreparation.Succeeded)
+            {
+                return gatewayPreparation;
+            }
             newNetworkMode = $"container:{selectedGateway.ContainerName}";
         }
 
@@ -232,7 +238,6 @@ public sealed class HomeLabService(
                 ToHealth(installation.HealthState));
         }
 
-        var output = new List<string>();
         var oldNetworkMode = installation.NetworkMode;
         var oldConfigurationJson = installation.ConfigurationJson;
         var remove = await RunDockerAsync(
@@ -824,6 +829,7 @@ public sealed class HomeLabService(
         var secretConfiguration = DeserializeDictionary(installation.SecretConfigurationJson);
         var environment = app.Environment
             .Concat(configuration.Where(item => !IsInternalConfigurationKey(item.Key)))
+            .Concat(BuildVpnPortEnvironment(app, installation.NetworkMode))
             .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
             .Select(group => $"{group.Key}={group.Last().Value}")
             .ToList();
@@ -1196,6 +1202,19 @@ public sealed class HomeLabService(
                         reusableVpnGateway?.ContainerName),
                     recipeId is not null,
                     now);
+                if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
+                    reusableVpnGateway is not null)
+                {
+                    var gatewayPreparation = await EnsureVpnGatewayNamespacePortAsync(
+                        reusableVpnGateway,
+                        app,
+                        output,
+                        cancellationToken);
+                    if (!gatewayPreparation.Succeeded)
+                    {
+                        throw new InvalidOperationException(gatewayPreparation.Detail);
+                    }
+                }
                 var run = await RunContainerAsync(
                     installation,
                     app,
@@ -1409,6 +1428,7 @@ public sealed class HomeLabService(
 
         foreach (var environment in app.Environment
                      .Concat(configuration.Where(item => !IsInternalConfigurationKey(item.Key)))
+                     .Concat(BuildVpnPortEnvironment(app, installation.NetworkMode))
                      .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
                      .Select(group => group.Last()))
         {
@@ -1424,7 +1444,7 @@ public sealed class HomeLabService(
         {
             foreach (var port in app.Ports)
             {
-                args.AddRange(["--publish", $"127.0.0.1::{port.ContainerPort}"]);
+                args.AddRange(["--publish", $"127.0.0.1::{ResolveContainerPort(app, port, false)}"]);
             }
         }
 
@@ -1462,7 +1482,7 @@ public sealed class HomeLabService(
         }
 
         var ports = installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase)
-            ? ParsePortBindings(inspect, app)
+            ? ParsePortBindings(inspect, app, false)
             : await ParseSharedNamespacePortBindingsAsync(installation.NetworkMode, app, cancellationToken);
         if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase) && ports.Count != app.Ports.Count)
         {
@@ -1597,7 +1617,7 @@ public sealed class HomeLabService(
         var gateway = await InspectContainerAsync(gatewayName, cancellationToken);
         return gateway is null
             ? []
-            : ParsePortBindings(gateway, app);
+            : ParsePortBindings(gateway, app, true);
     }
 
     private async Task<HomeLabOperationResult> EnsureNetworkAsync(string networkName, CancellationToken cancellationToken)
@@ -1747,7 +1767,10 @@ public sealed class HomeLabService(
         CancellationToken cancellationToken) =>
         await commandRunner.RunAsync(request, false, cancellationToken);
 
-    private static IReadOnlyList<HomeLabPortBinding> ParsePortBindings(JsonObject inspect, HomeLabAppManifest app)
+    private static IReadOnlyList<HomeLabPortBinding> ParsePortBindings(
+        JsonObject inspect,
+        HomeLabAppManifest app,
+        bool useVpnNamespacePort)
     {
         var ports = inspect["NetworkSettings"]?["Ports"]?.AsObject();
         if (ports is null)
@@ -1758,13 +1781,14 @@ public sealed class HomeLabService(
         var result = new List<HomeLabPortBinding>();
         foreach (var port in app.Ports)
         {
-            var key = $"{port.ContainerPort}/{port.Protocol}";
+            var containerPort = ResolveContainerPort(app, port, useVpnNamespacePort);
+            var key = $"{containerPort}/{port.Protocol}";
             var published = ports[key]?.AsArray()?.FirstOrDefault()?.AsObject()?["HostPort"]?.GetValue<string>();
             if (!int.TryParse(published, out var hostPort))
             {
                 continue;
             }
-            result.Add(new HomeLabPortBinding(port.Name, port.ContainerPort, hostPort));
+            result.Add(new HomeLabPortBinding(port.Name, containerPort, hostPort));
         }
         return result;
     }
@@ -1786,6 +1810,30 @@ public sealed class HomeLabService(
 
     private static HomeLabPortManifest ResolvePrimaryPort(HomeLabAppManifest app) =>
         app.Ports.FirstOrDefault(port => port.Primary) ?? app.Ports.First();
+
+    private static int ResolveContainerPort(
+        HomeLabAppManifest app,
+        HomeLabPortManifest port,
+        bool useVpnNamespacePort) =>
+        useVpnNamespacePort && port.VpnContainerPort is int vpnPort
+            ? vpnPort
+            : port.ContainerPort;
+
+    private static IEnumerable<KeyValuePair<string, string>> BuildVpnPortEnvironment(
+        HomeLabAppManifest app,
+        string networkMode)
+    {
+        if (!networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            return [];
+        }
+
+        return app.Ports
+            .Where(port => !string.IsNullOrWhiteSpace(port.VpnEnvironmentVariable) && port.VpnContainerPort is not null)
+            .Select(port => new KeyValuePair<string, string>(
+                port.VpnEnvironmentVariable!,
+                ResolveContainerPort(app, port, true).ToString()));
+    }
 
     private string ResolveVolumeHostPath(
         Guid deploymentId,
@@ -2247,16 +2295,56 @@ public sealed class HomeLabService(
         foreach (var existing in routedInstallations)
         {
             var existingApp = HomeLabCatalog.GetApp(existing.AppId);
+            var existingBindings = DeserializePortBindings(existing.PortMappingsJson);
             var conflictingPort = app.Ports.FirstOrDefault(port =>
                 existingApp.Ports.Any(existingPort =>
-                    existingPort.ContainerPort == port.ContainerPort &&
-                    existingPort.Protocol.Equals(port.Protocol, StringComparison.OrdinalIgnoreCase)));
+                {
+                    if (!existingPort.Protocol.Equals(port.Protocol, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+
+                    var existingBinding = existingBindings.FirstOrDefault(binding =>
+                        binding.Name.Equals(existingPort.Name, StringComparison.OrdinalIgnoreCase));
+                    var existingContainerPort = existingBinding?.ContainerPort ??
+                        ResolveContainerPort(existingApp, existingPort, true);
+                    return existingContainerPort == ResolveContainerPort(app, port, true);
+                }));
             if (conflictingPort is not null)
             {
                 throw new InvalidOperationException(
-                    $"{app.Name} cannot share the VPN Gateway network namespace with {existingApp.Name}: both require {conflictingPort.Protocol.ToUpperInvariant()} port {conflictingPort.ContainerPort}. Choose a direct route or use a separate VPN Gateway installation.");
+                    $"{app.Name} cannot share the VPN Gateway network namespace with {existingApp.Name}: both require {conflictingPort.Protocol.ToUpperInvariant()} port {ResolveContainerPort(app, conflictingPort, true)} and neither app has a separate configured listener. Update the app definition or use a separate VPN Gateway installation.");
             }
         }
+    }
+
+    private async Task<HomeLabOperationResult> EnsureVpnGatewayNamespacePortAsync(
+        HomeLabInstallationEntity gateway,
+        HomeLabAppManifest app,
+        List<string> output,
+        CancellationToken cancellationToken)
+    {
+        var requiredPorts = app.Ports
+            .Where(port => port.VpnContainerPort is not null)
+            .Select(port => (port.Protocol, ContainerPort: ResolveContainerPort(app, port, true)))
+            .ToArray();
+        if (requiredPorts.Length == 0)
+        {
+            return Success("VPN Gateway ports ready.", "The app does not require a remapped VPN namespace port.", [], HomeLabHealthState.Healthy);
+        }
+
+        var inspect = await InspectContainerAsync(gateway.ContainerName, cancellationToken);
+        var publishedPorts = inspect?["NetworkSettings"]?["Ports"]?.AsObject();
+        var missing = requiredPorts.Any(required =>
+            publishedPorts?[$"{required.ContainerPort}/{required.Protocol}"]?.AsArray()?.Count > 0 != true);
+        if (!missing)
+        {
+            return Success("VPN Gateway ports ready.", $"{app.Name} can use the existing gateway namespace.", [], HomeLabHealthState.Healthy);
+        }
+
+        var trackedGateway = await dbContext.HomeLabInstallations
+            .SingleAsync(item => item.Id == gateway.Id, cancellationToken);
+        return await UpdateVpnGatewayAsync(trackedGateway, output, cancellationToken);
     }
 
     private static IReadOnlyList<string> ExpandDependencies(IReadOnlyList<string> requestedAppIds)

@@ -20,10 +20,11 @@ public static class HomeLabCatalog
             "https://github.com/qdm12/gluetun-wiki",
             "qmcgaw/gluetun",
             "latest",
-            "1",
+            "2",
             [
                 new("http-proxy", 8888, Primary: true),
                 new("routed-web", 8080),
+                new("routed-web-alt", 8081),
                 new("routed-stremio", 11470)
             ],
             [new("config", "/gluetun", HomeLabStorageKind.Configuration)],
@@ -211,8 +212,8 @@ public static class HomeLabCatalog
             "https://webtor.io/",
             "ghcr.io/webtor-io/self-hosted",
             "latest",
-            "1",
-            [new("web", 8080, Primary: true)],
+            "2",
+            [new("web", 8080, Primary: true, VpnContainerPort: 8081, VpnEnvironmentVariable: "WEB_PORT")],
             [new("data", "/data", HomeLabStorageKind.UserData), new("database", "/pgdata", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(), [], null,
             [new("network-route", "Internet route", "select", true, Help: "Webtor must use VPN Gateway routing. LMS blocks direct Webtor installations.", Options: new[] { "VPN Gateway (Gluetun)" }), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Webtor traffic.")],
