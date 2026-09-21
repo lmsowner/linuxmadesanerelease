@@ -513,9 +513,10 @@ public sealed class HomeLabService(
                 }
             }
 
+            var targetImage = $"{app.ImageRepository}:{app.ImageTag}";
             var pull = await RunDockerAsync(
-                ["pull", installation.Image],
-                $"Pull updated Home Lab image {installation.Image}",
+                ["pull", targetImage],
+                $"Pull updated Home Lab image {targetImage}",
                 cancellationToken);
             AppendOutput(output, pull);
             if (pull.ExitCode != 0)
@@ -533,6 +534,7 @@ public sealed class HomeLabService(
                 return Failure("Home Lab container replacement failed.", NormalizeFailure(remove), output, HomeLabHealthState.Failed);
             }
 
+            installation.Image = targetImage;
             var run = await RunContainerAsync(
                 installation,
                 app,
@@ -553,7 +555,7 @@ public sealed class HomeLabService(
             await dbContext.SaveChangesAsync(cancellationToken);
             return Success(
                 "Home Lab app updated.",
-                $"{app.Name} was recreated from {installation.Image}.",
+                $"{app.Name} was recreated from {targetImage}.",
                 output,
                 ToHealth(installation.HealthState));
         }
