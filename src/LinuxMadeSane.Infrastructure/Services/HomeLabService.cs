@@ -47,6 +47,7 @@ public sealed class HomeLabService(
                 var app = HomeLabCatalog.GetApp(entity.AppId);
                 await EnforceRequiredVpnRouteAsync(entity, app, cancellationToken);
                 var applicationConfigurationChanged = await EnsureApplicationConfigurationAsync(
+                    entity,
                     app,
                     DeserializeBindings(entity.VolumeMappingsJson),
                     cancellationToken);
@@ -1142,10 +1143,10 @@ public sealed class HomeLabService(
 
         if (app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
         {
-            environment.Add("WebUI\\ReverseProxySupportEnabled=true");
+            environment.Add("WebUI\\ReverseProxySupportEnabled=false");
             environment.Add("WebUI\\HostHeaderValidation=false");
-            connections.Add("Web UI proxy support: enabled for the LMS Caddy route");
-            connections.Add("Application login: use qBittorrent credentials; the initial admin password is in the container logs until changed");
+            connections.Add("Web UI access: the local LMS Caddy route is trusted without a separate qBittorrent login");
+            connections.Add("Direct application login: use qBittorrent credentials; the initial admin password is in the container logs until changed");
         }
 
         if (recipeId is not null)
@@ -1657,7 +1658,7 @@ public sealed class HomeLabService(
             }
         }
 
-        await EnsureApplicationConfigurationAsync(app, bindings, cancellationToken);
+        await EnsureApplicationConfigurationAsync(installation, app, bindings, cancellationToken);
 
         var args = new List<string>
         {
@@ -1793,6 +1794,7 @@ public sealed class HomeLabService(
     }
 
     private async Task<bool> EnsureApplicationConfigurationAsync(
+        HomeLabInstallationEntity installation,
         HomeLabAppManifest app,
         IReadOnlyList<HomeLabVolumeBinding> bindings,
         CancellationToken cancellationToken)
@@ -1809,6 +1811,8 @@ public sealed class HomeLabService(
             throw new InvalidOperationException("qBittorrent requires a mounted /config volume for LMS proxy compatibility settings.");
         }
 
+        var proxyGatewaySubnet = await ResolveQbittorrentProxyGatewaySubnetAsync(installation, cancellationToken);
+
         var configFile = Path.Combine(configBinding.HostPath, "qBittorrent", "qBittorrent.conf");
         var quotedConfigFile = ShellQuote(configFile);
         var script = $"""
@@ -1820,20 +1824,22 @@ public sealed class HomeLabService(
             if [ ! -f "$config_file" ]; then
                 cat > "$config_file" <<'LMS_QBITTORRENT_CONFIG'
             [Preferences]
-            WebUI\ReverseProxySupportEnabled=true
+            WebUI\ReverseProxySupportEnabled=false
             WebUI\HostHeaderValidation=false
             WebUI\LocalHostAuth=false
+            WebUI\AuthSubnetWhitelist={proxyGatewaySubnet}
+            WebUI\AuthSubnetWhitelistEnabled=true
             Connection\UPnP=false
             LMS_QBITTORRENT_CONFIG
                 changed=1
             else
-                if ! grep -q '^WebUI\\ReverseProxySupportEnabled=true$' "$config_file"; then
+                if ! grep -q '^WebUI\\ReverseProxySupportEnabled=false$' "$config_file"; then
                     if grep -q '^WebUI\\ReverseProxySupportEnabled=' "$config_file"; then
-                        sed -i 's/^WebUI\\ReverseProxySupportEnabled=.*/WebUI\\ReverseProxySupportEnabled=true/' "$config_file"
+                        sed -i 's/^WebUI\\ReverseProxySupportEnabled=.*/WebUI\\ReverseProxySupportEnabled=false/' "$config_file"
                     elif grep -q '^\\[Preferences\\]$' "$config_file"; then
-                        sed -i '/^\\[Preferences\\]$/a WebUI\\ReverseProxySupportEnabled=true' "$config_file"
+                        sed -i '/^\\[Preferences\\]$/a WebUI\\ReverseProxySupportEnabled=false' "$config_file"
                     else
-                        printf '\n[Preferences]\nWebUI\ReverseProxySupportEnabled=true\n' >> "$config_file"
+                        printf '\n[Preferences]\nWebUI\ReverseProxySupportEnabled=false\n' >> "$config_file"
                     fi
                     changed=1
                 fi
@@ -1852,6 +1858,22 @@ public sealed class HomeLabService(
                         sed -i 's/^WebUI\\LocalHostAuth=.*/WebUI\\LocalHostAuth=false/' "$config_file"
                     elif grep -q '^\[Preferences\]$' "$config_file"; then
                         sed -i '/^\[Preferences\]$/a WebUI\\LocalHostAuth=false' "$config_file"
+                    fi
+                    changed=1
+                fi
+                if ! grep -Fqx 'WebUI\AuthSubnetWhitelist={proxyGatewaySubnet}' "$config_file"; then
+                    if grep -q '^WebUI\\AuthSubnetWhitelist=' "$config_file"; then
+                        sed -i 's|^WebUI\\AuthSubnetWhitelist=.*|WebUI\\AuthSubnetWhitelist={proxyGatewaySubnet}|' "$config_file"
+                    elif grep -q '^\[Preferences\]$' "$config_file"; then
+                        sed -i '/^\[Preferences\]$/a WebUI\\AuthSubnetWhitelist={proxyGatewaySubnet}' "$config_file"
+                    fi
+                    changed=1
+                fi
+                if ! grep -q '^WebUI\\AuthSubnetWhitelistEnabled=true$' "$config_file"; then
+                    if grep -q '^WebUI\\AuthSubnetWhitelistEnabled=' "$config_file"; then
+                        sed -i 's/^WebUI\\AuthSubnetWhitelistEnabled=.*/WebUI\\AuthSubnetWhitelistEnabled=true/' "$config_file"
+                    elif grep -q '^\[Preferences\]$' "$config_file"; then
+                        sed -i '/^\[Preferences\]$/a WebUI\\AuthSubnetWhitelistEnabled=true' "$config_file"
                     fi
                     changed=1
                 fi
@@ -1881,6 +1903,37 @@ public sealed class HomeLabService(
         }
 
         return result.StandardOutput.Trim().EndsWith("1", StringComparison.Ordinal);
+    }
+
+    private async Task<string> ResolveQbittorrentProxyGatewaySubnetAsync(
+        HomeLabInstallationEntity installation,
+        CancellationToken cancellationToken)
+    {
+        LinuxCommandResult inspect;
+        if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            var gatewayContainer = installation.NetworkMode["container:".Length..].TrimStart('/');
+            inspect = await RunDockerAsync(
+                ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{println .Gateway}}{{end}}", gatewayContainer],
+                $"Resolve qBittorrent proxy gateway through {gatewayContainer}",
+                cancellationToken);
+        }
+        else
+        {
+            inspect = await RunDockerAsync(
+                ["network", "inspect", "--format", "{{range .IPAM.Config}}{{println .Gateway}}{{end}}", installation.NetworkName],
+                $"Resolve qBittorrent proxy gateway on {installation.NetworkName}",
+                cancellationToken);
+        }
+
+        if (inspect.ExitCode != 0 ||
+            !HomeLabQbittorrentWebUiAccess.TryBuildDockerGatewaySubnet(inspect.StandardOutput, out var subnet))
+        {
+            throw new InvalidOperationException(
+                $"qBittorrent's Docker gateway could not be resolved for LMS browser access: {NormalizeFailure(inspect)}");
+        }
+
+        return subnet;
     }
 
     private async Task<LinuxCommandResult> ResetQbittorrentCredentialsAsync(
