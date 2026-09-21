@@ -20,6 +20,7 @@ export function startCountdown(seconds) {
         render();
         if (remaining <= 0) {
             window.clearInterval(countdownTimer);
+            window.location.reload();
         }
     }, 1000);
 }
