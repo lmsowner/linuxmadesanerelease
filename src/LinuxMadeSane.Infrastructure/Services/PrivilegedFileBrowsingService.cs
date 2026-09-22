@@ -34,16 +34,34 @@ public sealed class PrivilegedFileBrowsingService(
         """
         import datetime, grp, json, os, pwd, stat, sys
         path = sys.argv[1]
-        if not os.path.isdir(path):
-            raise FileNotFoundError(path)
         result = []
         with os.scandir(path) as entries:
             for entry in entries:
                 full_path = os.path.join(path, entry.name)
-                info = entry.stat(follow_symlinks=False)
+                try:
+                    is_link = entry.is_symlink()
+                    is_directory = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    is_link = False
+                    is_directory = True
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    result.append({
+                        "Name": entry.name,
+                        "FullPath": full_path,
+                        "ItemType": 2 if is_link else (1 if is_directory else 0),
+                        "SizeBytes": 0,
+                        "LastModifiedUtc": None,
+                        "Permissions": "??????????",
+                        "OwnerName": "",
+                        "GroupName": "",
+                        "PermissionsOctal": "",
+                        "LinkTarget": ""
+                    })
+                    continue
                 mode = info.st_mode
-                is_link = stat.S_ISLNK(mode)
-                item_type = 2 if is_link else (1 if stat.S_ISDIR(mode) else 0)
+                item_type = 2 if is_link else (1 if is_directory else 0)
                 try:
                     owner = pwd.getpwuid(info.st_uid).pw_name
                 except KeyError:

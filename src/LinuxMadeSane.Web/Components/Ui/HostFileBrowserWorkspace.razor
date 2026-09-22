@@ -196,7 +196,7 @@ else
                             var suggestedAccessUser = SuggestedAccessUser;
                             <section class="host-file-access-guidance" aria-label="Folder access guidance">
                                 <div class="host-file-access-guidance-copy">
-                                    <strong>Use the right Linux identity for this folder.</strong>
+                                    <strong>@AccessGuidanceTitle</strong>
                                     <span>@BuildAccessGuidanceMessage(accessDeniedPath, suggestedAccessUser)</span>
                                 </div>
                                 <div class="host-file-access-guidance-actions">
@@ -1327,6 +1327,9 @@ else
     private bool HasBrowseFailure => !string.IsNullOrWhiteSpace(errorMessage) && !canBrowse;
     private bool ShowAccessDeniedGuidance => !string.IsNullOrWhiteSpace(accessDeniedPath);
     private string? SuggestedAccessUser => GetSuggestedAccessUser(accessDeniedPath);
+    private string AccessGuidanceTitle => sudoModeEnabled
+        ? "This item rejects root access."
+        : "Use the right Linux identity for this folder.";
     private bool CanShowPopout => AllowPopout && !DetachedBrowserId.HasValue && !DetachedSearchId.HasValue;
     private bool ShouldOpenFileSearchInline => DetachedSearchId.HasValue || !AllowPopout;
     private string ResolvedExplorerTitle => string.IsNullOrWhiteSpace(Title) ? "Filesystem explorer" : Title.Trim();
@@ -5568,6 +5571,11 @@ else
     private string BuildAccessGuidanceMessage(string path, string? suggestedUser)
     {
         var normalizedPath = ResolveBrowserPath(path);
+        if (sudoModeEnabled)
+        {
+            return $"{normalizedPath} still rejects privileged access. User-session mounts such as GVFS and redirected drives can deny root; open it through the owning user's session.";
+        }
+
         if (!string.IsNullOrWhiteSpace(suggestedUser))
         {
             return UsesSshTransport &&
@@ -5635,10 +5643,15 @@ else
         return false;
     }
 
-    private static string BuildBrowseFailureMessage(string path, Exception exception, bool isAccessDenied, bool isPathNotFound)
+    private string BuildBrowseFailureMessage(string path, Exception exception, bool isAccessDenied, bool isPathNotFound)
     {
         if (isAccessDenied)
         {
+            if (sudoModeEnabled)
+            {
+                return $"{path} rejected privileged root access. This can happen with user-session or network mounts.";
+            }
+
             return $"{path} is not accessible with the current credentials or filesystem permissions.";
         }
 
