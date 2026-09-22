@@ -833,6 +833,27 @@ public sealed class HomeLabService(
 
         if (actionName is not null)
         {
+            if (action is HomeLabLifecycleAction.Start or HomeLabLifecycleAction.Restart &&
+                app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    await RefreshWireGuardProfileAsync(installation, cancellationToken);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    installation.HealthState = (int)HomeLabHealthState.Failed;
+                    installation.HealthDetail = exception.Message;
+                    installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    return Failure(
+                        "VPN Gateway profile refresh failed.",
+                        exception.Message,
+                        output,
+                        HomeLabHealthState.Failed);
+                }
+            }
+
             var result = await RunDockerAsync(
                 [actionName, installation.ContainerName],
                 $"{actionName} Home Lab container {installation.ContainerName}",
@@ -1810,7 +1831,8 @@ public sealed class HomeLabService(
             {
                 var containerPath = secretReference.Key["FILE:".Length..];
                 var hostPath = ResolveSecretFileHostPath(bindings, containerPath);
-                await WriteSecretFileAsync(hostPath, secret, cancellationToken);
+                var fileContent = await PrepareSecretFileContentAsync(app, containerPath, secret, cancellationToken);
+                await WriteSecretFileAsync(hostPath, fileContent, cancellationToken);
                 continue;
             }
             resolvedSecrets[secretReference.Key] = secret;
@@ -2750,6 +2772,39 @@ public sealed class HomeLabService(
         }
         return hostPath;
     }
+
+    private async Task RefreshWireGuardProfileAsync(
+        HomeLabInstallationEntity installation,
+        CancellationToken cancellationToken)
+    {
+        var secretReference = DeserializeDictionary(installation.SecretConfigurationJson)
+            .SingleOrDefault(item => item.Key.Equals("FILE:/gluetun/wireguard/wg0.conf", StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrWhiteSpace(secretReference.Key))
+        {
+            return;
+        }
+
+        var profile = await secretStore.ResolveSecretAsync(secretReference.Value, cancellationToken);
+        if (string.IsNullOrEmpty(profile))
+        {
+            throw new InvalidOperationException("The saved WireGuard profile is unavailable. Edit the VPN Gateway and paste the provider profile again.");
+        }
+
+        var bindings = DeserializeBindings(installation.VolumeMappingsJson);
+        var hostPath = ResolveSecretFileHostPath(bindings, "/gluetun/wireguard/wg0.conf");
+        var normalizedProfile = await HomeLabWireGuardProfileNormalizer.NormalizeAsync(profile, cancellationToken);
+        await WriteSecretFileAsync(hostPath, normalizedProfile, cancellationToken);
+    }
+
+    private static Task<string> PrepareSecretFileContentAsync(
+        HomeLabAppManifest app,
+        string containerPath,
+        string content,
+        CancellationToken cancellationToken) =>
+        app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) &&
+        containerPath.Equals("/gluetun/wireguard/wg0.conf", StringComparison.OrdinalIgnoreCase)
+            ? HomeLabWireGuardProfileNormalizer.NormalizeAsync(content, cancellationToken)
+            : Task.FromResult(content);
 
     private async Task WriteSecretFileAsync(string hostPath, string content, CancellationToken cancellationToken)
     {
