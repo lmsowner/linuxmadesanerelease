@@ -40,6 +40,42 @@
     }
     else
     {
+        @if (renamingGateway is { } gatewayToRename)
+        {
+            <UiModal IsOpen="true"
+                     Title="Rename VPN gateway"
+                     Subtitle="This changes the name shown in Linux Made Sane. Docker networking and routed apps stay connected to the same gateway."
+                     Class="home-lab-rename-modal"
+                     OnClose="CancelGatewayRename">
+                <ChildContent>
+                    <section class="home-lab-rename-panel">
+                        <div class="home-lab-config-field">
+                            <label for="home-lab-gateway-name">Gateway name</label>
+                            <input id="home-lab-gateway-name"
+                                   class="ui-control-input"
+                                   maxlength="160"
+                                   value="@gatewayRenameValue"
+                                   @oninput="eventArgs => gatewayRenameValue = eventArgs.Value?.ToString() ?? string.Empty"
+                                   autofocus />
+                            <span class="meta-text">Currently shown as @gatewayToRename.DisplayName.</span>
+                        </div>
+                        <div class="home-lab-rename-actions">
+                            <UiCommandButton Label="Cancel"
+                                             Glyph="UiIconGlyph.Clear"
+                                             Variant="UiButtonVariant.Ghost"
+                                             Disabled="@busy"
+                                             OnClick="CancelGatewayRename" />
+                            <UiCommandButton Label="Rename gateway"
+                                             Glyph="UiIconGlyph.Edit"
+                                             Variant="UiButtonVariant.PrimaryMuted"
+                                             Disabled="@(busy || !CanRenameGateway)"
+                                             OnClick="RenameGatewayAsync" />
+                        </div>
+                    </section>
+                </ChildContent>
+            </UiModal>
+        }
+
         <TabControl ActiveValue="@activeTab"
                     ActiveValueChanged="HandleTabChangedAsync"
                     Class="home-lab-tabs"
@@ -159,11 +195,17 @@
                                             <dt>Incoming P2P port</dt><dd>@GetEffectiveEnvironmentValue(selectedDetails, "VPN_PORT_FORWARDING")</dd>
                                         </dl>
                                         <UiCommandButton Label="Edit gateway"
-                                                         Title="Rename this gateway or paste a replacement provider profile"
+                                                         Title="Change this gateway's VPN provider configuration"
                                                          Glyph="UiIconGlyph.Edit"
                                                          Variant="UiButtonVariant.ActionSubtle"
                                                          Disabled="@busy"
                                                          OnClick="BeginVpnReconfiguration" />
+                                        <UiCommandButton Label="Rename gateway"
+                                                         Title="Change the name shown for this gateway"
+                                                         Glyph="UiIconGlyph.Edit"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         Disabled="@busy"
+                                                         OnClick="() => BeginGatewayRename(selectedInstallation)" />
                                     </div>
                                 }
 
@@ -509,10 +551,16 @@
                                                  OnClick="() => ManageAsync(installation)" />
                                 @if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    <UiCommandButton Label="Edit gateway"
+                                    <UiCommandButton Label="Rename"
                                                      Glyph="UiIconGlyph.Edit"
                                                      Variant="UiButtonVariant.ActionSubtle"
-                                                     Title="Rename this gateway or paste a replacement VPN provider configuration"
+                                                     Title="Change the name shown for this VPN gateway"
+                                                     Disabled="@busy"
+                                                     OnClick="() => BeginGatewayRename(installation)" />
+                                    <UiCommandButton Label="VPN settings"
+                                                     Glyph="UiIconGlyph.Edit"
+                                                     Variant="UiButtonVariant.ActionSubtle"
+                                                     Title="Change this gateway's VPN provider configuration"
                                                      Disabled="@busy"
                                                      OnClick="() => BeginVpnReconfiguration(installation)" />
                                 }
@@ -634,6 +682,8 @@
     private string customPrompt = string.Empty;
     private HomeLabAppManifest? configuringApp;
     private HomeLabAppInstallation? configuringInstallation;
+    private HomeLabAppInstallation? renamingGateway;
+    private string gatewayRenameValue = string.Empty;
     private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
     private HomeLabAppInstallation? selectedInstallation;
@@ -1102,6 +1152,59 @@
         configurationValues["protocol"] = "WireGuard";
         configurationValues["port-forwarding"] = HomeLabVpnPortForwardingPlan.RequiredSelection;
         CloseDetails();
+    }
+
+    private void BeginGatewayRename(HomeLabAppInstallation gateway)
+    {
+        if (!IsVpnGateway(gateway))
+        {
+            return;
+        }
+
+        renamingGateway = gateway;
+        gatewayRenameValue = gateway.DisplayName;
+        CloseDetails();
+    }
+
+    private bool CanRenameGateway =>
+        renamingGateway is { } gateway &&
+        !string.IsNullOrWhiteSpace(gatewayRenameValue) &&
+        gatewayRenameValue.Trim().Length <= 160 &&
+        !gateway.DisplayName.Equals(gatewayRenameValue.Trim(), StringComparison.Ordinal);
+
+    private void CancelGatewayRename()
+    {
+        renamingGateway = null;
+        gatewayRenameValue = string.Empty;
+    }
+
+    private async Task RenameGatewayAsync()
+    {
+        if (renamingGateway is not { } gateway || !CanRenameGateway)
+        {
+            return;
+        }
+
+        var renamed = false;
+        await RunUiOperationAsync(async () =>
+        {
+            var configuration = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["gateway-name"] = gatewayRenameValue.Trim(),
+                ["configuration-mode"] = "Paste provider config"
+            };
+            var result = await HomeLabService.ReconfigureVpnGatewayAsync(
+                gateway.Id,
+                configuration,
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            renamed = result.Succeeded;
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+
+        if (renamed)
+        {
+            CancelGatewayRename();
+        }
     }
 
     private bool ShouldShowConfigurationField(HomeLabConfigurationField field)
