@@ -4,6 +4,9 @@
 @page "/ai/threads"
 @page "/ai/threads/new"
 @page "/ai/threads/{ThreadId:guid}"
+@page "/home-lab/assist"
+@page "/home-lab/assist/new"
+@page "/home-lab/assist/{ThreadId:guid}"
 @rendermode InteractiveServer
 @implements IAsyncDisposable
 @using LinuxMadeSane.Application.Interfaces
@@ -18,19 +21,9 @@
 @inject IJSRuntime JSRuntime
 @inject NavigationManager NavigationManager
 
-<PageTitle>AI Chat Workspace | Linux Made Sane</PageTitle>
+<PageTitle>@(IsHomeLabRoute ? "Home Lab Help" : "AI Chat Workspace") | Linux Made Sane</PageTitle>
 
 <div class="page-shell ai-chat-shell">
-    <section class="hero-panel compact">
-        <div>
-            <h1 class="page-title-compact">AI chats</h1>
-            <p class="hero-copy page-copy-compact">Configure provider and machine scope, then work from chat tabs.</p>
-        </div>
-        <div class="hero-actions">
-            <UiCommandButton Label="Provider settings" Glyph="UiIconGlyph.Connection" Variant="UiButtonVariant.Ghost" Href="/ai/providers" />
-        </div>
-    </section>
-
     @if (IsInitialLoadPending)
     {
         <section class="surface-card">
@@ -48,7 +41,7 @@
         <section class="workspace-tabs-shell">
             <div class="workspace-tab-toolbar">
                 <div class="table-header workspace-tab-toolbar-header">
-                    <h2>Chat threads</h2>
+                    <h1 class="page-title-compact">@(IsHomeLabRoute ? "Home Lab help" : "AI chats")</h1>
                     <span>@FilteredThreads.Count item(s)</span>
                 </div>
 
@@ -202,8 +195,6 @@
     private bool isSendingMessage;
     private bool isClearingConversation;
     private Guid? loadingThreadId;
-    private ElementReference approvalPromptElement;
-    private bool scrollApprovalPromptIntoView;
     private Guid? returnToHomeLabActionId;
     private Guid? processedStorageSetupInvocationId;
     private string? storagePickerRole;
@@ -215,9 +206,17 @@
     private readonly HashSet<Guid> mutatingMessageIds = [];
     private readonly HashSet<Guid> mutatingToolIds = [];
 
+    private string CurrentRelativePath =>
+        NavigationManager.ToBaseRelativePath(NavigationManager.Uri).Split('?', '#')[0].TrimEnd('/');
+
+    private bool IsHomeLabRoute =>
+        CurrentRelativePath.StartsWith("home-lab/assist", StringComparison.OrdinalIgnoreCase);
+
     private bool IsNewRoute =>
-        NavigationManager.ToBaseRelativePath(NavigationManager.Uri).TrimEnd('/')
-            .Equals("ai/threads/new", StringComparison.OrdinalIgnoreCase);
+        CurrentRelativePath.EndsWith("/new", StringComparison.OrdinalIgnoreCase);
+
+    private string BuildThreadRoute(Guid threadId) =>
+        IsHomeLabRoute ? $"/home-lab/assist/{threadId}" : $"/ai/threads/{threadId}";
 
     private bool HasActiveWorkspace =>
         ThreadId.HasValue &&
@@ -297,11 +296,13 @@
         get
         {
             var filtered = threads
+                .Where(MatchesWorkspaceContext)
                 .Where(MatchesSearch)
                 .Where(MatchesFilter)
                 .ToList();
 
             if (SelectedThreadListItem is not null &&
+                MatchesWorkspaceContext(SelectedThreadListItem) &&
                 filtered.All(thread => thread.Id != SelectedThreadListItem.Id))
             {
                 filtered.Insert(0, SelectedThreadListItem);
@@ -369,6 +370,11 @@
 
     private AiChatRun? DisplayedRun => ActiveRun ?? LatestRun;
 
+    private bool ShouldDisplayRunStatus =>
+        DisplayedRun is not null &&
+        DisplayedRun.Status != AiChatRunStatus.AwaitingApproval &&
+        (ActiveRun is not null || DisplayedRun.Status is AiChatRunStatus.Failed or AiChatRunStatus.Cancelled);
+
     private bool CanCancelRun =>
         ActiveRun is not null &&
         ActiveRun.Status is AiChatRunStatus.Queued or AiChatRunStatus.Running or AiChatRunStatus.CancellationRequested;
@@ -420,7 +426,6 @@
                         <span>Chat title</span>
                         <InputText @bind-Value="selectedThreadContext!.Editor.Title" />
                     </label>
-                    <span class="meta-text">Thread ID: @workspace!.Thread.Id</span>
                 </div>
                 <div class="workspace-thread-actions">
                     <div class="workspace-thread-menus">
@@ -503,16 +508,23 @@
                     </div>
 
                     <div class="workspace-thread-command-bar">
-                        @if (DisplayedRun is not null && DisplayedRun.Status != AiChatRunStatus.AwaitingApproval)
+                        @if (IsHomeLabRoute)
                         {
-                            <span class="status-pill @GetRunPillClass(DisplayedRun.Status)">@GetRunStatusLabel(DisplayedRun.Status)</span>
+                            <UiCommandButton Label="Back to Home Lab"
+                                             Glyph="UiIconGlyph.Dock"
+                                             Variant="UiButtonVariant.Toolbar"
+                                             Class="workspace-quick-button"
+                                             Href="/home-lab/apps" />
                         }
-                        <UiCommandButton Label="@(isCreatingThread ? "Creating..." : "New chat")"
-                                         Glyph="UiIconGlyph.Plus"
-                                         Variant="UiButtonVariant.Toolbar"
-                                         Class="workspace-quick-button"
-                                         OnClick="CreateThreadAndNavigateAsync"
-                                         Disabled="@isCreatingThread" />
+                        else
+                        {
+                            <UiCommandButton Label="@(isCreatingThread ? "Creating..." : "New chat")"
+                                             Glyph="UiIconGlyph.Plus"
+                                             Variant="UiButtonVariant.Toolbar"
+                                             Class="workspace-quick-button"
+                                             OnClick="CreateThreadAndNavigateAsync"
+                                             Disabled="@isCreatingThread" />
+                        }
                         <UiCommandButton Label="@(isSavingWorkspace ? "Saving..." : "Save")"
                                          Glyph="UiIconGlyph.Connect"
                                          Variant="UiButtonVariant.Action"
@@ -526,16 +538,13 @@
                 </div>
             </div>
 
-            @if (!string.IsNullOrWhiteSpace(workspaceError))
-            {
-                <div class="callout error">@workspaceError</div>
-            }
-
+            <div class="ai-chat-workbench">
+            <section class="ai-chat-conversation-pane">
             <div class="chat-history-shell">
                 <div class="table-header">
                     <h2 class="section-title-compact">Conversation timeline</h2>
                     <div class="row-action-cluster">
-                        <span>@workspace.Timeline.Count item(s)</span>
+                        <span>@workspace!.Timeline.Count item(s)</span>
                         <UiCommandButton Label="@(isClearingConversation ? "Clearing..." : "Clear conversation")"
                                          Glyph="UiIconGlyph.Clear"
                                          Variant="UiButtonVariant.Toolbar"
@@ -582,7 +591,17 @@
                                             }
                                         </div>
                                     </div>
-                                    <p class="chat-message-content">@message.Content</p>
+                                    @if (message.Content.Length > 560)
+                                    {
+                                        <details class="chat-message-details">
+                                            <summary>@BuildMessagePreview(message.Content)</summary>
+                                            <p class="chat-message-content">@message.Content</p>
+                                        </details>
+                                    }
+                                    else
+                                    {
+                                        <p class="chat-message-content">@message.Content</p>
+                                    }
                                 </article>
                             }
                             else if (timelineItem is AiChatToolExecutionTimelineItemViewModel toolItem)
@@ -763,6 +782,49 @@
                     </div>
                 }
 
+            </div>
+            </section>
+
+            <aside class="ai-chat-action-pane" aria-label="Prompt and actions">
+                <div class="ai-action-heading">
+                    <h2>Ask LMS</h2>
+                    @if (IsHomeLabRoute)
+                    {
+                        <span class="status-pill neutral">Home Lab</span>
+                    }
+                </div>
+
+                <EditForm Model="@messageComposer" OnValidSubmit="SendMessageAsync" class="stack-form chat-compose-form">
+                    <DataAnnotationsValidator />
+
+                    @if (!string.IsNullOrWhiteSpace(messageError))
+                    {
+                        <div class="callout error">@messageError</div>
+                    }
+
+                    <label>
+                        <span>What do you need?</span>
+                        <InputTextArea @bind-Value="messageComposer.Content" placeholder="Ask a question or describe what needs fixing." />
+                        <ValidationMessage For="@(() => messageComposer.Content)" />
+                    </label>
+
+                    <div class="hero-actions">
+                        <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Working..." : "Send")"
+                                         Glyph="UiIconGlyph.Send"
+                                         Type="submit"
+                                         Disabled="@(isSendingMessage || HasActiveRun)" />
+                        @if (CanCancelRun)
+                        {
+                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Interrupt" Variant="UiButtonVariant.Danger" OnClick="RequestRunCancellationAsync" />
+                        }
+                    </div>
+                </EditForm>
+
+                @if (!string.IsNullOrWhiteSpace(workspaceError))
+                {
+                    <div class="callout error">@workspaceError</div>
+                }
+
                 @if (requiredHomeLabStorageRoles.Count > 0)
                 {
                     <div class="surface-subcard home-lab-storage-choice-card">
@@ -811,24 +873,24 @@
                     </div>
                 }
 
-                @if (DisplayedRun is not null && DisplayedRun.Status != AiChatRunStatus.AwaitingApproval)
+                @if (ShouldDisplayRunStatus)
                 {
-                    <div class="callout @GetRunCalloutClass(DisplayedRun.Status)">
+                    <div class="callout @GetRunCalloutClass(DisplayedRun!.Status)">
                         <div class="workspace-run-status">
-                            <strong>@GetRunStatusLabel(DisplayedRun.Status)</strong>
-                            <span class="meta-text">Updated @DisplayedRun.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                            <strong>@GetRunStatusLabel(DisplayedRun!.Status)</strong>
+                            <span class="meta-text">Updated @DisplayedRun!.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
                         </div>
-                        <p class="chat-run-summary">@DisplayedRun.StatusSummary</p>
-                        @if (!string.IsNullOrWhiteSpace(DisplayedRun.LastError))
+                        <p class="chat-run-summary">@DisplayedRun!.StatusSummary</p>
+                        @if (!string.IsNullOrWhiteSpace(DisplayedRun!.LastError))
                         {
-                            <pre class="command-preview-block">@DisplayedRun.LastError</pre>
+                            <pre class="command-preview-block">@DisplayedRun!.LastError</pre>
                         }
                     </div>
                 }
 
                 @if (PendingApprovalRequests.Count > 0 || !string.IsNullOrWhiteSpace(approvalError))
                 {
-                    <div class="surface-subcard approval-card" @ref="approvalPromptElement">
+                    <div class="surface-subcard approval-card">
                     @if (!string.IsNullOrWhiteSpace(approvalError))
                     {
                         <div class="callout error">@approvalError</div>
@@ -840,7 +902,7 @@
                             <div>
                                 <strong>LMS needs your OK</strong>
                                 <p class="chat-message-content">@request.Summary</p>
-                                <p class="helper-text">If you allow this, Linux Made Sane will run the change with sudo and report the result here.</p>
+                                <p class="helper-text">Runs with sudo on this LMS server.</p>
                             </div>
 
                             @if (!string.IsNullOrWhiteSpace(request.CommandPreview))
@@ -867,58 +929,13 @@
                     }
                     </div>
                 }
+            </aside>
             </div>
-
-            <EditForm Model="@messageComposer" OnValidSubmit="SendMessageAsync" class="stack-form chat-compose-form">
-                <DataAnnotationsValidator />
-
-                @if (!string.IsNullOrWhiteSpace(messageError))
-                {
-                    <div class="callout error">@messageError</div>
-                }
-
-                <label>
-                    <span>New user message</span>
-                    <InputTextArea @bind-Value="messageComposer.Content" placeholder="Describe the Linux task, question, or context you want to keep in this chat." />
-                    <ValidationMessage For="@(() => messageComposer.Content)" />
-                </label>
-
-                <div class="hero-actions">
-                    <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Turn in progress" : "Send message")"
-                                     Glyph="UiIconGlyph.Send"
-                                     Type="submit"
-                                     Disabled="@(isSendingMessage || HasActiveRun)" />
-                </div>
-
-                @if (HasActiveRun)
-                {
-                    <p class="helper-text">
-                        Finish or cancel the current turn before sending another message.
-                    </p>
-                }
-            </EditForm>
         </section>;
 
     protected override async Task OnParametersSetAsync()
     {
         await LoadAsync();
-    }
-
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-        if (!scrollApprovalPromptIntoView || PendingApprovalRequests.Count == 0)
-        {
-            return;
-        }
-
-        scrollApprovalPromptIntoView = false;
-        try
-        {
-            await JSRuntime.InvokeVoidAsync("lmsLayout.scrollIntoView", approvalPromptElement);
-        }
-        catch (JSDisconnectedException)
-        {
-        }
     }
 
     private async Task LoadAsync()
@@ -943,9 +960,10 @@
             if (!ThreadId.HasValue)
             {
                 loadingThreadId = null;
-                if (threads.Count > 0)
+                var firstThread = threads.FirstOrDefault(MatchesWorkspaceContext);
+                if (firstThread is not null)
                 {
-                    NavigationManager.NavigateTo($"/ai/threads/{threads[0].Id}", replace: true);
+                    NavigationManager.NavigateTo(BuildThreadRoute(firstThread.Id), replace: true);
                     return;
                 }
 
@@ -982,7 +1000,12 @@
     {
         selectedThreadContext = await ThreadService.GetEditorAsync(threadId);
         workspace = await ChatService.GetWorkspaceAsync(threadId);
-        scrollApprovalPromptIntoView = PendingApprovalRequests.Count > 0;
+        if (!IsHomeLabRoute && IsHomeLabThreadTitle(selectedThreadContext.Editor.Title))
+        {
+            NavigationManager.NavigateTo($"/home-lab/assist/{threadId}", replace: true);
+            return;
+        }
+
         SyncApprovalDrafts();
         await SyncRequiredHomeLabStorageAsync();
         UpdateWorkspaceRefreshLoop();
@@ -995,9 +1018,7 @@
             return;
         }
 
-        var hadPendingPrompt = PendingApprovalRequests.Count > 0;
         workspace = await ChatService.GetWorkspaceAsync(ThreadId.Value);
-        scrollApprovalPromptIntoView |= !hadPendingPrompt && PendingApprovalRequests.Count > 0;
         SyncApprovalDrafts();
         await SyncRequiredHomeLabStorageAsync();
         ReturnToHomeLabWhenApprovedChangeCompletes();
@@ -1011,7 +1032,7 @@
         try
         {
             var threadId = await ThreadService.CreateThreadAsync();
-            NavigationManager.NavigateTo($"/ai/threads/{threadId}", replace: true);
+            NavigationManager.NavigateTo(BuildThreadRoute(threadId), replace: true);
         }
         catch (Exception exception)
         {
@@ -1412,7 +1433,7 @@
     {
         if (Guid.TryParse(value, out var threadId))
         {
-            NavigationManager.NavigateTo($"/ai/threads/{threadId}");
+            NavigationManager.NavigateTo(BuildThreadRoute(threadId));
         }
 
         return Task.CompletedTask;
@@ -1433,6 +1454,12 @@
                thread.ProviderLabel.Contains(search, StringComparison.OrdinalIgnoreCase) ||
                thread.ModelId.Contains(search, StringComparison.OrdinalIgnoreCase);
     }
+
+    private bool MatchesWorkspaceContext(AiChatThreadListItemViewModel thread) =>
+        IsHomeLabRoute == IsHomeLabThreadTitle(thread.Title);
+
+    private static bool IsHomeLabThreadTitle(string title) =>
+        title.StartsWith("Home Lab ·", StringComparison.OrdinalIgnoreCase);
 
     private bool MatchesFilter(AiChatThreadListItemViewModel thread) => activeThreadFilter switch
     {
@@ -1504,6 +1531,12 @@
     private static string FormatCommandForDisplay(string commandText) =>
         AiCommandDisplayFormatter.SanitizeDisplayText(commandText);
 
+    private static string BuildMessagePreview(string content)
+    {
+        var normalized = string.Join(' ', content.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return normalized.Length <= 180 ? normalized : $"{normalized[..177]}...";
+    }
+
     private static string BuildThreadTabTooltip(AiChatThreadListItemViewModel thread) =>
         $"{thread.Title} | {thread.ProviderLabel} | {thread.ModelId} | {BuildThreadScopeSummary(thread)} | {thread.MessageCount} message(s) | updated {thread.UpdatedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm}";
 
@@ -1553,9 +1586,7 @@
                     try
                     {
                         await RefreshThreadsAsync();
-                        var hadPendingPrompt = PendingApprovalRequests.Count > 0;
                         workspace = await ChatService.GetWorkspaceAsync(threadId);
-                        scrollApprovalPromptIntoView |= !hadPendingPrompt && PendingApprovalRequests.Count > 0;
                         SyncApprovalDrafts();
                         await SyncRequiredHomeLabStorageAsync();
                         ReturnToHomeLabWhenApprovedChangeCompletes();
