@@ -423,8 +423,20 @@
                             <span>Use a guided prompt recipe, enter your own request, or add a VPN Gateway.</span>
                         </div>
                     }
-                    @foreach (var installation in workspace.Installations.OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase))
+                    @{
+                        var orderedInstallations = workspace.Installations
+                            .OrderBy(item => IsVpnGateway(item) ? 0 : 1)
+                            .ThenBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+                            .ToArray();
+                        var firstApplicationId = orderedInstallations.FirstOrDefault(item => !IsVpnGateway(item))?.Id;
+                        var hasVpnGateways = orderedInstallations.Any(IsVpnGateway);
+                    }
+                    @foreach (var installation in orderedInstallations)
                     {
+                        @if (hasVpnGateways && installation.Id == firstApplicationId)
+                        {
+                            <div class="home-lab-app-group-separator" role="separator" aria-label="End of VPN Gateways"></div>
+                        }
                         var app = GetApp(installation.AppId);
                         <div class="home-lab-app-row">
                             <div class="home-lab-app-name">
@@ -506,6 +518,12 @@
                                 }
                                 <UiCommandButton Label="Start" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
                                 <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
+                                <UiCommandButton Label="Restart"
+                                                 Title="Stop and start this Docker container"
+                                                 Glyph="UiIconGlyph.Restart"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Disabled="@busy"
+                                                 OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Restart)" />
                                 @if (CanRepair(installation))
                                 {
                                     <UiCommandButton Label="Repair"
@@ -1279,6 +1297,9 @@
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
         });
     }
+
+    private static bool IsVpnGateway(HomeLabAppInstallation installation) =>
+        installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase);
 
     private async Task VerifySecurityAsync()
     {
