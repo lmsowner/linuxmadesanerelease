@@ -1775,6 +1775,25 @@ public sealed class HomeLabService(
             {
                 return ContainerRunResult.Failed(Failure("Home Lab volume setup failed.", NormalizeFailure(mkdir), output, HomeLabHealthState.Failed));
             }
+
+            var volume = app.Volumes.FirstOrDefault(candidate =>
+                candidate.ContainerPath.Equals(binding.ContainerPath, StringComparison.Ordinal));
+            if (volume?.HostOwner is { Length: > 0 } hostOwner)
+            {
+                var chown = await RunAsync(
+                    new LinuxCommandRequest(
+                        "chown",
+                        ["-R", hostOwner, binding.HostPath],
+                        true,
+                        TimeSpan.FromSeconds(30),
+                        $"Set Home Lab volume ownership for {binding.ContainerPath}"),
+                    cancellationToken);
+                AppendOutput(output, chown);
+                if (chown.ExitCode != 0)
+                {
+                    return ContainerRunResult.Failed(Failure("Home Lab volume ownership setup failed.", NormalizeFailure(chown), output, HomeLabHealthState.Failed));
+                }
+            }
         }
 
         await EnsureApplicationConfigurationAsync(installation, app, bindings, cancellationToken);

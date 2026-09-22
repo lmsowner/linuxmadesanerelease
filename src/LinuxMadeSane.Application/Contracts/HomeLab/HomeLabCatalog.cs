@@ -362,7 +362,7 @@ public static class HomeLabCatalog
             "latest",
             "1",
             [new("web", 5055, Primary: true)],
-            [new("config", "/app/config", HomeLabStorageKind.Configuration)],
+            [new("config", "/app/config", HomeLabStorageKind.Configuration, HostOwner: "1000:1000")],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PORT"] = "5055", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/api/v1/settings/public", Port: 5055),
             [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Seerr traffic.")],
             SupportsVpnGateway: true)

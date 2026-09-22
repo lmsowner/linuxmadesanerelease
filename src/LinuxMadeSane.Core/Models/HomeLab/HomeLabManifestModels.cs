@@ -24,7 +24,8 @@ public sealed record HomeLabVolumeManifest(
     string ContainerPath,
     HomeLabStorageKind Kind,
     string? SharedRole = null,
-    bool ReadOnly = false);
+    bool ReadOnly = false,
+    string? HostOwner = null);
 
 public sealed record HomeLabHealthCheckManifest(
     string? HttpPath = null,
