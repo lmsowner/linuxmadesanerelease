@@ -11,6 +11,7 @@ public sealed record HomeLabPromptRecipe(
     string Description,
     IReadOnlyList<string> AppIds,
     bool RequiresVpnGateway,
+    string StarterPrompt,
     string Prompt);
 
 public static class HomeLabPromptRecipeCatalog
@@ -30,6 +31,7 @@ public static class HomeLabPromptRecipeCatalog
             "Create a WordPress instance with its managed database, persistent files, health checks, and an LMS local access route.",
             ["wordpress"],
             false,
+            "Set up a private WordPress website with persistent site files and an LMS-managed database. Use the supported defaults unless I specify a WordPress version, variant, database choice, database administration tool, domain, or other requirement below.",
             "Keep WordPress and its database on the private LMS deployment network. Verify the database dependency before reporting the website ready."),
         Create(
             "forward-proxy",
@@ -37,6 +39,7 @@ public static class HomeLabPromptRecipeCatalog
             "Create a private forward proxy for devices on networks you control and verify the proxy listener without publishing an internet-facing admin page.",
             ["squid-proxy"],
             false,
+            "Set up a private forward proxy for devices on networks I control. Keep it private unless I explicitly describe a trusted network or access requirement.",
             "Treat this as a private network service. Do not expose it through Edge Gateway or configure it as an open public proxy."),
         Create(
             "secure-streaming",
@@ -44,6 +47,7 @@ public static class HomeLabPromptRecipeCatalog
             "Set up Webtor and Stremio behind one reusable VPN Gateway, with LMS-managed local access and streaming connectivity.",
             ["webtor", "stremio-server"],
             true,
+            "Set up Webtor and Stremio behind an existing VPN Gateway with LMS-managed local access. Ask me which gateway to use if there is more than one.",
             "Preserve trusted local Caddy access, Webtor HTTP cookie rewriting, separate internal ports in the shared VPN namespace, and the Stremio-to-host gateway mapping used for local Webtor streams. This is for personal, public-domain, or otherwise lawfully accessed content; do not configure content sources or add-ons."),
         Create(
             "secure-qbittorrent",
@@ -51,6 +55,7 @@ public static class HomeLabPromptRecipeCatalog
             "Set up qBittorrent behind an existing reusable VPN Gateway and verify that its traffic cannot bypass the gateway.",
             ["qbittorrent"],
             true,
+            "Set up qBittorrent behind an existing VPN Gateway, store downloads in my LMS Home Lab storage, and verify that its traffic cannot bypass the gateway.",
             "Do not require inbound port forwarding: it is optional and some VPN providers support P2P without it. Preserve the trusted local LMS Caddy route and its first-open referrer handling."),
         Create(
             "vpn-media-automation",
@@ -58,6 +63,7 @@ public static class HomeLabPromptRecipeCatalog
             "Set up qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr behind one reusable VPN Gateway.",
             ["qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"],
             true,
+            "Set up qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr behind one existing VPN Gateway. Reuse my LMS Home Lab storage and ask before making any choice that depends on my environment.",
             "Route every requested service through the selected gateway and preserve a distinct internal listener for each web interface. Use the shared VPN namespace loopback endpoints when describing app-to-app connections. Do not select, recommend, or configure indexers, catalogues, download sources, or content. The user completes any source-specific configuration for services they are authorised to use."),
         Create(
             "private-photo-library",
@@ -65,6 +71,7 @@ public static class HomeLabPromptRecipeCatalog
             "Set up Immich and its managed database, cache, and machine-learning dependencies for a private photo and video library.",
             ["immich"],
             false,
+            "Set up a private Immich photo and video library with persistent storage and its LMS-managed database, cache, and machine-learning services. Ask me about storage or access requirements that are not already configured.",
             "Verify every managed Immich dependency and the LMS local access route before reporting the library ready.")
     ];
 
@@ -87,6 +94,25 @@ public static class HomeLabPromptRecipeCatalog
             {normalized}
 
             Start by inspecting Home Lab. Explain what can be handled by the supported LMS Home Lab tools and what information is still needed. Prefer existing LMS-managed apps and infrastructure. Present every change for approval and verify the actual result.
+            """;
+    }
+
+    public static string BuildRecipePrompt(HomeLabPromptRecipe recipe, string request)
+    {
+        ArgumentNullException.ThrowIfNull(recipe);
+        var normalized = request?.Trim() ?? string.Empty;
+        if (normalized.Length == 0)
+        {
+            throw new InvalidOperationException("Describe what you want from this Home Lab prompt recipe.");
+        }
+
+        return $"""
+            {recipe.Prompt}
+
+            User-edited requirements for this recipe:
+            {normalized}
+
+            Treat the user-edited requirements as part of the requested outcome. Work out which details are supported by the LMS-managed recipe and current app catalog. Before proposing a change, clearly explain any requested version, variant, companion app, database, administration suite, or other detail that LMS cannot currently apply. Do not silently ignore, substitute, or claim to have completed an unsupported requirement.
             """;
     }
 
@@ -116,6 +142,7 @@ public static class HomeLabPromptRecipeCatalog
         string description,
         IReadOnlyList<string> appIds,
         bool requiresVpnGateway,
+        string starterPrompt,
         string technicalGuidance) =>
         new(
             id,
@@ -123,6 +150,7 @@ public static class HomeLabPromptRecipeCatalog
             description,
             appIds,
             requiresVpnGateway,
+            starterPrompt,
             $"""
             {OperatingContract}
 

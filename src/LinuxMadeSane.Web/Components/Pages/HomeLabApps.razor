@@ -76,6 +76,58 @@
             </UiModal>
         }
 
+        @if (customizingPromptRecipe is { } recipeToCustomize)
+        {
+            <UiModal IsOpen="true"
+                     Title="@($"Customize {recipeToCustomize.Name}")"
+                     Subtitle="Use the recipe as a starting point, then add the exact versions, variants, companion services, storage, access, or other requirements you need."
+                     Class="home-lab-prompt-modal"
+                     Resizable="true"
+                     OnClose="CancelPromptRecipeCustomization">
+                <ChildContent>
+                    <section class="home-lab-prompt-editor">
+                        <div>
+                            <p class="eyebrow">Starting prompt</p>
+                            <p class="meta-text">The recipe still supplies its LMS safety, networking, health-check, and deployment rules. Edit this request in plain language.</p>
+                        </div>
+                        <textarea id="home-lab-recipe-prompt"
+                                  class="ui-control-textarea"
+                                  @bind="recipePromptDraft"
+                                  @bind:event="oninput"
+                                  autofocus></textarea>
+                        <div class="home-lab-recipe-apps" aria-label="Recipe starting applications">
+                            @foreach (var appId in recipeToCustomize.AppIds)
+                            {
+                                <span>@HomeLabCatalog.GetApp(appId).Name</span>
+                            }
+                            @if (recipeToCustomize.RequiresVpnGateway)
+                            {
+                                <span>Existing VPN Gateway</span>
+                            }
+                        </div>
+                        <p class="meta-text">If a requested version, variant, or companion service is not supported by the current LMS catalog, the AI will explain that before proposing any change.</p>
+                        <div class="home-lab-prompt-actions">
+                            <UiCommandButton Label="Cancel"
+                                             Glyph="UiIconGlyph.Clear"
+                                             Variant="UiButtonVariant.Ghost"
+                                             Disabled="@(startingPromptRecipeId is not null)"
+                                             OnClick="CancelPromptRecipeCustomization" />
+                            <UiCommandButton Label="Reset starting prompt"
+                                             Glyph="UiIconGlyph.Refresh"
+                                             Variant="UiButtonVariant.ActionSubtle"
+                                             Disabled="@(startingPromptRecipeId is not null)"
+                                             OnClick="ResetPromptRecipeDraft" />
+                            <UiCommandButton Label="Start guided AI task"
+                                             Glyph="UiIconGlyph.Ai"
+                                             Variant="UiButtonVariant.PrimaryMuted"
+                                             Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft))"
+                                             OnClick="StartPromptRecipeAsync" />
+                        </div>
+                    </section>
+                </ChildContent>
+            </UiModal>
+        }
+
         <TabControl ActiveValue="@activeTab"
                     ActiveValueChanged="HandleTabChangedAsync"
                     Class="home-lab-tabs"
@@ -593,8 +645,8 @@
                 <section class="surface-subcard home-lab-prompt-intro">
                     <div>
                         <p class="eyebrow">Guided AI deployments</p>
-                        <h2>Describe the outcome; let LMS apply the platform details</h2>
-                        <p class="meta-text">Prompt recipes open a guided AI task. The AI inspects your current Home Lab, asks you to choose existing infrastructure when needed, and uses LMS-managed deployment tools so VPN routing, Caddy access, storage, health checks, and repairs stay consistent.</p>
+                        <h2>Start with a proven prompt, then make it yours</h2>
+                        <p class="meta-text">Each recipe gives you an editable starting request. Add versions, variants, databases, admin tools, domains, storage, or other details before the AI inspects your Home Lab and proposes an LMS-managed deployment.</p>
                     </div>
                 </section>
                 <div class="surface-card home-lab-recipe-list">
@@ -615,11 +667,11 @@
                                     <span>Existing VPN Gateway</span>
                                 }
                             </div>
-                            <UiCommandButton Label="Start with AI"
+                            <UiCommandButton Label="Customize prompt"
                                              Glyph="UiIconGlyph.Ai"
                                              Variant="UiButtonVariant.PrimaryMuted"
                                              Disabled="@(busy || startingPromptRecipeId is not null)"
-                                             OnClick="() => StartPromptRecipeAsync(promptRecipe)" />
+                                             OnClick="() => BeginPromptRecipeCustomization(promptRecipe)" />
                         </div>
                     }
                 </div>
@@ -680,6 +732,8 @@
     private string activeTab = "apps";
     private string? startingPromptRecipeId;
     private string customPrompt = string.Empty;
+    private HomeLabPromptRecipe? customizingPromptRecipe;
+    private string recipePromptDraft = string.Empty;
     private HomeLabAppManifest? configuringApp;
     private HomeLabAppInstallation? configuringInstallation;
     private HomeLabAppInstallation? renamingGateway;
@@ -746,9 +800,42 @@
         });
     }
 
-    private async Task StartPromptRecipeAsync(HomeLabPromptRecipe promptRecipe)
+    private void BeginPromptRecipeCustomization(HomeLabPromptRecipe promptRecipe)
     {
-        await StartAiPromptAsync(promptRecipe.Id, promptRecipe.Name, promptRecipe.Prompt);
+        customizingPromptRecipe = promptRecipe;
+        recipePromptDraft = promptRecipe.StarterPrompt;
+    }
+
+    private void ResetPromptRecipeDraft()
+    {
+        if (customizingPromptRecipe is { } promptRecipe)
+        {
+            recipePromptDraft = promptRecipe.StarterPrompt;
+        }
+    }
+
+    private void CancelPromptRecipeCustomization()
+    {
+        if (startingPromptRecipeId is not null)
+        {
+            return;
+        }
+
+        customizingPromptRecipe = null;
+        recipePromptDraft = string.Empty;
+    }
+
+    private async Task StartPromptRecipeAsync()
+    {
+        if (customizingPromptRecipe is not { } promptRecipe || string.IsNullOrWhiteSpace(recipePromptDraft))
+        {
+            return;
+        }
+
+        await StartAiPromptAsync(
+            promptRecipe.Id,
+            promptRecipe.Name,
+            HomeLabPromptRecipeCatalog.BuildRecipePrompt(promptRecipe, recipePromptDraft));
     }
 
     private async Task StartCustomPromptAsync()
