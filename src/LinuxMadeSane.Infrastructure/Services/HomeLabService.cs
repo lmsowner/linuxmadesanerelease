@@ -308,15 +308,6 @@ public sealed class HomeLabService(
                     [],
                     HomeLabHealthState.Blocked);
             }
-            if (app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) && !VpnGatewaySupportsP2p(selectedGateway))
-            {
-                return Failure(
-                    "qBittorrent route blocked.",
-                    "The selected VPN Gateway has no incoming P2P port. Reconfigure it with a supported paid P2P profile before routing qBittorrent through it.",
-                    output,
-                    HomeLabHealthState.Blocked);
-            }
-
             await EnsureVpnNamespacePortAvailabilityAsync(app, selectedGateway.ContainerName, installation.Id, cancellationToken);
             var gatewayPreparation = await EnsureVpnGatewayNamespacePortAsync(selectedGateway, app, output, true, cancellationToken);
             if (!gatewayPreparation.Succeeded)
@@ -1520,10 +1511,6 @@ public sealed class HomeLabService(
         }
         if (standaloneUsesVpn && reusableVpnGateway is not null)
         {
-            if (standaloneApp!.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) && !VpnGatewaySupportsP2p(reusableVpnGateway))
-            {
-                throw new InvalidOperationException("The selected VPN Gateway has no incoming P2P port. Reconfigure it with a supported paid P2P profile before installing qBittorrent.");
-            }
             await EnsureVpnNamespacePortAvailabilityAsync(
                 standaloneApp!,
                 reusableVpnGateway.ContainerName,
@@ -2936,11 +2923,6 @@ public sealed class HomeLabService(
         Guid.TryParse(value, out var gatewayId)
             ? gatewayId
             : null;
-
-    private static bool VpnGatewaySupportsP2p(HomeLabInstallationEntity gateway) =>
-        DeserializeDictionary(gateway.ConfigurationJson)
-            .TryGetValue("VPN_PORT_FORWARDING", out var value) &&
-        value.Equals("on", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsInternalConfigurationKey(string key) =>
         key.Equals("network-route", StringComparison.OrdinalIgnoreCase) ||
