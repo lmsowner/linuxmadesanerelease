@@ -195,6 +195,9 @@
     private bool isSendingMessage;
     private bool isClearingConversation;
     private Guid? loadingThreadId;
+    private ElementReference approvalPromptElement;
+    private bool scrollApprovalPromptIntoView;
+    private Guid? returnToHomeLabActionId;
     private readonly HashSet<Guid> submittingApprovalIds = [];
     private readonly HashSet<Guid> mutatingMessageIds = [];
     private readonly HashSet<Guid> mutatingToolIds = [];
@@ -209,7 +212,7 @@
         workspace is not null;
 
     private bool HasActiveRun =>
-        ActiveRun is not null;
+        ActiveRun is not null || returnToHomeLabActionId.HasValue;
 
     private bool HasPersistedConversationState =>
         workspace is not null &&
@@ -333,7 +336,9 @@
     private AiChatRun? ActiveRun =>
         workspace?.ChatRuns
             .OrderByDescending(run => run.UpdatedAtUtc)
-            .FirstOrDefault(run => !run.IsTerminal);
+            .FirstOrDefault(run =>
+                !run.IsTerminal &&
+                (run.Status != AiChatRunStatus.AwaitingApproval || PendingApprovalRequests.Count > 0));
 
     private AiChatRun? LatestRun =>
         workspace?.ChatRuns
@@ -347,8 +352,9 @@
         ActiveRun.Status is AiChatRunStatus.Queued or AiChatRunStatus.Running or AiChatRunStatus.CancellationRequested;
 
     private bool ShouldPollRun =>
-        ActiveRun is not null &&
-        ActiveRun.Status is AiChatRunStatus.Queued or AiChatRunStatus.Running or AiChatRunStatus.CancellationRequested;
+        returnToHomeLabActionId.HasValue ||
+        (ActiveRun is not null &&
+         ActiveRun.Status is AiChatRunStatus.Queued or AiChatRunStatus.Running or AiChatRunStatus.CancellationRequested);
 
     private string ServerContextSummary =>
         UsesImplicitLocalMachine
@@ -453,7 +459,7 @@
                     </div>
 
                     <div class="workspace-thread-command-bar">
-                        @if (DisplayedRun is not null)
+                        @if (DisplayedRun is not null && DisplayedRun.Status != AiChatRunStatus.AwaitingApproval)
                         {
                             <span class="status-pill @GetRunPillClass(DisplayedRun.Status)">@GetRunStatusLabel(DisplayedRun.Status)</span>
                         }
@@ -479,31 +485,6 @@
             @if (!string.IsNullOrWhiteSpace(workspaceError))
             {
                 <div class="callout error">@workspaceError</div>
-            }
-
-            <div class="callout info">
-                <strong>Sudo mode is on.</strong>
-                LMS can inspect the system immediately. Before it changes anything, it asks you once, then runs the approved fix with sudo.
-            </div>
-
-            @if (DisplayedRun is not null)
-            {
-                <div class="callout @GetRunCalloutClass(DisplayedRun.Status)">
-                    <div class="workspace-run-status">
-                        <div class="stack-tight">
-                            <strong>Turn status</strong>
-                            <span class="meta-text">Updated @DisplayedRun.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
-                        </div>
-                        <div class="row-action-cluster">
-                            <span class="status-pill @GetRunPillClass(DisplayedRun.Status)">@GetRunStatusLabel(DisplayedRun.Status)</span>
-                        </div>
-                    </div>
-                    <p class="chat-run-summary">@DisplayedRun.StatusSummary</p>
-                    @if (!string.IsNullOrWhiteSpace(DisplayedRun.LastError))
-                    {
-                        <pre class="command-preview-block">@DisplayedRun.LastError</pre>
-                    }
-                </div>
             }
 
             <div class="chat-history-shell">
@@ -737,39 +718,25 @@
                         }
                     </div>
                 }
-            </div>
 
-            <EditForm Model="@messageComposer" OnValidSubmit="SendMessageAsync" class="stack-form chat-compose-form">
-                <DataAnnotationsValidator />
-
-                @if (!string.IsNullOrWhiteSpace(messageError))
+                @if (DisplayedRun is not null && DisplayedRun.Status != AiChatRunStatus.AwaitingApproval)
                 {
-                    <div class="callout error">@messageError</div>
+                    <div class="callout @GetRunCalloutClass(DisplayedRun.Status)">
+                        <div class="workspace-run-status">
+                            <strong>@GetRunStatusLabel(DisplayedRun.Status)</strong>
+                            <span class="meta-text">Updated @DisplayedRun.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                        </div>
+                        <p class="chat-run-summary">@DisplayedRun.StatusSummary</p>
+                        @if (!string.IsNullOrWhiteSpace(DisplayedRun.LastError))
+                        {
+                            <pre class="command-preview-block">@DisplayedRun.LastError</pre>
+                        }
+                    </div>
                 }
 
-                <label>
-                    <span>New user message</span>
-                    <InputTextArea @bind-Value="messageComposer.Content" placeholder="Describe the Linux task, question, or context you want to keep in this chat." />
-                    <ValidationMessage For="@(() => messageComposer.Content)" />
-                </label>
-
-                <div class="hero-actions">
-                    <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Turn in progress" : "Send message")"
-                                     Glyph="UiIconGlyph.Send"
-                                     Type="submit"
-                                     Disabled="@(isSendingMessage || HasActiveRun)" />
-                </div>
-
-                @if (HasActiveRun)
+                @if (PendingApprovalRequests.Count > 0 || !string.IsNullOrWhiteSpace(approvalError))
                 {
-                    <p class="helper-text">
-                        Finish or cancel the current turn before sending another message.
-                    </p>
-                }
-            </EditForm>
-            @if (PendingApprovalRequests.Count > 0 || !string.IsNullOrWhiteSpace(approvalError))
-            {
-                <div class="surface-subcard approval-card">
+                    <div class="surface-subcard approval-card" @ref="approvalPromptElement">
                     @if (!string.IsNullOrWhiteSpace(approvalError))
                     {
                         <div class="callout error">@approvalError</div>
@@ -806,13 +773,60 @@
                             </div>
                         </div>
                     }
+                    </div>
+                }
+            </div>
+
+            <EditForm Model="@messageComposer" OnValidSubmit="SendMessageAsync" class="stack-form chat-compose-form">
+                <DataAnnotationsValidator />
+
+                @if (!string.IsNullOrWhiteSpace(messageError))
+                {
+                    <div class="callout error">@messageError</div>
+                }
+
+                <label>
+                    <span>New user message</span>
+                    <InputTextArea @bind-Value="messageComposer.Content" placeholder="Describe the Linux task, question, or context you want to keep in this chat." />
+                    <ValidationMessage For="@(() => messageComposer.Content)" />
+                </label>
+
+                <div class="hero-actions">
+                    <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Turn in progress" : "Send message")"
+                                     Glyph="UiIconGlyph.Send"
+                                     Type="submit"
+                                     Disabled="@(isSendingMessage || HasActiveRun)" />
                 </div>
-            }
+
+                @if (HasActiveRun)
+                {
+                    <p class="helper-text">
+                        Finish or cancel the current turn before sending another message.
+                    </p>
+                }
+            </EditForm>
         </section>;
 
     protected override async Task OnParametersSetAsync()
     {
         await LoadAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!scrollApprovalPromptIntoView || PendingApprovalRequests.Count == 0)
+        {
+            return;
+        }
+
+        scrollApprovalPromptIntoView = false;
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsLayout.scrollIntoView", approvalPromptElement);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
     }
 
     private async Task LoadAsync()
@@ -876,6 +890,7 @@
     {
         selectedThreadContext = await ThreadService.GetEditorAsync(threadId);
         workspace = await ChatService.GetWorkspaceAsync(threadId);
+        scrollApprovalPromptIntoView = PendingApprovalRequests.Count > 0;
         SyncApprovalDrafts();
         UpdateWorkspaceRefreshLoop();
     }
@@ -887,8 +902,11 @@
             return;
         }
 
+        var hadPendingPrompt = PendingApprovalRequests.Count > 0;
         workspace = await ChatService.GetWorkspaceAsync(ThreadId.Value);
+        scrollApprovalPromptIntoView |= !hadPendingPrompt && PendingApprovalRequests.Count > 0;
         SyncApprovalDrafts();
+        ReturnToHomeLabWhenApprovedChangeCompletes();
         UpdateWorkspaceRefreshLoop();
     }
 
@@ -1237,6 +1255,18 @@
         approvalError = string.Empty;
         submittingApprovalIds.Add(requestId);
 
+        var request = PendingApprovalRequests.FirstOrDefault(candidate => candidate.Id == requestId);
+        if (decisionType == AiApprovalDecisionType.ApproveOnce &&
+            request?.ProposedActionId is { } proposedActionId &&
+            IsHomeLabMutation(request.ToolName))
+        {
+            returnToHomeLabActionId = proposedActionId;
+        }
+        else
+        {
+            returnToHomeLabActionId = null;
+        }
+
         try
         {
             await ApprovalService.DecideApprovalAsync(
@@ -1258,6 +1288,7 @@
         }
         catch (Exception exception)
         {
+            returnToHomeLabActionId = null;
             approvalError = exception.Message;
         }
         finally
@@ -1359,7 +1390,7 @@
 
     private static string GetRunStatusLabel(AiChatRunStatus status) => status switch
     {
-        AiChatRunStatus.AwaitingApproval => "Waiting for you",
+        AiChatRunStatus.AwaitingApproval => "Approval needed below",
         AiChatRunStatus.CancellationRequested => "Stopping",
         _ => status.ToString()
     };
@@ -1428,8 +1459,11 @@
                     try
                     {
                         await RefreshThreadsAsync();
+                        var hadPendingPrompt = PendingApprovalRequests.Count > 0;
                         workspace = await ChatService.GetWorkspaceAsync(threadId);
+                        scrollApprovalPromptIntoView |= !hadPendingPrompt && PendingApprovalRequests.Count > 0;
                         SyncApprovalDrafts();
+                        ReturnToHomeLabWhenApprovedChangeCompletes();
                         UpdateWorkspaceRefreshLoop();
                     }
                     catch (Exception exception)
@@ -1484,6 +1518,44 @@
             .ToHashSet();
         submittingApprovalIds.RemoveWhere(id => !pendingIds.Contains(id));
     }
+
+    private void ReturnToHomeLabWhenApprovedChangeCompletes()
+    {
+        if (returnToHomeLabActionId is not { } proposedActionId || workspace is null)
+        {
+            return;
+        }
+
+        var invocation = workspace.Timeline
+            .OfType<AiChatToolExecutionTimelineItemViewModel>()
+            .FirstOrDefault(item => item.ProposedActionId == proposedActionId);
+        if (invocation is null)
+        {
+            if (LatestRun?.IsTerminal == true)
+            {
+                returnToHomeLabActionId = null;
+            }
+
+            return;
+        }
+
+        if (invocation.Status != AiInvocationStatus.Succeeded)
+        {
+            if (invocation.Status is AiInvocationStatus.Failed or AiInvocationStatus.Cancelled)
+            {
+                returnToHomeLabActionId = null;
+            }
+
+            return;
+        }
+
+        returnToHomeLabActionId = null;
+        NavigationManager.NavigateTo("/home-lab/apps?tab=apps", replace: true);
+    }
+
+    private static bool IsHomeLabMutation(string toolName) =>
+        toolName.Equals(AiToolNames.ApplyHomeLabPromptRecipe, StringComparison.OrdinalIgnoreCase) ||
+        toolName.Equals(AiToolNames.RepairHomeLabInstallation, StringComparison.OrdinalIgnoreCase);
 
     private enum ThreadSidebarFilter
     {

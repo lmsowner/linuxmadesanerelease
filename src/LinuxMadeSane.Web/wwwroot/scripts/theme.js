@@ -876,6 +876,10 @@ window.lmsLayout = (() => {
         applySidebarCollapsed(getSidebarCollapsed());
     }
 
+    function scrollIntoView(element) {
+        element?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
     initializeSidebar();
 
     if (document.readyState === "loading") {
@@ -891,7 +895,8 @@ window.lmsLayout = (() => {
         getSidebarCollapsed,
         setSidebarCollapsed,
         toggleSidebarCollapsed,
-        initializeSidebar
+        initializeSidebar,
+        scrollIntoView
     };
 })();
 
