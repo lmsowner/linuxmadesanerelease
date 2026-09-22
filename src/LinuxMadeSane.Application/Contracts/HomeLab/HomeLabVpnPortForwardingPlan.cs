@@ -5,6 +5,7 @@ namespace LinuxMadeSane.Application.Contracts.HomeLab;
 
 public static class HomeLabVpnPortForwardingPlan
 {
+    public const int QbittorrentVpnWebUiPort = 18082;
     public const string RequiredSelection = "Required for qBittorrent/P2P";
     public const string OffSelection = "Off (P2P still works)";
     public const string LegacyOffSelection = "Off (streaming only)";
@@ -59,8 +60,8 @@ public static class HomeLabVpnPortForwardingPlan
 
         result["VPN_PORT_FORWARDING"] = "on";
         result["VPN_PORT_FORWARDING_PROVIDER"] = forwardingProvider;
-        result["VPN_PORT_FORWARDING_UP_COMMAND"] = "/bin/sh -c 'wget -O- -nv --retry-connrefused --tries=10 --post-data \"json={\\\"listen_port\\\":{{PORT}},\\\"current_network_interface\\\":\\\"{{VPN_INTERFACE}}\\\",\\\"random_port\\\":false,\\\"upnp\\\":false}\" http://127.0.0.1:8080/api/v2/app/setPreferences'";
-        result["VPN_PORT_FORWARDING_DOWN_COMMAND"] = "/bin/sh -c 'wget -O- -nv --retry-connrefused --tries=5 --post-data \"json={\\\"listen_port\\\":0,\\\"current_network_interface\\\":\\\"lo\\\"}\" http://127.0.0.1:8080/api/v2/app/setPreferences || true'";
+        result["VPN_PORT_FORWARDING_UP_COMMAND"] = $"/bin/sh -c 'wget -O- -nv --retry-connrefused --tries=10 --post-data \"json={{\\\"listen_port\\\":{{{{PORT}}}},\\\"current_network_interface\\\":\\\"{{{{VPN_INTERFACE}}}}\\\",\\\"random_port\\\":false,\\\"upnp\\\":false}}\" http://127.0.0.1:{QbittorrentVpnWebUiPort}/api/v2/app/setPreferences'";
+        result["VPN_PORT_FORWARDING_DOWN_COMMAND"] = $"/bin/sh -c 'wget -O- -nv --retry-connrefused --tries=5 --post-data \"json={{\\\"listen_port\\\":0,\\\"current_network_interface\\\":\\\"lo\\\"}}\" http://127.0.0.1:{QbittorrentVpnWebUiPort}/api/v2/app/setPreferences || true'";
         return result;
     }
 }

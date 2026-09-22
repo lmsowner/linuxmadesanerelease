@@ -14,15 +14,33 @@ internal static partial class HomeLabContainerPortPlan
             ? vpnPort
             : port.ContainerPort;
 
-    public static IReadOnlyList<(string Protocol, int Port)> GatewayPublishedPorts() =>
-        HomeLabCatalog.Apps
+    public static IReadOnlyList<(string Protocol, int Port)> GatewayPublishedPorts()
+    {
+        var assignments = HomeLabCatalog.Apps
             .Where(app => app.SupportsVpnGateway)
-            .SelectMany(app => app.Ports)
-            .Select(port => (port.Protocol.ToLowerInvariant(), Resolve(port, true)))
-            .Distinct()
+            .SelectMany(app => app.Ports.Select(port => new VpnListenerAssignment(
+                app.Id,
+                app.Name,
+                port.Name,
+                port.Protocol.ToLowerInvariant(),
+                Resolve(port, true))))
+            .ToArray();
+        var collision = assignments
+            .GroupBy(assignment => assignment.Port)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (collision is not null)
+        {
+            var owners = string.Join(", ", collision.Select(assignment => $"{assignment.AppName} ({assignment.AppId}:{assignment.PortName}/{assignment.Protocol})"));
+            throw new InvalidOperationException(
+                $"Home Lab VPN listener collision: {owners} all require port {collision.Key}. Every VPN-capable app must have a globally unique namespace port.");
+        }
+
+        return assignments
+            .Select(assignment => (assignment.Protocol, assignment.Port))
             .OrderBy(port => port.Item2)
             .ThenBy(port => port.Item1, StringComparer.Ordinal)
             .ToArray();
+    }
 
     public static string GatewayFirewallInputPorts() =>
         string.Join(",", GatewayPublishedPorts()
@@ -79,4 +97,11 @@ internal static partial class HomeLabContainerPortPlan
 
     [GeneratedRegex("^[A-Z][A-Z0-9_]*$", RegexOptions.CultureInvariant)]
     private static partial Regex SafeSettingName();
+
+    private sealed record VpnListenerAssignment(
+        string AppId,
+        string AppName,
+        string PortName,
+        string Protocol,
+        int Port);
 }

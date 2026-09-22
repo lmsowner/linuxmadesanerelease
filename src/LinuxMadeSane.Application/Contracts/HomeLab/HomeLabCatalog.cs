@@ -57,7 +57,12 @@ public static class HomeLabCatalog
             "lscr.io/linuxserver/qbittorrent",
             "latest",
             "1",
-            [new("web", 8080, Primary: true)],
+            [new(
+                "web",
+                8080,
+                Primary: true,
+                VpnContainerPort: HomeLabVpnPortForwardingPlan.QbittorrentVpnWebUiPort,
+                VpnEnvironmentVariable: "WEBUI_PORT")],
             [
                 new("config", "/config", HomeLabStorageKind.Configuration),
                 new("downloads", "/downloads", HomeLabStorageKind.UserData, "downloads")

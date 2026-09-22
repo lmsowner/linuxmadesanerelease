@@ -566,7 +566,7 @@ public sealed class HomeLabService(
                     "--retry-delay", "1",
                     "--request", "POST",
                     "--data-urlencode", HomeLabQbittorrentPortForwarding.BuildPreferencesFormValue(forwardedPort),
-                    "http://127.0.0.1:8080/api/v2/app/setPreferences"
+                    $"http://127.0.0.1:{HomeLabVpnPortForwardingPlan.QbittorrentVpnWebUiPort}/api/v2/app/setPreferences"
                 ],
                 $"Synchronize qBittorrent with VPN forwarded port {forwardedPort}",
                 cancellationToken);
@@ -593,7 +593,7 @@ public sealed class HomeLabService(
         CancellationToken cancellationToken)
     {
         var result = await RunDockerAsync(
-            ["exec", qbittorrentContainer, "curl", "-fsS", "http://127.0.0.1:8080/api/v2/app/preferences"],
+            ["exec", qbittorrentContainer, "curl", "-fsS", $"http://127.0.0.1:{HomeLabVpnPortForwardingPlan.QbittorrentVpnWebUiPort}/api/v2/app/preferences"],
             $"Verify qBittorrent listening port in {qbittorrentContainer}",
             cancellationToken);
         return result.ExitCode == 0 &&
@@ -3093,6 +3093,10 @@ public sealed class HomeLabService(
         bool pullImage,
         CancellationToken cancellationToken)
     {
+        // Validate the complete shared namespace before accepting an already-published port.
+        // This prevents a catalog collision from being hidden by an existing gateway binding.
+        _ = HomeLabContainerPortPlan.GatewayPublishedPorts();
+
         var requiredPorts = app.Ports
             .Select(port => (Protocol: port.Protocol.ToLowerInvariant(), ContainerPort: HomeLabContainerPortPlan.Resolve(port, true)))
             .Distinct()
