@@ -16,12 +16,161 @@
 @inject IJSRuntime JSRuntime
 @inject NavigationManager NavigationManager
 
-<PageTitle>Redirecting | Linux Made Sane</PageTitle>
+<PageTitle>AI Chat Workspace | Linux Made Sane</PageTitle>
 
-<div class="page-shell">
-    <UiPanel>
-        <p class="meta-text">Redirecting to AI Services...</p>
-    </UiPanel>
+<div class="page-shell ai-chat-shell">
+    <section class="hero-panel compact">
+        <div>
+            <h1 class="page-title-compact">AI chats</h1>
+            <p class="hero-copy page-copy-compact">Configure provider and machine scope, then work from chat tabs.</p>
+        </div>
+        <div class="hero-actions">
+            <UiCommandButton Label="Provider settings" Glyph="UiIconGlyph.Connection" Variant="UiButtonVariant.Ghost" Href="/ai/providers" />
+        </div>
+    </section>
+
+    @if (IsInitialLoadPending)
+    {
+        <section class="surface-card">
+            <p class="meta-text">Loading AI workspace...</p>
+        </section>
+    }
+    else if (!string.IsNullOrWhiteSpace(loadError) && threads.Count == 0)
+    {
+        <section class="surface-card">
+            <div class="callout error">@loadError</div>
+        </section>
+    }
+    else
+    {
+        <section class="workspace-tabs-shell">
+            <div class="workspace-tab-toolbar">
+                <div class="table-header workspace-tab-toolbar-header">
+                    <h2>Chat threads</h2>
+                    <span>@FilteredThreads.Count item(s)</span>
+                </div>
+
+                <div class="workspace-tab-controls">
+                    <label class="workspace-search-label">
+                        <span>Search</span>
+                        <InputText @bind-Value="threadSearch" placeholder="Search title, provider, or model" />
+                    </label>
+
+                    <div class="segmented-control">
+                        <button class="segmented-button @(activeThreadFilter == ThreadSidebarFilter.All ? "selected" : string.Empty)"
+                                type="button"
+                                @onclick="(() => SetThreadFilter(ThreadSidebarFilter.All))">
+                            All
+                        </button>
+                        <button class="segmented-button @(activeThreadFilter == ThreadSidebarFilter.PendingApproval ? "selected" : string.Empty)"
+                                type="button"
+                                @onclick="(() => SetThreadFilter(ThreadSidebarFilter.PendingApproval))">
+                            Needs approval
+                        </button>
+                        <button class="segmented-button @(activeThreadFilter == ThreadSidebarFilter.NoServers ? "selected" : string.Empty)"
+                                type="button"
+                                @onclick="(() => SetThreadFilter(ThreadSidebarFilter.NoServers))">
+                            Local default
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(loadError) && threads.Count > 0)
+            {
+                <div class="callout error">@loadError</div>
+            }
+
+            @if (threads.Count == 0)
+            {
+                <div class="workspace-empty-panel">
+                    <div class="empty-state stack-tight">
+                        <span>Create a chat to start.</span>
+                        <div>
+                            <UiCommandButton Label="@(isCreatingThread ? "Creating..." : "New chat")"
+                                             Glyph="UiIconGlyph.Plus"
+                                             Variant="UiButtonVariant.Toolbar"
+                                             OnClick="CreateThreadAndNavigateAsync"
+                                             Disabled="@isCreatingThread" />
+                        </div>
+                    </div>
+                </div>
+            }
+            else if (FilteredThreads.Count == 0)
+            {
+                <div class="workspace-empty-panel">
+                    <div class="empty-state">
+                        No threads match the current search or filter.
+                    </div>
+                </div>
+            }
+            else
+            {
+                <TabControl ActiveValue="@SelectedThreadTabValue"
+                            ActiveValueChanged="HandleThreadTabChangedAsync"
+                            PanelClass="workspace-thread-tab-panel"
+                            Class="workspace-thread-tab-control">
+                    <ChildContent>
+                        @foreach (var thread in FilteredThreads)
+                        {
+                            <TabPage @key="thread.Id"
+                                     Value="@thread.Id.ToString()"
+                                     Title="@thread.Title"
+                                     Tooltip="@BuildThreadTabTooltip(thread)">
+                                <Header>
+                                    <div class="thread-tab-chip" title="@BuildThreadTabTooltip(thread)">
+                                        <span class="thread-tab-title">@thread.Title</span>
+
+                                        @if (thread.PendingApprovalCount > 0)
+                                        {
+                                            <span class="thread-tab-badge warning">@thread.PendingApprovalCount</span>
+                                        }
+
+                                        @if (thread.AttachedServerCount == 0)
+                                        {
+                                            <span class="thread-tab-badge neutral">Local default</span>
+                                        }
+                                    </div>
+                                </Header>
+                                <ChildContent>
+                                    @if (ThreadId != thread.Id)
+                                    {
+                                        <div class="workspace-empty-panel">
+                                            <div class="empty-state">
+                                                Select a chat to load its history.
+                                            </div>
+                                        </div>
+                                    }
+                                    else if (IsThreadWorkspaceLoading(thread.Id))
+                                    {
+                                        <div class="workspace-empty-panel">
+                                            <p class="meta-text">Loading chat history...</p>
+                                        </div>
+                                    }
+                                    else if (IsThreadWorkspaceReady(thread.Id))
+                                    {
+                                        @ActiveThreadWorkspaceContent
+                                    }
+                                    else if (!string.IsNullOrWhiteSpace(loadError))
+                                    {
+                                        <div class="callout error">@loadError</div>
+                                    }
+                                    else
+                                    {
+                                        <div class="workspace-empty-panel">
+                                            <div class="empty-state">
+                                                Chat not found.
+                                            </div>
+                                        </div>
+                                    }
+                                </ChildContent>
+                            </TabPage>
+                        }
+                    </ChildContent>
+                </TabControl>
+            }
+        </section>
+    }
 </div>
 
 @code {
@@ -879,10 +1028,9 @@
             </div>
         </section>;
 
-    protected override Task OnParametersSetAsync()
+    protected override async Task OnParametersSetAsync()
     {
-        NavigationManager.NavigateTo("/ai", replace: true);
-        return Task.CompletedTask;
+        await LoadAsync();
     }
 
     private async Task LoadAsync()
