@@ -2244,6 +2244,18 @@ public sealed class HomeLabService(
             : ResolveHealth(inspect);
         if (inspect is not null &&
             health.Item1 == HomeLabHealthState.Healthy &&
+            app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            var missingPorts = FindMissingVpnGatewayPorts(inspect);
+            if (missingPorts.Count > 0)
+            {
+                health = (
+                    HomeLabHealthState.Degraded,
+                    $"VPN Gateway is missing required listener ports {string.Join(", ", missingPorts.Select(port => $"{port.Port}/{port.Protocol}"))}. Repair it to reconnect routed apps and rebuild their Caddy routes.");
+            }
+        }
+        if (inspect is not null &&
+            health.Item1 == HomeLabHealthState.Healthy &&
             app.HealthCheck?.HttpPath is { Length: > 0 } healthPath)
         {
             health = await ProbeHttpHealthAsync(
@@ -3063,12 +3075,12 @@ public sealed class HomeLabService(
         CancellationToken cancellationToken)
     {
         var requiredPorts = app.Ports
-            .Where(port => port.VpnContainerPort is not null)
-            .Select(port => (port.Protocol, ContainerPort: HomeLabContainerPortPlan.Resolve(port, true)))
+            .Select(port => (Protocol: port.Protocol.ToLowerInvariant(), ContainerPort: HomeLabContainerPortPlan.Resolve(port, true)))
+            .Distinct()
             .ToArray();
         if (requiredPorts.Length == 0)
         {
-            return Success("VPN Gateway ports ready.", "The app does not require a remapped VPN namespace port.", [], HomeLabHealthState.Healthy);
+            return Success("VPN Gateway ports ready.", "The app does not expose a listener through the VPN namespace.", [], HomeLabHealthState.Healthy);
         }
 
         var inspect = await InspectContainerAsync(gateway.ContainerName, cancellationToken);
@@ -3083,6 +3095,15 @@ public sealed class HomeLabService(
         var trackedGateway = await dbContext.HomeLabInstallations
             .SingleAsync(item => item.Id == gateway.Id, cancellationToken);
         return await RecreateVpnGatewayAsync(trackedGateway, output, pullImage, cancellationToken);
+    }
+
+    private static IReadOnlyList<(string Protocol, int Port)> FindMissingVpnGatewayPorts(JsonObject inspect)
+    {
+        var publishedPorts = inspect["NetworkSettings"]?["Ports"]?.AsObject();
+        return HomeLabContainerPortPlan.GatewayPublishedPorts()
+            .Where(required =>
+                publishedPorts?[$"{required.Port}/{required.Protocol}"]?.AsArray()?.Count > 0 != true)
+            .ToArray();
     }
 
     private static IReadOnlyList<string> ExpandDependencies(IReadOnlyList<string> requestedAppIds)
