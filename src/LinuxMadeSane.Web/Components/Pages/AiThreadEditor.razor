@@ -217,6 +217,11 @@
     private bool isSendingMessage;
     private bool isClearingConversation;
     private Guid? loadingThreadId;
+    private ElementReference timelineElement;
+    private bool scrollTimelineToEnd;
+    private bool smoothTimelineScroll;
+    private Guid? timelineScrollThreadId;
+    private string lastTimelineScrollKey = string.Empty;
     private Guid? returnToHomeLabActionId;
     private Guid? processedStorageSetupInvocationId;
     private string? storagePickerRole;
@@ -401,6 +406,18 @@
         ActiveRun is not null &&
         ActiveRun.Status is AiChatRunStatus.Queued or AiChatRunStatus.Running or AiChatRunStatus.CancellationRequested;
 
+    private bool IsWaitingForChatInput =>
+        HasActiveWorkspace &&
+        !HasActiveRun &&
+        !isSendingMessage &&
+        requiredHomeLabStorageRoles.Count == 0 &&
+        PendingApprovalRequests.Count == 0;
+
+    private bool IsWaitingForUserInput =>
+        IsWaitingForChatInput ||
+        requiredHomeLabStorageRoles.Count > 0 ||
+        PendingApprovalRequests.Count > 0;
+
     private bool ShouldPollRun =>
         returnToHomeLabActionId.HasValue ||
         (ActiveRun is not null &&
@@ -578,7 +595,7 @@
                 }
                 else
                 {
-                    <div class="chat-history-list">
+                    <div class="chat-history-list" @ref="timelineElement">
                         @foreach (var timelineItem in workspace.Timeline)
                         {
                             if (timelineItem is AiChatMessageTimelineItemViewModel messageItem)
@@ -808,9 +825,18 @@
             <aside class="ai-chat-action-pane" aria-label="Prompt and actions">
                 <div class="ai-action-heading">
                     <h2>Ask LMS</h2>
+                    @if (IsWaitingForUserInput)
+                    {
+                        <span class="ai-input-needed" role="status" aria-live="polite">
+                            <span class="ai-input-needed-dot" aria-hidden="true"></span>
+                            Waiting for your input
+                        </span>
+                    }
                 </div>
 
-                <EditForm Model="@messageComposer" OnValidSubmit="SendMessageAsync" class="stack-form chat-compose-form">
+                <EditForm Model="@messageComposer"
+                          OnValidSubmit="SendMessageAsync"
+                          class="@(IsWaitingForChatInput ? "stack-form chat-compose-form awaiting-user-input" : "stack-form chat-compose-form")">
                     <DataAnnotationsValidator />
 
                     @if (!string.IsNullOrWhiteSpace(messageError))
@@ -843,7 +869,7 @@
 
                 @if (requiredHomeLabStorageRoles.Count > 0)
                 {
-                    <div class="surface-subcard home-lab-storage-choice-card">
+                    <div class="surface-subcard home-lab-storage-choice-card awaiting-user-input">
                         <div class="stack-tight">
                             <strong>Choose storage folders</strong>
                             <p class="helper-text">Select each folder here. LMS will save the choices and continue this setup automatically.</p>
@@ -906,7 +932,7 @@
 
                 @if (PendingApprovalRequests.Count > 0 || !string.IsNullOrWhiteSpace(approvalError))
                 {
-                    <div class="surface-subcard approval-card">
+                    <div class="surface-subcard approval-card awaiting-user-input">
                     @if (!string.IsNullOrWhiteSpace(approvalError))
                     {
                         <div class="callout error">@approvalError</div>
@@ -952,6 +978,23 @@
     protected override async Task OnParametersSetAsync()
     {
         await LoadAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!scrollTimelineToEnd)
+        {
+            return;
+        }
+
+        scrollTimelineToEnd = false;
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsLayout.scrollToBottom", timelineElement, smoothTimelineScroll);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
     }
 
     private async Task LoadAsync()
@@ -1024,6 +1067,7 @@
 
         SyncApprovalDrafts();
         await SyncRequiredHomeLabStorageAsync();
+        ScheduleTimelineScroll();
         UpdateWorkspaceRefreshLoop();
     }
 
@@ -1037,6 +1081,7 @@
         workspace = await ChatService.GetWorkspaceAsync(ThreadId.Value);
         SyncApprovalDrafts();
         await SyncRequiredHomeLabStorageAsync();
+        ScheduleTimelineScroll();
         ReturnToHomeLabWhenApprovedChangeCompletes();
         UpdateWorkspaceRefreshLoop();
     }
@@ -1566,6 +1611,27 @@
             ? completedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
             : "Still running";
 
+    private void ScheduleTimelineScroll()
+    {
+        if (workspace is null || workspace.Timeline.Count == 0)
+        {
+            return;
+        }
+
+        var key = $"{workspace.Timeline.Count}:{LatestRun?.UpdatedAtUtc.UtcTicks ?? 0}";
+        if (timelineScrollThreadId == workspace.Thread.Id &&
+            key.Equals(lastTimelineScrollKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        smoothTimelineScroll = timelineScrollThreadId == workspace.Thread.Id &&
+                               !string.IsNullOrEmpty(lastTimelineScrollKey);
+        timelineScrollThreadId = workspace.Thread.Id;
+        lastTimelineScrollKey = key;
+        scrollTimelineToEnd = true;
+    }
+
     private void UpdateWorkspaceRefreshLoop()
     {
         if (ThreadId.HasValue && ShouldPollRun)
@@ -1605,6 +1671,7 @@
                         workspace = await ChatService.GetWorkspaceAsync(threadId);
                         SyncApprovalDrafts();
                         await SyncRequiredHomeLabStorageAsync();
+                        ScheduleTimelineScroll();
                         ReturnToHomeLabWhenApprovedChangeCompletes();
                         UpdateWorkspaceRefreshLoop();
                     }

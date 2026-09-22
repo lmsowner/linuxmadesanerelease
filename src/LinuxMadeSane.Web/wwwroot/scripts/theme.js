@@ -880,6 +880,13 @@ window.lmsLayout = (() => {
         element?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
 
+    function scrollToBottom(element, smooth = true) {
+        element?.scrollTo({
+            top: element.scrollHeight,
+            behavior: smooth ? "smooth" : "auto"
+        });
+    }
+
     initializeSidebar();
 
     if (document.readyState === "loading") {
@@ -896,7 +903,8 @@ window.lmsLayout = (() => {
         setSidebarCollapsed,
         toggleSidebarCollapsed,
         initializeSidebar,
-        scrollIntoView
+        scrollIntoView,
+        scrollToBottom
     };
 })();
 
