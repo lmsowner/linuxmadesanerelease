@@ -3,6 +3,8 @@
 
 namespace LinuxMadeSane.Application.Contracts.HomeLab;
 
+using LinuxMadeSane.Core.Models.HomeLab;
+
 public sealed record HomeLabPromptRecipe(
     string Id,
     string Name,
@@ -85,6 +87,26 @@ public static class HomeLabPromptRecipeCatalog
             {normalized}
 
             Start by inspecting Home Lab. Explain what can be handled by the supported LMS Home Lab tools and what information is still needed. Prefer existing LMS-managed apps and infrastructure. Present every change for approval and verify the actual result.
+            """;
+    }
+
+    public static string BuildTroubleshootingPrompt(HomeLabAppInstallation installation)
+    {
+        ArgumentNullException.ThrowIfNull(installation);
+
+        return $"""
+            Treat this as a focused troubleshooting session for one existing Linux Made Sane Home Lab Docker container.
+
+            Target installation ID: {installation.Id}
+            LMS app ID: {installation.AppId}
+            Display name: {installation.DisplayName}
+            Container name: {installation.ContainerName}
+            Current LMS health: {installation.HealthState}
+            Current health detail: {installation.HealthDetail}
+
+            Call inspect_home_lab first and match the exact installation ID. Check the container health, its managed dependencies, the LMS local Caddy access route, Docker networking, and VPN namespace or kill-switch state where applicable. Ask me what symptom I see if I have not described it yet. Explain the evidence in plain language.
+
+            Keep LMS as the source of truth. Do not use raw docker, docker compose, or shell commands to replace LMS-managed configuration. Never request or expose passwords, API keys, VPN profiles, temporary application passwords, or container log secrets. If recreating the container from its saved image and settings is a reasonable fix, call repair_home_lab_installation with the exact installation ID so LMS can reapply its network, Caddy, volumes, health check, and saved configuration after I approve the action. Inspect again afterward and report the actual result. Do not install another application or apply a prompt recipe while troubleshooting this container.
             """;
     }
 

@@ -1279,6 +1279,7 @@ public sealed class AiChatTurnOrchestrator(
                 ToolArgumentsJson = toolCall.ArgumentsJson,
                 RiskLevel = definition.Approval.RiskLevel
             },
+            AiToolNames.RepairHomeLabInstallation => BuildHomeLabInstallationRepairAction(toolCall, definition),
             AiToolNames.ApplyHomeLabPromptRecipe => BuildHomeLabPromptRecipeAction(toolCall, definition),
             _ => throw new InvalidOperationException($"No approval proposal mapping is defined for tool {toolCall.ToolName}.")
         };
@@ -1464,6 +1465,22 @@ public sealed class AiChatTurnOrchestrator(
             ProviderToolCallId = toolCall.ProviderToolCallId,
             ToolArgumentsJson = toolCall.ArgumentsJson,
             CommandPreview = AiCommandDisplayFormatter.BuildCommandPreview(toolCall.ToolName, toolCall.ArgumentsJson),
+            RiskLevel = definition.Approval.RiskLevel
+        };
+    }
+
+    private static AiProposedActionProposal BuildHomeLabInstallationRepairAction(
+        AiProviderToolCallRequest toolCall,
+        AiToolDefinition definition)
+    {
+        var request = DeserializeRequest<RepairHomeLabInstallationToolRequest>(toolCall.ArgumentsJson);
+        return new AiProposedActionProposal
+        {
+            Title = "Repair Home Lab Docker container",
+            Description = $"Reapply the saved image, volumes, networking, VPN route, health check, and Caddy access for LMS installation {request.InstallationId}.",
+            ToolName = toolCall.ToolName,
+            ProviderToolCallId = toolCall.ProviderToolCallId,
+            ToolArgumentsJson = toolCall.ArgumentsJson,
             RiskLevel = definition.Approval.RiskLevel
         };
     }

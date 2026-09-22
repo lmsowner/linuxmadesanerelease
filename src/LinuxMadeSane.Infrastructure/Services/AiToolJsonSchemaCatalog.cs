@@ -216,6 +216,21 @@ public static class AiToolJsonSchemaCatalog
               "properties": {}
             }
             """,
+        AiToolNames.RepairHomeLabInstallation =>
+            """
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "installationId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "The exact LMS Home Lab installation ID returned by inspect_home_lab."
+                }
+              },
+              "required": [ "installationId" ]
+            }
+            """,
         AiToolNames.ApplyHomeLabPromptRecipe =>
             """
             {

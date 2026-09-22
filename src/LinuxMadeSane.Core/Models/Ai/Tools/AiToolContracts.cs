@@ -135,6 +135,19 @@ public sealed record InspectHomeLabToolResponse(
     IReadOnlyList<HomeLabAiInstallation> Installations,
     IReadOnlyList<HomeLabAiPromptRecipe> PromptRecipes) : IAiToolResponse;
 
+public sealed record RepairHomeLabInstallationToolRequest(
+    Guid InstallationId) : IAiToolRequest;
+
+public sealed record RepairHomeLabInstallationToolResponse(
+    Guid InstallationId,
+    string Name,
+    string Action,
+    bool Succeeded,
+    HomeLabAiInstallation Before,
+    HomeLabAiInstallation After,
+    string Detail,
+    DateTimeOffset CompletedAtUtc) : IAiToolResponse;
+
 public sealed record ApplyHomeLabPromptRecipeToolRequest(
     string PromptRecipeId,
     Guid? VpnGatewayInstallationId = null) : IAiToolRequest;
@@ -155,8 +168,13 @@ public sealed record HomeLabAiGateway(
 
 public sealed record HomeLabAiInstallation(
     Guid InstallationId,
+    Guid DeploymentId,
     string AppId,
     string Name,
+    string ContainerName,
+    string Image,
+    string NetworkMode,
+    IReadOnlyList<string> Dependencies,
     string HealthState,
     string HealthDetail,
     bool IsVpnRouted,

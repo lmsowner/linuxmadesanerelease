@@ -676,9 +676,12 @@ public sealed class HomeLabService(
                 HomeLabHealthState.Stopped);
         }
 
-        if (action is HomeLabLifecycleAction.Update or HomeLabLifecycleAction.Repair)
+        if (action is HomeLabLifecycleAction.Update or HomeLabLifecycleAction.Repair or HomeLabLifecycleAction.Recreate)
         {
             var isRepair = action == HomeLabLifecycleAction.Repair;
+            var isRecreate = action == HomeLabLifecycleAction.Recreate;
+            var reuseExistingImage = isRepair || isRecreate;
+            var operationName = isRepair ? "Repair" : isRecreate ? "Recreate" : "Replace";
             if (isRepair)
             {
                 await RefreshHealthInternalAsync(installation, cancellationToken);
@@ -698,7 +701,7 @@ public sealed class HomeLabService(
 
             if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             {
-                return await RecreateVpnGatewayAsync(installation, output, !isRepair, cancellationToken);
+                return await RecreateVpnGatewayAsync(installation, output, !reuseExistingImage, cancellationToken);
             }
 
             if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
@@ -715,7 +718,7 @@ public sealed class HomeLabService(
                         HomeLabHealthState.Blocked);
                 }
 
-                if (isRepair && ToHealth(installation.HealthState) == HomeLabHealthState.Blocked)
+                if (reuseExistingImage && ToHealth(installation.HealthState) == HomeLabHealthState.Blocked)
                 {
                     await RefreshHealthInternalAsync(gateway, cancellationToken);
                     var gatewayHealth = ToHealth(gateway.HealthState);
@@ -739,7 +742,7 @@ public sealed class HomeLabService(
                     gateway,
                     app,
                     output,
-                    !isRepair,
+                    !reuseExistingImage,
                     cancellationToken);
                 if (!gatewayPreparation.Succeeded)
                 {
@@ -747,8 +750,8 @@ public sealed class HomeLabService(
                 }
             }
 
-            var targetImage = isRepair ? installation.Image : $"{app.ImageRepository}:{app.ImageTag}";
-            if (!isRepair)
+            var targetImage = reuseExistingImage ? installation.Image : $"{app.ImageRepository}:{app.ImageTag}";
+            if (!reuseExistingImage)
             {
                 var pull = await RunDockerAsync(
                     ["pull", targetImage],
@@ -763,13 +766,13 @@ public sealed class HomeLabService(
 
             var remove = await RunDockerAsync(
                 ["rm", "--force", installation.ContainerName],
-                $"{(isRepair ? "Repair" : "Replace")} Home Lab container {installation.ContainerName}",
+                $"{operationName} Home Lab container {installation.ContainerName}",
                 cancellationToken);
             AppendOutput(output, remove);
             if (remove.ExitCode != 0 && !ContainsNoSuchContainer(remove))
             {
                 return Failure(
-                    isRepair ? "Home Lab container repair failed." : "Home Lab container replacement failed.",
+                    reuseExistingImage ? "Home Lab container repair failed." : "Home Lab container replacement failed.",
                     NormalizeFailure(remove),
                     output,
                     HomeLabHealthState.Failed);
@@ -795,7 +798,7 @@ public sealed class HomeLabService(
             await RefreshHealthInternalAsync(installation, cancellationToken);
             await dbContext.SaveChangesAsync(cancellationToken);
             var repairedHealth = ToHealth(installation.HealthState);
-            if (isRepair && repairedHealth is not (HomeLabHealthState.Healthy or HomeLabHealthState.Starting))
+            if (reuseExistingImage && repairedHealth is not (HomeLabHealthState.Healthy or HomeLabHealthState.Starting))
             {
                 return Failure(
                     "Home Lab repair completed, but the container is still faulty.",
@@ -805,10 +808,12 @@ public sealed class HomeLabService(
             }
 
             return Success(
-                isRepair ? "Home Lab app repaired." : "Home Lab app updated.",
+                isRepair ? "Home Lab app repaired." : isRecreate ? "Home Lab app recreated." : "Home Lab app updated.",
                 isRepair
                     ? $"{app.Name} was recreated from its saved configuration and existing image. {installation.HealthDetail}"
-                    : $"{app.Name} was recreated from {targetImage}.",
+                    : isRecreate
+                        ? $"{app.Name} was recreated from its saved configuration and existing image. LMS reapplied its managed networking and access route. {installation.HealthDetail}"
+                        : $"{app.Name} was recreated from {targetImage}.",
                 output,
                 ToHealth(installation.HealthState));
         }

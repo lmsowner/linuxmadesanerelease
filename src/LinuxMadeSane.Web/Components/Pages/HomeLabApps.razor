@@ -18,7 +18,7 @@
 <div class="page-shell home-lab-page">
     <UiHeroPanel Eyebrow="Home Lab"
                   Title="Home Lab"
-                  Description="Install and manage apps, launch guided AI prompt recipes, and configure shared storage."
+                  Description="Set up services with guided prompts, manage their Docker containers, and troubleshoot each container with AI."
                   Compact="true">
         <Actions>
             <UiCommandButton Label="Refresh"
@@ -44,7 +44,7 @@
                     ActiveValueChanged="HandleTabChangedAsync"
                     Class="home-lab-tabs"
                     PanelClass="home-lab-tab-panel">
-            <TabPage Value="apps" Title="Apps">
+            <TabPage Value="apps" Title="Docker">
                 @if (configuringApp is { } appToConfigure)
                 {
                     <UiModal IsOpen="true"
@@ -394,62 +394,56 @@
                     }
                 }
 
-                <div class="home-lab-filter-tabs" role="tablist" aria-label="App categories">
-                    @foreach (var category in Categories)
-                    {
-                        <button class="@(activeCategory == category ? "active" : string.Empty)"
-                                type="button"
-                                role="tab"
-                                aria-selected="@(activeCategory == category)"
-                                @onclick="() => activeCategory = category">@(category is null ? "All" : FormatCategory(category.Value))</button>
-                    }
-                </div>
+                <section class="surface-subcard home-lab-docker-heading">
+                    <div>
+                        <p class="eyebrow">Managed Docker</p>
+                        <h2>Installed containers</h2>
+                        <p class="meta-text">Use AI Help on a container to inspect its health, LMS Caddy route, dependencies, and Docker networking, then approve a repair if one is needed.</p>
+                    </div>
+                    <UiCommandButton Label="Add VPN Gateway"
+                                     Title="Install another independently configured Gluetun gateway"
+                                     Glyph="UiIconGlyph.Plus"
+                                     Variant="UiButtonVariant.PrimaryMuted"
+                                     Disabled="@busy"
+                                     OnClick='() => InstallAsync(GetApp("vpn-gateway"))' />
+                </section>
 
                 <div class="surface-card home-lab-app-list">
                     <div class="home-lab-app-list-header">
-                        <span>Application</span>
+                        <span>Docker container</span>
                         <span>Image</span>
                         <span>Network</span>
                         <span>Status</span>
                         <span>Actions</span>
                     </div>
-                    @foreach (var app in FilteredApps)
+                    @if (workspace.Installations.Count == 0)
                     {
-                        var installations = workspace.Installations.Where(item => item.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase)).ToArray();
-                        var installation = installations.FirstOrDefault();
+                        <div class="home-lab-empty-state">
+                            <strong>No Docker containers have been set up yet.</strong>
+                            <span>Use a guided prompt recipe, enter your own request, or add a VPN Gateway.</span>
+                        </div>
+                    }
+                    @foreach (var installation in workspace.Installations.OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase))
+                    {
+                        var app = GetApp(installation.AppId);
                         <div class="home-lab-app-row">
                             <div class="home-lab-app-name">
-                                <strong>@app.Name</strong>
+                                <strong>@installation.DisplayName</strong>
                                 <span>@app.Description</span>
-                                @if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) && installations.Length > 0)
-                                {
-                                    @foreach (var gateway in installations)
-                                    {
-                                        <span>@gateway.DisplayName · @gateway.HealthState</span>
-                                    }
-                                }
-                                else if (installation is not null)
-                                {
-                                    <span>Network: @FormatNetwork(installation.NetworkMode)</span>
-                                }
+                                <span>Network: @FormatNetwork(installation.NetworkMode)</span>
                             </div>
-                            <span class="home-lab-image">@app.ImageRepository:@app.ImageTag</span>
-                            @if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) && installations.Length > 0)
+                            <span class="home-lab-image">@installation.Image</span>
+                            @if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
                             {
-                                <div class="home-lab-gateway-summary-list">
-                                    @foreach (var gateway in installations.OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase))
-                                    {
-                                        <div class="home-lab-network-summary home-lab-gateway-summary">
-                                            <div class="home-lab-network-summary-heading">
-                                                <UiPill Tone="@GetNetworkSummaryTone(gateway)">@GetNetworkSummaryState(gateway)</UiPill>
-                                                <strong>@gateway.DisplayName</strong>
-                                            </div>
-                                            <span>Public IP: <code>@GetNetworkSummaryPublicIp(gateway)</code></span>
-                                        </div>
-                                    }
+                                <div class="home-lab-network-summary home-lab-gateway-summary">
+                                    <div class="home-lab-network-summary-heading">
+                                        <UiPill Tone="@GetNetworkSummaryTone(installation)">@GetNetworkSummaryState(installation)</UiPill>
+                                        <strong>@installation.DisplayName</strong>
+                                    </div>
+                                    <span>Public IP: <code>@GetNetworkSummaryPublicIp(installation)</code></span>
                                 </div>
                             }
-                            else if (installation is not null)
+                            else
                             {
                                 <div class="home-lab-network-summary">
                                     <div class="home-lab-network-summary-heading">
@@ -461,10 +455,10 @@
                                     {
                                         <span>Incoming peer port: <strong>@(qbitSecurity.PortForwardingStatus ?? "Unverified")</strong>@(qbitSecurity.ForwardedPort is int forwardedPort ? $" · {forwardedPort}" : string.Empty)</span>
                                     }
-                                    @if (app.SupportsVpnGateway && !app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+                                    @if (app.SupportsVpnGateway)
                                     {
                                         <select class="ui-control-input home-lab-route-select"
-                                                aria-label="Internet route for @app.Name"
+                                                aria-label="Internet route for @installation.DisplayName"
                                                 value="@GetRouteSelection(installation)"
                                                 disabled="@busy"
                                                 @onchange="eventArgs => ChangeSummaryRouteAsync(installation, eventArgs.Value?.ToString())">
@@ -477,97 +471,52 @@
                                     }
                                 </div>
                             }
-                            <UiPill Tone="@(installation is null ? UiPillTone.Neutral : GetHealthTone(installation.HealthState))">
-                                @(installation is null
-                                    ? "Available"
-                                    : app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) && installations.Length > 1
-                                        ? $"{installations.Length} gateways"
-                                        : installation.HealthState.ToString())
-                            </UiPill>
+                            <UiPill Tone="@GetHealthTone(installation.HealthState)">@installation.HealthState</UiPill>
                             <div class="home-lab-action-row row-action-cluster">
+                                @if (BuildLocalUrl(installation) is { } localUrl)
+                                {
+                                    <UiCommandButton Label="Open"
+                                                     Glyph="UiIconGlyph.Website"
+                                                     Variant="UiButtonVariant.Action"
+                                                     Href="@localUrl"
+                                                     Target="_blank"
+                                                     Rel="noopener"
+                                                     referrerpolicy="@(installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) ? "no-referrer" : null)" />
+                                }
+                                <UiCommandButton Label="AI Help"
+                                                 Title="Open a troubleshooting chat for this Docker container"
+                                                 Glyph="UiIconGlyph.Ai"
+                                                 Variant="UiButtonVariant.PrimaryMuted"
+                                                 Disabled="@(busy || startingPromptRecipeId is not null)"
+                                                 OnClick="() => StartContainerHelpAsync(installation)" />
+                                <UiCommandButton Label="Settings"
+                                                 Glyph="UiIconGlyph.ListView"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Title="View effective Docker settings"
+                                                 Disabled="@busy"
+                                                 OnClick="() => ManageAsync(installation)" />
                                 @if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    <UiCommandButton Label="Add VPN Gateway"
-                                                     Title="Install another independently configured Gluetun gateway"
-                                                     Glyph="UiIconGlyph.Plus"
+                                    <UiCommandButton Label="Edit gateway"
+                                                     Glyph="UiIconGlyph.Edit"
+                                                     Variant="UiButtonVariant.ActionSubtle"
+                                                     Title="Rename this gateway or paste a replacement VPN provider configuration"
+                                                     Disabled="@busy"
+                                                     OnClick="() => BeginVpnReconfiguration(installation)" />
+                                }
+                                <UiCommandButton Label="Start" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
+                                <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
+                                @if (CanRepair(installation))
+                                {
+                                    <UiCommandButton Label="Repair"
+                                                     Title="Recreate this faulty container from its saved configuration and existing image"
+                                                     Glyph="UiIconGlyph.Repair"
                                                      Variant="UiButtonVariant.PrimaryMuted"
                                                      Disabled="@busy"
-                                                     OnClick="() => InstallAsync(app)" />
-                                    @foreach (var gateway in installations.OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase))
-                                    {
-                                        <div class="home-lab-gateway-action-group">
-                                            <strong>@gateway.DisplayName</strong>
-                                            <div class="home-lab-action-row row-action-cluster">
-                                            @if (BuildLocalUrl(gateway) is { } gatewayUrl)
-                                            {
-                                                <UiCommandButton Label="Open" Glyph="UiIconGlyph.Website" Variant="UiButtonVariant.Action" Href="@gatewayUrl" Target="_blank" Rel="noopener" />
-                                            }
-                                            <UiCommandButton Label="Settings"
-                                                             Glyph="UiIconGlyph.ListView"
-                                                             Variant="UiButtonVariant.Ghost"
-                                                             Title="View this gateway's effective Docker settings"
-                                                             Disabled="@busy"
-                                                             OnClick="() => ManageAsync(gateway)" />
-                                            <UiCommandButton Label="Edit gateway"
-                                                             Glyph="UiIconGlyph.Edit"
-                                                             Variant="UiButtonVariant.ActionSubtle"
-                                                             Title="Rename this gateway or paste a replacement VPN provider configuration"
-                                                             Disabled="@busy"
-                                                             OnClick="() => BeginVpnReconfiguration(gateway)" />
-                                            <UiCommandButton Label="Start" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Start)" />
-                                            <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Stop)" />
-                                            @if (CanRepair(gateway))
-                                            {
-                                                <UiCommandButton Label="Repair"
-                                                                 Title="Recreate this faulty gateway from its saved configuration and reconnect its routed apps"
-                                                                 Glyph="UiIconGlyph.Repair"
-                                                                 Variant="UiButtonVariant.PrimaryMuted"
-                                                                 Disabled="@busy"
-                                                                 OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Repair)" />
-                                            }
-                                            <UiCommandButton Label="Update" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Update)" />
-                                            <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="() => RunAsync(gateway.Id, HomeLabLifecycleAction.Remove)" />
-                                            </div>
-                                        </div>
-                                    }
+                                                     OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Repair)" />
                                 }
-                                else if (installation is not null)
-                                {
-                                        @if (BuildLocalUrl(installation) is { } localUrl)
-                                        {
-                                            <UiCommandButton Label="Open"
-                                                             Glyph="UiIconGlyph.Website"
-                                                             Variant="UiButtonVariant.Action"
-                                                             Href="@localUrl"
-                                                             Target="_blank"
-                                                             Rel="noopener"
-                                                             referrerpolicy="@(installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) ? "no-referrer" : null)"
-                                                             Title="@(installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) ? "Open qBittorrent through the trusted local LMS Caddy route." : null)" />
-                                        }
-                                        <UiCommandButton Label="Settings"
-                                                         Glyph="UiIconGlyph.ListView"
-                                                         Variant="UiButtonVariant.Ghost"
-                                                         Title="View effective Docker settings"
-                                                         Disabled="@busy"
-                                                         OnClick="() => ManageAsync(installation)" />
-                                        <UiCommandButton Label="Start" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Start)" />
-                                        <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Stop)" />
-                                        @if (CanRepair(installation))
-                                        {
-                                            <UiCommandButton Label="Repair"
-                                                             Title="Recreate this faulty container from its saved configuration and existing image"
-                                                             Glyph="UiIconGlyph.Repair"
-                                                             Variant="UiButtonVariant.PrimaryMuted"
-                                                             Disabled="@busy"
-                                                             OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Repair)" />
-                                        }
-                                        <UiCommandButton Label="Update" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
-                                        <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Remove)" />
-                                }
-                                else
-                                {
-                                    <UiCommandButton Label="Install" Glyph="UiIconGlyph.Download" Variant="UiButtonVariant.PrimaryMuted" Disabled="@busy" OnClick="() => InstallAsync(app)" />
-                                }
+                                <UiCommandButton Label="Update" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Update)" />
+                                <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="() => RunAsync(installation.Id, HomeLabLifecycleAction.Remove)" />
                             </div>
                         </div>
                     }
@@ -645,16 +594,6 @@
                 </section>
             </TabPage>
 
-            <TabPage Value="ai" Title="AI Help">
-                <section class="surface-subcard home-lab-ai-panel">
-                    <div>
-                        <p class="eyebrow">Home Lab assistant</p>
-                        <h2>Use AI to plan and troubleshoot</h2>
-                        <p class="meta-text">Ask about prompt recipes, storage layout, Docker health, or an app’s effective configuration. Prompt recipes inspect automatically and present any deployment or repair action for approval before LMS changes the system.</p>
-                    </div>
-                    <UiCommandButton Label="Open AI assistant" Glyph="UiIconGlyph.Ai" Variant="UiButtonVariant.PrimaryMuted" Href="/ai" />
-                </section>
-            </TabPage>
         </TabControl>
     }
 </div>
@@ -675,7 +614,6 @@
     private string activeTab = "apps";
     private string? startingPromptRecipeId;
     private string customPrompt = string.Empty;
-    private HomeLabAppCategory? activeCategory;
     private HomeLabAppManifest? configuringApp;
     private HomeLabAppInstallation? configuringInstallation;
     private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
@@ -689,20 +627,6 @@
     [SupplyParameterFromQuery(Name = "tab")]
     public string? RequestedTab { get; set; }
 
-    private static readonly HomeLabAppCategory?[] Categories =
-    [
-        null,
-        HomeLabAppCategory.Infrastructure,
-        HomeLabAppCategory.Download,
-        HomeLabAppCategory.Media,
-        HomeLabAppCategory.Automation,
-        HomeLabAppCategory.Photos,
-        HomeLabAppCategory.Utilities
-    ];
-
-    private IReadOnlyList<HomeLabAppManifest> FilteredApps =>
-        workspace?.Apps.Where(app => activeCategory is null || app.Category == activeCategory).ToArray() ?? [];
-
     private IEnumerable<HomeLabAppInstallation> InstalledVpnGateways =>
         workspace?.Installations
             .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
@@ -713,7 +637,7 @@
 
     protected override void OnParametersSet()
     {
-        activeTab = RequestedTab is "prompts" or "storage" or "ai" ? RequestedTab : "apps";
+        activeTab = RequestedTab is "prompts" or "storage" ? RequestedTab : "apps";
     }
 
     private async Task LoadAsync()
@@ -740,7 +664,7 @@
 
     private Task HandleTabChangedAsync(string? value)
     {
-        activeTab = value is "prompts" or "storage" or "ai" ? value : "apps";
+        activeTab = value is "prompts" or "storage" ? value : "apps";
         Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("tab", activeTab), replace: true);
         return Task.CompletedTask;
     }
@@ -767,6 +691,14 @@
         }
 
         await StartAiPromptAsync("custom", "Custom setup", HomeLabPromptRecipeCatalog.BuildCustomPrompt(customPrompt));
+    }
+
+    private async Task StartContainerHelpAsync(HomeLabAppInstallation installation)
+    {
+        await StartAiPromptAsync(
+            $"help-{installation.Id}",
+            $"Help with {installation.DisplayName}",
+            HomeLabPromptRecipeCatalog.BuildTroubleshootingPrompt(installation));
     }
 
     private async Task StartAiPromptAsync(string promptId, string title, string prompt)
@@ -1414,16 +1346,6 @@
         message = text;
         error = isError;
     }
-
-    private static string FormatCategory(HomeLabAppCategory category) => category switch
-    {
-        HomeLabAppCategory.Infrastructure => "Infrastructure",
-        HomeLabAppCategory.Download => "Download",
-        HomeLabAppCategory.Media => "Media",
-        HomeLabAppCategory.Automation => "Automation",
-        HomeLabAppCategory.Photos => "Photos",
-        _ => "Utilities"
-    };
 
     private static UiPillTone GetHealthTone(HomeLabHealthState state) => state switch
     {

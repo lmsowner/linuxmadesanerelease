@@ -82,6 +82,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             AiToolNames.WriteFileWithConfirmation => await ExecuteWriteFileAsync(definition, context, cancellationToken),
             AiToolNames.InstallPackageWithConfirmation => await ExecuteInstallPackageAsync(definition, context, cancellationToken),
             AiToolNames.InspectHomeLab => await ExecuteInspectHomeLabAsync(definition, context, cancellationToken),
+            AiToolNames.RepairHomeLabInstallation => await ExecuteRepairHomeLabInstallationAsync(definition, context, cancellationToken),
             AiToolNames.ApplyHomeLabPromptRecipe => await ExecuteApplyHomeLabPromptRecipeAsync(definition, context, cancellationToken),
             AiToolNames.RollbackSafeChange => await safeChangeService.ExecuteRollbackAsync(thread, invocation, cancellationToken),
             _ => throw new InvalidOperationException($"Tool {definition.Name} is not supported by this bridge.")
@@ -507,6 +508,63 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             0);
     }
 
+    private async Task<AiToolExecutionResult> ExecuteRepairHomeLabInstallationAsync(
+        AiToolDefinition definition,
+        AiToolExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var request = DeserializeRequest<RepairHomeLabInstallationToolRequest>(context.Invocation.ArgumentsJson);
+        var service = RequireHomeLabService();
+        await service.ExecuteAsync(request.InstallationId, HomeLabLifecycleAction.RefreshHealth, cancellationToken);
+        var installation = (await service.GetWorkspaceAsync(cancellationToken)).Installations
+            .FirstOrDefault(item => item.Id == request.InstallationId)
+            ?? throw new InvalidOperationException("The requested Home Lab Docker installation no longer exists.");
+        var before = await MapHomeLabInstallationAsync(service, installation, cancellationToken);
+        var action = installation.HealthState switch
+        {
+            HomeLabHealthState.Stopped => HomeLabLifecycleAction.Start,
+            HomeLabHealthState.Degraded or HomeLabHealthState.Failed or HomeLabHealthState.Blocked => HomeLabLifecycleAction.Repair,
+            _ => HomeLabLifecycleAction.Recreate
+        };
+
+        var operation = await service.ExecuteAsync(installation.Id, action, cancellationToken);
+        var refreshed = await WaitForHomeLabInstallationAsync(service, installation.Id, cancellationToken);
+        var after = await MapHomeLabInstallationAsync(service, refreshed, cancellationToken);
+        var app = HomeLabCatalog.GetApp(refreshed.AppId);
+        var networkReady = !after.IsVpnRouted || after.IsSecured;
+        var succeeded = operation.Succeeded &&
+                        refreshed.HealthState == HomeLabHealthState.Healthy &&
+                        networkReady &&
+                        (!app.RequiresVpnGateway || after.IsSecured);
+        var response = new RepairHomeLabInstallationToolResponse(
+            refreshed.Id,
+            refreshed.DisplayName,
+            action.ToString(),
+            succeeded,
+            before,
+            after,
+            $"{operation.Summary} {operation.Detail}",
+            DateTimeOffset.UtcNow);
+        var output = string.Join(
+            Environment.NewLine,
+            $"Before: {FormatHomeLabInstallation(before)}",
+            $"LMS action: {action}",
+            response.Detail,
+            $"After: {FormatHomeLabInstallation(after)}");
+
+        return CreateExecutionResult(
+            definition,
+            context.Invocation,
+            response,
+            succeeded ? AiExecutionOutcome.Succeeded : AiExecutionOutcome.Failed,
+            succeeded
+                ? $"Repaired and verified Home Lab container {refreshed.DisplayName}."
+                : $"Home Lab container {refreshed.DisplayName} still needs attention.",
+            output,
+            succeeded ? string.Empty : "The container did not reach a healthy LMS-managed state after the repair attempt.",
+            succeeded ? 0 : 1);
+    }
+
     private async Task<AiToolExecutionResult> ExecuteApplyHomeLabPromptRecipeAsync(
         AiToolDefinition definition,
         AiToolExecutionContext context,
@@ -702,8 +760,13 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
 
         return new HomeLabAiInstallation(
             installation.Id,
+            installation.DeploymentId,
             installation.AppId,
             installation.DisplayName,
+            installation.ContainerName,
+            installation.Image,
+            installation.NetworkMode,
+            app.Dependencies,
             installation.HealthState.ToString(),
             installation.HealthDetail,
             isVpnRouted,
@@ -727,7 +790,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     }
 
     private static string FormatHomeLabInstallation(HomeLabAiInstallation item) =>
-        $"- {item.Name} ({item.AppId}) | {item.HealthState} | VPN routed={item.IsVpnRouted} | secured={item.IsSecured} | access={item.AccessUrl}";
+        $"- {item.Name} ({item.AppId}) | installation={item.InstallationId} | container={item.ContainerName} | image={item.Image} | network={item.NetworkMode} | dependencies={string.Join(",", item.Dependencies)} | {item.HealthState}: {item.HealthDetail} | VPN routed={item.IsVpnRouted} | secured={item.IsSecured} | access={item.AccessUrl}";
 
     private async Task<ManagedHost> ResolveAuthorizedHostAsync(
         Guid serverId,
