@@ -307,37 +307,35 @@
                                                             {
                                                                 <span class="file-browser-item-note">Not accessible</span>
                                                             }
+                                                            else if (IsFolderSizeLoading(item))
+                                                            {
+                                                                <span class="file-browser-folder-size-progress"
+                                                                      aria-live="polite">@FormatDriveSize(GetFolderSizeProgress(item))</span>
+                                                                <button type="button"
+                                                                        class="file-browser-get-size-button"
+                                                                        title="@($"Cancel size calculation for {item.Name}")"
+                                                                        disabled="@(!FolderSizeCancellationRequested.HasDelegate)"
+                                                                        @onclick="@(() => CancelFolderSizeAsync(item))"
+                                                                        @onclick:stopPropagation="true"
+                                                                        @onpointerdown:stopPropagation="true">
+                                                                    Cancel
+                                                                </button>
+                                                            }
                                                             else if (TryGetFolderSize(item, out var folderSizeBytes))
                                                             {
                                                                 <span class="file-browser-folder-size">@FormatDriveSize(folderSizeBytes)</span>
                                                             }
                                                             else
                                                             {
-                                                                var isSizeLoading = IsFolderSizeLoading(item);
-                                                                @if (isSizeLoading)
-                                                                {
-                                                                    <button type="button"
-                                                                            class="file-browser-get-size-button"
-                                                                            title="@($"Cancel size calculation for {item.Name}")"
-                                                                            disabled="@(!FolderSizeCancellationRequested.HasDelegate)"
-                                                                            @onclick="@(() => CancelFolderSizeAsync(item))"
-                                                                            @onclick:stopPropagation="true"
-                                                                            @onpointerdown:stopPropagation="true">
-                                                                        Cancel
-                                                                    </button>
-                                                                }
-                                                                else
-                                                                {
-                                                                    <button type="button"
-                                                                            class="file-browser-get-size-button"
-                                                                            title="@($"Calculate space used by {item.Name}")"
-                                                                            disabled="@(IsBusy || !FolderSizeRequested.HasDelegate)"
-                                                                            @onclick="@(() => RequestFolderSizeAsync(item))"
-                                                                            @onclick:stopPropagation="true"
-                                                                            @onpointerdown:stopPropagation="true">
-                                                                        Get size
-                                                                    </button>
-                                                                }
+                                                                <button type="button"
+                                                                        class="file-browser-get-size-button"
+                                                                        title="@($"Calculate space used by {item.Name}")"
+                                                                        disabled="@(IsBusy || !FolderSizeRequested.HasDelegate)"
+                                                                        @onclick="@(() => RequestFolderSizeAsync(item))"
+                                                                        @onclick:stopPropagation="true"
+                                                                        @onpointerdown:stopPropagation="true">
+                                                                    Get size
+                                                                </button>
                                                             }
                                                         }
                                                         else
@@ -503,30 +501,29 @@
                                                     <dd>
                                                         @if (detailItem.ItemType == SftpItemType.Folder)
                                                         {
-                                                            @if (TryGetFolderSize(detailItem, out var folderSizeBytes))
+                                                            @if (IsFolderSizeLoading(detailItem))
+                                                            {
+                                                                <span class="file-browser-folder-size-progress"
+                                                                      aria-live="polite">@FormatDriveSize(GetFolderSizeProgress(detailItem))</span>
+                                                                <button type="button"
+                                                                        class="file-browser-get-size-button"
+                                                                        disabled="@(!FolderSizeCancellationRequested.HasDelegate)"
+                                                                        @onclick="@(() => CancelFolderSizeAsync(detailItem))">
+                                                                    Cancel
+                                                                </button>
+                                                            }
+                                                            else if (TryGetFolderSize(detailItem, out var folderSizeBytes))
                                                             {
                                                                 @FormatDriveSize(folderSizeBytes)
                                                             }
                                                             else
                                                             {
-                                                                @if (IsFolderSizeLoading(detailItem))
-                                                                {
-                                                                    <button type="button"
-                                                                            class="file-browser-get-size-button"
-                                                                            disabled="@(!FolderSizeCancellationRequested.HasDelegate)"
-                                                                            @onclick="@(() => CancelFolderSizeAsync(detailItem))">
-                                                                        Cancel
-                                                                    </button>
-                                                                }
-                                                                else
-                                                                {
-                                                                    <button type="button"
-                                                                            class="file-browser-get-size-button"
-                                                                            disabled="@(IsBusy || !FolderSizeRequested.HasDelegate)"
-                                                                            @onclick="@(() => RequestFolderSizeAsync(detailItem))">
-                                                                        Get size
-                                                                    </button>
-                                                                }
+                                                                <button type="button"
+                                                                        class="file-browser-get-size-button"
+                                                                        disabled="@(IsBusy || !FolderSizeRequested.HasDelegate)"
+                                                                        @onclick="@(() => RequestFolderSizeAsync(detailItem))">
+                                                                    Get size
+                                                                </button>
                                                             }
                                                         }
                                                         else
@@ -591,6 +588,7 @@
     [Parameter] public bool SidebarCollapsed { get; set; }
     [Parameter] public bool DetailPanelFocused { get; set; }
     [Parameter] public IReadOnlyDictionary<string, long> FolderSizes { get; set; } = new Dictionary<string, long>(StringComparer.Ordinal);
+    [Parameter] public IReadOnlyDictionary<string, long> FolderSizeProgress { get; set; } = new Dictionary<string, long>(StringComparer.Ordinal);
     [Parameter] public IReadOnlySet<string> LoadingFolderSizes { get; set; } = new HashSet<string>(StringComparer.Ordinal);
     [Parameter] public EventCallback RefreshRequested { get; set; }
     [Parameter] public EventCallback GoUpRequested { get; set; }
@@ -653,6 +651,9 @@
 
     private bool IsFolderSizeLoading(SftpItem item) =>
         LoadingFolderSizes.Contains(NormalizePath(item.FullPath));
+
+    private long GetFolderSizeProgress(SftpItem item) =>
+        FolderSizeProgress.GetValueOrDefault(NormalizePath(item.FullPath));
 
     private Task ToggleDirectoryAsync(string path) =>
         ToggleDirectoryRequested.HasDelegate ? ToggleDirectoryRequested.InvokeAsync(path) : Task.CompletedTask;

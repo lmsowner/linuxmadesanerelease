@@ -13,6 +13,7 @@
 @using LinuxMadeSane.Core.Models.Shares
 @using LinuxMadeSane.Infrastructure.Services
 @using LinuxMadeSane.Web.Services
+@using System.Diagnostics
 @using System.Text.Json
 @using Microsoft.AspNetCore.Components.Authorization
 @implements IAsyncDisposable
@@ -103,6 +104,7 @@ else
                                  SidebarCollapsed="@foldersPaneCollapsed"
                                  DetailPanelFocused="@previewPanelFocused"
                                  FolderSizes="@CachedFolderSizes"
+                                 FolderSizeProgress="@folderSizeProgressBytes"
                                  LoadingFolderSizes="@loadingFolderSizePaths"
                                  NotConnectedTitle="Browser not connected"
                                  NotConnectedMessage="@NotConnectedMessage"
@@ -513,30 +515,27 @@ else
                                 {
                                     <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Size: @FormatBytes(item.SizeBytes)</UiPill>
                                 }
+                                else if (IsFolderSizeLoading(item))
+                                {
+                                    <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill host-file-preview-size-progress">Size: @SystemInfoValueFormatter.FormatDriveSize(GetFolderSizeProgress(item))</UiPill>
+                                    <UiCommandButton Label="Cancel"
+                                                     Title="@($"Cancel size calculation for {item.Name}")"
+                                                     HideIcon="true"
+                                                     Class="host-file-preview-get-size"
+                                                     OnClick="@(() => CancelFolderSizeAsync(item))" />
+                                }
                                 else if (TryGetCachedFolderSize(item, out var folderSizeBytes))
                                 {
                                     <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Size: @SystemInfoValueFormatter.FormatDriveSize(folderSizeBytes)</UiPill>
                                 }
                                 else
                                 {
-                                    var isSizeLoading = IsFolderSizeLoading(item);
-                                    @if (isSizeLoading)
-                                    {
-                                        <UiCommandButton Label="Cancel"
-                                                         Title="@($"Cancel size calculation for {item.Name}")"
-                                                         HideIcon="true"
-                                                         Class="host-file-preview-get-size"
-                                                         OnClick="@(() => CancelFolderSizeAsync(item))" />
-                                    }
-                                    else
-                                    {
-                                        <UiCommandButton Label="Get size"
-                                                         Title="@($"Calculate space used by {item.Name}")"
-                                                         HideIcon="true"
-                                                         Class="host-file-preview-get-size"
-                                                         Disabled="@isBusy"
-                                                         OnClick="@(() => CalculateFolderSizeAsync(item))" />
-                                    }
+                                    <UiCommandButton Label="Get size"
+                                                     Title="@($"Calculate space used by {item.Name}")"
+                                                     HideIcon="true"
+                                                     Class="host-file-preview-get-size"
+                                                     Disabled="@isBusy"
+                                                     OnClick="@(() => CalculateFolderSizeAsync(item))" />
                                 }
                                 <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Modified: @(item.LastModifiedUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "n/a")</UiPill>
                             </div>
@@ -1217,6 +1216,7 @@ else
     private CancellationTokenSource? operationMessageCts;
     private readonly Dictionary<string, CancellationTokenSource> folderSizeRequests = new(StringComparer.Ordinal);
     private readonly HashSet<string> loadingFolderSizePaths = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> folderSizeProgressBytes = new(StringComparer.Ordinal);
     private string? observedClipboardSignature;
     private string ownershipPermissionsStatusMessage = string.Empty;
     private string ownershipPermissionsStatusTone = "info";
@@ -1577,6 +1577,7 @@ else
         }
         folderSizeRequests.Clear();
         loadingFolderSizePaths.Clear();
+        folderSizeProgressBytes.Clear();
         pathSuggestions = [];
         isPathSuggestionsLoading = false;
         pathSuggestionsRequestVersion = 0;
@@ -6380,6 +6381,7 @@ else
         var cancellation = new CancellationTokenSource();
         folderSizeRequests[path] = cancellation;
         loadingFolderSizePaths.Add(path);
+        folderSizeProgressBytes[path] = 0;
         await InvokeAsync(StateHasChanged);
 
         try
@@ -6389,7 +6391,18 @@ else
                 profile,
                 path,
                 ignoreInaccessibleDirectories: false,
-                cancellation.Token);
+                cancellation.Token,
+                async progressBytes =>
+                {
+                    if (!folderSizeRequests.TryGetValue(path, out var currentRequest) ||
+                        !ReferenceEquals(currentRequest, cancellation))
+                    {
+                        return;
+                    }
+
+                    folderSizeProgressBytes[path] = progressBytes;
+                    await InvokeAsync(StateHasChanged);
+                });
             WorkspaceState.TrySetFolderSize(
                 host.Id,
                 path,
@@ -6413,6 +6426,7 @@ else
             {
                 folderSizeRequests.Remove(path);
                 loadingFolderSizePaths.Remove(path);
+                folderSizeProgressBytes.Remove(path);
             }
 
             cancellation.Dispose();
@@ -6451,14 +6465,21 @@ else
     private bool IsFolderSizeLoading(SftpItem item) =>
         loadingFolderSizePaths.Contains(ResolveBrowserPath(item.FullPath));
 
+    private long GetFolderSizeProgress(SftpItem item) =>
+        folderSizeProgressBytes.GetValueOrDefault(ResolveBrowserPath(item.FullPath));
+
     private async Task<long> EstimateDirectorySizeAsync(
         ManagedHost host,
         ManagedHostConnectionProfile profile,
         string rootPath,
         bool ignoreInaccessibleDirectories,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<long, Task>? progress = null)
     {
         long totalBytes = 0;
+        long lastReportedBytes = 0;
+        var hasReportedProgress = false;
+        var progressTimer = Stopwatch.StartNew();
         var pending = new Stack<string>();
         pending.Push(rootPath);
 
@@ -6489,9 +6510,29 @@ else
                         break;
                     case SftpItemType.File:
                         totalBytes += Math.Max(0, child.SizeBytes);
+                        if (progress is not null && progressTimer.Elapsed >= TimeSpan.FromMilliseconds(50))
+                        {
+                            await progress(totalBytes);
+                            lastReportedBytes = totalBytes;
+                            hasReportedProgress = true;
+                            progressTimer.Restart();
+                        }
                         break;
                 }
             }
+
+            if (progress is not null && !hasReportedProgress && totalBytes != lastReportedBytes)
+            {
+                await progress(totalBytes);
+                lastReportedBytes = totalBytes;
+                hasReportedProgress = true;
+                progressTimer.Restart();
+            }
+        }
+
+        if (progress is not null && totalBytes != lastReportedBytes)
+        {
+            await progress(totalBytes);
         }
 
         return totalBytes;
@@ -6650,6 +6691,7 @@ else
         }
         folderSizeRequests.Clear();
         loadingFolderSizePaths.Clear();
+        folderSizeProgressBytes.Clear();
 
         if (operationMessageCts is not null)
         {
