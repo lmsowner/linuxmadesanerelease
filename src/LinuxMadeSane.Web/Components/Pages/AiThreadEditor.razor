@@ -38,6 +38,27 @@
     }
     else
     {
+        @if (IsHomeLabRoute)
+        {
+            @if (ThreadId.HasValue && IsThreadWorkspaceLoading(ThreadId.Value))
+            {
+                <p class="meta-text">Loading conversation...</p>
+            }
+            else if (HasActiveWorkspace)
+            {
+                @ActiveThreadWorkspaceContent
+            }
+            else if (!string.IsNullOrWhiteSpace(loadError))
+            {
+                <div class="callout error">@loadError</div>
+            }
+            else
+            {
+                <div class="empty-state">Conversation not found.</div>
+            }
+        }
+        else
+        {
         <section class="workspace-tabs-shell">
             <div class="workspace-tab-toolbar">
                 <div class="table-header workspace-tab-toolbar-header">
@@ -165,6 +186,7 @@
                 </TabControl>
             }
         </section>
+        }
     }
 </div>
 
@@ -397,7 +419,7 @@
     private CancellationTokenSource? workspaceRefreshCancellationTokenSource;
     private Task? workspaceRefreshTask;
 
-    private RenderFragment ActiveThreadWorkspaceContent => @<section class="workspace-thread-shell">
+    private RenderFragment ActiveThreadWorkspaceContent => @<section class="workspace-thread-shell @(IsHomeLabRoute ? "home-lab-guided-workspace" : string.Empty)">
             @if (storagePickerRole is not null)
             {
                 <UiModal IsOpen="true"
@@ -420,6 +442,8 @@
                 </UiModal>
             }
 
+            @if (!IsHomeLabRoute)
+            {
             <div class="workspace-thread-header">
                 <div class="workspace-thread-title">
                     <label class="workspace-thread-title-field">
@@ -508,23 +532,12 @@
                     </div>
 
                     <div class="workspace-thread-command-bar">
-                        @if (IsHomeLabRoute)
-                        {
-                            <UiCommandButton Label="Back to Home Lab"
-                                             Glyph="UiIconGlyph.Dock"
-                                             Variant="UiButtonVariant.Toolbar"
-                                             Class="workspace-quick-button"
-                                             Href="/home-lab/apps" />
-                        }
-                        else
-                        {
-                            <UiCommandButton Label="@(isCreatingThread ? "Creating..." : "New chat")"
-                                             Glyph="UiIconGlyph.Plus"
-                                             Variant="UiButtonVariant.Toolbar"
-                                             Class="workspace-quick-button"
-                                             OnClick="CreateThreadAndNavigateAsync"
-                                             Disabled="@isCreatingThread" />
-                        }
+                        <UiCommandButton Label="@(isCreatingThread ? "Creating..." : "New chat")"
+                                         Glyph="UiIconGlyph.Plus"
+                                         Variant="UiButtonVariant.Toolbar"
+                                         Class="workspace-quick-button"
+                                         OnClick="CreateThreadAndNavigateAsync"
+                                         Disabled="@isCreatingThread" />
                         <UiCommandButton Label="@(isSavingWorkspace ? "Saving..." : "Save")"
                                          Glyph="UiIconGlyph.Connect"
                                          Variant="UiButtonVariant.Action"
@@ -537,23 +550,27 @@
                     </div>
                 </div>
             </div>
+            }
 
             <div class="ai-chat-workbench">
             <section class="ai-chat-conversation-pane">
             <div class="chat-history-shell">
                 <div class="table-header">
                     <h2 class="section-title-compact">Conversation timeline</h2>
-                    <div class="row-action-cluster">
-                        <span>@workspace!.Timeline.Count item(s)</span>
-                        <UiCommandButton Label="@(isClearingConversation ? "Clearing..." : "Clear conversation")"
-                                         Glyph="UiIconGlyph.Clear"
-                                         Variant="UiButtonVariant.Toolbar"
-                                         OnClick="ConfirmAndClearConversationAsync"
-                                         Disabled="@(HasActiveRun || isClearingConversation || !HasPersistedConversationState)" />
-                    </div>
+                    @if (!IsHomeLabRoute)
+                    {
+                        <div class="row-action-cluster">
+                            <span>@workspace!.Timeline.Count item(s)</span>
+                            <UiCommandButton Label="@(isClearingConversation ? "Clearing..." : "Clear conversation")"
+                                             Glyph="UiIconGlyph.Clear"
+                                             Variant="UiButtonVariant.Toolbar"
+                                             OnClick="ConfirmAndClearConversationAsync"
+                                             Disabled="@(HasActiveRun || isClearingConversation || !HasPersistedConversationState)" />
+                        </div>
+                    }
                 </div>
 
-                @if (workspace.Timeline.Count == 0)
+                @if (workspace!.Timeline.Count == 0)
                 {
                     <div class="empty-state">
                         No events yet.
@@ -575,21 +592,24 @@
                                             <span class="meta-text">#@message.SequenceNumber</span>
                                             <span class="meta-text">@message.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
                                         </div>
-                                        <div class="row-action-cluster">
-                                            <UiCommandButton Label="@(IsMutatingMessage(message.Id) ? "Removing..." : "Remove")"
-                                                             Glyph="UiIconGlyph.Delete"
-                                                             Variant="UiButtonVariant.Toolbar"
-                                                             OnClick="@(() => ConfirmAndRemoveMessageAsync(message.Id, false))"
-                                                             Disabled="@(HasActiveRun || IsMutatingMessage(message.Id))" />
-                                            @if (message.Role == AiChatMessageRole.User)
-                                            {
-                                                <UiCommandButton Label="Trim here"
-                                                                 Glyph="UiIconGlyph.Cut"
+                                        @if (!IsHomeLabRoute)
+                                        {
+                                            <div class="row-action-cluster">
+                                                <UiCommandButton Label="@(IsMutatingMessage(message.Id) ? "Removing..." : "Remove")"
+                                                                 Glyph="UiIconGlyph.Delete"
                                                                  Variant="UiButtonVariant.Toolbar"
-                                                                 OnClick="@(() => ConfirmAndRemoveMessageAsync(message.Id, true))"
+                                                                 OnClick="@(() => ConfirmAndRemoveMessageAsync(message.Id, false))"
                                                                  Disabled="@(HasActiveRun || IsMutatingMessage(message.Id))" />
-                                            }
-                                        </div>
+                                                @if (message.Role == AiChatMessageRole.User)
+                                                {
+                                                    <UiCommandButton Label="Trim here"
+                                                                     Glyph="UiIconGlyph.Cut"
+                                                                     Variant="UiButtonVariant.Toolbar"
+                                                                     OnClick="@(() => ConfirmAndRemoveMessageAsync(message.Id, true))"
+                                                                     Disabled="@(HasActiveRun || IsMutatingMessage(message.Id))" />
+                                                }
+                                            </div>
+                                        }
                                     </div>
                                     @if (message.Content.Length > 560)
                                     {
@@ -788,10 +808,6 @@
             <aside class="ai-chat-action-pane" aria-label="Prompt and actions">
                 <div class="ai-action-heading">
                     <h2>Ask LMS</h2>
-                    @if (IsHomeLabRoute)
-                    {
-                        <span class="status-pill neutral">Home Lab</span>
-                    }
                 </div>
 
                 <EditForm Model="@messageComposer" OnValidSubmit="SendMessageAsync" class="stack-form chat-compose-form">
