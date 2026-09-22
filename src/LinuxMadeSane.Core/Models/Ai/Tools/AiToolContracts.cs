@@ -158,7 +158,8 @@ public sealed record ApplyHomeLabPromptRecipeToolResponse(
     bool Succeeded,
     IReadOnlyList<HomeLabAiInstallation> Installations,
     IReadOnlyList<string> Details,
-    DateTimeOffset CompletedAtUtc) : IAiToolResponse;
+    DateTimeOffset CompletedAtUtc,
+    IReadOnlyList<string>? RequiredStorageRoles = null) : IAiToolResponse;
 
 public sealed record HomeLabAiGateway(
     Guid InstallationId,

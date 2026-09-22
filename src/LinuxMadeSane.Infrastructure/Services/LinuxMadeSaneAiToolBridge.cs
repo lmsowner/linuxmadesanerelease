@@ -600,7 +600,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 recipe,
                 false,
                 [],
-                [$"Before installation, choose a host path for shared storage role(s) {roles} in Home Lab > Storage."]);
+                [$"Before installation, choose a host path for shared storage role(s) {roles} in Home Lab > Storage."],
+                missingStorageRoles);
         }
 
         if (recipe.RequiresVpnGateway)
@@ -717,7 +718,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         HomeLabPromptRecipe recipe,
         bool succeeded,
         IReadOnlyList<HomeLabAiInstallation> installations,
-        IReadOnlyList<string> details)
+        IReadOnlyList<string> details,
+        IReadOnlyList<string>? requiredStorageRoles = null)
     {
         var response = new ApplyHomeLabPromptRecipeToolResponse(
             recipe.Id,
@@ -725,7 +727,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             succeeded,
             installations,
             details,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            requiredStorageRoles);
         return CreateExecutionResult(
             definition,
             invocation,

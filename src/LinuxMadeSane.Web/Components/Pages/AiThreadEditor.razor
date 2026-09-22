@@ -10,9 +10,11 @@
 @using LinuxMadeSane.Application.Services
 @using LinuxMadeSane.Core.Models.Ai
 @using Microsoft.JSInterop
+@using System.Text.Json
 @inject IAiApprovalService ApprovalService
 @inject IAiThreadService ThreadService
 @inject IAiChatService ChatService
+@inject IHomeLabService HomeLabService
 @inject IJSRuntime JSRuntime
 @inject NavigationManager NavigationManager
 
@@ -178,6 +180,11 @@
     public Guid? ThreadId { get; set; }
 
     private AiChatThreadEditorContextViewModel? selectedThreadContext;
+    private static readonly JsonSerializerOptions ToolPayloadSerializerOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = true
+    };
+    private static readonly string[] KnownHomeLabStorageRoles = ["downloads", "movies", "tv", "photos"];
     private AiChatWorkspaceViewModel? workspace;
     private AiChatMessageComposer messageComposer = new();
     private IReadOnlyList<AiChatThreadListItemViewModel> threads = [];
@@ -198,6 +205,12 @@
     private ElementReference approvalPromptElement;
     private bool scrollApprovalPromptIntoView;
     private Guid? returnToHomeLabActionId;
+    private Guid? processedStorageSetupInvocationId;
+    private string? storagePickerRole;
+    private IReadOnlyList<string> requiredHomeLabStorageRoles = [];
+    private readonly Dictionary<string, string> selectedHomeLabStoragePaths = new(StringComparer.OrdinalIgnoreCase);
+    private bool isSavingHomeLabStorage;
+    private string homeLabStorageError = string.Empty;
     private readonly HashSet<Guid> submittingApprovalIds = [];
     private readonly HashSet<Guid> mutatingMessageIds = [];
     private readonly HashSet<Guid> mutatingToolIds = [];
@@ -213,6 +226,15 @@
 
     private bool HasActiveRun =>
         ActiveRun is not null || returnToHomeLabActionId.HasValue;
+
+    private bool CanSaveHomeLabStorage =>
+        requiredHomeLabStorageRoles.Count > 0 &&
+        requiredHomeLabStorageRoles.All(role => !string.IsNullOrWhiteSpace(GetSelectedStoragePath(role)));
+
+    private string StoragePickerInitialPath =>
+        storagePickerRole is null
+            ? "/mnt/storage"
+            : GetSelectedStoragePath(storagePickerRole) ?? "/mnt/storage";
 
     private bool HasPersistedConversationState =>
         workspace is not null &&
@@ -370,6 +392,28 @@
     private Task? workspaceRefreshTask;
 
     private RenderFragment ActiveThreadWorkspaceContent => @<section class="workspace-thread-shell">
+            @if (storagePickerRole is not null)
+            {
+                <UiModal IsOpen="true"
+                         Title="@($"Choose the {GetStorageRoleLabel(storagePickerRole)} folder")"
+                         Subtitle="Browse to the host folder LMS should mount into the containers."
+                         Class="home-lab-storage-picker-modal"
+                         Resizable="true"
+                         CloseOnBackdrop="false"
+                         OnClose="CloseStorageFolderPicker">
+                    <ChildContent>
+                        <HostFileBrowserWorkspace @key="storagePickerRole"
+                                                  HostId="@AiLocalMachine.ManagedHostId"
+                                                  RootPath="/"
+                                                  InitialPath="@StoragePickerInitialPath"
+                                                  Title="@($"Select {GetStorageRoleLabel(storagePickerRole)} storage")"
+                                                  AllowPopout="false"
+                                                  FolderSelected="ChooseStorageFolderAsync"
+                                                  FolderSelectLabel="Use this folder" />
+                    </ChildContent>
+                </UiModal>
+            }
+
             <div class="workspace-thread-header">
                 <div class="workspace-thread-title">
                     <label class="workspace-thread-title-field">
@@ -719,6 +763,54 @@
                     </div>
                 }
 
+                @if (requiredHomeLabStorageRoles.Count > 0)
+                {
+                    <div class="surface-subcard home-lab-storage-choice-card">
+                        <div class="stack-tight">
+                            <strong>Choose storage folders</strong>
+                            <p class="helper-text">Select each folder here. LMS will save the choices and continue this setup automatically.</p>
+                        </div>
+
+                        <div class="home-lab-storage-choice-grid">
+                            @foreach (var role in requiredHomeLabStorageRoles)
+                            {
+                                <div class="home-lab-storage-choice-row">
+                                    <div class="stack-tight">
+                                        <strong>@GetStorageRoleLabel(role)</strong>
+                                        <span class="meta-text">@(GetSelectedStoragePath(role) ?? "No folder selected")</span>
+                                    </div>
+                                    <div class="row-action-cluster">
+                                        <UiCommandButton Label="Use suggested folder"
+                                                         Title="@GetSuggestedStoragePath(role)"
+                                                         Glyph="UiIconGlyph.FolderClosed"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         Disabled="@isSavingHomeLabStorage"
+                                                         OnClick="@(() => SelectSuggestedStoragePath(role))" />
+                                        <UiCommandButton Label="Choose folder"
+                                                         Glyph="UiIconGlyph.FolderOpen"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@isSavingHomeLabStorage"
+                                                         OnClick="@(() => OpenStorageFolderPicker(role))" />
+                                    </div>
+                                </div>
+                            }
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(homeLabStorageError))
+                        {
+                            <div class="callout error">@homeLabStorageError</div>
+                        }
+
+                        <div class="hero-actions">
+                            <UiCommandButton Label="@(isSavingHomeLabStorage ? "Saving and continuing..." : "Save folders and continue setup")"
+                                             Glyph="UiIconGlyph.Save"
+                                             Variant="UiButtonVariant.Primary"
+                                             Disabled="@(isSavingHomeLabStorage || !CanSaveHomeLabStorage)"
+                                             OnClick="SaveHomeLabStorageAndContinueAsync" />
+                        </div>
+                    </div>
+                }
+
                 @if (DisplayedRun is not null && DisplayedRun.Status != AiChatRunStatus.AwaitingApproval)
                 {
                     <div class="callout @GetRunCalloutClass(DisplayedRun.Status)">
@@ -892,6 +984,7 @@
         workspace = await ChatService.GetWorkspaceAsync(threadId);
         scrollApprovalPromptIntoView = PendingApprovalRequests.Count > 0;
         SyncApprovalDrafts();
+        await SyncRequiredHomeLabStorageAsync();
         UpdateWorkspaceRefreshLoop();
     }
 
@@ -906,6 +999,7 @@
         workspace = await ChatService.GetWorkspaceAsync(ThreadId.Value);
         scrollApprovalPromptIntoView |= !hadPendingPrompt && PendingApprovalRequests.Count > 0;
         SyncApprovalDrafts();
+        await SyncRequiredHomeLabStorageAsync();
         ReturnToHomeLabWhenApprovedChangeCompletes();
         UpdateWorkspaceRefreshLoop();
     }
@@ -1463,6 +1557,7 @@
                         workspace = await ChatService.GetWorkspaceAsync(threadId);
                         scrollApprovalPromptIntoView |= !hadPendingPrompt && PendingApprovalRequests.Count > 0;
                         SyncApprovalDrafts();
+                        await SyncRequiredHomeLabStorageAsync();
                         ReturnToHomeLabWhenApprovedChangeCompletes();
                         UpdateWorkspaceRefreshLoop();
                     }
@@ -1517,6 +1612,154 @@
             .Select(request => request.Id)
             .ToHashSet();
         submittingApprovalIds.RemoveWhere(id => !pendingIds.Contains(id));
+    }
+
+    private async Task SyncRequiredHomeLabStorageAsync()
+    {
+        if (workspace is null)
+        {
+            return;
+        }
+
+        var invocation = workspace.Timeline
+            .OfType<AiChatToolExecutionTimelineItemViewModel>()
+            .Where(item => item.ToolName.Equals(AiToolNames.ApplyHomeLabPromptRecipe, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(item => item.StartedAtUtc)
+            .FirstOrDefault();
+        if (invocation is null || processedStorageSetupInvocationId == invocation.InvocationId)
+        {
+            return;
+        }
+
+        processedStorageSetupInvocationId = invocation.InvocationId;
+        var requestedRoles = invocation.Status == AiInvocationStatus.Failed
+            ? GetRequiredStorageRoles(invocation.PayloadText)
+            : [];
+        if (requestedRoles.Count == 0)
+        {
+            requiredHomeLabStorageRoles = [];
+            selectedHomeLabStoragePaths.Clear();
+            storagePickerRole = null;
+            homeLabStorageError = string.Empty;
+            return;
+        }
+
+        var homeLabWorkspace = await HomeLabService.GetWorkspaceAsync();
+        requiredHomeLabStorageRoles = requestedRoles
+            .Where(role => homeLabWorkspace.StorageRoles.All(saved =>
+                !saved.Role.Equals(role, StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(saved.HostPath)))
+            .ToArray();
+        selectedHomeLabStoragePaths.Clear();
+        storagePickerRole = null;
+        homeLabStorageError = string.Empty;
+    }
+
+    private static IReadOnlyList<string> GetRequiredStorageRoles(string payloadText)
+    {
+        ApplyHomeLabPromptRecipeToolResponse? response = null;
+        try
+        {
+            response = JsonSerializer.Deserialize<ApplyHomeLabPromptRecipeToolResponse>(
+                payloadText,
+                ToolPayloadSerializerOptions);
+        }
+        catch (JsonException)
+        {
+        }
+
+        var explicitRoles = response?.RequiredStorageRoles?
+            .Where(role => KnownHomeLabStorageRoles.Contains(role, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray() ?? [];
+        if (explicitRoles.Length > 0)
+        {
+            return explicitRoles;
+        }
+
+        var details = response?.Details ?? [];
+        return KnownHomeLabStorageRoles
+            .Where(role => details.Any(detail =>
+                detail.Contains($"'{role}'", StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+    }
+
+    private string? GetSelectedStoragePath(string role) =>
+        selectedHomeLabStoragePaths.TryGetValue(role, out var path) && !string.IsNullOrWhiteSpace(path)
+            ? path
+            : null;
+
+    private static string GetSuggestedStoragePath(string role) =>
+        $"/mnt/storage/{role}";
+
+    private static string GetStorageRoleLabel(string role) => role switch
+    {
+        "tv" => "TV",
+        _ => char.ToUpperInvariant(role[0]) + role[1..]
+    };
+
+    private void SelectSuggestedStoragePath(string role)
+    {
+        selectedHomeLabStoragePaths[role] = GetSuggestedStoragePath(role);
+        homeLabStorageError = string.Empty;
+    }
+
+    private void OpenStorageFolderPicker(string role)
+    {
+        storagePickerRole = role;
+        homeLabStorageError = string.Empty;
+    }
+
+    private void CloseStorageFolderPicker() =>
+        storagePickerRole = null;
+
+    private Task ChooseStorageFolderAsync(string path)
+    {
+        if (storagePickerRole is { } role && !string.IsNullOrWhiteSpace(path))
+        {
+            selectedHomeLabStoragePaths[role] = path;
+        }
+
+        storagePickerRole = null;
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveHomeLabStorageAndContinueAsync()
+    {
+        if (!ThreadId.HasValue || !CanSaveHomeLabStorage)
+        {
+            return;
+        }
+
+        isSavingHomeLabStorage = true;
+        homeLabStorageError = string.Empty;
+        try
+        {
+            foreach (var role in requiredHomeLabStorageRoles)
+            {
+                await HomeLabService.SaveStorageRoleAsync(role, selectedHomeLabStoragePaths[role]);
+            }
+
+            await ChatService.SendUserMessageAsync(
+                ThreadId.Value,
+                new AiChatMessageComposer
+                {
+                    Content = "I selected and saved all required shared storage roles using the LMS folder controls. Continue this same Home Lab setup now."
+                });
+            requiredHomeLabStorageRoles = [];
+            selectedHomeLabStoragePaths.Clear();
+            storagePickerRole = null;
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            homeLabStorageError = exception.Message;
+        }
+        finally
+        {
+            isSavingHomeLabStorage = false;
+        }
     }
 
     private void ReturnToHomeLabWhenApprovedChangeCompletes()
