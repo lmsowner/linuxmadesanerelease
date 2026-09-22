@@ -65,12 +65,12 @@
                         <button class="segmented-button @(activeThreadFilter == ThreadSidebarFilter.PendingApproval ? "selected" : string.Empty)"
                                 type="button"
                                 @onclick="(() => SetThreadFilter(ThreadSidebarFilter.PendingApproval))">
-                            Needs approval
+                            Needs your OK
                         </button>
                         <button class="segmented-button @(activeThreadFilter == ThreadSidebarFilter.NoServers ? "selected" : string.Empty)"
                                 type="button"
                                 @onclick="(() => SetThreadFilter(ThreadSidebarFilter.NoServers))">
-                            Local default
+                            This LMS server
                         </button>
                     </div>
                 </div>
@@ -128,7 +128,7 @@
 
                                         @if (thread.AttachedServerCount == 0)
                                         {
-                                            <span class="thread-tab-badge neutral">Local default</span>
+                                            <span class="thread-tab-badge neutral">This LMS server</span>
                                         }
                                     </div>
                                 </Header>
@@ -195,7 +195,6 @@
     private bool isSendingMessage;
     private bool isClearingConversation;
     private Guid? loadingThreadId;
-    private readonly Dictionary<Guid, AiApprovalDecisionCommand> approvalDrafts = [];
     private readonly HashSet<Guid> submittingApprovalIds = [];
     private readonly HashSet<Guid> mutatingMessageIds = [];
     private readonly HashSet<Guid> mutatingToolIds = [];
@@ -353,12 +352,12 @@
 
     private string ServerContextSummary =>
         UsesImplicitLocalMachine
-            ? "No explicit machines linked. This chat defaults to the local Linux Made Sane machine."
+            ? "This chat works on the server running Linux Made Sane."
             : $"{EffectiveAttachedServers.Count} linked machine(s).";
 
     private string MachineScopeLabel =>
         UsesImplicitLocalMachine
-            ? "Local default"
+            ? "This LMS server"
             : $"{ExplicitSelectedServers.Count} linked";
 
     private CancellationTokenSource? workspaceRefreshCancellationTokenSource;
@@ -403,48 +402,6 @@
                                                     Class="workspace-provider-switcher" />
                             }
                         </div>
-
-                        <details class="workspace-popover">
-                            <summary class="workspace-menu-button">
-                                <span class="workspace-menu-label">Trust</span>
-                                <span class="workspace-menu-value">@workspace.Thread.TrustProfile.TrustLevel</span>
-                            </summary>
-                            <div class="workspace-menu-panel">
-                                <div class="stack-form workspace-menu-form">
-                                    <label>
-                                        <span>Trust preset</span>
-                                        <UiCombobox @bind-Value="selectedThreadContext.Editor.TrustLevel" @bind-Value:after="OnTrustLevelChangedAsync">
-                                            @foreach (var level in Enum.GetValues<AiTrustLevel>())
-                                            {
-                                                <option value="@level">@level</option>
-                                            }
-                                        </UiCombobox>
-                                    </label>
-
-                                    <div class="workspace-toggle-grid">
-                                        <label class="checkbox-row">
-                                            <span>Read-only tools</span>
-                                            <InputCheckbox @bind-Value="selectedThreadContext.Editor.AllowReadOnlyTools" />
-                                        </label>
-
-                                        <label class="checkbox-row">
-                                            <span>Mutating tools</span>
-                                            <InputCheckbox @bind-Value="selectedThreadContext.Editor.AllowMutatingTools" />
-                                        </label>
-
-                                        <label class="checkbox-row">
-                                            <span>Approve medium risk</span>
-                                            <InputCheckbox @bind-Value="selectedThreadContext.Editor.RequireApprovalForMediumRisk" />
-                                        </label>
-
-                                        <label class="checkbox-row">
-                                            <span>Approve high risk</span>
-                                            <InputCheckbox @bind-Value="selectedThreadContext.Editor.RequireApprovalForHighRisk" />
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-                        </details>
 
                         <details class="workspace-popover">
                             <summary class="workspace-menu-button">
@@ -498,8 +455,7 @@
                     <div class="workspace-thread-command-bar">
                         @if (DisplayedRun is not null)
                         {
-                            <span class="status-pill @GetRunPillClass(DisplayedRun.Status)">@DisplayedRun.Status</span>
-                            <span class="status-pill neutral">@DisplayedRun.Step</span>
+                            <span class="status-pill @GetRunPillClass(DisplayedRun.Status)">@GetRunStatusLabel(DisplayedRun.Status)</span>
                         }
                         <UiCommandButton Label="@(isCreatingThread ? "Creating..." : "New chat")"
                                          Glyph="UiIconGlyph.Plus"
@@ -525,6 +481,11 @@
                 <div class="callout error">@workspaceError</div>
             }
 
+            <div class="callout info">
+                <strong>Sudo mode is on.</strong>
+                LMS can inspect the system immediately. Before it changes anything, it asks you once, then runs the approved fix with sudo.
+            </div>
+
             @if (DisplayedRun is not null)
             {
                 <div class="callout @GetRunCalloutClass(DisplayedRun.Status)">
@@ -534,8 +495,7 @@
                             <span class="meta-text">Updated @DisplayedRun.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
                         </div>
                         <div class="row-action-cluster">
-                            <span class="status-pill @GetRunPillClass(DisplayedRun.Status)">@DisplayedRun.Status</span>
-                            <span class="status-pill neutral">@DisplayedRun.Step</span>
+                            <span class="status-pill @GetRunPillClass(DisplayedRun.Status)">@GetRunStatusLabel(DisplayedRun.Status)</span>
                         </div>
                     </div>
                     <p class="chat-run-summary">@DisplayedRun.StatusSummary</p>
@@ -607,7 +567,6 @@
                                         <div class="row-action-cluster">
                                             <span class="status-pill warning">Tool</span>
                                             <span class="status-pill @GetToolStatusPillClass(toolItem.Status)">@toolItem.Status</span>
-                                            <span class="status-pill @GetApprovalStatusPillClass(toolItem.ApprovalStatus)">@toolItem.ApprovalStatus</span>
                                             @if (toolItem.SafeChange is not null)
                                             {
                                                 <span class="status-pill neutral">@toolItem.RiskLevel</span>
@@ -648,7 +607,6 @@
                                         {
                                             <span class="meta-text"><strong>Target</strong> @toolItem.TargetServerName</span>
                                         }
-                                        <span class="meta-text"><strong>Approval</strong> @toolItem.ApprovalStatus</span>
                                         <span class="meta-text"><strong>Started</strong> @toolItem.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
                                         <span class="meta-text"><strong>Ended</strong> @FormatCompletedAt(toolItem.CompletedAtUtc)</span>
                                         @if (toolItem.ExitCode.HasValue)
@@ -809,223 +767,47 @@
                     </p>
                 }
             </EditForm>
-            <div class="workspace-support-panels">
-                <details class="surface-subcard workspace-drawer" open="@(PendingApprovalRequests.Count > 0)">
-                    <summary class="workspace-drawer-summary">
-                        <span>Approvals</span>
-                        <span class="meta-text">@PendingApprovalRequests.Count pending</span>
-                    </summary>
-
+            @if (PendingApprovalRequests.Count > 0 || !string.IsNullOrWhiteSpace(approvalError))
+            {
+                <div class="surface-subcard approval-card">
                     @if (!string.IsNullOrWhiteSpace(approvalError))
                     {
                         <div class="callout error">@approvalError</div>
                     }
 
-                    @if (PendingApprovalRequests.Count == 0)
+                    @foreach (var request in PendingApprovalRequests)
                     {
-                        <div class="empty-state">
-                            No pending approvals.
-                        </div>
-                    }
-                    else
-                    {
-                        <div class="stack-list">
-                            @foreach (var request in PendingApprovalRequests)
+                        <div class="stack-form">
+                            <div>
+                                <strong>LMS needs your OK</strong>
+                                <p class="chat-message-content">@request.Summary</p>
+                                <p class="helper-text">If you allow this, Linux Made Sane will run the change with sudo and report the result here.</p>
+                            </div>
+
+                            @if (!string.IsNullOrWhiteSpace(request.CommandPreview))
                             {
-                                var draft = GetApprovalDraft(request.Id);
-                                var pendingAction = GetProposedAction(request.ProposedActionId);
-
-                                <div class="surface-subcard approval-card">
-                                    <div class="row-action-cluster">
-                                        <strong>@request.Title</strong>
-                                        <span class="status-pill warning">@request.RiskLevel</span>
-                                        <span class="status-pill neutral">@request.Requirement</span>
-                                    </div>
-                                    <p class="meta-text">@request.Summary</p>
-                                    <div class="stack-tight">
-                                        <span class="meta-text">Tool: @request.ToolName</span>
-                                        <span class="meta-text">Needs reviewer trust: @request.RequiredTrustLevel</span>
-                                        <span class="meta-text">Requested: @request.RequestedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
-                                    </div>
-                                    <p class="helper-text">@request.PolicyReason</p>
-
-                                    @if (pendingAction?.SafeChange is not null)
-                                    {
-                                        var preview = pendingAction.SafeChange.ImpactPreview;
-                                        var rollbackPlan = pendingAction.SafeChange.RollbackPlan;
-                                        var verificationPlan = pendingAction.SafeChange.VerificationPlan;
-
-                                        <div class="safe-change-preview-card">
-                                            <div class="row-action-cluster">
-                                                <strong>Impact Preview</strong>
-                                                <span class="status-pill warning">@pendingAction.RiskLevel</span>
-                                                <span class="status-pill neutral">Rollback @rollbackPlan.SupportLevel</span>
-                                            </div>
-                                            <p class="meta-text">@preview.WhatWillChange</p>
-                                            <p class="helper-text">@preview.WhyItIsNeeded</p>
-                                            <div class="tool-event-meta-grid safe-change-meta-grid">
-                                                <span class="meta-text"><strong>Service effect</strong> @preview.ServiceImpact</span>
-                                                <span class="meta-text"><strong>Interruption</strong> @preview.ExpectedInterruption</span>
-                                                <span class="meta-text"><strong>Risk</strong> @preview.RiskSummary</span>
-                                                <span class="meta-text"><strong>Verification</strong> @verificationPlan.Summary</span>
-                                            </div>
-
-                                            @if (preview.AffectedTargets.Count > 0)
-                                            {
-                                                <div class="safe-change-block">
-                                                    <span class="selection-title">Affected resources</span>
-                                                    <ul class="safe-change-list">
-                                                        @foreach (var target in preview.AffectedTargets)
-                                                        {
-                                                            <li><strong>@target.Kind</strong> @target.Name @target.Detail</li>
-                                                        }
-                                                    </ul>
-                                                </div>
-                                            }
-
-                                            <div class="safe-change-block">
-                                                <span class="selection-title">Verification steps</span>
-                                                <ul class="safe-change-list">
-                                                    @foreach (var step in verificationPlan.Steps)
-                                                    {
-                                                        <li>@step</li>
-                                                    }
-                                                </ul>
-                                            </div>
-
-                                            @if (preview.Warnings.Count > 0 || rollbackPlan.ManualSteps.Count > 0 || !string.IsNullOrWhiteSpace(rollbackPlan.Limitations))
-                                            {
-                                                <div class="safe-change-block">
-                                                    <span class="selection-title">Rollback notes</span>
-                                                    <ul class="safe-change-list">
-                                                        @foreach (var warning in preview.Warnings)
-                                                        {
-                                                            <li>@warning</li>
-                                                        }
-                                                        @foreach (var step in rollbackPlan.ManualSteps)
-                                                        {
-                                                            <li>@step</li>
-                                                        }
-                                                    </ul>
-                                                    @if (!string.IsNullOrWhiteSpace(rollbackPlan.Limitations))
-                                                    {
-                                                        <p class="helper-text">@rollbackPlan.Limitations</p>
-                                                    }
-                                                </div>
-                                            }
-                                        </div>
-                                    }
-
-                                    @if (!string.IsNullOrWhiteSpace(request.CommandPreview))
-                                    {
-                                        <div class="approval-command-preview">
-                                            <span class="selection-title">Command preview</span>
-                                            <pre class="command-preview-block command-display-block">@FormatCommandForDisplay(request.CommandPreview)</pre>
-                                        </div>
-                                    }
-
-                                    <div class="stack-form approval-review-form">
-                                        <div class="field-row">
-                                            <label>
-                                                <span>Reviewer name</span>
-                                                <InputText @bind-Value="draft.ActorName" />
-                                            </label>
-
-                                            <label>
-                                                <span>Reviewer trust</span>
-                                                <UiCombobox @bind-Value="draft.UserTrustLevel">
-                                                    @foreach (var trustLevel in Enum.GetValues<AiUserTrustLevel>())
-                                                    {
-                                                        <option value="@trustLevel">@trustLevel</option>
-                                                    }
-                                                </UiCombobox>
-                                            </label>
-                                        </div>
-
-                                        @if (request.RequiredTrustLevel == AiUserTrustLevel.Admin)
-                                        {
-                                            <label class="checkbox-row">
-                                                <span>Use admin override</span>
-                                                <InputCheckbox @bind-Value="draft.AdminOverrideUsed" />
-                                            </label>
-                                        }
-
-                                        @if (request.RememberDecisionSupported)
-                                        {
-                                            <label class="checkbox-row">
-                                                <span>Remember this decision later</span>
-                                                <InputCheckbox @bind-Value="draft.RememberDecision" />
-                                            </label>
-                                        }
-
-                                        <label>
-                                            <span>Decision note</span>
-                                            <InputTextArea @bind-Value="draft.Reason" placeholder="Optional audit note for this approval decision." />
-                                        </label>
-
-                                        <div class="hero-actions">
-                                            <UiCommandButton Label="Approve"
-                                                             Glyph="UiIconGlyph.Connect"
-                                                             Variant="UiButtonVariant.Action"
-                                                             OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.Approve))"
-                                                             Disabled="@IsSubmittingApproval(request.Id)" />
-                                            <UiCommandButton Label="Approve once"
-                                                             Glyph="UiIconGlyph.Connect"
-                                                             Variant="UiButtonVariant.Action"
-                                                             OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.ApproveOnce))"
-                                                             Disabled="@IsSubmittingApproval(request.Id)" />
-                                            <UiCommandButton Label="Deny"
-                                                             Glyph="UiIconGlyph.Disconnect"
-                                                             Variant="UiButtonVariant.Danger"
-                                                             OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.Deny))"
-                                                             Disabled="@IsSubmittingApproval(request.Id)" />
-                                        </div>
-                                    </div>
-                                </div>
+                                <details>
+                                    <summary>Show command</summary>
+                                    <pre class="command-preview-block command-display-block">@FormatCommandForDisplay(request.CommandPreview)</pre>
+                                </details>
                             }
-                        </div>
-                    }
-                </details>
 
-                <details class="surface-subcard workspace-drawer">
-                    <summary class="workspace-drawer-summary">
-                        <span>Recent tool activity</span>
-                        <span class="meta-text">@RecentToolEvents.Count item(s)</span>
-                    </summary>
-
-                    @if (RecentToolEvents.Count == 0)
-                    {
-                        <div class="empty-state">
-                            No tool activity yet.
+                            <div class="hero-actions">
+                                <UiCommandButton Label="@(IsSubmittingApproval(request.Id) ? "Running..." : "Allow and run with sudo")"
+                                                 Glyph="UiIconGlyph.Run"
+                                                 Variant="UiButtonVariant.Action"
+                                                 OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.ApproveOnce))"
+                                                 Disabled="@IsSubmittingApproval(request.Id)" />
+                                <UiCommandButton Label="Cancel"
+                                                 Glyph="UiIconGlyph.Disconnect"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.Deny))"
+                                                 Disabled="@IsSubmittingApproval(request.Id)" />
+                            </div>
                         </div>
                     }
-                    else
-                    {
-                        <div class="stack-list">
-                            @foreach (var toolEvent in RecentToolEvents)
-                            {
-                                <div class="surface-subcard">
-                                    <div class="row-action-cluster">
-                                        <strong>@toolEvent.Title</strong>
-                                        <span class="status-pill @GetToolStatusPillClass(toolEvent.Status)">@toolEvent.Status</span>
-                                    </div>
-                                    <p class="meta-text">@toolEvent.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</p>
-                                    @if (!string.IsNullOrWhiteSpace(toolEvent.TargetServerName))
-                                    {
-                                        <p class="meta-text">Target: @toolEvent.TargetServerName</p>
-                                    }
-                                    <p class="meta-text">Approval: @toolEvent.ApprovalStatus</p>
-                                    @if (toolEvent.ExitCode.HasValue)
-                                    {
-                                        <p class="meta-text">Exit code: @toolEvent.ExitCode.Value</p>
-                                    }
-                                    <p class="meta-text">@toolEvent.Summary</p>
-                                </div>
-                            }
-                        </div>
-                    }
-                </details>
-            </div>
+                </div>
+            }
         </section>;
 
     protected override async Task OnParametersSetAsync()
@@ -1424,35 +1206,8 @@
         }
     }
 
-    private Task OnTrustLevelChangedAsync()
-    {
-        if (selectedThreadContext is null)
-        {
-            return Task.CompletedTask;
-        }
-
-        var preset = AiTrustProfile.CreatePreset(selectedThreadContext.Editor.TrustLevel);
-        selectedThreadContext.Editor.AllowReadOnlyTools = preset.AllowReadOnlyTools;
-        selectedThreadContext.Editor.AllowMutatingTools = preset.AllowMutatingTools;
-        selectedThreadContext.Editor.RequireApprovalForMediumRisk = preset.RequireApprovalForMediumRisk;
-        selectedThreadContext.Editor.RequireApprovalForHighRisk = preset.RequireApprovalForHighRisk;
-        return Task.CompletedTask;
-    }
-
     private bool IsServerSelected(Guid serverId) =>
         selectedThreadContext?.Editor.AttachedServerIds.Contains(serverId) ?? false;
-
-    private AiApprovalDecisionCommand GetApprovalDraft(Guid requestId)
-    {
-        if (approvalDrafts.TryGetValue(requestId, out var draft))
-        {
-            return draft;
-        }
-
-        draft = new AiApprovalDecisionCommand();
-        approvalDrafts[requestId] = draft;
-        return draft;
-    }
 
     private bool IsSubmittingApproval(Guid requestId) =>
         submittingApprovalIds.Contains(requestId);
@@ -1479,7 +1234,6 @@
 
     private async Task SubmitApprovalDecisionAsync(Guid requestId, AiApprovalDecisionType decisionType)
     {
-        var draft = GetApprovalDraft(requestId);
         approvalError = string.Empty;
         submittingApprovalIds.Add(requestId);
 
@@ -1490,11 +1244,13 @@
                 new AiApprovalDecisionCommand
                 {
                     DecisionType = decisionType,
-                    ActorName = draft.ActorName,
-                    UserTrustLevel = draft.UserTrustLevel,
-                    AdminOverrideUsed = draft.AdminOverrideUsed,
-                    RememberDecision = draft.RememberDecision,
-                    Reason = draft.Reason
+                    ActorName = "LMS user",
+                    UserTrustLevel = AiUserTrustLevel.Standard,
+                    AdminOverrideUsed = false,
+                    RememberDecision = false,
+                    Reason = decisionType == AiApprovalDecisionType.Deny
+                        ? "User cancelled the requested change."
+                        : "User allowed this change to run with sudo."
                 });
 
             await RefreshThreadsAsync();
@@ -1592,27 +1348,6 @@
         _ => "neutral"
     };
 
-    private static string GetApprovalStatusPillClass(string approvalStatus)
-    {
-        if (approvalStatus.Contains("Denied", StringComparison.OrdinalIgnoreCase) ||
-            approvalStatus.Contains("Blocked", StringComparison.OrdinalIgnoreCase))
-        {
-            return "failure";
-        }
-
-        if (approvalStatus.Contains("Pending", StringComparison.OrdinalIgnoreCase))
-        {
-            return "warning";
-        }
-
-        if (approvalStatus.Contains("Approved", StringComparison.OrdinalIgnoreCase))
-        {
-            return "success";
-        }
-
-        return "neutral";
-    }
-
     private static string GetRunPillClass(AiChatRunStatus status) => status switch
     {
         AiChatRunStatus.Completed => "success",
@@ -1620,6 +1355,13 @@
         AiChatRunStatus.Cancelled => "failure",
         AiChatRunStatus.AwaitingApproval => "warning",
         _ => "neutral"
+    };
+
+    private static string GetRunStatusLabel(AiChatRunStatus status) => status switch
+    {
+        AiChatRunStatus.AwaitingApproval => "Waiting for you",
+        AiChatRunStatus.CancellationRequested => "Stopping",
+        _ => status.ToString()
     };
 
     private static string GetRunCalloutClass(AiChatRunStatus status) => status switch
@@ -1642,7 +1384,7 @@
 
     private static string BuildThreadScopeSummary(AiChatThreadListItemViewModel thread) =>
         thread.AttachedServerCount == 0
-            ? "local default"
+            ? "this LMS server"
             : $"{thread.AttachedServerCount} machine(s)";
 
     private static string FormatCompletedAt(DateTimeOffset? completedAtUtc) =>
@@ -1740,20 +1482,6 @@
         var pendingIds = PendingApprovalRequests
             .Select(request => request.Id)
             .ToHashSet();
-
-        foreach (var requestId in approvalDrafts.Keys.Where(id => !pendingIds.Contains(id)).ToArray())
-        {
-            approvalDrafts.Remove(requestId);
-        }
-
-        foreach (var requestId in pendingIds)
-        {
-            if (!approvalDrafts.ContainsKey(requestId))
-            {
-                approvalDrafts[requestId] = new AiApprovalDecisionCommand();
-            }
-        }
-
         submittingApprovalIds.RemoveWhere(id => !pendingIds.Contains(id));
     }
 

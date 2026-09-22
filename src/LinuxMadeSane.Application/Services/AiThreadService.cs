@@ -286,7 +286,7 @@ public sealed class AiThreadService(
             ? string.Empty
             : models.FirstOrDefault(model => model.ProviderKey.Equals(defaultProvider.ProviderKey, StringComparison.OrdinalIgnoreCase))?.ModelId
               ?? defaultProvider.DefaultModelId;
-        var trustProfile = AiTrustProfile.CreatePreset(AiTrustLevel.Guided);
+        var trustProfile = AiTrustProfile.CreatePreset(AiTrustLevel.OperatorApproved);
 
         return new AiChatThreadEditor
         {

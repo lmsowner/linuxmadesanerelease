@@ -532,7 +532,7 @@ public sealed class AiChatTurnOrchestrator(
             {
                 Status = AiChatRunStatus.AwaitingApproval,
                 Step = AiChatRunStep.AwaitingApproval,
-                StatusSummary = $"{executionPlan.Actions.Count(action => action.RequiresApproval)} action(s) are waiting for approval.",
+                StatusSummary = "LMS needs your OK before it changes the system.",
                 ExecutionPlanId = executionPlan.Id,
                 UpdatedAtUtc = checkpointAtUtc
             };
@@ -608,7 +608,7 @@ public sealed class AiChatTurnOrchestrator(
             {
                 Status = AiChatRunStatus.AwaitingApproval,
                 Step = AiChatRunStep.AwaitingApproval,
-                StatusSummary = $"{approvalRequests.Count(request => request.State == AiApprovalState.Pending)} action(s) are waiting for approval.",
+                StatusSummary = "LMS needs your OK before it changes the system.",
                 UpdatedAtUtc = DateTimeOffset.UtcNow
             };
 

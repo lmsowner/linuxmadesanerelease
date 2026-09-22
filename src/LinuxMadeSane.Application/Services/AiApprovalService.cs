@@ -317,7 +317,7 @@ public sealed class AiApprovalService(
             {
                 Status = AiChatRunStatus.AwaitingApproval,
                 Step = AiChatRunStep.AwaitingApproval,
-                StatusSummary = $"{planRequests.Count(item => item.State == AiApprovalState.Pending)} action(s) are still waiting for approval.",
+                StatusSummary = "LMS still needs your OK before it changes the system.",
                 UpdatedAtUtc = now
             };
 
@@ -329,7 +329,7 @@ public sealed class AiApprovalService(
         {
             Status = AiChatRunStatus.Queued,
             Step = AiChatRunStep.ExecutingApprovedTools,
-            StatusSummary = "Approvals granted. Queued to resume Linux Made Sane tool execution.",
+            StatusSummary = "Thanks — running the change with sudo now.",
             UpdatedAtUtc = now
         };
 

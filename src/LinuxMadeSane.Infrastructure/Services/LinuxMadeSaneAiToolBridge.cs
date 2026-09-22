@@ -373,9 +373,10 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         var request = DeserializeRequest<RunCommandToolRequest>(context.Invocation.ArgumentsJson);
         var host = await ResolveAuthorizedHostAsync(request.ServerId, context.AttachedServers, cancellationToken);
 
-        var commandText = string.IsNullOrWhiteSpace(request.WorkingDirectory)
+        var requestedCommandText = string.IsNullOrWhiteSpace(request.WorkingDirectory)
             ? request.CommandText.Trim()
             : $"cd {QuoteShellArgument(request.WorkingDirectory.Trim())} && {request.CommandText.Trim()}";
+        var commandText = $"sudo -n /bin/sh -lc {QuoteShellArgument(requestedCommandText)}";
         var result = await ExecuteCommandAsync(host, commandText, cancellationToken);
 
         var response = new RunCommandToolResponse(
@@ -828,75 +829,23 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         ManagedHost host,
         string path,
         CancellationToken cancellationToken)
-    {
-        if (!AiLocalMachine.IsLocalMachine(host.Id))
-        {
-            return await fileAccessService.ListItemsAsync(
-                host,
-                path,
-                CreateStoredConnectionProfile(host),
-                cancellationToken);
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        var normalizedPath = LocalFileBrowsingSupport.NormalizePath(host.DefaultWorkingDirectory, path);
-        var directory = new DirectoryInfo(normalizedPath);
-        if (!directory.Exists)
-        {
-            throw new InvalidOperationException($"Directory {normalizedPath} was not found on the local machine.");
-        }
-
-        return directory
-            .EnumerateFileSystemInfos()
-            .Select(LocalFileBrowsingSupport.MapItem)
-            .OrderByDescending(item => item.ItemType == SftpItemType.Folder)
-            .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-    }
+        => await fileAccessService.ListItemsAsync(
+            host,
+            path,
+            CreateStoredConnectionProfile(host),
+            cancellationToken);
 
     private async Task<SftpFileContent> ReadFileAsync(
         ManagedHost host,
         string path,
         int maxBytes,
         CancellationToken cancellationToken)
-    {
-        if (!AiLocalMachine.IsLocalMachine(host.Id))
-        {
-            return await fileAccessService.ReadFileAsync(
-                host,
-                path,
-                CreateStoredConnectionProfile(host),
-                maxBytes,
-                cancellationToken);
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        var normalizedPath = LocalFileBrowsingSupport.NormalizePath(host.DefaultWorkingDirectory, path);
-        if (Directory.Exists(normalizedPath))
-        {
-            throw new InvalidOperationException("The requested path is a directory, not a file.");
-        }
-
-        var fileInfo = new FileInfo(normalizedPath);
-        if (!fileInfo.Exists)
-        {
-            throw new InvalidOperationException($"File {normalizedPath} was not found on the local machine.");
-        }
-
-        var safeMaxBytes = Math.Clamp(maxBytes, 1, 1_048_576);
-        await using var stream = fileInfo.OpenRead();
-        var buffer = new byte[safeMaxBytes];
-        var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
-        var decoded = TextFileEncoding.Decode(buffer.AsSpan(0, bytesRead));
-
-        return new SftpFileContent(
-            normalizedPath,
-            decoded.Content,
-            fileInfo.Length,
-            fileInfo.LastWriteTimeUtc == DateTime.MinValue ? null : new DateTimeOffset(fileInfo.LastWriteTimeUtc, TimeSpan.Zero),
-            fileInfo.Length > bytesRead,
-            decoded.EncodingName);
-    }
+        => await fileAccessService.ReadFileAsync(
+            host,
+            path,
+            CreateStoredConnectionProfile(host),
+            maxBytes,
+            cancellationToken);
 
     private async Task<SftpWriteResult> WriteFileAsync(
         ManagedHost host,
@@ -904,41 +853,17 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         string content,
         bool createDirectories,
         CancellationToken cancellationToken)
-    {
-        if (!AiLocalMachine.IsLocalMachine(host.Id))
-        {
-            return await fileAccessService.WriteFileAsync(
-                host,
-                path,
-                content,
-                CreateStoredConnectionProfile(host),
-                createDirectories,
-                encodingName: null,
-                cancellationToken);
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        var normalizedPath = LocalFileBrowsingSupport.NormalizePath(host.DefaultWorkingDirectory, path);
-        var directory = Path.GetDirectoryName(normalizedPath);
-        if (!string.IsNullOrWhiteSpace(directory))
-        {
-            if (createDirectories)
-            {
-                Directory.CreateDirectory(directory);
-            }
-            else if (!Directory.Exists(directory))
-            {
-                throw new InvalidOperationException($"Directory {directory} does not exist on the local machine.");
-            }
-        }
-
-        await File.WriteAllTextAsync(normalizedPath, content, cancellationToken);
-
-        return new SftpWriteResult(normalizedPath, Encoding.UTF8.GetByteCount(content), DateTimeOffset.UtcNow);
-    }
+        => await fileAccessService.WriteFileAsync(
+            host,
+            path,
+            content,
+            CreateStoredConnectionProfile(host),
+            createDirectories,
+            encodingName: null,
+            cancellationToken);
 
     private static ManagedHostConnectionProfile CreateStoredConnectionProfile(ManagedHost host) =>
-        new(host.Username, null, PreferStoredCredentials: true);
+        new(host.Username, null, PreferStoredCredentials: true, UseSshTransport: false, UseSudo: true);
 
     private static TRequest DeserializeRequest<TRequest>(string argumentsJson)
         where TRequest : IAiToolRequest
