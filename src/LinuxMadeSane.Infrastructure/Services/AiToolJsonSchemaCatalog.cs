@@ -224,7 +224,7 @@ public static class AiToolJsonSchemaCatalog
               "properties": {
                 "promptRecipeId": {
                   "type": "string",
-                  "enum": [ "secure-streaming", "secure-webtor", "secure-stremio", "secure-qbittorrent", "personal-media-server", "private-photo-library" ],
+                  "enum": [ "wordpress-site", "forward-proxy", "secure-streaming", "secure-qbittorrent", "vpn-media-automation", "private-photo-library" ],
                   "description": "The supported LMS Home Lab prompt recipe to apply."
                 },
                 "vpnGatewayInstallationId": {

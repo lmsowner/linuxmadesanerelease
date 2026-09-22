@@ -543,7 +543,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 var start = await service.ExecuteAsync(gateway.Id, HomeLabLifecycleAction.Start, cancellationToken);
                 details.Add($"VPN Gateway: {start.Summary} {start.Detail}");
             }
-            else if (gateway.HealthState is HomeLabHealthState.Failed or HomeLabHealthState.Blocked)
+            else if (gateway.HealthState is HomeLabHealthState.Degraded or HomeLabHealthState.Failed or HomeLabHealthState.Blocked)
             {
                 var repair = await service.ExecuteAsync(gateway.Id, HomeLabLifecycleAction.Repair, cancellationToken);
                 details.Add($"VPN Gateway: {repair.Summary} {repair.Detail}");
@@ -604,7 +604,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 succeeded &= route.Succeeded;
             }
 
-            if (installation.HealthState is HomeLabHealthState.Failed or HomeLabHealthState.Blocked)
+            if (installation.HealthState is HomeLabHealthState.Degraded or HomeLabHealthState.Failed or HomeLabHealthState.Blocked)
             {
                 var repair = await service.ExecuteAsync(installation.Id, HomeLabLifecycleAction.Repair, cancellationToken);
                 details.Add($"{installation.DisplayName}: {repair.Summary} {repair.Detail}");

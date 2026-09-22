@@ -608,7 +608,21 @@
                         </div>
                     }
                 </div>
-                <p class="meta-text home-lab-prompt-legal">Prompt recipes are intended for personal, public-domain, or otherwise lawfully accessed content and services.</p>
+                <section class="surface-subcard home-lab-custom-prompt">
+                    <div>
+                        <p class="eyebrow">Enter your own</p>
+                        <h2>Tell the Home Lab AI what you want to run</h2>
+                        <p class="meta-text">The AI starts by inspecting LMS, uses supported managed apps where possible, and presents changes for approval.</p>
+                    </div>
+                    <textarea class="ui-control-textarea"
+                              @bind="customPrompt"
+                              placeholder="For example: set up a private dashboard for services already installed on this server"></textarea>
+                    <UiCommandButton Label="Start custom AI task"
+                                     Glyph="UiIconGlyph.Ai"
+                                     Variant="UiButtonVariant.PrimaryMuted"
+                                     Disabled="@(busy || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(customPrompt))"
+                                     OnClick="StartCustomPromptAsync" />
+                </section>
             </TabPage>
 
             <TabPage Value="storage" Title="Storage">
@@ -616,7 +630,7 @@
                     <div>
                         <p class="eyebrow">Shared storage roles</p>
                         <h2>Choose host locations once</h2>
-                        <p class="meta-text">Recipes reuse these paths when mounting downloads and media into participating containers.</p>
+                        <p class="meta-text">Apps and guided AI setups reuse these paths when mounting shared data into participating containers.</p>
                     </div>
                     <div class="home-lab-storage-grid">
                         @foreach (var role in StorageRoles)
@@ -660,6 +674,7 @@
     private bool busy;
     private string activeTab = "apps";
     private string? startingPromptRecipeId;
+    private string customPrompt = string.Empty;
     private HomeLabAppCategory? activeCategory;
     private HomeLabAppManifest? configuringApp;
     private HomeLabAppInstallation? configuringInstallation;
@@ -741,12 +756,27 @@
 
     private async Task StartPromptRecipeAsync(HomeLabPromptRecipe promptRecipe)
     {
+        await StartAiPromptAsync(promptRecipe.Id, promptRecipe.Name, promptRecipe.Prompt);
+    }
+
+    private async Task StartCustomPromptAsync()
+    {
+        if (string.IsNullOrWhiteSpace(customPrompt))
+        {
+            return;
+        }
+
+        await StartAiPromptAsync("custom", "Custom setup", HomeLabPromptRecipeCatalog.BuildCustomPrompt(customPrompt));
+    }
+
+    private async Task StartAiPromptAsync(string promptId, string title, string prompt)
+    {
         if (startingPromptRecipeId is not null)
         {
             return;
         }
 
-        startingPromptRecipeId = promptRecipe.Id;
+        startingPromptRecipeId = promptId;
         message = string.Empty;
         error = false;
         try
@@ -754,14 +784,14 @@
             var context = await AiThreadService.GetEditorAsync();
             if (string.IsNullOrWhiteSpace(context.Editor.ProviderKey))
             {
-                throw new InvalidOperationException("Configure an AI provider before starting a Home Lab prompt recipe.");
+                throw new InvalidOperationException("Configure an AI provider before starting a Home Lab AI task.");
             }
 
-            context.Editor.Title = $"Home Lab · {promptRecipe.Name}";
+            context.Editor.Title = $"Home Lab · {title}";
             var threadId = await AiThreadService.SaveThreadAsync(context.Editor);
             await AiChatService.SendUserMessageAsync(
                 threadId,
-                new AiChatMessageComposer { Content = promptRecipe.Prompt });
+                new AiChatMessageComposer { Content = prompt });
             Navigation.NavigateTo($"/ai/threads/{threadId}");
         }
         catch (Exception exception)

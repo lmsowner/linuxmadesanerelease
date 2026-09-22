@@ -73,6 +73,71 @@ public static class HomeLabCatalog
             [new("network-route", "Internet route", "select", true, Help: "Direct exposes qBittorrent through the deployment network. VPN Gateway routes its traffic through the selected Gluetun gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries qBittorrent traffic.")],
             SupportsVpnGateway: true),
         new(
+            "wordpress",
+            "WordPress",
+            "Website and publishing platform with an LMS-managed private database.",
+            HomeLabAppCategory.Utilities,
+            "web",
+            "https://wordpress.org/",
+            "https://hub.docker.com/_/wordpress",
+            "wordpress",
+            "latest",
+            "1",
+            [new("web", 80, Primary: true)],
+            [new("site", "/var/www/html", HomeLabStorageKind.UserData)],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["WORDPRESS_DB_HOST"] = "wordpress-database:3306",
+                ["WORDPRESS_DB_USER"] = "lms_wordpress",
+                ["WORDPRESS_DB_PASSWORD"] = "lms-wordpress-internal",
+                ["WORDPRESS_DB_NAME"] = "lms_wordpress"
+            },
+            ["wordpress-database"],
+            new HomeLabHealthCheckManifest(HttpPath: "/wp-admin/install.php", Port: 80, StartPeriodSeconds: 60),
+            []),
+        new(
+            "wordpress-database",
+            "WordPress Database",
+            "Private MariaDB dependency managed with the WordPress deployment.",
+            HomeLabAppCategory.Infrastructure,
+            "database",
+            "https://mariadb.org/",
+            "https://hub.docker.com/_/mariadb",
+            "mariadb",
+            "11",
+            "1",
+            [],
+            [new("database", "/var/lib/mysql", HomeLabStorageKind.Configuration)],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["MARIADB_DATABASE"] = "lms_wordpress",
+                ["MARIADB_USER"] = "lms_wordpress",
+                ["MARIADB_PASSWORD"] = "lms-wordpress-internal",
+                ["MARIADB_ROOT_PASSWORD"] = "lms-wordpress-root-internal"
+            },
+            [],
+            new HomeLabHealthCheckManifest(DockerCommand: "healthcheck.sh --connect --innodb_initialized", StartPeriodSeconds: 45),
+            [],
+            IsSystemDependency: true),
+        new(
+            "squid-proxy",
+            "Squid Forward Proxy",
+            "Private caching forward proxy for devices on networks you control.",
+            HomeLabAppCategory.Infrastructure,
+            "network",
+            "https://www.squid-cache.org/",
+            "https://hub.docker.com/r/ubuntu/squid",
+            "ubuntu/squid",
+            "latest",
+            "1",
+            [new("proxy", 3128, Primary: true)],
+            [],
+            new Dictionary<string, string>(),
+            [],
+            new HomeLabHealthCheckManifest(DockerCommand: "squidclient -h 127.0.0.1 -p 3128 mgr:info >/dev/null", StartPeriodSeconds: 30),
+            [],
+            EdgeGatewaySupported: false),
+        new(
             "jellyfin",
             "Jellyfin",
             "Free media server for movies, television, music, and live media.",
@@ -242,7 +307,9 @@ public static class HomeLabCatalog
             "1",
             [new("web", 9696, Primary: true)],
             [new("config", "/config", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 9696), []),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 9696),
+            [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Prowlarr traffic.")],
+            SupportsVpnGateway: true),
         new(
             "sonarr",
             "Sonarr",
@@ -260,7 +327,9 @@ public static class HomeLabCatalog
                 new("downloads", "/downloads", HomeLabStorageKind.UserData, "downloads"),
                 new("tv", "/tv", HomeLabStorageKind.UserData, "tv")
             ],
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8989), []),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8989),
+            [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Sonarr traffic.")],
+            SupportsVpnGateway: true),
         new(
             "radarr",
             "Radarr",
@@ -278,11 +347,13 @@ public static class HomeLabCatalog
                 new("downloads", "/downloads", HomeLabStorageKind.UserData, "downloads"),
                 new("movies", "/movies", HomeLabStorageKind.UserData, "movies")
             ],
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 7878), []),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 7878),
+            [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Radarr traffic.")],
+            SupportsVpnGateway: true),
         new(
             "seerr",
-            "Seerr",
-            "Request management UI for Sonarr and Radarr.",
+            "Seerr (Overseerr successor)",
+            "Request management UI for Sonarr and Radarr, succeeding Overseerr and Jellyseerr.",
             HomeLabAppCategory.Automation,
             "list",
             "https://seerr.dev/",
@@ -292,7 +363,9 @@ public static class HomeLabCatalog
             "1",
             [new("web", 5055, Primary: true)],
             [new("config", "/app/config", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PORT"] = "5055", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/api/v1/settings/public", Port: 5055), [])
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PORT"] = "5055", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/api/v1/settings/public", Port: 5055),
+            [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Seerr traffic.")],
+            SupportsVpnGateway: true)
     ];
 
     public static IReadOnlyList<HomeLabRecipeManifest> Recipes { get; } =
