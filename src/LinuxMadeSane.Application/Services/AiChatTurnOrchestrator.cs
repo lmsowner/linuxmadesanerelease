@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using LinuxMadeSane.Application.Contracts.Ai;
+using LinuxMadeSane.Application.Contracts.HomeLab;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
@@ -1269,6 +1270,16 @@ public sealed class AiChatTurnOrchestrator(
             AiToolNames.RunCommand => BuildRunCommandAction(toolCall, attachedServers, definition),
             AiToolNames.WriteFileWithConfirmation => BuildWriteFileAction(toolCall, attachedServers, definition),
             AiToolNames.InstallPackageWithConfirmation => BuildInstallPackageAction(toolCall, attachedServers, definition),
+            AiToolNames.InspectHomeLab => new AiProposedActionProposal
+            {
+                Title = "Inspect LMS Home Lab",
+                Description = "Read LMS-managed app, VPN, health, routing, and local access state without exposing secrets.",
+                ToolName = toolCall.ToolName,
+                ProviderToolCallId = toolCall.ProviderToolCallId,
+                ToolArgumentsJson = toolCall.ArgumentsJson,
+                RiskLevel = definition.Approval.RiskLevel
+            },
+            AiToolNames.ApplyHomeLabPromptRecipe => BuildHomeLabPromptRecipeAction(toolCall, definition),
             _ => throw new InvalidOperationException($"No approval proposal mapping is defined for tool {toolCall.ToolName}.")
         };
     }
@@ -1453,6 +1464,27 @@ public sealed class AiChatTurnOrchestrator(
             ProviderToolCallId = toolCall.ProviderToolCallId,
             ToolArgumentsJson = toolCall.ArgumentsJson,
             CommandPreview = AiCommandDisplayFormatter.BuildCommandPreview(toolCall.ToolName, toolCall.ArgumentsJson),
+            RiskLevel = definition.Approval.RiskLevel
+        };
+    }
+
+    private static AiProposedActionProposal BuildHomeLabPromptRecipeAction(
+        AiProviderToolCallRequest toolCall,
+        AiToolDefinition definition)
+    {
+        var request = DeserializeRequest<ApplyHomeLabPromptRecipeToolRequest>(toolCall.ArgumentsJson);
+        var recipe = HomeLabPromptRecipeCatalog.Get(request.PromptRecipeId);
+        var gateway = request.VpnGatewayInstallationId.HasValue
+            ? $" using VPN Gateway {request.VpnGatewayInstallationId.Value}"
+            : string.Empty;
+
+        return new AiProposedActionProposal
+        {
+            Title = $"Apply Home Lab prompt recipe: {recipe.Name}",
+            Description = $"Install, route, repair, and verify {string.Join(", ", recipe.AppIds)} through LMS{gateway}.",
+            ToolName = toolCall.ToolName,
+            ProviderToolCallId = toolCall.ProviderToolCallId,
+            ToolArgumentsJson = toolCall.ArgumentsJson,
             RiskLevel = definition.Approval.RiskLevel
         };
     }

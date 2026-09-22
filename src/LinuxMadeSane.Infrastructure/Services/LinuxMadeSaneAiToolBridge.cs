@@ -4,12 +4,14 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using LinuxMadeSane.Application.Contracts.HomeLab;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Application.Services;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
 using LinuxMadeSane.Core.Models.Ai;
+using LinuxMadeSane.Core.Models.HomeLab;
 using LinuxMadeSane.Core.Models.RdpOptimizer;
 
 namespace LinuxMadeSane.Infrastructure.Services;
@@ -22,7 +24,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     IManagedHostStore hostStore,
     IAiSafeChangeService safeChangeService,
     ICommandExecutionService commandExecutionService,
-    IManagedHostFileAccessService fileAccessService) : IAiToolBridge
+    IManagedHostFileAccessService fileAccessService,
+    IHomeLabService? homeLabService = null) : IAiToolBridge
 {
     public LinuxMadeSaneAiToolBridge(
         IAiToolRegistry toolRegistry,
@@ -78,6 +81,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             AiToolNames.RunCommand => await ExecuteRunCommandAsync(definition, context, cancellationToken),
             AiToolNames.WriteFileWithConfirmation => await ExecuteWriteFileAsync(definition, context, cancellationToken),
             AiToolNames.InstallPackageWithConfirmation => await ExecuteInstallPackageAsync(definition, context, cancellationToken),
+            AiToolNames.InspectHomeLab => await ExecuteInspectHomeLabAsync(definition, context, cancellationToken),
+            AiToolNames.ApplyHomeLabPromptRecipe => await ExecuteApplyHomeLabPromptRecipeAsync(definition, context, cancellationToken),
             AiToolNames.RollbackSafeChange => await safeChangeService.ExecuteRollbackAsync(thread, invocation, cancellationToken),
             _ => throw new InvalidOperationException($"Tool {definition.Name} is not supported by this bridge.")
         };
@@ -460,6 +465,269 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             result.StandardError,
             result.ExitCode);
     }
+
+    private async Task<AiToolExecutionResult> ExecuteInspectHomeLabAsync(
+        AiToolDefinition definition,
+        AiToolExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        _ = DeserializeRequest<InspectHomeLabToolRequest>(context.Invocation.ArgumentsJson);
+        var service = RequireHomeLabService();
+        var workspace = await service.GetWorkspaceAsync(cancellationToken);
+        var installations = new List<HomeLabAiInstallation>();
+        foreach (var installation in workspace.Installations)
+        {
+            installations.Add(await MapHomeLabInstallationAsync(service, installation, cancellationToken));
+        }
+
+        var response = new InspectHomeLabToolResponse(
+            workspace.Installations
+                .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+                .Select(item => new HomeLabAiGateway(item.Id, item.DisplayName, item.HealthState.ToString(), item.HealthDetail))
+                .ToArray(),
+            installations,
+            HomeLabPromptRecipeCatalog.All
+                .Select(recipe => new HomeLabAiPromptRecipe(
+                    recipe.Id,
+                    recipe.Name,
+                    recipe.Description,
+                    recipe.AppIds,
+                    recipe.RequiresVpnGateway))
+                .ToArray());
+        var output = BuildHomeLabInspectionOutput(response);
+
+        return CreateExecutionResult(
+            definition,
+            context.Invocation,
+            response,
+            AiExecutionOutcome.Succeeded,
+            $"Inspected {response.Installations.Count} LMS Home Lab installation(s).",
+            output,
+            string.Empty,
+            0);
+    }
+
+    private async Task<AiToolExecutionResult> ExecuteApplyHomeLabPromptRecipeAsync(
+        AiToolDefinition definition,
+        AiToolExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var request = DeserializeRequest<ApplyHomeLabPromptRecipeToolRequest>(context.Invocation.ArgumentsJson);
+        var recipe = HomeLabPromptRecipeCatalog.Get(request.PromptRecipeId);
+        var service = RequireHomeLabService();
+        var workspace = await service.GetWorkspaceAsync(cancellationToken);
+        var details = new List<string>();
+        HomeLabAppInstallation? gateway = null;
+
+        if (recipe.RequiresVpnGateway)
+        {
+            var gateways = workspace.Installations
+                .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            gateway = request.VpnGatewayInstallationId.HasValue
+                ? gateways.FirstOrDefault(item => item.Id == request.VpnGatewayInstallationId.Value)
+                : gateways.Length == 1
+                    ? gateways[0]
+                    : null;
+
+            if (gateway is null)
+            {
+                var reason = gateways.Length == 0
+                    ? "No VPN Gateway is installed. Configure one in Home Lab > Apps so credentials remain in LMS secret fields."
+                    : "Several VPN Gateways are installed. Inspect Home Lab and choose one by installation ID.";
+                return CreateHomeLabApplyResult(definition, context.Invocation, recipe, false, [], [reason]);
+            }
+
+            if (gateway.HealthState == HomeLabHealthState.Stopped)
+            {
+                var start = await service.ExecuteAsync(gateway.Id, HomeLabLifecycleAction.Start, cancellationToken);
+                details.Add($"VPN Gateway: {start.Summary} {start.Detail}");
+            }
+            else if (gateway.HealthState is HomeLabHealthState.Failed or HomeLabHealthState.Blocked)
+            {
+                var repair = await service.ExecuteAsync(gateway.Id, HomeLabLifecycleAction.Repair, cancellationToken);
+                details.Add($"VPN Gateway: {repair.Summary} {repair.Detail}");
+            }
+        }
+
+        var targetInstallations = new List<HomeLabAiInstallation>();
+        var succeeded = true;
+        foreach (var appId in recipe.AppIds)
+        {
+            workspace = await service.GetWorkspaceAsync(cancellationToken);
+            var installation = workspace.Installations
+                .Where(item => item.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(item => item.UpdatedAtUtc)
+                .FirstOrDefault();
+
+            if (installation is null)
+            {
+                var configuration = recipe.RequiresVpnGateway
+                    ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["network-route"] = "VPN Gateway (Gluetun)",
+                        ["vpn-gateway"] = gateway!.Id.ToString()
+                    }
+                    : null;
+                var install = await service.InstallAppAsync(
+                    new HomeLabInstallRequest(appId, Configuration: configuration),
+                    cancellationToken);
+                details.Add($"{HomeLabCatalog.GetApp(appId).Name}: {install.Summary} {install.Detail}");
+                if (!install.Succeeded)
+                {
+                    succeeded = false;
+                    continue;
+                }
+
+                workspace = await service.GetWorkspaceAsync(cancellationToken);
+                installation = workspace.Installations
+                    .Where(item => item.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(item => item.UpdatedAtUtc)
+                    .FirstOrDefault();
+            }
+            else
+            {
+                details.Add($"{installation.DisplayName}: reused existing LMS installation.");
+            }
+
+            if (installation is null)
+            {
+                succeeded = false;
+                details.Add($"{HomeLabCatalog.GetApp(appId).Name}: LMS did not return the installation after deployment.");
+                continue;
+            }
+
+            if (recipe.RequiresVpnGateway)
+            {
+                var route = await service.SetNetworkRouteAsync(installation.Id, true, gateway!.Id, cancellationToken);
+                details.Add($"{installation.DisplayName}: {route.Summary} {route.Detail}");
+                succeeded &= route.Succeeded;
+            }
+
+            if (installation.HealthState is HomeLabHealthState.Failed or HomeLabHealthState.Blocked)
+            {
+                var repair = await service.ExecuteAsync(installation.Id, HomeLabLifecycleAction.Repair, cancellationToken);
+                details.Add($"{installation.DisplayName}: {repair.Summary} {repair.Detail}");
+                succeeded &= repair.Succeeded;
+            }
+
+            installation = await WaitForHomeLabInstallationAsync(service, installation.Id, cancellationToken);
+            var mapped = await MapHomeLabInstallationAsync(service, installation, cancellationToken);
+            targetInstallations.Add(mapped);
+            succeeded &= installation.HealthState is HomeLabHealthState.Healthy or HomeLabHealthState.Degraded;
+            succeeded &= !recipe.RequiresVpnGateway || mapped.IsSecured;
+        }
+
+        return CreateHomeLabApplyResult(
+            definition,
+            context.Invocation,
+            recipe,
+            succeeded && targetInstallations.Count == recipe.AppIds.Count,
+            targetInstallations,
+            details);
+    }
+
+    private static AiToolExecutionResult CreateHomeLabApplyResult(
+        AiToolDefinition definition,
+        AiToolInvocation invocation,
+        HomeLabPromptRecipe recipe,
+        bool succeeded,
+        IReadOnlyList<HomeLabAiInstallation> installations,
+        IReadOnlyList<string> details)
+    {
+        var response = new ApplyHomeLabPromptRecipeToolResponse(
+            recipe.Id,
+            recipe.Name,
+            succeeded,
+            installations,
+            details,
+            DateTimeOffset.UtcNow);
+        return CreateExecutionResult(
+            definition,
+            invocation,
+            response,
+            succeeded ? AiExecutionOutcome.Succeeded : AiExecutionOutcome.Failed,
+            succeeded
+                ? $"Applied and verified Home Lab prompt recipe {recipe.Name}."
+                : $"Home Lab prompt recipe {recipe.Name} needs attention.",
+            string.Join(Environment.NewLine, details.Concat(installations.Select(FormatHomeLabInstallation))),
+            succeeded ? string.Empty : "One or more requested apps did not reach a secured, usable LMS state.",
+            succeeded ? 0 : 1);
+    }
+
+    private static async Task<HomeLabAppInstallation> WaitForHomeLabInstallationAsync(
+        IHomeLabService service,
+        Guid installationId,
+        CancellationToken cancellationToken)
+    {
+        HomeLabAppInstallation? installation = null;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            await service.ExecuteAsync(installationId, HomeLabLifecycleAction.RefreshHealth, cancellationToken);
+            installation = (await service.GetWorkspaceAsync(cancellationToken)).Installations
+                .First(item => item.Id == installationId);
+            if (installation.HealthState is HomeLabHealthState.Healthy or HomeLabHealthState.Degraded or
+                HomeLabHealthState.Failed or HomeLabHealthState.Blocked or HomeLabHealthState.Stopped)
+            {
+                return installation;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+        }
+
+        return installation ?? throw new InvalidOperationException("The Home Lab installation disappeared while LMS was checking its health.");
+    }
+
+    private static async Task<HomeLabAiInstallation> MapHomeLabInstallationAsync(
+        IHomeLabService service,
+        HomeLabAppInstallation installation,
+        CancellationToken cancellationToken)
+    {
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        var isVpnRouted = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
+        var isSecured = false;
+        if (app.SupportsVpnGateway)
+        {
+            try
+            {
+                var security = await service.GetNetworkSecurityAsync(installation.Id, cancellationToken);
+                isVpnRouted = security.IsVpnRouted;
+                isSecured = security.IsSecured;
+            }
+            catch
+            {
+                isSecured = false;
+            }
+        }
+
+        return new HomeLabAiInstallation(
+            installation.Id,
+            installation.AppId,
+            installation.DisplayName,
+            installation.HealthState.ToString(),
+            installation.HealthDetail,
+            isVpnRouted,
+            isSecured,
+            installation.CaddySourcePort is int port ? $"http://<LMS host>:{port}" : string.Empty);
+    }
+
+    private IHomeLabService RequireHomeLabService() =>
+        homeLabService ?? throw new InvalidOperationException("LMS Home Lab services are unavailable to this AI session.");
+
+    private static string BuildHomeLabInspectionOutput(InspectHomeLabToolResponse response)
+    {
+        var gateways = response.VpnGateways.Count == 0
+            ? "VPN Gateways: none installed"
+            : "VPN Gateways:" + Environment.NewLine + string.Join(Environment.NewLine, response.VpnGateways.Select(item =>
+                $"- {item.Name} | {item.InstallationId} | {item.HealthState} | {item.HealthDetail}"));
+        var installations = response.Installations.Count == 0
+            ? "Installations: none"
+            : "Installations:" + Environment.NewLine + string.Join(Environment.NewLine, response.Installations.Select(FormatHomeLabInstallation));
+        return $"{gateways}{Environment.NewLine}{installations}";
+    }
+
+    private static string FormatHomeLabInstallation(HomeLabAiInstallation item) =>
+        $"- {item.Name} ({item.AppId}) | {item.HealthState} | VPN routed={item.IsVpnRouted} | secured={item.IsSecured} | access={item.AccessUrl}";
 
     private async Task<ManagedHost> ResolveAuthorizedHostAsync(
         Guid serverId,

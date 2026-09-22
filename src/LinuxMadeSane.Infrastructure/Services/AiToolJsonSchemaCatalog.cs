@@ -208,6 +208,34 @@ public static class AiToolJsonSchemaCatalog
               "required": [ "serverId", "packageNames" ]
             }
             """,
+        AiToolNames.InspectHomeLab =>
+            """
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {}
+            }
+            """,
+        AiToolNames.ApplyHomeLabPromptRecipe =>
+            """
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "promptRecipeId": {
+                  "type": "string",
+                  "enum": [ "secure-streaming", "secure-webtor", "secure-stremio", "secure-qbittorrent", "personal-media-server", "private-photo-library" ],
+                  "description": "The supported LMS Home Lab prompt recipe to apply."
+                },
+                "vpnGatewayInstallationId": {
+                  "type": [ "string", "null" ],
+                  "format": "uuid",
+                  "description": "The existing LMS VPN Gateway installation to reuse. Required when the prompt recipe needs VPN and more than one usable gateway exists."
+                }
+              },
+              "required": [ "promptRecipeId" ]
+            }
+            """,
         AiToolNames.DesktopSetKeyboardLayout =>
             """
             {

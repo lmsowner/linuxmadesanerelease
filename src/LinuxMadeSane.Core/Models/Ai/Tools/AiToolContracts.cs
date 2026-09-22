@@ -128,6 +128,48 @@ public sealed record InstallPackageWithConfirmationToolResponse(
     DateTimeOffset StartedAtUtc,
     DateTimeOffset CompletedAtUtc) : IAiToolResponse;
 
+public sealed record InspectHomeLabToolRequest() : IAiToolRequest;
+
+public sealed record InspectHomeLabToolResponse(
+    IReadOnlyList<HomeLabAiGateway> VpnGateways,
+    IReadOnlyList<HomeLabAiInstallation> Installations,
+    IReadOnlyList<HomeLabAiPromptRecipe> PromptRecipes) : IAiToolResponse;
+
+public sealed record ApplyHomeLabPromptRecipeToolRequest(
+    string PromptRecipeId,
+    Guid? VpnGatewayInstallationId = null) : IAiToolRequest;
+
+public sealed record ApplyHomeLabPromptRecipeToolResponse(
+    string PromptRecipeId,
+    string PromptRecipeName,
+    bool Succeeded,
+    IReadOnlyList<HomeLabAiInstallation> Installations,
+    IReadOnlyList<string> Details,
+    DateTimeOffset CompletedAtUtc) : IAiToolResponse;
+
+public sealed record HomeLabAiGateway(
+    Guid InstallationId,
+    string Name,
+    string HealthState,
+    string HealthDetail);
+
+public sealed record HomeLabAiInstallation(
+    Guid InstallationId,
+    string AppId,
+    string Name,
+    string HealthState,
+    string HealthDetail,
+    bool IsVpnRouted,
+    bool IsSecured,
+    string AccessUrl);
+
+public sealed record HomeLabAiPromptRecipe(
+    string Id,
+    string Name,
+    string Description,
+    IReadOnlyList<string> AppIds,
+    bool RequiresVpnGateway);
+
 public sealed record RollbackSafeChangeToolRequest(
     Guid OriginalActionId) : IAiToolRequest;
 

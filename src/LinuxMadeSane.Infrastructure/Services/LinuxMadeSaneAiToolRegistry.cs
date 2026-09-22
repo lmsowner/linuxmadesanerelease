@@ -83,6 +83,21 @@ public sealed class LinuxMadeSaneAiToolRegistry : IAiToolRegistry
             true,
             "ICommandExecutionService",
             supportsRememberDecision: false),
+        CreateDefinition<InspectHomeLabToolRequest, InspectHomeLabToolResponse>(
+            AiToolNames.InspectHomeLab,
+            "Inspect LMS-managed Home Lab apps, VPN gateways, health, secured routing, local access routes, and available prompt recipes without exposing secrets.",
+            AiActionRiskLevel.ReadOnly,
+            AiApprovalRequirement.AutoRun,
+            false,
+            "IHomeLabService"),
+        CreateDefinition<ApplyHomeLabPromptRecipeToolRequest, ApplyHomeLabPromptRecipeToolResponse>(
+            AiToolNames.ApplyHomeLabPromptRecipe,
+            "Apply or repair a supported Home Lab prompt recipe through LMS-managed app, VPN, Caddy, storage, health, and networking services. Never accepts VPN credentials.",
+            AiActionRiskLevel.HighRiskMutation,
+            AiApprovalRequirement.UserConfirmation,
+            false,
+            "IHomeLabService",
+            supportsRememberDecision: false),
         CreateDefinition<RollbackSafeChangeToolRequest, RollbackSafeChangeToolResponse>(
             AiToolNames.RollbackSafeChange,
             "Rollback a previously snapshotted Deep Fix change after approval.",

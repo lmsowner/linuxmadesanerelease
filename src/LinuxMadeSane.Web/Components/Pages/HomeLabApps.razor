@@ -3,11 +3,14 @@
 
 @page "/home-lab/apps"
 @rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts.Ai
 @using LinuxMadeSane.Application.Contracts.HomeLab
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.HomeLab
 @inject IHomeLabService HomeLabService
+@inject IAiThreadService AiThreadService
+@inject IAiChatService AiChatService
 @inject NavigationManager Navigation
 
 <PageTitle>Home Lab | Linux Made Sane</PageTitle>
@@ -15,7 +18,7 @@
 <div class="page-shell home-lab-page">
     <UiHeroPanel Eyebrow="Home Lab"
                   Title="Home Lab"
-                  Description="Install apps and recipes, manage shared storage, and get planning help."
+                  Description="Install and manage apps, launch guided AI prompt recipes, and configure shared storage."
                   Compact="true">
         <Actions>
             <UiCommandButton Label="Refresh"
@@ -571,105 +574,41 @@
                 </div>
             </TabPage>
 
-            <TabPage Value="recipes" Title="Recipes">
-                @if (configuringRecipe is { } recipeToConfigure)
-                {
-                    var vpn = HomeLabCatalog.GetApp("vpn-gateway");
-                    <UiModal IsOpen="true"
-                             Title="@($"Configure {recipeToConfigure.Name}")"
-                             Subtitle="This recipe installs Gluetun and routes the selected apps through it. Secrets are stored securely."
-                             Class="home-lab-settings-modal"
-                             Resizable="true"
-                             CloseOnBackdrop="false"
-                             OnClose="CancelRecipeConfiguration">
-                        <ChildContent>
-                            <section class="home-lab-config-panel">
-                                <div class="home-lab-config-heading">
-                                    <div>
-                                        <p class="eyebrow">VPN gateway setup</p>
-                                        <h2>Configure @recipeToConfigure.Name</h2>
-                                        <p class="meta-text">The recipe remains blocked if its VPN gateway is unhealthy.</p>
-                                    </div>
-                                    <UiCommandButton Label="Cancel"
-                                                     Glyph="UiIconGlyph.Clear"
-                                                     Variant="UiButtonVariant.Ghost"
-                                                     Disabled="@busy"
-                                                     OnClick="CancelRecipeConfiguration" />
-                                </div>
-                                <div class="home-lab-config-grid">
-                                    @foreach (var field in vpn.ConfigurationSchema.Where(ShouldShowRecipeConfigurationField))
-                                    {
-                                        <div class="@GetConfigurationFieldClass(field)">
-                                            <label for="recipe-vpn-@field.Id">@field.Label</label>
-                                            @if (field.Type.Equals("select", StringComparison.OrdinalIgnoreCase))
-                                            {
-                                                <select id="recipe-vpn-@field.Id" class="ui-control-input" value="@GetConfigurationValue(field.Id)" @onchange="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString())">
-                                                    <option value="">Choose...</option>
-                                                    @foreach (var option in GetConfigurationFieldOptions(field))
-                                                    {
-                                                        <option value="@option">@option</option>
-                                                    }
-                                                </select>
-                                            }
-                                            else if (field.Type.Equals("secret-textarea", StringComparison.OrdinalIgnoreCase))
-                                            {
-                                                <textarea id="recipe-vpn-@field.Id"
-                                                          class="ui-control-input ui-control-textarea"
-                                                          rows="8"
-                                                          autocomplete="off"
-                                                          @oninput="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString(), true)">@GetSecretConfigurationValue(field.Id)</textarea>
-                                            }
-                                            else
-                                            {
-                                                <input id="recipe-vpn-@field.Id"
-                                                       class="ui-control-input"
-                                                       type="@(field.Secret ? "password" : "text")"
-                                                       value="@(field.Secret ? GetSecretConfigurationValue(field.Id) : GetConfigurationValue(field.Id))"
-                                                       autocomplete="@(field.Secret ? "new-password" : "off")"
-                                                       @oninput="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString(), field.Secret)" />
-                                            }
-                                            @if (!string.IsNullOrWhiteSpace(field.Help))
-                                            {
-                                                <span class="meta-text">@GetConfigurationFieldHelp(field)</span>
-                                            }
-                                        </div>
-                                    }
-                                </div>
-                                <div class="home-lab-config-footer">
-                                    <span class="meta-text">LMS recreates the complete recipe from these settings.</span>
-                                    <UiCommandButton Label="Install configured recipe"
-                                                     Glyph="UiIconGlyph.Download"
-                                                     Variant="UiButtonVariant.Primary"
-                                                     Disabled="@busy"
-                                                     OnClick="InstallConfiguredRecipeAsync" />
-                                </div>
-                            </section>
-                        </ChildContent>
-                    </UiModal>
-                }
-
+            <TabPage Value="prompts" Title="Prompt recipes">
+                <section class="surface-subcard home-lab-prompt-intro">
+                    <div>
+                        <p class="eyebrow">Guided AI deployments</p>
+                        <h2>Describe the outcome; let LMS apply the platform details</h2>
+                        <p class="meta-text">Prompt recipes open a guided AI task. The AI inspects your current Home Lab, asks you to choose existing infrastructure when needed, and uses LMS-managed deployment tools so VPN routing, Caddy access, storage, health checks, and repairs stay consistent.</p>
+                    </div>
+                </section>
                 <div class="surface-card home-lab-recipe-list">
-                    @foreach (var recipe in workspace.Recipes)
+                    @foreach (var promptRecipe in HomeLabPromptRecipeCatalog.All)
                     {
                         <div class="home-lab-recipe-row">
                             <div>
-                                <strong>@recipe.Name</strong>
-                                <span>@recipe.Description</span>
+                                <strong>@promptRecipe.Name</strong>
+                                <span>@promptRecipe.Description</span>
                             </div>
                             <div class="home-lab-recipe-apps">
-                                @foreach (var appId in recipe.AppIds)
+                                @foreach (var appId in promptRecipe.AppIds)
                                 {
                                     <span>@HomeLabCatalog.GetApp(appId).Name</span>
                                 }
+                                @if (promptRecipe.RequiresVpnGateway)
+                                {
+                                    <span>Existing VPN Gateway</span>
+                                }
                             </div>
-                            <UiCommandButton Label="Install"
-                                             Glyph="UiIconGlyph.Download"
+                            <UiCommandButton Label="Start with AI"
+                                             Glyph="UiIconGlyph.Ai"
                                              Variant="UiButtonVariant.PrimaryMuted"
-                                             Disabled="@busy"
-                                             OnClick="() => InstallRecipeAsync(recipe)" />
+                                             Disabled="@(busy || startingPromptRecipeId is not null)"
+                                             OnClick="() => StartPromptRecipeAsync(promptRecipe)" />
                         </div>
                     }
                 </div>
+                <p class="meta-text home-lab-prompt-legal">Prompt recipes are intended for personal, public-domain, or otherwise lawfully accessed content and services.</p>
             </TabPage>
 
             <TabPage Value="storage" Title="Storage">
@@ -697,7 +636,7 @@
                     <div>
                         <p class="eyebrow">Home Lab assistant</p>
                         <h2>Use AI to plan and troubleshoot</h2>
-                        <p class="meta-text">Ask about choosing a recipe, storage layout, Docker health, or an app’s effective configuration. AI suggestions do not install or change anything automatically.</p>
+                        <p class="meta-text">Ask about prompt recipes, storage layout, Docker health, or an app’s effective configuration. Prompt recipes inspect automatically and present any deployment or repair action for approval before LMS changes the system.</p>
                     </div>
                     <UiCommandButton Label="Open AI assistant" Glyph="UiIconGlyph.Ai" Variant="UiButtonVariant.PrimaryMuted" Href="/ai" />
                 </section>
@@ -720,10 +659,10 @@
     private bool error;
     private bool busy;
     private string activeTab = "apps";
+    private string? startingPromptRecipeId;
     private HomeLabAppCategory? activeCategory;
     private HomeLabAppManifest? configuringApp;
     private HomeLabAppInstallation? configuringInstallation;
-    private HomeLabRecipeManifest? configuringRecipe;
     private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
     private HomeLabAppInstallation? selectedInstallation;
@@ -759,7 +698,7 @@
 
     protected override void OnParametersSet()
     {
-        activeTab = RequestedTab is "recipes" or "storage" or "ai" ? RequestedTab : "apps";
+        activeTab = RequestedTab is "prompts" or "storage" or "ai" ? RequestedTab : "apps";
     }
 
     private async Task LoadAsync()
@@ -786,7 +725,7 @@
 
     private Task HandleTabChangedAsync(string? value)
     {
-        activeTab = value is "recipes" or "storage" or "ai" ? value : "apps";
+        activeTab = value is "prompts" or "storage" or "ai" ? value : "apps";
         Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("tab", activeTab), replace: true);
         return Task.CompletedTask;
     }
@@ -800,69 +739,46 @@
         });
     }
 
-    private async Task InstallRecipeAsync(HomeLabRecipeManifest recipe)
+    private async Task StartPromptRecipeAsync(HomeLabPromptRecipe promptRecipe)
     {
-        if (recipe.RequiresVpnGateway)
-        {
-            configuringRecipe = recipe;
-            configuringApp = null;
-            configuringInstallation = null;
-            configurationValues.Clear();
-            secretConfigurationValues.Clear();
-            configurationValues["gateway-name"] = NextGatewayName();
-            configurationValues["configuration-mode"] = "Paste provider config";
-            configurationValues["provider"] = "ProtonVPN";
-            configurationValues["protocol"] = "WireGuard";
-            configurationValues["port-forwarding"] = HomeLabVpnPortForwardingPlan.RequiredSelection;
-            activeTab = "recipes";
-            return;
-        }
-
-        await RunUiOperationAsync(async () =>
-        {
-            var result = await HomeLabService.InstallRecipeAsync(new HomeLabRecipeInstallRequest(
-                recipe.Id,
-                new Dictionary<string, string>(storagePaths, StringComparer.OrdinalIgnoreCase)));
-            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
-        });
-    }
-
-    private async Task InstallConfiguredRecipeAsync()
-    {
-        if (configuringRecipe is not { } recipe)
+        if (startingPromptRecipeId is not null)
         {
             return;
         }
 
-        await RunUiOperationAsync(async () =>
+        startingPromptRecipeId = promptRecipe.Id;
+        message = string.Empty;
+        error = false;
+        try
         {
-            var result = await HomeLabService.InstallRecipeAsync(new HomeLabRecipeInstallRequest(
-                recipe.Id,
-                new Dictionary<string, string>(storagePaths, StringComparer.OrdinalIgnoreCase),
-                configurationValues,
-                SecretConfiguration: secretConfigurationValues));
-            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
-            if (result.Succeeded)
+            var context = await AiThreadService.GetEditorAsync();
+            if (string.IsNullOrWhiteSpace(context.Editor.ProviderKey))
             {
-                configuringRecipe = null;
-                configurationValues.Clear();
-                secretConfigurationValues.Clear();
+                throw new InvalidOperationException("Configure an AI provider before starting a Home Lab prompt recipe.");
             }
-        });
-    }
 
-    private void CancelRecipeConfiguration()
-    {
-        configuringRecipe = null;
-        configurationValues.Clear();
-        secretConfigurationValues.Clear();
+            context.Editor.Title = $"Home Lab · {promptRecipe.Name}";
+            var threadId = await AiThreadService.SaveThreadAsync(context.Editor);
+            await AiChatService.SendUserMessageAsync(
+                threadId,
+                new AiChatMessageComposer { Content = promptRecipe.Prompt });
+            Navigation.NavigateTo($"/ai/threads/{threadId}");
+        }
+        catch (Exception exception)
+        {
+            message = exception.Message;
+            error = true;
+        }
+        finally
+        {
+            startingPromptRecipeId = null;
+        }
     }
 
     private async Task InstallAsync(HomeLabAppManifest app)
     {
         if (app.ConfigurationSchema.Count > 0 || app.SupportsVpnGateway)
         {
-            configuringRecipe = null;
             configuringApp = app;
             configuringInstallation = null;
             configurationValues.Clear();
@@ -1220,35 +1136,6 @@
             return true;
         }
 
-        var setupMode = GetConfigurationValue("configuration-mode");
-        if (field.Id.Equals("vpn-config", StringComparison.OrdinalIgnoreCase))
-        {
-            return setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase);
-        }
-        if (setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase) &&
-            !field.Id.Equals("configuration-mode", StringComparison.OrdinalIgnoreCase) &&
-            !field.Id.Equals("protocol", StringComparison.OrdinalIgnoreCase) &&
-            !field.Id.Equals("provider", StringComparison.OrdinalIgnoreCase) &&
-            !field.Id.Equals("port-forwarding", StringComparison.OrdinalIgnoreCase) &&
-            !field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        var protocol = GetConfigurationValue("protocol");
-        if (field.Id.StartsWith("wireguard-", StringComparison.OrdinalIgnoreCase))
-        {
-            return protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase);
-        }
-        if (field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
-        {
-            return protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase);
-        }
-        return true;
-    }
-
-    private bool ShouldShowRecipeConfigurationField(HomeLabConfigurationField field)
-    {
         var setupMode = GetConfigurationValue("configuration-mode");
         if (field.Id.Equals("vpn-config", StringComparison.OrdinalIgnoreCase))
         {
