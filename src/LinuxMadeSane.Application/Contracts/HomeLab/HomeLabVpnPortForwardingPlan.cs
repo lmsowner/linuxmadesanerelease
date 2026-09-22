@@ -6,7 +6,13 @@ namespace LinuxMadeSane.Application.Contracts.HomeLab;
 public static class HomeLabVpnPortForwardingPlan
 {
     public const string RequiredSelection = "Required for qBittorrent/P2P";
-    public const string OffSelection = "Off (streaming only)";
+    public const string OffSelection = "Off (P2P still works)";
+    public const string LegacyOffSelection = "Off (streaming only)";
+
+    public static bool SupportsAutomaticPortForwarding(string? provider) =>
+        provider is not null &&
+        (provider.Equals("ProtonVPN", StringComparison.OrdinalIgnoreCase) ||
+         provider.Equals("Private Internet Access", StringComparison.OrdinalIgnoreCase));
 
     public static IReadOnlyDictionary<string, string> Build(
         string selection,
@@ -14,7 +20,8 @@ public static class HomeLabVpnPortForwardingPlan
         string protocol,
         string? pastedConfiguration)
     {
-        if (selection.Equals(OffSelection, StringComparison.OrdinalIgnoreCase))
+        if (selection.Equals(OffSelection, StringComparison.OrdinalIgnoreCase) ||
+            selection.Equals(LegacyOffSelection, StringComparison.OrdinalIgnoreCase))
         {
             return new Dictionary<string, string> { ["VPN_PORT_FORWARDING"] = "off" };
         }
@@ -27,6 +34,7 @@ public static class HomeLabVpnPortForwardingPlan
         {
             "ProtonVPN" => "protonvpn",
             "Private Internet Access" => "private internet access",
+            "NordVPN" => throw new InvalidOperationException($"NordVPN allows P2P traffic, but it does not provide an inbound forwarded port. Choose '{OffSelection}'; qBittorrent will still work, with reduced inbound peer reachability."),
             _ => throw new InvalidOperationException($"{provider} does not expose automatic port forwarding through this LMS definition. Choose '{OffSelection}' or use a supported P2P provider.")
         };
 

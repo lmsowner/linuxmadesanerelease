@@ -64,7 +64,7 @@
                         <div class="home-lab-config-grid">
                             @foreach (var field in appToConfigure.ConfigurationSchema.Where(ShouldShowConfigurationField))
                             {
-                                <div class="home-lab-config-field">
+                                <div class="@GetConfigurationFieldClass(field)">
                                     <label for="home-lab-@field.Id">@field.Label</label>
                                     @if (field.Type.Equals("select", StringComparison.OrdinalIgnoreCase))
                                     {
@@ -79,7 +79,7 @@
                                             }
                                             else
                                             {
-                                                @foreach (var option in field.Options ?? [])
+                                                @foreach (var option in GetConfigurationFieldOptions(field))
                                                 {
                                                     <option value="@option">@option</option>
                                                 }
@@ -105,7 +105,7 @@
                                     }
                                     @if (!string.IsNullOrWhiteSpace(field.Help))
                                     {
-                                        <span class="meta-text">@field.Help</span>
+                                        <span class="meta-text">@GetConfigurationFieldHelp(field)</span>
                                     }
                                 </div>
                             }
@@ -597,13 +597,13 @@
                                 <div class="home-lab-config-grid">
                                     @foreach (var field in vpn.ConfigurationSchema.Where(ShouldShowRecipeConfigurationField))
                                     {
-                                        <div class="home-lab-config-field">
+                                        <div class="@GetConfigurationFieldClass(field)">
                                             <label for="recipe-vpn-@field.Id">@field.Label</label>
                                             @if (field.Type.Equals("select", StringComparison.OrdinalIgnoreCase))
                                             {
                                                 <select id="recipe-vpn-@field.Id" class="ui-control-input" value="@GetConfigurationValue(field.Id)" @onchange="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString())">
                                                     <option value="">Choose...</option>
-                                                    @foreach (var option in field.Options ?? [])
+                                                    @foreach (var option in GetConfigurationFieldOptions(field))
                                                     {
                                                         <option value="@option">@option</option>
                                                     }
@@ -628,7 +628,7 @@
                                             }
                                             @if (!string.IsNullOrWhiteSpace(field.Help))
                                             {
-                                                <span class="meta-text">@field.Help</span>
+                                                <span class="meta-text">@GetConfigurationFieldHelp(field)</span>
                                             }
                                         </div>
                                     }
@@ -811,7 +811,7 @@
             configurationValues["configuration-mode"] = "Paste provider config";
             configurationValues["provider"] = "ProtonVPN";
             configurationValues["protocol"] = "WireGuard";
-            configurationValues["port-forwarding"] = "Required for qBittorrent/P2P";
+            configurationValues["port-forwarding"] = HomeLabVpnPortForwardingPlan.RequiredSelection;
             activeTab = "recipes";
             return;
         }
@@ -880,7 +880,7 @@
                 configurationValues["configuration-mode"] = "Paste provider config";
                 configurationValues["provider"] = "ProtonVPN";
                 configurationValues["protocol"] = "WireGuard";
-                configurationValues["port-forwarding"] = "Required for qBittorrent/P2P";
+                configurationValues["port-forwarding"] = HomeLabVpnPortForwardingPlan.RequiredSelection;
             }
             activeTab = "apps";
             return;
@@ -1202,7 +1202,7 @@
         configurationValues["configuration-mode"] = "Paste provider config";
         configurationValues["provider"] = "ProtonVPN";
         configurationValues["protocol"] = "WireGuard";
-        configurationValues["port-forwarding"] = "Required for qBittorrent/P2P";
+        configurationValues["port-forwarding"] = HomeLabVpnPortForwardingPlan.RequiredSelection;
         CloseDetails();
     }
 
@@ -1284,6 +1284,41 @@
     {
         var target = secret ? secretConfigurationValues : configurationValues;
         target[key] = value ?? string.Empty;
+        if (!secret && key.Equals("provider", StringComparison.OrdinalIgnoreCase))
+        {
+            configurationValues["port-forwarding"] = HomeLabVpnPortForwardingPlan.SupportsAutomaticPortForwarding(value)
+                ? HomeLabVpnPortForwardingPlan.RequiredSelection
+                : HomeLabVpnPortForwardingPlan.OffSelection;
+        }
+    }
+
+    private static string GetConfigurationFieldClass(HomeLabConfigurationField field) =>
+        field.Type.Equals("secret-textarea", StringComparison.OrdinalIgnoreCase)
+            ? "home-lab-config-field home-lab-config-field-wide"
+            : "home-lab-config-field";
+
+    private IEnumerable<string> GetConfigurationFieldOptions(HomeLabConfigurationField field)
+    {
+        if (!field.Id.Equals("port-forwarding", StringComparison.OrdinalIgnoreCase) ||
+            HomeLabVpnPortForwardingPlan.SupportsAutomaticPortForwarding(GetConfigurationValue("provider")))
+        {
+            return field.Options ?? [];
+        }
+
+        return [HomeLabVpnPortForwardingPlan.OffSelection];
+    }
+
+    private string? GetConfigurationFieldHelp(HomeLabConfigurationField field)
+    {
+        if (!field.Id.Equals("port-forwarding", StringComparison.OrdinalIgnoreCase))
+        {
+            return field.Help;
+        }
+
+        var provider = GetConfigurationValue("provider");
+        return HomeLabVpnPortForwardingPlan.SupportsAutomaticPortForwarding(provider)
+            ? field.Help
+            : $"{provider} can carry P2P traffic but does not provide an inbound forwarded port. LMS will install this gateway with incoming port forwarding off; qBittorrent will still work, with reduced inbound peer reachability.";
     }
 
     private static HomeLabAppManifest GetApp(string appId) => HomeLabCatalog.GetApp(appId);
