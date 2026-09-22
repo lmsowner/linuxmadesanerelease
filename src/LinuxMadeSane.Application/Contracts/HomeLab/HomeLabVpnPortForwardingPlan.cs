@@ -60,8 +60,26 @@ public static class HomeLabVpnPortForwardingPlan
 
         result["VPN_PORT_FORWARDING"] = "on";
         result["VPN_PORT_FORWARDING_PROVIDER"] = forwardingProvider;
-        result["VPN_PORT_FORWARDING_UP_COMMAND"] = $"/bin/sh -c 'wget -O- -nv --retry-connrefused --tries=10 --post-data \"json={{\\\"listen_port\\\":{{{{PORT}}}},\\\"current_network_interface\\\":\\\"{{{{VPN_INTERFACE}}}}\\\",\\\"random_port\\\":false,\\\"upnp\\\":false}}\" http://127.0.0.1:{QbittorrentVpnWebUiPort}/api/v2/app/setPreferences'";
-        result["VPN_PORT_FORWARDING_DOWN_COMMAND"] = $"/bin/sh -c 'wget -O- -nv --retry-connrefused --tries=5 --post-data \"json={{\\\"listen_port\\\":0,\\\"current_network_interface\\\":\\\"lo\\\"}}\" http://127.0.0.1:{QbittorrentVpnWebUiPort}/api/v2/app/setPreferences || true'";
+        RefreshManagedCallbackCommands(result);
         return result;
+    }
+
+    public static bool RefreshManagedCallbackCommands(IDictionary<string, string> configuration)
+    {
+        if (!configuration.TryGetValue("VPN_PORT_FORWARDING", out var enabled) ||
+            !enabled.Equals("on", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var upCommand = $"/bin/sh -c 'wget -O- -nv --retry-connrefused --tries=10 --post-data \"json={{\\\"listen_port\\\":{{{{PORT}}}},\\\"current_network_interface\\\":\\\"{{{{VPN_INTERFACE}}}}\\\",\\\"random_port\\\":false,\\\"upnp\\\":false}}\" http://127.0.0.1:{QbittorrentVpnWebUiPort}/api/v2/app/setPreferences'";
+        var downCommand = $"/bin/sh -c 'wget -O- -nv --retry-connrefused --tries=5 --post-data \"json={{\\\"listen_port\\\":0,\\\"current_network_interface\\\":\\\"lo\\\"}}\" http://127.0.0.1:{QbittorrentVpnWebUiPort}/api/v2/app/setPreferences || true'";
+        var changed = !configuration.TryGetValue("VPN_PORT_FORWARDING_UP_COMMAND", out var currentUp) ||
+                      !currentUp.Equals(upCommand, StringComparison.Ordinal) ||
+                      !configuration.TryGetValue("VPN_PORT_FORWARDING_DOWN_COMMAND", out var currentDown) ||
+                      !currentDown.Equals(downCommand, StringComparison.Ordinal);
+        configuration["VPN_PORT_FORWARDING_UP_COMMAND"] = upCommand;
+        configuration["VPN_PORT_FORWARDING_DOWN_COMMAND"] = downCommand;
+        return changed;
     }
 }

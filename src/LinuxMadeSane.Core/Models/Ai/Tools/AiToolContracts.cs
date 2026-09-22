@@ -180,7 +180,16 @@ public sealed record HomeLabAiInstallation(
     string HealthDetail,
     bool IsVpnRouted,
     bool IsSecured,
-    string AccessUrl);
+    string AccessUrl,
+    IReadOnlyList<HomeLabAiPort> Ports,
+    string PortForwardingStatus,
+    int? ForwardedPort,
+    string PortForwardingDetail);
+
+public sealed record HomeLabAiPort(
+    string Name,
+    int ContainerPort,
+    int HostPort);
 
 public sealed record HomeLabAiPromptRecipe(
     string Id,

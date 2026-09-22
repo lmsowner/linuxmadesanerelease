@@ -521,14 +521,32 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             .FirstOrDefault(item => item.Id == request.InstallationId)
             ?? throw new InvalidOperationException("The requested Home Lab Docker installation no longer exists.");
         var before = await MapHomeLabInstallationAsync(service, installation, cancellationToken);
+        var workspace = await service.GetWorkspaceAsync(cancellationToken);
+        var repairTarget = installation;
         var action = installation.HealthState switch
         {
             HomeLabHealthState.Stopped => HomeLabLifecycleAction.Start,
             HomeLabHealthState.Degraded or HomeLabHealthState.Failed or HomeLabHealthState.Blocked => HomeLabLifecycleAction.Repair,
             _ => HomeLabLifecycleAction.Recreate
         };
+        var actionLabel = action.ToString();
+        if (installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            action = HomeLabLifecycleAction.Repair;
+            actionLabel = "Repair VPN gateway namespace";
+        }
+        else if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            var gatewayContainerName = installation.NetworkMode["container:".Length..];
+            repairTarget = workspace.Installations.FirstOrDefault(item =>
+                               item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) &&
+                               item.ContainerName.Equals(gatewayContainerName, StringComparison.OrdinalIgnoreCase))
+                           ?? throw new InvalidOperationException("The VPN Gateway for this Home Lab installation no longer exists.");
+            action = HomeLabLifecycleAction.Repair;
+            actionLabel = "Repair shared VPN gateway namespace";
+        }
 
-        var operation = await service.ExecuteAsync(installation.Id, action, cancellationToken);
+        var operation = await service.ExecuteAsync(repairTarget.Id, action, cancellationToken);
         var refreshed = await WaitForHomeLabInstallationAsync(service, installation.Id, cancellationToken);
         var after = await MapHomeLabInstallationAsync(service, refreshed, cancellationToken);
         var app = HomeLabCatalog.GetApp(refreshed.AppId);
@@ -540,7 +558,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         var response = new RepairHomeLabInstallationToolResponse(
             refreshed.Id,
             refreshed.DisplayName,
-            action.ToString(),
+            actionLabel,
             succeeded,
             before,
             after,
@@ -549,7 +567,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         var output = string.Join(
             Environment.NewLine,
             $"Before: {FormatHomeLabInstallation(before)}",
-            $"LMS action: {action}",
+            $"LMS action: {actionLabel} via {repairTarget.DisplayName} ({repairTarget.Id})",
             response.Detail,
             $"After: {FormatHomeLabInstallation(after)}");
 
@@ -773,11 +791,12 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         var app = HomeLabCatalog.GetApp(installation.AppId);
         var isVpnRouted = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
         var isSecured = false;
+        HomeLabNetworkSecurity? security = null;
         if (app.SupportsVpnGateway)
         {
             try
             {
-                var security = await service.GetNetworkSecurityAsync(installation.Id, cancellationToken);
+                security = await service.GetNetworkSecurityAsync(installation.Id, cancellationToken);
                 isVpnRouted = security.IsVpnRouted;
                 isSecured = security.IsSecured;
             }
@@ -800,7 +819,11 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             installation.HealthDetail,
             isVpnRouted,
             isSecured,
-            installation.CaddySourcePort is int port ? $"http://<LMS host>:{port}" : string.Empty);
+            installation.CaddySourcePort is int port ? $"http://<LMS host>:{port}" : string.Empty,
+            ParseHomeLabAiPorts(installation.PortMappingsJson),
+            security?.PortForwardingStatus ?? string.Empty,
+            security?.ForwardedPort,
+            security?.PortForwardingDetail ?? string.Empty);
     }
 
     private IHomeLabService RequireHomeLabService() =>
@@ -819,7 +842,29 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     }
 
     private static string FormatHomeLabInstallation(HomeLabAiInstallation item) =>
-        $"- {item.Name} ({item.AppId}) | installation={item.InstallationId} | container={item.ContainerName} | image={item.Image} | network={item.NetworkMode} | dependencies={string.Join(",", item.Dependencies)} | {item.HealthState}: {item.HealthDetail} | VPN routed={item.IsVpnRouted} | secured={item.IsSecured} | access={item.AccessUrl}";
+        $"- {item.Name} ({item.AppId}) | installation={item.InstallationId} | container={item.ContainerName} | image={item.Image} | network={item.NetworkMode} | ports={FormatHomeLabPorts(item.Ports)} | dependencies={string.Join(",", item.Dependencies)} | {item.HealthState}: {item.HealthDetail} | VPN routed={item.IsVpnRouted} | secured={item.IsSecured} | forwarding={FormatHomeLabForwarding(item)} | access={item.AccessUrl}";
+
+    private static IReadOnlyList<HomeLabAiPort> ParseHomeLabAiPorts(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<List<HomeLabAiPort>>(json, SerializerOptions) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static string FormatHomeLabPorts(IReadOnlyList<HomeLabAiPort> ports) =>
+        ports.Count == 0
+            ? "none"
+            : string.Join(",", ports.Select(port => $"{port.Name}:{port.ContainerPort}->127.0.0.1:{port.HostPort}"));
+
+    private static string FormatHomeLabForwarding(HomeLabAiInstallation item) =>
+        string.IsNullOrWhiteSpace(item.PortForwardingStatus)
+            ? "n/a"
+            : $"{item.PortForwardingStatus} port={item.ForwardedPort?.ToString() ?? "none"} ({item.PortForwardingDetail})";
 
     private async Task<ManagedHost> ResolveAuthorizedHostAsync(
         Guid serverId,

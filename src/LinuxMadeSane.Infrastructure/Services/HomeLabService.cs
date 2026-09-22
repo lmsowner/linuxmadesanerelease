@@ -682,7 +682,7 @@ public sealed class HomeLabService(
             var isRecreate = action == HomeLabLifecycleAction.Recreate;
             var reuseExistingImage = isRepair || isRecreate;
             var operationName = isRepair ? "Repair" : isRecreate ? "Recreate" : "Replace";
-            if (isRepair)
+            if (isRepair && !app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             {
                 await RefreshHealthInternalAsync(installation, cancellationToken);
                 if (ToHealth(installation.HealthState) is not (
@@ -900,6 +900,14 @@ public sealed class HomeLabService(
         bool pullImage,
         CancellationToken cancellationToken)
     {
+        var gatewayConfiguration = DeserializeDictionary(gateway.ConfigurationJson);
+        if (HomeLabVpnPortForwardingPlan.RefreshManagedCallbackCommands(gatewayConfiguration))
+        {
+            gateway.ConfigurationJson = JsonSerializer.Serialize(gatewayConfiguration, JsonOptions);
+            gateway.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
         var routedInstallations = await dbContext.HomeLabInstallations
             .Where(item => item.NetworkMode == $"container:{gateway.ContainerName}")
             .ToListAsync(cancellationToken);
@@ -950,7 +958,7 @@ public sealed class HomeLabService(
             gateway,
             HomeLabCatalog.GetApp(gateway.AppId),
             DeserializeBindings(gateway.VolumeMappingsJson),
-            DeserializeDictionary(gateway.ConfigurationJson),
+            gatewayConfiguration,
             DeserializeDictionary(gateway.SecretConfigurationJson),
             output,
             cancellationToken);
