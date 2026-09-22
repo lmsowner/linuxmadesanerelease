@@ -21,7 +21,8 @@ public sealed class AiChatTurnOrchestrator(
     IAiToolBridge toolBridge,
     IAiChatRunQueue runQueue) : IAiChatOrchestrationService
 {
-    private const int MaxProviderAttempts = 3;
+    private const int MaxProviderRetriesPerTurn = 3;
+    private const int MaxProviderCallsPerRun = 24;
 
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
@@ -267,6 +268,14 @@ public sealed class AiChatTurnOrchestrator(
             continuationActions,
             run.Id);
 
+        if (run.ProviderAttemptCount >= MaxProviderCallsPerRun)
+        {
+            return await MarkRunFailedAsync(
+                run,
+                $"The AI turn exceeded the safety limit of {MaxProviderCallsPerRun} provider calls. Start a new message to continue.",
+                cancellationToken);
+        }
+
         var step = isContinuation
             ? AiChatRunStep.ContinuingProviderTurn
             : AiChatRunStep.RequestingProviderTurn;
@@ -298,13 +307,15 @@ public sealed class AiChatTurnOrchestrator(
         AiProviderTurnResult turnResult;
         Exception? finalException = null;
 
-        for (var attempt = run.ProviderAttemptCount + 1; attempt <= MaxProviderAttempts; attempt++)
+        for (var retryAttempt = 1;
+             retryAttempt <= MaxProviderRetriesPerTurn && run.ProviderAttemptCount < MaxProviderCallsPerRun;
+             retryAttempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             run = run with
             {
-                ProviderAttemptCount = attempt,
+                ProviderAttemptCount = run.ProviderAttemptCount + 1,
                 UpdatedAtUtc = DateTimeOffset.UtcNow
             };
 
@@ -358,7 +369,10 @@ public sealed class AiChatTurnOrchestrator(
             {
                 throw;
             }
-            catch (Exception exception) when (attempt < MaxProviderAttempts && IsTransientProviderFailure(exception))
+            catch (Exception exception) when (
+                retryAttempt < MaxProviderRetriesPerTurn &&
+                run.ProviderAttemptCount < MaxProviderCallsPerRun &&
+                IsTransientProviderFailure(exception))
             {
                 finalException = exception;
                 var retryAtUtc = DateTimeOffset.UtcNow;
@@ -366,7 +380,7 @@ public sealed class AiChatTurnOrchestrator(
                 {
                     Status = AiChatRunStatus.Running,
                     Step = step,
-                    StatusSummary = $"Provider request failed transiently. Retrying attempt {attempt + 1} of {MaxProviderAttempts}.",
+                    StatusSummary = $"Provider request failed transiently. Retrying attempt {retryAttempt + 1} of {MaxProviderRetriesPerTurn}.",
                     LastError = exception.Message,
                     UpdatedAtUtc = retryAtUtc
                 };
@@ -374,7 +388,7 @@ public sealed class AiChatTurnOrchestrator(
                 await conversationStore.SaveChatRunAsync(run, cancellationToken);
                 await RecordAuditAsync(
                     run,
-                    $"provider-retry:{attempt}",
+                    $"provider-retry:{run.ProviderAttemptCount}",
                     $"provider.{thread.ProviderType.ToString().ToLowerInvariant()}.turn.retry",
                     "Provider turn retry scheduled",
                     exception.Message,
@@ -382,7 +396,7 @@ public sealed class AiChatTurnOrchestrator(
                     retryAtUtc,
                     cancellationToken);
 
-                await Task.Delay(TimeSpan.FromSeconds(Math.Min(attempt, 3)), cancellationToken);
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(retryAttempt, 3)), cancellationToken);
             }
             catch (Exception exception)
             {
@@ -391,10 +405,12 @@ public sealed class AiChatTurnOrchestrator(
             }
         }
 
-        await RecordProviderFailureAsync(thread, userMessage.Id, finalException?.Message ?? string.Empty, cancellationToken);
+        var failureMessage = finalException?.Message ??
+            $"The AI turn exceeded the safety limit of {MaxProviderCallsPerRun} provider calls. Start a new message to continue.";
+        await RecordProviderFailureAsync(thread, userMessage.Id, failureMessage, cancellationToken);
         return await MarkRunFailedAsync(
             run,
-            finalException?.Message ?? "The provider returned an unspecified failure.",
+            failureMessage,
             cancellationToken);
     }
 

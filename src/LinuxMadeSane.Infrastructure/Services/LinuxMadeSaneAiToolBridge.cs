@@ -578,6 +578,31 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         var details = new List<string>();
         HomeLabAppInstallation? gateway = null;
 
+        var missingStorageRoles = recipe.AppIds
+            .Where(appId => workspace.Installations.All(installation =>
+                !installation.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase)))
+            .SelectMany(appId => HomeLabCatalog.GetApp(appId).Volumes)
+            .Select(volume => volume.SharedRole)
+            .Where(role => !string.IsNullOrWhiteSpace(role))
+            .Select(role => role!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(role => workspace.StorageRoles.All(saved =>
+                !saved.Role.Equals(role, StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(saved.HostPath)))
+            .OrderBy(role => role, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (missingStorageRoles.Length > 0)
+        {
+            var roles = string.Join(", ", missingStorageRoles.Select(role => $"'{role}'"));
+            return CreateHomeLabApplyResult(
+                definition,
+                context.Invocation,
+                recipe,
+                false,
+                [],
+                [$"Before installation, choose a host path for shared storage role(s) {roles} in Home Lab > Storage."]);
+        }
+
         if (recipe.RequiresVpnGateway)
         {
             var gateways = workspace.Installations
