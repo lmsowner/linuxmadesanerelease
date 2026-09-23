@@ -9,6 +9,7 @@ namespace LinuxMadeSane.Application.Interfaces;
 
 public interface IEdgeGatewayService
 {
+    Task<IReadOnlyList<EdgeGatewayRouteListItem>> ListRoutesAsync(CancellationToken cancellationToken = default);
     Task<EdgeGatewayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default);
     Task<EdgeGatewaySettingsEditor> GetSettingsEditorAsync(CancellationToken cancellationToken = default);
     Task SaveSettingsAsync(EdgeGatewaySettingsEditor editor, CancellationToken cancellationToken = default);

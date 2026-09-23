@@ -40,6 +40,9 @@ public sealed class EdgeGatewayService(
     private const int StatusNotFound = 404;
     private static readonly TimeSpan AuditDeduplicationWindow = TimeSpan.FromMinutes(5);
 
+    public async Task<IReadOnlyList<EdgeGatewayRouteListItem>> ListRoutesAsync(CancellationToken cancellationToken = default) =>
+        (await store.ListRoutesAsync(cancellationToken)).Select(MapListItem).ToArray();
+
     public async Task<EdgeGatewayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default)
     {
         var settingsTask = GetGatewaySettingsAsync(cancellationToken);

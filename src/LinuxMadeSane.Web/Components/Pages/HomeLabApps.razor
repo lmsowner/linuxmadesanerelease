@@ -815,6 +815,7 @@
     private HomeLabConnectionGuide? connectionGuide;
     private HomeLabNetworkSecurity? networkSecurity;
     private EdgeGatewayDashboardViewModel? edgeGatewayDashboard;
+    private IReadOnlyList<EdgeGatewayRouteListItem> edgeGatewayRoutes = [];
     private readonly Dictionary<Guid, HomeLabNetworkSecurity> summaryNetworkSecurity = [];
     private readonly HashSet<string> collapsedInstallationGroups = new(StringComparer.Ordinal);
     private string? selectedLogs;
@@ -1013,7 +1014,7 @@
         {
             workspace = await HomeLabService.GetWorkspaceAsync();
             promptRecipes = await PromptRecipeProvider.GetRecipesAsync();
-            edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
+            await RefreshEdgeGatewayStateAsync();
             foreach (var role in workspace.StorageRoles)
             {
                 storagePaths[role.Role] = role.HostPath;
@@ -1315,7 +1316,7 @@
             effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
             connectionGuide = await HomeLabService.GetConnectionGuideAsync(installation.Id);
             networkSecurity = await HomeLabService.GetNetworkSecurityAsync(installation.Id);
-            edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
+            await RefreshEdgeGatewayStateAsync();
             await LoadExternalAccessDraftAsync(installation);
             selectedLogs = null;
             settingsTab = "overview";
@@ -2025,7 +2026,7 @@
         {
             await operation();
             workspace = await HomeLabService.GetWorkspaceAsync();
-            edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
+            await RefreshEdgeGatewayStateAsync();
             await RefreshSummaryNetworkSecurityAsync();
             if (selectedInstallation is { } openInstallation)
             {
@@ -2082,11 +2083,24 @@
         externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
     }
 
+    private async Task RefreshEdgeGatewayStateAsync()
+    {
+        edgeGatewayRoutes = await EdgeGatewayService.ListRoutesAsync();
+        try
+        {
+            edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
+        }
+        catch
+        {
+            edgeGatewayDashboard = null;
+        }
+    }
+
     private string BuildAvailableExternalSubdomain(HomeLabAppInstallation installation)
     {
         var candidate = installation.AppId.Trim().ToLowerInvariant();
         var hostname = $"{candidate}.{externalDomainDraft}";
-        var isUsed = edgeGatewayDashboard?.Routes.Any(route =>
+        var isUsed = edgeGatewayRoutes.Any(route =>
             route.Id != installation.EdgeGatewayRouteId &&
             route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)) == true;
         return isUsed ? $"{candidate}-{installation.ContainerName[^Math.Min(8, installation.ContainerName.Length)..]}" : candidate;
@@ -2192,7 +2206,7 @@
 
     private EdgeGatewayRouteListItem? GetExternalRoute(HomeLabAppInstallation installation) =>
         installation.EdgeGatewayRouteId is Guid routeId
-            ? edgeGatewayDashboard?.Routes.FirstOrDefault(route => route.Id == routeId)
+            ? edgeGatewayRoutes.FirstOrDefault(route => route.Id == routeId)
             : null;
 
     private bool IsEdgeGatewaySession
@@ -2204,7 +2218,7 @@
                 return false;
             }
 
-            return edgeGatewayDashboard?.Routes.Any(route =>
+            return edgeGatewayRoutes.Any(route =>
                 route.Enabled &&
                 route.Hostname.Trim().TrimEnd('.').Equals(baseUri.Host.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase)) == true;
         }
