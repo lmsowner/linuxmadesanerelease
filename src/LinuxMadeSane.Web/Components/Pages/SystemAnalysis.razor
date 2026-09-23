@@ -6,8 +6,6 @@
 @rendermode InteractiveServer
 @implements IAsyncDisposable
 @using System.Net
-@using System.Net.NetworkInformation
-@using System.Net.Sockets
 @using LinuxMadeSane.Application.Contracts.SystemInfo
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Abstractions
@@ -153,11 +151,6 @@
                                         <small>@FormatBytes(snapshot.Memory.AvailableBytes) available</small>
                                     </article>
                                     <article class="system-analysis-metric-card">
-                                        <span>Network</span>
-                                        <strong>↓ @FormatRate(TotalNetworkReceiveRate)</strong>
-                                        <small>↑ @FormatRate(TotalNetworkTransmitRate)</small>
-                                    </article>
-                                    <article class="system-analysis-metric-card">
                                         <span>Disk I/O</span>
                                         <strong>R @FormatRate(TotalDiskReadRate)</strong>
                                         <small>W @FormatRate(TotalDiskWriteRate)</small>
@@ -173,11 +166,6 @@
                                         <div class="system-analysis-meter"><i style="@MeterStyle(Percent(snapshot.RootFileSystem.UsedBytes, snapshot.RootFileSystem.TotalBytes))"></i></div>
                                         <small>@FormatBytes(snapshot.RootFileSystem.TotalBytes) total</small>
                                     </article>
-                                    <article class="system-analysis-metric-card">
-                                        <span>TCP sessions</span>
-                                        <strong>@snapshot.TcpEstablishedConnectionCount</strong>
-                                        <small>Established IPv4 and IPv6 connections</small>
-                                    </article>
                                 </div>
 
                                 <section class="surface-card system-analysis-table-card">
@@ -185,7 +173,7 @@
                                         <h2>Top CPU processes</h2>
                                         <span>Measured across the polling interval</span>
                                     </div>
-                                    @ProcessTable(GetCpuProcesses(10), showIo: false, showActions: false)
+                                    @ProcessTable(GetCpuProcesses(10), showIo: false, showPorts: false, showActions: false)
                                 </section>
                             </div>
                         </ChildContent>
@@ -206,7 +194,7 @@
                                         <h2>CPU by process</h2>
                                         <span>100% equals one fully occupied logical CPU</span>
                                     </div>
-                                    @ProcessTable(GetCpuProcesses(75), showIo: false, showActions: false)
+                                    @ProcessTable(GetCpuProcesses(75), showIo: false, showPorts: false, showActions: false)
                                 </section>
                             </div>
                         </ChildContent>
@@ -228,7 +216,7 @@
                                         <h2>Memory by process</h2>
                                         <span>Resident memory, highest first</span>
                                     </div>
-                                    @ProcessTable(GetMemoryProcesses(75), showIo: false, showActions: false)
+                                    @ProcessTable(GetMemoryProcesses(75), showIo: false, showPorts: false, showActions: false)
                                 </section>
                             </div>
                         </ChildContent>
@@ -252,11 +240,6 @@
                                         <span>Established TCP</span>
                                         <strong>@snapshot.TcpEstablishedConnectionCount</strong>
                                         <small>Current kernel socket table</small>
-                                    </article>
-                                    <article class="system-analysis-metric-card">
-                                        <span>Listening ports</span>
-                                        <strong>@ListeningPortCount</strong>
-                                        <small>@(snapshot.ListeningPortOwnershipIsPrivileged ? "All host process owners resolved" : "Showing currently readable process owners")</small>
                                     </article>
                                 </div>
                                 <section class="surface-card system-analysis-table-card">
@@ -284,35 +267,7 @@
                                         </table>
                                     </div>
                                 </section>
-                                <section class="surface-card system-analysis-table-card">
-                                    <div class="table-header">
-                                        <h2>Listening ports by process</h2>
-                                        <span>Bound IP identifies loopback, all interfaces, or a specific NIC; Owner is the real Linux process account</span>
-                                    </div>
-                                    <div class="table-scroll">
-                                        <table class="system-analysis-table system-analysis-listener-table">
-                                            <thead><tr><th>Protocol</th><th>Listening IP / port</th><th>Interface</th><th>PID</th><th>Process</th><th>Owner</th></tr></thead>
-                                            <tbody>
-                                                @if (!ListeningPortRows.Any())
-                                                {
-                                                    <tr><td colspan="6" class="meta-text">No process-owned listening ports are visible to LMS.</td></tr>
-                                                }
-                                                @foreach (var row in ListeningPortRows)
-                                                {
-                                                    <tr>
-                                                        <td><strong>@row.Port.Protocol</strong></td>
-                                                        <td><code>@FormatListeningEndpoint(row.Port)</code></td>
-                                                        <td>@row.Port.InterfaceName</td>
-                                                        <td>@row.Process.ProcessId</td>
-                                                        <td><strong>@row.Process.Name</strong></td>
-                                                        <td>@row.Process.User</td>
-                                                    </tr>
-                                                }
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </section>
-                                <p class="meta-text system-analysis-note">LMS reads the kernel socket tables directly, then uses one non-interactive sudo scan of `/proc/&lt;pid&gt;/fd` to correlate every readable socket inode with its PID and Linux owner. The command uses a fixed argument list with no shell or pipe. If sudo was deliberately disabled at install time, LMS falls back to its own readable descriptors and marks the limitation clearly. This is listener ownership, not per-process traffic attribution.</p>
+                                <p class="meta-text system-analysis-note">Network counters and established TCP sessions are sampled only while this tab is open. Process-owned listening ports are collected on the Processes tab.</p>
                             </div>
                         </ChildContent>
                     </TabPage>
@@ -461,13 +416,7 @@
                                         </table>
                                     </div>
                                 </section>
-                                <section class="surface-card system-analysis-table-card">
-                                    <div class="table-header">
-                                        <h2>Process I/O</h2>
-                                        <span>Visible where Linux permits LMS to read /proc/&lt;pid&gt;/io</span>
-                                    </div>
-                                    @ProcessTable(GetIoProcesses(75), showIo: true, showActions: false)
-                                </section>
+                                <p class="meta-text system-analysis-note">Per-process disk I/O is collected on the Processes tab so this view can use inexpensive block-device counters.</p>
                             </div>
                         </ChildContent>
                     </TabPage>
@@ -652,19 +601,22 @@
                                     </label>
                                     <label>
                                         <span>Order by</span>
-                                        <select class="ui-control-input" @bind="processOrder">
-                                            <option value="cpu">CPU</option>
+                                        <select class="ui-control-input"
+                                                @bind:get="processOrder"
+                                                @bind:set="ChangeProcessOrder">
+                                            <option value="pid">PID</option>
+                                            <option value="cpu">CPU (live)</option>
                                             <option value="memory">Memory</option>
                                             <option value="io">Disk I/O</option>
                                             <option value="ports">Listening ports</option>
-                                            <option value="pid">PID</option>
                                             <option value="name">Name</option>
                                         </select>
                                     </label>
                                     <span class="meta-text">Showing @FilteredProcesses.Count() of @snapshot.ProcessCount processes</span>
                                 </section>
                                 <section class="surface-card system-analysis-table-card">
-                                    @ProcessTable(FilteredProcesses.Take(150), showIo: true, showActions: true)
+                                    @ProcessTable(FilteredProcesses.Take(150), showIo: true, showPorts: true, showActions: true)
+                                    <p class="meta-text system-analysis-note">Process disk I/O and listening-port ownership are sampled only while this tab is open. PID is the stable default order; CPU is the only order that continuously re-ranks rows.</p>
                                 </section>
                             </div>
                         </ChildContent>
@@ -742,38 +694,7 @@
     [SupplyParameterFromQuery(Name = "tab")]
     public string? RequestedTab { get; set; }
 
-    private readonly string currentInstanceLabel = BuildCurrentInstanceLabel();
-
-    private static string BuildCurrentInstanceLabel()
-    {
-        var hostname = Dns.GetHostName();
-        var address = GetPrimaryLocalAddress();
-        return string.IsNullOrWhiteSpace(address)
-            ? hostname
-            : $"{hostname} - {address}";
-    }
-
-    private static string GetPrimaryLocalAddress()
-    {
-        try
-        {
-            return NetworkInterface.GetAllNetworkInterfaces()
-                .Where(static networkInterface =>
-                    networkInterface.OperationalStatus == OperationalStatus.Up &&
-                    networkInterface.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-                .SelectMany(static networkInterface => networkInterface.GetIPProperties().UnicastAddresses)
-                .Select(static address => address.Address)
-                .Where(static address =>
-                    address.AddressFamily == AddressFamily.InterNetwork &&
-                    !IPAddress.IsLoopback(address))
-                .Select(static address => address.ToString())
-                .FirstOrDefault() ?? string.Empty;
-        }
-        catch
-        {
-            return string.Empty;
-        }
-    }
+    private readonly string currentInstanceLabel = Dns.GetHostName();
 
     private LocalSystemMonitorSnapshot? snapshot;
     private LmsConfigurationSummarySnapshot? configurationSnapshot;
@@ -797,7 +718,8 @@
     private int pollPresetIndex = 2;
     private int pollingGeneration;
     private string processFilter = string.Empty;
-    private string processOrder = "cpu";
+    private string processOrder = "pid";
+    private IReadOnlyDictionary<(int ProcessId, long StartTimeTicks), int>? pinnedProcessOrder;
     private string errorMessage = string.Empty;
     private string configurationErrorMessage = string.Empty;
     private string configurationCopyMessage = string.Empty;
@@ -823,7 +745,6 @@
     private double? TotalNetworkTransmitRate => SumRates(snapshot?.NetworkInterfaces.Where(item => !item.IsLoopback).Select(item => item.TransmitBytesPerSecond));
     private double? TotalDiskReadRate => SumRates(snapshot?.Disks.Select(item => item.ReadBytesPerSecond));
     private double? TotalDiskWriteRate => SumRates(snapshot?.Disks.Select(item => item.WriteBytesPerSecond));
-    private int ListeningPortCount => snapshot?.Processes.Sum(process => process.ListeningPorts.Count) ?? 0;
     private IReadOnlyList<DriveBreadcrumb> DriveBreadcrumbs => BuildDriveBreadcrumbs(driveUsage?.Path ?? driveUsageRequestedPath);
     private IReadOnlyList<LmsConfigurationSummary> VisibleConfigurationSummaries => configurationSnapshot?.Summaries
         .Where(summary => summary.Status != LmsConfigurationSummaryStatus.NotConfigured)
@@ -831,15 +752,6 @@
     private IReadOnlyList<LmsConfigurationSummary> CompactConfigurationSummaries => configurationSnapshot?.Summaries
         .Where(summary => summary.Status == LmsConfigurationSummaryStatus.NotConfigured)
         .ToArray() ?? [];
-
-    private IEnumerable<ProcessListeningPortRow> ListeningPortRows =>
-        snapshot is null
-            ? []
-            : snapshot.Processes
-            .SelectMany(process => process.ListeningPorts.Select(port => new ProcessListeningPortRow(process, port)))
-            .OrderBy(row => row.Port.Port)
-            .ThenBy(row => row.Port.Protocol, StringComparer.Ordinal)
-            .ThenBy(row => row.Process.ProcessId);
 
     protected override async Task OnInitializedAsync()
     {
@@ -855,6 +767,7 @@
         {
             activeTab = requestedTab;
             await RestartPollingAsync();
+            await RefreshSnapshotAsync(CancellationToken.None);
             return;
         }
 
@@ -872,7 +785,7 @@
         {
             isRefreshing = true;
             errorMessage = string.Empty;
-            snapshot = await SystemMonitor.CaptureAsync(cancellationToken);
+            snapshot = await SystemMonitor.CaptureAsync(GetCaptureOptions(), cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -913,6 +826,7 @@
         {
             activeTab = selectedTab;
             await RestartPollingAsync();
+            await RefreshSnapshotAsync(CancellationToken.None);
         }
 
         var tabQueryValue = activeTab == "overview" ? null : activeTab;
@@ -1253,12 +1167,6 @@
             .ThenByDescending(process => process.CpuPercent ?? -1)
             .Take(count) ?? [];
 
-    private IEnumerable<LocalProcessMetric> GetIoProcesses(int count) =>
-        snapshot?.Processes
-            .Where(process => process.ReadBytesPerSecond.HasValue || process.WriteBytesPerSecond.HasValue)
-            .OrderByDescending(GetTotalProcessIo)
-            .Take(count) ?? [];
-
     private IEnumerable<LocalProcessMetric> FilteredProcesses
     {
         get
@@ -1279,38 +1187,75 @@
                         port.InterfaceName.Contains(filter, StringComparison.OrdinalIgnoreCase)));
             }
 
-            return processOrder switch
+            if (processOrder.Equals("cpu", StringComparison.Ordinal))
             {
-                "memory" => query.OrderByDescending(process => process.ResidentMemoryBytes),
-                "io" => query.OrderByDescending(GetTotalProcessIo),
-                "ports" => query.OrderByDescending(process => process.ListeningPorts.Count)
-                    .ThenBy(process => process.Name, StringComparer.OrdinalIgnoreCase),
-                "pid" => query.OrderBy(process => process.ProcessId),
-                "name" => query.OrderBy(process => process.Name, StringComparer.OrdinalIgnoreCase),
-                _ => query.OrderByDescending(process => process.CpuPercent ?? -1)
-            };
+                return query.OrderByDescending(process => process.CpuPercent ?? -1)
+                    .ThenBy(process => process.ProcessId);
+            }
+
+            return pinnedProcessOrder is null
+                ? OrderProcesses(query, processOrder)
+                : query.OrderBy(process => pinnedProcessOrder.GetValueOrDefault(
+                        (process.ProcessId, process.ProcessStartTimeTicks),
+                        int.MaxValue))
+                    .ThenBy(process => process.ProcessId);
         }
     }
+
+    private void ChangeProcessOrder(string? value)
+    {
+        processOrder = value is "cpu" or "memory" or "io" or "ports" or "name" ? value : "pid";
+        pinnedProcessOrder = processOrder.Equals("cpu", StringComparison.Ordinal)
+            ? null
+            : OrderProcesses(snapshot?.Processes ?? [], processOrder)
+                .Select((process, index) => (process, index))
+                .ToDictionary(
+                    item => (item.process.ProcessId, item.process.ProcessStartTimeTicks),
+                    item => item.index);
+    }
+
+    private static IOrderedEnumerable<LocalProcessMetric> OrderProcesses(
+        IEnumerable<LocalProcessMetric> processes,
+        string order) => order switch
+        {
+            "memory" => processes.OrderByDescending(process => process.ResidentMemoryBytes)
+                .ThenBy(process => process.ProcessId),
+            "io" => processes.OrderByDescending(GetTotalProcessIo)
+                .ThenBy(process => process.ProcessId),
+            "ports" => processes.OrderByDescending(process => process.ListeningPorts.Count)
+                .ThenBy(process => process.ProcessId),
+            "name" => processes.OrderBy(process => process.Name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(process => process.ProcessId),
+            _ => processes.OrderBy(process => process.ProcessId)
+        };
+
+    private LocalSystemMonitorCaptureOptions GetCaptureOptions() => activeTab switch
+    {
+        "network" => LocalSystemMonitorCaptureOptions.Network,
+        "processes" => LocalSystemMonitorCaptureOptions.Processes,
+        _ => LocalSystemMonitorCaptureOptions.Overview
+    };
 
     private RenderFragment ProcessTable(
         IEnumerable<LocalProcessMetric> processes,
         bool showIo,
+        bool showPorts,
         bool showActions)
     {
         var rows = processes.ToArray();
         return @<div class="table-scroll">
             <table class="system-analysis-table process-table">
                 <thead>
-                    <tr><th>PID</th><th>Process</th><th>User</th><th>State</th><th>CPU</th><th>Memory</th><th>Threads</th>@if (showIo) { <th>Read</th><th>Write</th> }<th>Listening ports</th>@if (showActions) { <th>Action</th> }</tr>
+                    <tr><th>PID</th><th>Process</th><th>User</th><th>State</th><th>CPU</th><th>Memory</th><th>Threads</th>@if (showIo) { <th>Read</th><th>Write</th> }@if (showPorts) { <th>Listening ports</th> }@if (showActions) { <th>Action</th> }</tr>
                 </thead>
                 <tbody>
                     @if (rows.Length == 0)
                     {
-                        <tr><td colspan="@(8 + (showIo ? 2 : 0) + (showActions ? 1 : 0))" class="meta-text">No matching process activity is visible for this interval.</td></tr>
+                        <tr><td colspan="@(7 + (showIo ? 2 : 0) + (showPorts ? 1 : 0) + (showActions ? 1 : 0))" class="meta-text">No matching process activity is visible for this interval.</td></tr>
                     }
                     @foreach (var process in rows)
                     {
-                        <tr title="@process.CommandLine">
+                        <tr @key="(process.ProcessId, process.ProcessStartTimeTicks)" title="@process.CommandLine">
                             <td>@process.ProcessId</td>
                             <td><strong>@process.Name</strong><span class="system-analysis-command">@process.CommandLine</span></td>
                             <td>@process.User</td>
@@ -1323,6 +1268,8 @@
                                 <td>@FormatRate(process.ReadBytesPerSecond)</td>
                                 <td>@FormatRate(process.WriteBytesPerSecond)</td>
                             }
+                            @if (showPorts)
+                            {
                             <td class="system-analysis-port-cell">
                                 @if (process.ListeningPorts.Count > 0)
                                 {
@@ -1346,6 +1293,7 @@
                                     <span class="meta-text">—</span>
                                 }
                             </td>
+                            }
                             @if (showActions)
                             {
                                 <td class="system-analysis-process-actions">
@@ -1459,10 +1407,6 @@
 
         pollingCancellation?.Dispose();
     }
-
-    private sealed record ProcessListeningPortRow(
-        LocalProcessMetric Process,
-        LocalProcessListeningPortMetric Port);
 
     private sealed record DriveBreadcrumb(string Label, string Path, bool IsLast);
 }

@@ -25,29 +25,42 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
     private readonly SemaphoreSlim captureGate = new(1, 1);
     private RawSample? previousSample;
     private LocalSystemMonitorSnapshot? lastSnapshot;
+    private LocalSystemMonitorCaptureOptions? lastCaptureOptions;
     private PrivilegedSocketOwnership? lastSuccessfulPrivilegedSocketOwnership;
     private int consecutivePrivilegedSocketOwnershipFailures;
 
-    public async Task<LocalSystemMonitorSnapshot> CaptureAsync(CancellationToken cancellationToken = default)
+    public Task<LocalSystemMonitorSnapshot> CaptureAsync(CancellationToken cancellationToken = default) =>
+        CaptureAsync(LocalSystemMonitorCaptureOptions.Overview, cancellationToken);
+
+    public async Task<LocalSystemMonitorSnapshot> CaptureAsync(
+        LocalSystemMonitorCaptureOptions options,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(options);
         cancellationToken.ThrowIfCancellationRequested();
         await captureGate.WaitAsync(cancellationToken);
         try
         {
             if (lastSnapshot is not null &&
+                options == lastCaptureOptions &&
                 DateTimeOffset.UtcNow - lastSnapshot.CapturedAtUtc < MinimumSampleSpacing)
             {
                 return lastSnapshot;
             }
 
-            var privilegedSocketOwnership = await ReadPrivilegedSocketOwnershipAsync(cancellationToken);
-            var privilegedProcessIo = await ReadPrivilegedProcessIoAsync(cancellationToken);
+            var privilegedSocketOwnership = options.IncludeListeningPorts
+                ? await ReadPrivilegedSocketOwnershipAsync(cancellationToken)
+                : PrivilegedSocketOwnership.Unavailable;
+            var privilegedProcessIo = options.IncludeProcessIo
+                ? await ReadPrivilegedProcessIoAsync(cancellationToken)
+                : new Dictionary<int, ProcessIoCounters>();
             var current = await Task.Run(
-                () => CaptureRawSample(privilegedSocketOwnership, privilegedProcessIo),
+                () => CaptureRawSample(options, privilegedSocketOwnership, privilegedProcessIo),
                 cancellationToken);
             var snapshot = BuildSnapshot(current, previousSample);
             previousSample = current;
             lastSnapshot = snapshot;
+            lastCaptureOptions = options;
             return snapshot;
         }
         finally
@@ -57,6 +70,7 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
     }
 
     private static RawSample CaptureRawSample(
+        LocalSystemMonitorCaptureOptions options,
         PrivilegedSocketOwnership privilegedSocketOwnership,
         IReadOnlyDictionary<int, ProcessIoCounters> privilegedProcessIo)
     {
@@ -67,7 +81,9 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
 
         var capturedAtUtc = DateTimeOffset.UtcNow;
         var users = ReadUserNames();
-        var socketSnapshot = ReadSocketSnapshot();
+        var socketSnapshot = options.IncludeSocketSummary || options.IncludeListeningPorts
+            ? ReadSocketSnapshot()
+            : SocketSnapshot.Empty;
         return new RawSample(
             capturedAtUtc,
             ReadCpuCounters(),
@@ -75,8 +91,14 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
             ReadMemoryCounters(),
             ReadRootFileSystem(),
             ReadUptime(),
-            ReadProcesses(users, socketSnapshot.ListeningSockets, privilegedSocketOwnership, privilegedProcessIo),
-            ReadNetworkInterfaces(),
+            ReadProcesses(
+                users,
+                socketSnapshot.ListeningSockets,
+                privilegedSocketOwnership,
+                privilegedProcessIo,
+                options.IncludeProcessIo,
+                options.IncludeListeningPorts),
+            options.IncludeNetworkInterfaces ? ReadNetworkInterfaces() : [],
             ReadDisks(),
             socketSnapshot.TcpEstablishedConnectionCount,
             privilegedSocketOwnership.IsAvailable);
@@ -375,7 +397,9 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
         IReadOnlyDictionary<int, string> users,
         IReadOnlyDictionary<long, LocalProcessListeningPortMetric> listeningSockets,
         PrivilegedSocketOwnership privilegedSocketOwnership,
-        IReadOnlyDictionary<int, ProcessIoCounters> privilegedProcessIo)
+        IReadOnlyDictionary<int, ProcessIoCounters> privilegedProcessIo,
+        bool includeProcessIo,
+        bool includeListeningPorts)
     {
         var processes = new List<RawProcess>();
         foreach (var directory in Directory.EnumerateDirectories("/proc"))
@@ -404,16 +428,20 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
                 }
 
                 var userId = ReadProcessUserId(directory);
-                var io = privilegedProcessIo.TryGetValue(processId, out var privilegedIo)
-                    ? (privilegedIo.ReadBytes, privilegedIo.WriteBytes)
-                    : ReadProcessIo(directory);
+                var io = includeProcessIo
+                    ? privilegedProcessIo.TryGetValue(processId, out var privilegedIo)
+                        ? (privilegedIo.ReadBytes, privilegedIo.WriteBytes)
+                        : ReadProcessIo(directory)
+                    : ((long? ReadBytes, long? WriteBytes))(null, null);
                 var commandLine = ReadProcessCommandLine(directory, name);
-                var processPorts = privilegedSocketOwnership.IsAvailable
-                    ? ReadPrivilegedProcessListeningPorts(
-                        processId,
-                        listeningSockets,
-                        privilegedSocketOwnership.SocketInodesByProcessId)
-                    : ReadProcessListeningPorts(directory, listeningSockets);
+                var processPorts = !includeListeningPorts
+                    ? new ProcessPortReadResult(true, [])
+                    : privilegedSocketOwnership.IsAvailable
+                        ? ReadPrivilegedProcessListeningPorts(
+                            processId,
+                            listeningSockets,
+                            privilegedSocketOwnership.SocketInodesByProcessId)
+                        : ReadProcessListeningPorts(directory, listeningSockets);
                 processes.Add(new RawProcess(
                     processId,
                     (int)ParseLong(fields[1]),
@@ -1093,7 +1121,12 @@ public sealed class LocalProcSystemMonitorService(ILinuxCommandRunner? commandRu
 
     private sealed record SocketSnapshot(
         IReadOnlyDictionary<long, LocalProcessListeningPortMetric> ListeningSockets,
-        int TcpEstablishedConnectionCount);
+        int TcpEstablishedConnectionCount)
+    {
+        public static SocketSnapshot Empty { get; } = new(
+            new Dictionary<long, LocalProcessListeningPortMetric>(),
+            0);
+    }
 
     private sealed record PrivilegedSocketOwnership(
         bool IsAvailable,

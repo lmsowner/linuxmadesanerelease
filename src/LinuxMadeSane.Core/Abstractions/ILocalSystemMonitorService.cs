@@ -8,4 +8,7 @@ namespace LinuxMadeSane.Core.Abstractions;
 public interface ILocalSystemMonitorService
 {
     Task<LocalSystemMonitorSnapshot> CaptureAsync(CancellationToken cancellationToken = default);
+    Task<LocalSystemMonitorSnapshot> CaptureAsync(
+        LocalSystemMonitorCaptureOptions options,
+        CancellationToken cancellationToken = default);
 }

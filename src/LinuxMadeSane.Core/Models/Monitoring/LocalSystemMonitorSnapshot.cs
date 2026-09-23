@@ -3,6 +3,25 @@
 
 namespace LinuxMadeSane.Core.Models.Monitoring;
 
+public sealed record LocalSystemMonitorCaptureOptions(
+    bool IncludeProcessIo = false,
+    bool IncludeListeningPorts = false,
+    bool IncludeNetworkInterfaces = false,
+    bool IncludeSocketSummary = false)
+{
+    public static LocalSystemMonitorCaptureOptions Overview { get; } = new();
+
+    public static LocalSystemMonitorCaptureOptions Network { get; } = new(
+        IncludeNetworkInterfaces: true,
+        IncludeSocketSummary: true);
+
+    public static LocalSystemMonitorCaptureOptions Processes { get; } = new(
+        IncludeProcessIo: true,
+        IncludeListeningPorts: true,
+        IncludeNetworkInterfaces: true,
+        IncludeSocketSummary: true);
+}
+
 public sealed record LocalSystemMonitorSnapshot(
     string HostName,
     string OperatingSystem,
