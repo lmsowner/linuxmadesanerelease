@@ -83,6 +83,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             AiToolNames.WriteFileWithConfirmation => await ExecuteWriteFileAsync(definition, context, cancellationToken),
             AiToolNames.InstallPackageWithConfirmation => await ExecuteInstallPackageAsync(definition, context, cancellationToken),
             AiToolNames.InspectHomeLab => await ExecuteInspectHomeLabAsync(definition, context, cancellationToken),
+            AiToolNames.InspectHomeLabApplicationConfig => await ExecuteInspectHomeLabApplicationConfigAsync(definition, context, cancellationToken),
+            AiToolNames.RepairHomeLabApplicationConfig => await ExecuteRepairHomeLabApplicationConfigAsync(definition, context, cancellationToken),
             AiToolNames.RepairHomeLabInstallation => await ExecuteRepairHomeLabInstallationAsync(definition, context, cancellationToken),
             AiToolNames.ApplyHomeLabPromptRecipe => await ExecuteApplyHomeLabPromptRecipeAsync(definition, context, cancellationToken),
             AiToolNames.RollbackSafeChange => await safeChangeService.ExecuteRollbackAsync(thread, invocation, cancellationToken),
@@ -525,11 +527,42 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         var before = await MapHomeLabInstallationAsync(service, installation, cancellationToken);
         var workspace = await service.GetWorkspaceAsync(cancellationToken);
         var repairTarget = installation;
+        HomeLabAppInstallation? routedGateway = null;
+        if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            var gatewayContainerName = installation.NetworkMode["container:".Length..];
+            routedGateway = workspace.Installations.FirstOrDefault(item =>
+                item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) &&
+                item.ContainerName.Equals(gatewayContainerName, StringComparison.OrdinalIgnoreCase));
+        }
+        if (!request.RestoreContainerSettings && installation.HealthState is HomeLabHealthState.Healthy or HomeLabHealthState.Starting)
+        {
+            var guardedResponse = new RepairHomeLabInstallationToolResponse(
+                installation.Id,
+                installation.DisplayName,
+                "No container repair performed",
+                true,
+                before,
+                before,
+                installation.HealthState == HomeLabHealthState.Healthy
+                    ? "LMS refused to recreate a healthy container. Inspect the app's persistent configuration and local access before proposing a scoped configuration repair."
+                    : "LMS refused to recreate a container whose health check is still starting. Inspect it again after startup completes.",
+                DateTimeOffset.UtcNow);
+            return CreateExecutionResult(
+                definition,
+                context.Invocation,
+                guardedResponse,
+                AiExecutionOutcome.Succeeded,
+                $"Protected healthy Home Lab container {installation.DisplayName} from an unnecessary rebuild.",
+                guardedResponse.Detail,
+                string.Empty,
+                0);
+        }
         var action = installation.HealthState switch
         {
             HomeLabHealthState.Stopped => HomeLabLifecycleAction.Start,
             HomeLabHealthState.Degraded or HomeLabHealthState.Failed or HomeLabHealthState.Blocked => HomeLabLifecycleAction.Repair,
-            _ => HomeLabLifecycleAction.Recreate
+            _ => HomeLabLifecycleAction.RefreshHealth
         };
         var actionLabel = action.ToString();
         HomeLabOperationResult operation;
@@ -544,13 +577,9 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             actionLabel = "Repair VPN gateway namespace";
             operation = await service.ExecuteAsync(repairTarget.Id, action, cancellationToken);
         }
-        else if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        else if (routedGateway?.HealthState is HomeLabHealthState.Degraded or HomeLabHealthState.Failed or HomeLabHealthState.Stopped or HomeLabHealthState.Blocked)
         {
-            var gatewayContainerName = installation.NetworkMode["container:".Length..];
-            repairTarget = workspace.Installations.FirstOrDefault(item =>
-                               item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) &&
-                               item.ContainerName.Equals(gatewayContainerName, StringComparison.OrdinalIgnoreCase))
-                           ?? throw new InvalidOperationException("The VPN Gateway for this Home Lab installation no longer exists.");
+            repairTarget = routedGateway;
             action = HomeLabLifecycleAction.Repair;
             actionLabel = "Repair shared VPN gateway namespace";
             operation = await service.ExecuteAsync(repairTarget.Id, action, cancellationToken);
@@ -595,6 +624,61 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             output,
             succeeded ? string.Empty : "The container did not reach a healthy LMS-managed state after the repair attempt.",
             succeeded ? 0 : 1);
+    }
+
+    private async Task<AiToolExecutionResult> ExecuteInspectHomeLabApplicationConfigAsync(
+        AiToolDefinition definition,
+        AiToolExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var request = DeserializeRequest<InspectHomeLabApplicationConfigToolRequest>(context.Invocation.ArgumentsJson);
+        var inspection = await RequireHomeLabService().InspectApplicationConfigAsync(
+            request.InstallationId,
+            request.RelativePath,
+            cancellationToken);
+        var response = new InspectHomeLabApplicationConfigToolResponse(
+            inspection.InstallationId,
+            inspection.Name,
+            inspection.Files,
+            inspection.Detail);
+        var output = inspection.Files.Count == 0
+            ? inspection.Detail
+            : string.Join(Environment.NewLine + Environment.NewLine, inspection.Files.Select(file =>
+                $"File: {file.RelativePath}{Environment.NewLine}SHA-256: {file.Sha256}{Environment.NewLine}{file.RedactedContent}"));
+        return CreateExecutionResult(
+            definition,
+            context.Invocation,
+            response,
+            AiExecutionOutcome.Succeeded,
+            $"Inspected {inspection.Files.Count} safe configuration file(s) for {inspection.Name}.",
+            output,
+            string.Empty,
+            0);
+    }
+
+    private async Task<AiToolExecutionResult> ExecuteRepairHomeLabApplicationConfigAsync(
+        AiToolDefinition definition,
+        AiToolExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var request = DeserializeRequest<RepairHomeLabApplicationConfigToolRequest>(context.Invocation.ArgumentsJson);
+        var service = RequireHomeLabService();
+        var result = await service.RepairApplicationConfigAsync(
+            request.InstallationId,
+            new HomeLabApplicationConfigPatch(request.RelativePath, request.ExpectedSha256, request.ExpectedText, request.ReplacementText),
+            cancellationToken);
+        var response = new RepairHomeLabApplicationConfigToolResponse(request.InstallationId, result.Name, result);
+        return CreateExecutionResult(
+            definition,
+            context.Invocation,
+            response,
+            result.Succeeded ? AiExecutionOutcome.Succeeded : AiExecutionOutcome.Failed,
+            result.Succeeded
+                ? $"Repaired and verified {result.Name} application configuration."
+                : $"The {result.Name} configuration repair was not retained.",
+            $"File: {result.RelativePath}{Environment.NewLine}Backup: {result.BackupRelativePath}{Environment.NewLine}{result.Detail}",
+            result.Succeeded ? string.Empty : result.Detail,
+            result.Succeeded ? 0 : 1);
     }
 
     private async Task<AiToolExecutionResult> ExecuteApplyHomeLabPromptRecipeAsync(

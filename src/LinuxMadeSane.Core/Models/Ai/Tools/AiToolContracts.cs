@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models.HomeLab;
 
 namespace LinuxMadeSane.Core.Models.Ai;
 
@@ -134,6 +135,28 @@ public sealed record InspectHomeLabToolResponse(
     IReadOnlyList<HomeLabAiGateway> VpnGateways,
     IReadOnlyList<HomeLabAiInstallation> Installations,
     IReadOnlyList<HomeLabAiPromptRecipe> PromptRecipes) : IAiToolResponse;
+
+public sealed record InspectHomeLabApplicationConfigToolRequest(
+    Guid InstallationId,
+    string? RelativePath = null) : IAiToolRequest;
+
+public sealed record InspectHomeLabApplicationConfigToolResponse(
+    Guid InstallationId,
+    string Name,
+    IReadOnlyList<HomeLabApplicationConfigFile> Files,
+    string Detail) : IAiToolResponse;
+
+public sealed record RepairHomeLabApplicationConfigToolRequest(
+    Guid InstallationId,
+    string RelativePath,
+    string ExpectedSha256,
+    string ExpectedText,
+    string ReplacementText) : IAiToolRequest;
+
+public sealed record RepairHomeLabApplicationConfigToolResponse(
+    Guid InstallationId,
+    string Name,
+    HomeLabApplicationConfigRepairResult Result) : IAiToolResponse;
 
 public sealed record RepairHomeLabInstallationToolRequest(
     Guid InstallationId,

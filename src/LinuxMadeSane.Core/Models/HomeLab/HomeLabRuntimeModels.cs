@@ -83,6 +83,35 @@ public sealed record HomeLabConnectionAddress(
     string PortMapping,
     string Detail);
 
+public sealed record HomeLabApplicationConfigInspection(
+    Guid InstallationId,
+    string Name,
+    IReadOnlyList<HomeLabApplicationConfigFile> Files,
+    string Detail);
+
+public sealed record HomeLabApplicationConfigFile(
+    string RelativePath,
+    string Sha256,
+    long SizeBytes,
+    DateTimeOffset LastModifiedUtc,
+    string RedactedContent);
+
+public sealed record HomeLabApplicationConfigPatch(
+    string RelativePath,
+    string ExpectedSha256,
+    string ExpectedText,
+    string ReplacementText);
+
+public sealed record HomeLabApplicationConfigRepairResult(
+    bool Succeeded,
+    bool RolledBack,
+    string Name,
+    string RelativePath,
+    string BackupRelativePath,
+    string Detail,
+    HomeLabHealthState HealthState,
+    DateTimeOffset CompletedAtUtc);
+
 public sealed record HomeLabNetworkSecurity(
     string Status,
     bool IsVpnRouted,

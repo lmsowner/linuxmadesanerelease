@@ -1295,6 +1295,16 @@ public sealed class AiChatTurnOrchestrator(
                 ToolArgumentsJson = toolCall.ArgumentsJson,
                 RiskLevel = definition.Approval.RiskLevel
             },
+            AiToolNames.InspectHomeLabApplicationConfig => new AiProposedActionProposal
+            {
+                Title = "Inspect Home Lab app configuration",
+                Description = "Read supported text files from this app's LMS-declared configuration mount with likely secrets redacted.",
+                ToolName = toolCall.ToolName,
+                ProviderToolCallId = toolCall.ProviderToolCallId,
+                ToolArgumentsJson = toolCall.ArgumentsJson,
+                RiskLevel = definition.Approval.RiskLevel
+            },
+            AiToolNames.RepairHomeLabApplicationConfig => BuildHomeLabApplicationConfigRepairAction(toolCall, definition),
             AiToolNames.RepairHomeLabInstallation => BuildHomeLabInstallationRepairAction(toolCall, definition),
             AiToolNames.ApplyHomeLabPromptRecipe => BuildHomeLabPromptRecipeAction(toolCall, definition),
             _ => throw new InvalidOperationException($"No approval proposal mapping is defined for tool {toolCall.ToolName}.")
@@ -1496,7 +1506,23 @@ public sealed class AiChatTurnOrchestrator(
         return new AiProposedActionProposal
         {
             Title = "Repair Home Lab Docker container",
-            Description = $"Reconcile and reapply the saved image, volumes, listener ports, networking, VPN route, forwarding callbacks, health check, and Caddy access for LMS installation {request.InstallationId}.{settingsAction} A VPN-routed target also recreates its shared gateway namespace and reconnects the apps using it.",
+            Description = $"Repair the unhealthy LMS installation {request.InstallationId}.{settingsAction} LMS will refuse to recreate a healthy app and will touch a shared VPN gateway only when its security checks show that the gateway is faulty.",
+            ToolName = toolCall.ToolName,
+            ProviderToolCallId = toolCall.ProviderToolCallId,
+            ToolArgumentsJson = toolCall.ArgumentsJson,
+            RiskLevel = definition.Approval.RiskLevel
+        };
+    }
+
+    private static AiProposedActionProposal BuildHomeLabApplicationConfigRepairAction(
+        AiProviderToolCallRequest toolCall,
+        AiToolDefinition definition)
+    {
+        var request = DeserializeRequest<RepairHomeLabApplicationConfigToolRequest>(toolCall.ArgumentsJson);
+        return new AiProposedActionProposal
+        {
+            Title = "Repair Home Lab app configuration",
+            Description = $"Back up and replace one exact setting in {request.RelativePath} for LMS installation {request.InstallationId}, restart only that app, verify its health and LMS URL, and roll back automatically if verification fails.",
             ToolName = toolCall.ToolName,
             ProviderToolCallId = toolCall.ProviderToolCallId,
             ToolArgumentsJson = toolCall.ArgumentsJson,

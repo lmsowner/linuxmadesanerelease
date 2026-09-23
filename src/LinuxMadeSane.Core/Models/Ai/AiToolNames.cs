@@ -16,6 +16,8 @@ public static class AiToolNames
     public const string WriteFileWithConfirmation = "write_file_with_confirmation";
     public const string InstallPackageWithConfirmation = "install_package_with_confirmation";
     public const string InspectHomeLab = "inspect_home_lab";
+    public const string InspectHomeLabApplicationConfig = "inspect_home_lab_app_config";
+    public const string RepairHomeLabApplicationConfig = "repair_home_lab_app_config";
     public const string RepairHomeLabInstallation = "repair_home_lab_installation";
     public const string ApplyHomeLabPromptRecipe = "apply_home_lab_prompt_recipe";
     public const string RollbackSafeChange = "rollback_safe_change";

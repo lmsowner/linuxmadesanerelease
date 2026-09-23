@@ -3,6 +3,9 @@
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Net;
 using System.Net.Sockets;
 using LinuxMadeSane.Application.Contracts.Caddy;
@@ -36,6 +39,13 @@ public sealed class HomeLabService(
     private const string ContainerSettingsBackupImageKey = "lms-container-backup-image";
     private const string ContainerSettingsBackupConfigurationKey = "lms-container-backup-configuration";
     private const string ContainerSettingsBackupVolumesKey = "lms-container-backup-volumes";
+    private const int MaximumConfigFileBytes = 128 * 1024;
+    private const int MaximumConfigInspectionBytes = 256 * 1024;
+    private static readonly HashSet<string> InspectableConfigExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".xml", ".json", ".yml", ".yaml", ".conf", ".config", ".ini", ".toml", ".properties", ".txt"
+    };
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public async Task<HomeLabWorkspace> GetWorkspaceAsync(CancellationToken cancellationToken = default)
     {
@@ -1334,6 +1344,320 @@ public sealed class HomeLabService(
             source.Id,
             source.DisplayName,
             HomeLabConnectionAddressPlanner.Build(source, candidates));
+    }
+
+    public async Task<HomeLabApplicationConfigInspection> InspectApplicationConfigAsync(
+        Guid installationId,
+        string? relativePath = null,
+        CancellationToken cancellationToken = default)
+    {
+        var installation = await dbContext.HomeLabInstallations
+            .AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var roots = ResolveConfigurationRoots(installation);
+        if (roots.Count == 0)
+        {
+            return new HomeLabApplicationConfigInspection(
+                installation.Id,
+                installation.DisplayName,
+                [],
+                "This app has no LMS-declared persistent configuration mount that can be inspected safely.");
+        }
+
+        var candidates = string.IsNullOrWhiteSpace(relativePath)
+            ? roots.SelectMany(root => Directory.Exists(root.HostPath)
+                    ? Directory.EnumerateFiles(root.HostPath, "*", SearchOption.TopDirectoryOnly)
+                        .Where(IsInspectableConfigFile)
+                        .Select(path => (Root: root, Path: path))
+                    : [])
+                .OrderBy(item => Path.GetFileName(item.Path).Equals("config.xml", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                .ThenBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
+                .Take(8)
+                .ToArray()
+            : [ResolveConfigurationFile(roots, relativePath)];
+
+        var files = new List<HomeLabApplicationConfigFile>();
+        var totalBytes = 0L;
+        foreach (var candidate in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var info = new FileInfo(candidate.Path);
+            if (!info.Exists || info.LinkTarget is not null || info.Length > MaximumConfigFileBytes || totalBytes + info.Length > MaximumConfigInspectionBytes)
+            {
+                continue;
+            }
+
+            var bytes = await File.ReadAllBytesAsync(candidate.Path, cancellationToken);
+            string content;
+            try { content = StrictUtf8.GetString(bytes); }
+            catch (DecoderFallbackException) { continue; }
+            totalBytes += bytes.LongLength;
+            files.Add(new HomeLabApplicationConfigFile(
+                BuildConfigurationRelativePath(candidate.Root, candidate.Path),
+                Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+                bytes.LongLength,
+                info.LastWriteTimeUtc,
+                RedactConfiguration(content)));
+        }
+
+        return new HomeLabApplicationConfigInspection(
+            installation.Id,
+            installation.DisplayName,
+            files,
+            files.Count == 0
+                ? "No supported small text configuration files were found. LMS does not expose databases, binary files, arbitrary container paths, or secret values to AI."
+                : "Configuration values that look like passwords, API keys, tokens, cookies, credentials, or private keys are redacted.");
+    }
+
+    public async Task<HomeLabApplicationConfigRepairResult> RepairApplicationConfigAsync(
+        Guid installationId,
+        HomeLabApplicationConfigPatch patch,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(patch);
+        if (string.IsNullOrWhiteSpace(patch.ExpectedText) || patch.ExpectedText.Length > 4096 || patch.ReplacementText.Length > 4096)
+        {
+            throw new InvalidOperationException("The configuration repair must replace one exact text value of at most 4096 characters.");
+        }
+        if (patch.ExpectedText.Contains("<redacted>", StringComparison.OrdinalIgnoreCase) ||
+            patch.ReplacementText.Contains("<redacted>", StringComparison.OrdinalIgnoreCase) ||
+            patch.ExpectedText.Contains('\0') || patch.ReplacementText.Contains('\0'))
+        {
+            throw new InvalidOperationException("Redacted values cannot be used in a configuration repair.");
+        }
+
+        var installation = await dbContext.HomeLabInstallations
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var target = ResolveConfigurationFile(ResolveConfigurationRoots(installation), patch.RelativePath);
+        var originalBytes = await File.ReadAllBytesAsync(target.Path, cancellationToken);
+        if (originalBytes.LongLength > MaximumConfigFileBytes)
+        {
+            throw new InvalidOperationException("The configuration file is too large for an AI-assisted repair.");
+        }
+
+        var actualHash = Convert.ToHexString(SHA256.HashData(originalBytes)).ToLowerInvariant();
+        if (!actualHash.Equals(patch.ExpectedSha256?.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("The configuration file changed after inspection. Inspect it again before proposing a repair.");
+        }
+
+        string originalText;
+        try { originalText = StrictUtf8.GetString(originalBytes); }
+        catch (DecoderFallbackException) { throw new InvalidOperationException("The configuration file is not valid UTF-8 text and cannot be edited safely."); }
+        var occurrenceCount = CountOccurrences(originalText, patch.ExpectedText);
+        if (occurrenceCount != 1)
+        {
+            throw new InvalidOperationException($"The expected configuration text must occur exactly once; LMS found {occurrenceCount} matches.");
+        }
+
+        var replacement = originalText.Replace(patch.ExpectedText, patch.ReplacementText, StringComparison.Ordinal);
+        var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff");
+        var backupDirectory = Path.Combine(target.Root.HostPath, ".lms-ai-backups", timestamp);
+        var backupPath = Path.Combine(backupDirectory, Path.GetFileName(target.Path));
+        var backupRelativePath = BuildConfigurationRelativePath(target.Root, backupPath);
+        var tempPath = Path.Combine(Path.GetTempPath(), $"lms-config-repair-{Guid.NewGuid():N}");
+        var edited = false;
+        var containerStopped = false;
+        var rolledBack = false;
+
+        try
+        {
+            EnsureSuccess(
+                await RunAsync(new LinuxCommandRequest("mkdir", ["-p", backupDirectory], true, DockerCommandTimeout, $"Create protected configuration backup directory for {installation.DisplayName}"), cancellationToken),
+                "Could not create the configuration backup directory.");
+            EnsureSuccess(
+                await RunAsync(new LinuxCommandRequest("cp", ["--preserve=all", target.Path, backupPath], true, DockerCommandTimeout, $"Back up {installation.DisplayName} configuration"), cancellationToken),
+                "Could not back up the configuration file.");
+            EnsureSuccess(
+                await RunDockerAsync(["stop", installation.ContainerName], $"Stop only Home Lab app {installation.DisplayName} for configuration repair", cancellationToken),
+                "Could not stop the selected app.");
+            containerStopped = true;
+
+            await File.WriteAllTextAsync(tempPath, replacement, new UTF8Encoding(false), cancellationToken);
+            EnsureSuccess(
+                await RunAsync(new LinuxCommandRequest("cp", [tempPath, target.Path], true, DockerCommandTimeout, $"Apply a reviewed configuration repair to {installation.DisplayName}"), cancellationToken),
+                "Could not apply the configuration repair.");
+            edited = true;
+            EnsureSuccess(
+                await RunDockerAsync(["start", installation.ContainerName], $"Start only Home Lab app {installation.DisplayName} after configuration repair", cancellationToken),
+                "Could not restart the selected app.");
+            containerStopped = false;
+
+            var verified = await WaitForApplicationRepairAsync(installation, cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            if (!verified)
+            {
+                throw new InvalidOperationException("The app did not pass its Docker health and LMS local-access checks after the configuration change.");
+            }
+
+            return new HomeLabApplicationConfigRepairResult(
+                true,
+                false,
+                installation.DisplayName,
+                patch.RelativePath,
+                backupRelativePath,
+                "Applied one exact configuration replacement, restarted only this app, and verified Docker health and LMS local access.",
+                ToHealth(installation.HealthState),
+                DateTimeOffset.UtcNow);
+        }
+        catch (Exception exception) when (edited || containerStopped)
+        {
+            rolledBack = edited;
+            if (edited) await RunDockerAsync(["stop", installation.ContainerName], $"Stop {installation.DisplayName} before configuration rollback", CancellationToken.None);
+            var restoreSucceeded = !edited ||
+                (await RunAsync(new LinuxCommandRequest("cp", ["--preserve=all", backupPath, target.Path], true, DockerCommandTimeout, $"Roll back {installation.DisplayName} configuration"), CancellationToken.None)).ExitCode == 0;
+            var restart = await RunDockerAsync(["start", installation.ContainerName], $"Restart {installation.DisplayName} after configuration rollback", CancellationToken.None);
+            await RefreshHealthInternalAsync(installation, CancellationToken.None);
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+            if (exception is OperationCanceledException) throw;
+            var rollbackDetail = restoreSucceeded && restart.ExitCode == 0
+                ? "The original file was restored and only this app was restarted."
+                : "LMS attempted the rollback, but the app still needs attention.";
+            return new HomeLabApplicationConfigRepairResult(
+                false,
+                rolledBack,
+                installation.DisplayName,
+                patch.RelativePath,
+                backupRelativePath,
+                $"{exception.Message} {rollbackDetail}",
+                ToHealth(installation.HealthState),
+                DateTimeOffset.UtcNow);
+        }
+        finally
+        {
+            if (File.Exists(tempPath)) File.Delete(tempPath);
+        }
+    }
+
+    private IReadOnlyList<HomeLabConfigurationRoot> ResolveConfigurationRoots(HomeLabInstallationEntity installation)
+    {
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        var bindings = DeserializeBindings(installation.VolumeMappingsJson);
+        return app.Volumes
+            .Where(volume => volume.Kind == HomeLabStorageKind.Configuration)
+            .Select(volume => (Volume: volume, Binding: bindings.FirstOrDefault(binding => binding.ContainerPath.Equals(volume.ContainerPath, StringComparison.Ordinal))))
+            .Where(item => item.Binding is not null && !item.Binding.ReadOnly)
+            .Select(item => new HomeLabConfigurationRoot(item.Volume.Id, Path.GetFullPath(item.Binding!.HostPath)))
+            .ToArray();
+    }
+
+    private static (HomeLabConfigurationRoot Root, string Path) ResolveConfigurationFile(
+        IReadOnlyList<HomeLabConfigurationRoot> roots,
+        string relativePath)
+    {
+        var normalized = (relativePath ?? string.Empty).Replace('\\', '/').Trim().TrimStart('/');
+        var separator = normalized.IndexOf('/');
+        var rootId = separator < 0 ? normalized : normalized[..separator];
+        var child = separator < 0 ? string.Empty : normalized[(separator + 1)..];
+        var root = roots.FirstOrDefault(item => item.Id.Equals(rootId, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException("The requested file is outside this app's LMS-declared configuration mounts.");
+        if (string.IsNullOrWhiteSpace(child))
+        {
+            throw new InvalidOperationException("Specify a file below the configuration mount name.");
+        }
+
+        var rootPath = Path.GetFullPath(root.HostPath).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var fullPath = Path.GetFullPath(Path.Combine(rootPath, child.Replace('/', Path.DirectorySeparatorChar)));
+        if (!fullPath.StartsWith(rootPath, StringComparison.Ordinal) || !IsInspectableConfigFile(fullPath))
+        {
+            throw new InvalidOperationException("The requested file is outside this app's safe text configuration scope.");
+        }
+        var info = new FileInfo(fullPath);
+        if (!info.Exists || info.LinkTarget is not null || ContainsSymbolicLinkDirectory(rootPath, fullPath))
+        {
+            throw new InvalidOperationException("The requested configuration file does not exist or is a symbolic link.");
+        }
+        return (root, fullPath);
+    }
+
+    private async Task<bool> WaitForApplicationRepairAsync(HomeLabInstallationEntity installation, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            await RefreshHealthInternalAsync(installation, cancellationToken);
+            if (ToHealth(installation.HealthState) == HomeLabHealthState.Healthy && await ProbeCaddyAccessAsync(installation, cancellationToken))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static async Task<bool> ProbeCaddyAccessAsync(HomeLabInstallationEntity installation, CancellationToken cancellationToken)
+    {
+        if (installation.CaddySourcePort is not int port || port <= 0) return true;
+        using var handler = new HttpClientHandler { UseProxy = false };
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(3) };
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{port}/");
+        request.Headers.Host = $"{Dns.GetHostName()}:{port}";
+        try
+        {
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            var code = (int)response.StatusCode;
+            return code < 500 && code != (int)HttpStatusCode.BadRequest;
+        }
+        catch (HttpRequestException) { return false; }
+        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested) { return false; }
+    }
+
+    private static bool IsInspectableConfigFile(string path) =>
+        InspectableConfigExtensions.Contains(Path.GetExtension(path)) &&
+        !path.Contains($"{Path.DirectorySeparatorChar}.lms-ai-backups{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
+
+    private static bool ContainsSymbolicLinkDirectory(string rootPath, string fullPath)
+    {
+        var relativeDirectory = Path.GetDirectoryName(Path.GetRelativePath(rootPath, fullPath));
+        if (string.IsNullOrWhiteSpace(relativeDirectory) || relativeDirectory == ".") return false;
+        var current = rootPath;
+        foreach (var segment in relativeDirectory.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (new DirectoryInfo(current).LinkTarget is not null) return true;
+        }
+        return false;
+    }
+
+    private static string BuildConfigurationRelativePath(HomeLabConfigurationRoot root, string path) =>
+        $"{root.Id}/{Path.GetRelativePath(root.HostPath, path).Replace(Path.DirectorySeparatorChar, '/')}";
+
+    private static int CountOccurrences(string source, string value)
+    {
+        var count = 0;
+        for (var index = 0; (index = source.IndexOf(value, index, StringComparison.Ordinal)) >= 0; index += value.Length) count++;
+        return count;
+    }
+
+    internal static string RedactConfiguration(string content)
+    {
+        const string secretName = "(?:api[_-]?key|password|passwd|token|secret|credential|authorization|cookie|private[_-]?key)";
+        var redacted = Regex.Replace(
+            content,
+            $@"(<(?<name>[^<>]*{secretName}[^<>]*)[^>]*>).*?(</\k<name>>)",
+            "$1<redacted>$3",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        redacted = Regex.Replace(
+            redacted,
+            $"(?<prefix>\\b(?:key|name)\\s*=\\s*[\"'][^\"']*{secretName}[^\"']*[\"']\\s+\\bvalue\\s*=\\s*[\"'])(?<value>[^\"']*)(?<suffix>[\"'])",
+            "${prefix}<redacted>${suffix}",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        redacted = Regex.Replace(
+            redacted,
+            $"(?<prefix>\\b{secretName}\\s*=\\s*[\"'])(?<value>[^\"']*)(?<suffix>[\"'])",
+            "${prefix}<redacted>${suffix}",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        redacted = Regex.Replace(
+            redacted,
+            $"(?<prefix>[\"'][^\"']*{secretName}[^\"']*[\"']\\s*:\\s*)(?<value>\"(?:\\\\.|[^\"\\\\])*\"|'[^'\\r\\n]*'|[^,\\r\\n}}\\]]*)",
+            "${prefix}<redacted>",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return Regex.Replace(
+            redacted,
+            $"(?im)^(?<prefix>\\s*[^=:\\r\\n]*{secretName}[^=:\\r\\n]*\\s*[:=]\\s*)(?<value>[^\\r\\n]*)",
+            "${prefix}<redacted>",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     private static bool AreConnectionPeers(
@@ -3517,6 +3841,7 @@ public sealed class HomeLabService(
 
     private sealed record HomeLabVolumeBinding(string HostPath, string ContainerPath, bool ReadOnly);
     private sealed record HomeLabPortBinding(string Name, int ContainerPort, int HostPort);
+    private sealed record HomeLabConfigurationRoot(string Id, string HostPath);
 
     private sealed record ContainerRunResult(
         bool Succeeded,

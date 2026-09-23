@@ -216,6 +216,33 @@ public static class AiToolJsonSchemaCatalog
               "properties": {}
             }
             """,
+        AiToolNames.InspectHomeLabApplicationConfig =>
+            """
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "installationId": { "type": "string", "format": "uuid", "description": "The exact LMS Home Lab installation ID returned by inspect_home_lab." },
+                "relativePath": { "type": "string", "maxLength": 500, "description": "Optional path returned by an earlier config inspection, such as config/config.xml. Omit to list the app's top-level supported configuration files." }
+              },
+              "required": [ "installationId" ]
+            }
+            """,
+        AiToolNames.RepairHomeLabApplicationConfig =>
+            """
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "installationId": { "type": "string", "format": "uuid" },
+                "relativePath": { "type": "string", "minLength": 1, "maxLength": 500, "description": "The exact relative path returned by inspect_home_lab_app_config." },
+                "expectedSha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$", "description": "The exact hash returned by the inspection, used to reject stale edits." },
+                "expectedText": { "type": "string", "minLength": 1, "maxLength": 4096, "description": "A non-secret exact text fragment that occurs once in the inspected file." },
+                "replacementText": { "type": "string", "maxLength": 4096, "description": "The reviewed replacement for that exact fragment." }
+              },
+              "required": [ "installationId", "relativePath", "expectedSha256", "expectedText", "replacementText" ]
+            }
+            """,
         AiToolNames.RepairHomeLabInstallation =>
             """
             {

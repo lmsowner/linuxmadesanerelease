@@ -23,4 +23,6 @@ public interface IHomeLabService
     Task<HomeLabLogsResult> GetLogsAsync(Guid installationId, CancellationToken cancellationToken = default);
     Task<HomeLabEffectiveConfiguration?> GetEffectiveConfigurationAsync(Guid deploymentId, CancellationToken cancellationToken = default);
     Task<HomeLabConnectionGuide> GetConnectionGuideAsync(Guid installationId, CancellationToken cancellationToken = default);
+    Task<HomeLabApplicationConfigInspection> InspectApplicationConfigAsync(Guid installationId, string? relativePath = null, CancellationToken cancellationToken = default);
+    Task<HomeLabApplicationConfigRepairResult> RepairApplicationConfigAsync(Guid installationId, HomeLabApplicationConfigPatch patch, CancellationToken cancellationToken = default);
 }
