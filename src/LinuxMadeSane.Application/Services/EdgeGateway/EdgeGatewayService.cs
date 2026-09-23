@@ -45,23 +45,62 @@ public sealed class EdgeGatewayService(
 
     public async Task<EdgeGatewayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default)
     {
-        var settingsTask = GetGatewaySettingsAsync(cancellationToken);
-        var routesTask = store.ListRoutesAsync(cancellationToken);
-        var auditEntriesTask = store.ListAuditEntriesAsync(take: 250, cancellationToken: cancellationToken);
-
-        var settings = await settingsTask;
+        var settings = await GetGatewaySettingsAsync(cancellationToken);
+        var routes = await store.ListRoutesAsync(cancellationToken);
+        var auditEntries = CollapseRepeatedAuditEntries(
+                await store.ListAuditEntriesAsync(take: 250, cancellationToken: cancellationToken))
+            .Take(80)
+            .ToArray();
         var connectorStatusTask = TryInspectLocalCloudflaredConnectorAsync(cancellationToken);
-        var gatewaySubdomain = settings.GatewaySubdomain;
         var cloudflareTask = BuildCloudflareStatusAsync(settings, connectorStatusTask, cancellationToken);
         var runtimeTask = BuildRuntimeStatusAsync(connectorStatusTask, cancellationToken);
 
-        await Task.WhenAll(routesTask, auditEntriesTask, cloudflareTask, runtimeTask);
-        var routes = await routesTask;
-        var auditEntries = CollapseRepeatedAuditEntries(await auditEntriesTask)
-            .Take(80)
-            .ToArray();
+        await Task.WhenAll(cloudflareTask, runtimeTask);
         var cloudflare = await cloudflareTask;
         var runtime = await runtimeTask;
+        return BuildDashboard(settings, routes, auditEntries, cloudflare, runtime);
+    }
+
+    public async Task<EdgeGatewayDashboardViewModel> GetDashboardSnapshotAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var settings = await GetGatewaySettingsAsync(cancellationToken);
+        var routes = await store.ListRoutesAsync(cancellationToken);
+        var auditEntries = CollapseRepeatedAuditEntries(
+                await store.ListAuditEntriesAsync(take: 250, cancellationToken: cancellationToken))
+            .Take(80)
+            .ToArray();
+        var exposureSettings = await cloudflareExposureStore.GetSettingsAsync(
+            AiLocalMachine.ManagedHostId,
+            cancellationToken);
+        var cloudflare = new EdgeGatewayCloudflareStatus(
+            !string.IsNullOrWhiteSpace(exposureSettings?.ApiTokenSecretReference),
+            false,
+            "Refreshing Cloudflare status...",
+            []);
+        var runtime = new EdgeGatewayRuntimeStatus(
+            new EdgeGatewayRuntimeComponentStatus(
+                EdgeGatewayDiagnosticStatus.Warning,
+                "Caddy",
+                "Checking Caddy status..."),
+            new EdgeGatewayRuntimeComponentStatus(
+                EdgeGatewayDiagnosticStatus.Warning,
+                "cloudflared",
+                "Checking cloudflared status..."),
+            false,
+            "Refreshing local edge runtime status...");
+
+        return BuildDashboard(settings, routes, auditEntries, cloudflare, runtime);
+    }
+
+    private EdgeGatewayDashboardViewModel BuildDashboard(
+        EdgeGatewaySettings settings,
+        IReadOnlyList<EdgeGatewayRoute> routes,
+        IReadOnlyList<EdgeGatewayAuditEntry> auditEntries,
+        EdgeGatewayCloudflareStatus cloudflare,
+        EdgeGatewayRuntimeStatus runtime)
+    {
+        var gatewaySubdomain = settings.GatewaySubdomain;
         var generatedCaddyfile = caddyfileGenerator.Generate(routes);
         var firstDomain = routes.Select(static route => route.DomainName)
             .Concat(cloudflare.Domains.Select(static domain => domain.GatewayDomainName))

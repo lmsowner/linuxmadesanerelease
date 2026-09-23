@@ -133,27 +133,21 @@ public sealed class SqliteEdgeGatewayStore(LinuxMadeSaneDbContext dbContext) : I
             query = query.Where(entry => entry.Decision == (int)parsedDecision);
         }
 
-        var entries = await query.ToListAsync(cancellationToken);
-
         if (fromUtc.HasValue)
         {
-            entries = entries
-                .Where(entry => entry.TimestampUtc >= fromUtc.Value)
-                .ToList();
+            query = query.Where(entry => entry.TimestampUtc >= fromUtc.Value);
         }
 
         if (toUtc.HasValue)
         {
-            entries = entries
-                .Where(entry => entry.TimestampUtc <= toUtc.Value)
-                .ToList();
+            query = query.Where(entry => entry.TimestampUtc <= toUtc.Value);
         }
 
-        return entries
+        var entries = await query
             .OrderByDescending(entry => entry.TimestampUtc)
             .Take(Math.Clamp(take, 1, 1000))
-            .Select(Map)
-            .ToArray();
+            .ToArrayAsync(cancellationToken);
+        return entries.Select(Map).ToArray();
     }
 
     private static EdgeGatewayRoute Map(EdgeGatewayRouteEntity entity) =>

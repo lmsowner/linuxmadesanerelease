@@ -13,6 +13,7 @@
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Models.Cloudflare
 @using LinuxMadeSane.Core.Models.EdgeGateway
+@using Microsoft.Extensions.DependencyInjection
 @inject IEdgeGatewayService EdgeGatewayService
 @inject EdgeGatewayOptions EdgeGatewayOptions
 @inject IEdgeGatewayTemporaryIpApprovalStore TemporaryIpApprovalStore
@@ -24,6 +25,7 @@
 @inject IMailRelayService MailRelayService
 @inject OnDemandAppService OnDemandApps
 @inject NavigationManager Navigation
+@inject IServiceScopeFactory ServiceScopeFactory
 
 <PageTitle>Edge Gateway | Linux Made Sane</PageTitle>
 
@@ -456,7 +458,7 @@
 
                         @if (CloudflareDomains.Count == 0)
                         {
-                            <p class="meta-text">No Cloudflare zones are available from the saved token.</p>
+                            <p class="meta-text">@(isDashboardLoading ? "Refreshing Cloudflare zones..." : "No Cloudflare zones are available from the saved token.")</p>
                         }
                         else if (ConfiguredCloudflareRelays.Count == 0)
                         {
@@ -594,7 +596,7 @@
 
                         @if (dashboard.Cloudflare.Domains.Count == 0)
                         {
-                            <p class="meta-text">Validate a Cloudflare token above first. Edge Gateway will then list the domains that token can manage.</p>
+                            <p class="meta-text">@(isDashboardLoading ? "Refreshing Cloudflare domains..." : "Validate a Cloudflare token above first. Edge Gateway will then list the domains that token can manage.")</p>
                         }
                         else if (RelaySetupCloudflareDomains.Count == 0)
                         {
@@ -1229,6 +1231,7 @@
     private int httpServiceScanTotalCount;
     private bool isDisposed;
     private bool isDashboardLoading;
+    private bool hasLoadedLiveDashboard;
     private Guid? releasingApprovalRequestId;
     private bool showRouteModal;
     private bool isHttpServicePickerOpen;
@@ -1369,10 +1372,32 @@
         SelectedRelaySetupCloudflareDomain is { } domain &&
         domain.DomainName.Equals(provisioningCloudflareDomainName, StringComparison.OrdinalIgnoreCase);
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
-        BeginDashboardLoad();
+        isDashboardLoading = true;
+        dashboardLoadError = string.Empty;
+        try
+        {
+            var snapshot = await LoadSavedDashboardSnapshotAsync();
+            ApplyDashboardSnapshot(snapshot, isLiveSnapshot: false);
+        }
+        catch (Exception exception)
+        {
+            dashboardLoadError = exception.Message;
+            userMessage = exception.Message;
+        }
+
         _ = WatchMailSetupAsync(quickSetupCancellation.Token);
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            BeginDashboardLoad();
+        }
+
+        return Task.CompletedTask;
     }
 
     public void Dispose()
@@ -1399,7 +1424,13 @@
         try
         {
             await Task.Yield();
-            var snapshot = await LoadDashboardSnapshotAsync(cancellationToken);
+            await using var scope = ServiceScopeFactory.CreateAsyncScope();
+            var snapshot = await LoadDashboardSnapshotAsync(
+                scope.ServiceProvider.GetRequiredService<IEdgeGatewayService>(),
+                scope.ServiceProvider.GetRequiredService<ISecurityUserStore>(),
+                scope.ServiceProvider.GetRequiredService<IEdgeGatewayTemporaryIpApprovalStore>(),
+                scope.ServiceProvider.GetRequiredService<OnDemandAppService>(),
+                cancellationToken);
             await InvokeAsync(() =>
             {
                 if (isDisposed || cancellationToken.IsCancellationRequested)
@@ -1407,7 +1438,7 @@
                     return;
                 }
 
-                ApplyDashboardSnapshot(snapshot);
+                ApplyDashboardSnapshot(snapshot, isLiveSnapshot: true);
                 isDashboardLoading = false;
                 StateHasChanged();
             });
@@ -1434,6 +1465,9 @@
 
     private async Task LoadAsync()
     {
+        dashboardLoadCancellation?.Cancel();
+        dashboardLoadCancellation?.Dispose();
+        dashboardLoadCancellation = null;
         isDashboardLoading = true;
         dashboardLoadError = string.Empty;
         await InvokeAsync(StateHasChanged);
@@ -1441,7 +1475,7 @@
         try
         {
             var snapshot = await LoadDashboardSnapshotAsync();
-            ApplyDashboardSnapshot(snapshot);
+            ApplyDashboardSnapshot(snapshot, isLiveSnapshot: true);
         }
         finally
         {
@@ -1450,31 +1484,62 @@
     }
 
     private async Task<EdgeGatewayDashboardSnapshot> LoadDashboardSnapshotAsync(CancellationToken cancellationToken = default)
+        => await LoadDashboardSnapshotAsync(
+            EdgeGatewayService,
+            SecurityUserStore,
+            TemporaryIpApprovalStore,
+            OnDemandApps,
+            cancellationToken);
+
+    private async Task<EdgeGatewayDashboardSnapshot> LoadSavedDashboardSnapshotAsync(
+        CancellationToken cancellationToken = default)
     {
-        var currentUri = Navigation.ToAbsoluteUri(Navigation.Uri);
-        var dashboardTask = EdgeGatewayService.GetDashboardAsync(cancellationToken);
-        var settingsTask = EdgeGatewayService.GetSettingsEditorAsync(cancellationToken);
-        var usersTask = SecurityUserStore.ListAsync(cancellationToken);
-        var approvalTask = TemporaryIpApprovalStore.LoadAsync(cancellationToken);
-        await Task.WhenAll(dashboardTask, settingsTask, usersTask, approvalTask);
-        var loadedDashboard = await dashboardTask;
-        var onDemandAvailability = await GetOnDemandAppsAvailabilityAsync(currentUri, loadedDashboard, cancellationToken);
+        var loadedDashboard = await EdgeGatewayService.GetDashboardSnapshotAsync(cancellationToken);
+        var settingsEditor = await EdgeGatewayService.GetSettingsEditorAsync(cancellationToken);
+        var securityUsers = await SecurityUserStore.ListAsync(cancellationToken);
+        var approvalState = await TemporaryIpApprovalStore.LoadAsync(cancellationToken);
         return new EdgeGatewayDashboardSnapshot(
             loadedDashboard,
-            await settingsTask,
-            await usersTask,
-            await approvalTask,
+            settingsEditor,
+            securityUsers,
+            approvalState,
+            new OnDemandAppsAvailability(false, "Refreshing On-Demand Apps availability..."));
+    }
+
+    private async Task<EdgeGatewayDashboardSnapshot> LoadDashboardSnapshotAsync(
+        IEdgeGatewayService edgeGatewayService,
+        ISecurityUserStore securityUserStore,
+        IEdgeGatewayTemporaryIpApprovalStore temporaryIpApprovalStore,
+        OnDemandAppService onDemandApps,
+        CancellationToken cancellationToken = default)
+    {
+        var currentUri = Navigation.ToAbsoluteUri(Navigation.Uri);
+        var loadedDashboard = await edgeGatewayService.GetDashboardAsync(cancellationToken);
+        var settingsEditor = await edgeGatewayService.GetSettingsEditorAsync(cancellationToken);
+        var securityUsers = await securityUserStore.ListAsync(cancellationToken);
+        var approvalState = await temporaryIpApprovalStore.LoadAsync(cancellationToken);
+        var onDemandAvailability = await GetOnDemandAppsAvailabilityAsync(
+            onDemandApps,
+            currentUri,
+            loadedDashboard,
+            cancellationToken);
+        return new EdgeGatewayDashboardSnapshot(
+            loadedDashboard,
+            settingsEditor,
+            securityUsers,
+            approvalState,
             onDemandAvailability);
     }
 
     private async Task<OnDemandAppsAvailability> GetOnDemandAppsAvailabilityAsync(
+        OnDemandAppService onDemandApps,
         Uri currentUri,
         EdgeGatewayDashboardViewModel loadedDashboard,
         CancellationToken cancellationToken)
     {
         try
         {
-            return await OnDemandApps.GetAvailabilityAsync(
+            return await onDemandApps.GetAvailabilityAsync(
                 currentUri.Host,
                 currentUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase),
                 loadedDashboard,
@@ -1490,9 +1555,9 @@
         }
     }
 
-    private void ApplyDashboardSnapshot(EdgeGatewayDashboardSnapshot snapshot)
+    private void ApplyDashboardSnapshot(EdgeGatewayDashboardSnapshot snapshot, bool isLiveSnapshot)
     {
-        var isFirstLoad = dashboard is null;
+        var isFirstLiveLoad = isLiveSnapshot && !hasLoadedLiveDashboard;
         dashboard = snapshot.Dashboard;
         onDemandAppsAvailability = snapshot.OnDemandAppsAvailability;
         temporaryIpApprovalState = snapshot.TemporaryIpApprovalState;
@@ -1518,7 +1583,12 @@
 
         SyncRouteDomainExpansionState();
 
-        if (isFirstLoad && OnDemandAppsAvailable && string.IsNullOrWhiteSpace(Tab))
+        if (isLiveSnapshot)
+        {
+            hasLoadedLiveDashboard = true;
+        }
+
+        if (isFirstLiveLoad && OnDemandAppsAvailable && string.IsNullOrWhiteSpace(Tab))
         {
             activeTab = OnDemandAppsTabValue;
         }

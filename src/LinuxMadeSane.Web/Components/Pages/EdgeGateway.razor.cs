@@ -47,7 +47,9 @@ public partial class EdgeGateway
                 result.Success ? $"Published https://{result.Hostname} with MFA security enabled." : result.Summary,
                 !result.Success,
                 result.Success ? $"https://{result.Hostname}" : null);
-            if (!isDisposed) ApplyDashboardSnapshot(await LoadDashboardSnapshotAsync(CancellationToken.None));
+            if (!isDisposed) ApplyDashboardSnapshot(
+                await LoadDashboardSnapshotAsync(CancellationToken.None),
+                isLiveSnapshot: true);
         }
         catch (Exception exception)
         {

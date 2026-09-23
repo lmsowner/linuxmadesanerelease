@@ -11,6 +11,8 @@ public interface IEdgeGatewayService
 {
     Task<IReadOnlyList<EdgeGatewayRouteListItem>> ListRoutesAsync(CancellationToken cancellationToken = default);
     Task<EdgeGatewayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default);
+    Task<EdgeGatewayDashboardViewModel> GetDashboardSnapshotAsync(CancellationToken cancellationToken = default) =>
+        GetDashboardAsync(cancellationToken);
     Task<EdgeGatewaySettingsEditor> GetSettingsEditorAsync(CancellationToken cancellationToken = default);
     Task SaveSettingsAsync(EdgeGatewaySettingsEditor editor, CancellationToken cancellationToken = default);
     Task<EdgeGatewayRouteEditor> GetEditorAsync(Guid? routeId, CancellationToken cancellationToken = default);
