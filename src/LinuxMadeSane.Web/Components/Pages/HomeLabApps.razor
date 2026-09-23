@@ -32,7 +32,7 @@
                              Glyph="UiIconGlyph.Refresh"
                              Variant="UiButtonVariant.Ghost"
                              Disabled="@(busy || backgroundRefreshInProgress)"
-                             OnClick="LoadAsync" />
+                             OnClick="RefreshAsync" />
         </Actions>
     </UiHeroPanel>
 
@@ -1049,7 +1049,17 @@
     protected override async Task OnInitializedAsync()
     {
         await LoadAsync();
-        healthMonitorTask = MonitorRuntimeHealthAfterInitialRefreshAsync(healthMonitorCancellation.Token);
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            StartBackgroundRefresh();
+            healthMonitorTask = MonitorRuntimeHealthAfterInitialRefreshAsync(healthMonitorCancellation.Token);
+        }
+
+        return Task.CompletedTask;
     }
 
     protected override void OnParametersSet()
@@ -1077,6 +1087,11 @@
             busy = false;
         }
 
+    }
+
+    private async Task RefreshAsync()
+    {
+        await LoadAsync();
         StartBackgroundRefresh();
     }
 
