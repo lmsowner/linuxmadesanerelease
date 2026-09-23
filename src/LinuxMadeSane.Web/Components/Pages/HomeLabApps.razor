@@ -10,9 +10,11 @@
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.HomeLab
+@using Microsoft.Extensions.DependencyInjection
 @inject IHomeLabService HomeLabService
 @inject IEdgeGatewayService EdgeGatewayService
 @inject IHomeLabPromptRecipeProvider PromptRecipeProvider
+@inject IServiceScopeFactory ServiceScopeFactory
 @inject IAiThreadService AiThreadService
 @inject IAiChatService AiChatService
 @inject NavigationManager Navigation
@@ -26,10 +28,10 @@
                   Description="Set up services with guided prompts, manage their Docker containers, and troubleshoot each container with AI."
                   Compact="true">
         <Actions>
-            <UiCommandButton Label="Refresh"
+            <UiCommandButton Label="@(backgroundRefreshInProgress ? "Refreshing..." : "Refresh")"
                              Glyph="UiIconGlyph.Refresh"
                              Variant="UiButtonVariant.Ghost"
-                             Disabled="@busy"
+                             Disabled="@(busy || backgroundRefreshInProgress)"
                              OnClick="LoadAsync" />
         </Actions>
     </UiHeroPanel>
@@ -875,6 +877,8 @@
     private bool confirmExternalUnpublish;
     private readonly CancellationTokenSource healthMonitorCancellation = new();
     private Task? healthMonitorTask;
+    private Task? backgroundRefreshTask;
+    private bool backgroundRefreshInProgress;
     private bool healthRefreshInProgress;
     private bool disposed;
 
@@ -1045,7 +1049,7 @@
     protected override async Task OnInitializedAsync()
     {
         await LoadAsync();
-        healthMonitorTask = MonitorRuntimeHealthAsync(healthMonitorCancellation.Token);
+        healthMonitorTask = MonitorRuntimeHealthAfterInitialRefreshAsync(healthMonitorCancellation.Token);
     }
 
     protected override void OnParametersSet()
@@ -1058,14 +1062,11 @@
         busy = true;
         try
         {
-            workspace = await HomeLabService.GetWorkspaceAsync();
-            promptRecipes = await PromptRecipeProvider.GetRecipesAsync();
-            await RefreshEdgeGatewayStateAsync();
+            workspace = await HomeLabService.GetWorkspaceSnapshotAsync(healthMonitorCancellation.Token);
             foreach (var role in workspace.StorageRoles)
             {
                 storagePaths[role.Role] = role.HostPath;
             }
-            await RefreshSummaryNetworkSecurityAsync();
         }
         catch (Exception exception)
         {
@@ -1075,6 +1076,125 @@
         {
             busy = false;
         }
+
+        StartBackgroundRefresh();
+    }
+
+    private void StartBackgroundRefresh()
+    {
+        if (disposed || backgroundRefreshInProgress)
+        {
+            return;
+        }
+
+        backgroundRefreshInProgress = true;
+        backgroundRefreshTask = RefreshBackgroundStateAsync(healthMonitorCancellation.Token);
+    }
+
+    private async Task RefreshBackgroundStateAsync(CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        try
+        {
+            await using var scope = ServiceScopeFactory.CreateAsyncScope();
+            var homeLabService = scope.ServiceProvider.GetRequiredService<IHomeLabService>();
+            var promptRecipeProvider = scope.ServiceProvider.GetRequiredService<IHomeLabPromptRecipeProvider>();
+            var edgeGatewayService = scope.ServiceProvider.GetRequiredService<IEdgeGatewayService>();
+
+            var recipeTask = promptRecipeProvider.GetRecipesAsync(cancellationToken);
+            var refreshedWorkspace = await homeLabService.GetWorkspaceAsync(cancellationToken);
+            var refreshedSecurity = new Dictionary<Guid, HomeLabNetworkSecurity>();
+            foreach (var installation in refreshedWorkspace.Installations)
+            {
+                try
+                {
+                    refreshedSecurity[installation.Id] = await homeLabService.GetNetworkSecurityAsync(
+                        installation.Id,
+                        cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    // Stopped or unavailable containers remain unverified in the saved snapshot.
+                }
+            }
+
+            IReadOnlyList<EdgeGatewayRouteListItem>? refreshedRoutes = null;
+            EdgeGatewayDashboardViewModel? refreshedDashboard = null;
+            try
+            {
+                refreshedRoutes = await edgeGatewayService.ListRoutesAsync(cancellationToken);
+                refreshedDashboard = await edgeGatewayService.GetDashboardAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                // Keep the currently displayed Edge Gateway state if its refresh is unavailable.
+            }
+
+            var refreshedRecipes = await recipeTask;
+            await InvokeAsync(() =>
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                workspace = refreshedWorkspace;
+                promptRecipes = refreshedRecipes;
+                if (refreshedRoutes is not null)
+                {
+                    edgeGatewayRoutes = refreshedRoutes;
+                    edgeGatewayDashboard = refreshedDashboard;
+                }
+
+                summaryNetworkSecurity.Clear();
+                foreach (var entry in refreshedSecurity)
+                {
+                    summaryNetworkSecurity[entry.Key] = entry.Value;
+                }
+
+                foreach (var role in refreshedWorkspace.StorageRoles)
+                {
+                    storagePaths[role.Role] = role.HostPath;
+                }
+
+                StateHasChanged();
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch
+        {
+            // Keep the fast saved snapshot visible; a manual refresh can retry live discovery.
+        }
+        finally
+        {
+            backgroundRefreshInProgress = false;
+            if (!disposed)
+            {
+                try
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+                catch (InvalidOperationException) when (disposed) { }
+            }
+        }
+    }
+
+    private async Task MonitorRuntimeHealthAfterInitialRefreshAsync(CancellationToken cancellationToken)
+    {
+        if (backgroundRefreshTask is not null)
+        {
+            await backgroundRefreshTask;
+        }
+
+        await MonitorRuntimeHealthAsync(cancellationToken);
     }
 
     private async Task MonitorRuntimeHealthAsync(CancellationToken cancellationToken)
@@ -1087,7 +1207,7 @@
             {
                 await InvokeAsync(async () =>
                 {
-                    if (disposed || busy || healthRefreshInProgress || workspace is null)
+                    if (disposed || busy || backgroundRefreshInProgress || healthRefreshInProgress || workspace is null)
                     {
                         return;
                     }
@@ -1159,6 +1279,11 @@
         if (healthMonitorTask is not null)
         {
             try { await healthMonitorTask; }
+            catch (OperationCanceledException) { }
+        }
+        if (backgroundRefreshTask is not null)
+        {
+            try { await backgroundRefreshTask; }
             catch (OperationCanceledException) { }
         }
         healthMonitorCancellation.Dispose();

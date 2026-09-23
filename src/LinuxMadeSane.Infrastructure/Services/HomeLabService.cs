@@ -47,6 +47,29 @@ public sealed class HomeLabService(
     };
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
+    public async Task<HomeLabWorkspace> GetWorkspaceSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        var installationEntities = await dbContext.HomeLabInstallations
+            .AsNoTracking()
+            .OrderBy(item => item.DisplayName)
+            .ToListAsync(cancellationToken);
+        var deploymentEntities = await dbContext.HomeLabDeployments
+            .AsNoTracking()
+            .OrderBy(item => item.Name)
+            .ToListAsync(cancellationToken);
+        var storageRoleEntities = await dbContext.HomeLabStorageRoles
+            .AsNoTracking()
+            .OrderBy(item => item.Role)
+            .ToListAsync(cancellationToken);
+
+        return new HomeLabWorkspace(
+            HomeLabCatalog.VisibleApps,
+            HomeLabCatalog.Recipes,
+            storageRoleEntities.Select(MapStorageRole).ToArray(),
+            deploymentEntities.Select(MapDeployment).ToArray(),
+            installationEntities.Select(MapInstallation).ToArray());
+    }
+
     public async Task<HomeLabWorkspace> GetWorkspaceAsync(CancellationToken cancellationToken = default)
     {
         var entities = await dbContext.HomeLabInstallations
