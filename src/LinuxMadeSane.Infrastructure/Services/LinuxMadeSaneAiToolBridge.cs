@@ -532,10 +532,17 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             _ => HomeLabLifecycleAction.Recreate
         };
         var actionLabel = action.ToString();
-        if (installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        HomeLabOperationResult operation;
+        if (request.RestoreContainerSettings)
+        {
+            actionLabel = "Restore pre-edit container settings";
+            operation = await service.RestoreContainerSettingsAsync(request.InstallationId, cancellationToken);
+        }
+        else if (installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
         {
             action = HomeLabLifecycleAction.Repair;
             actionLabel = "Repair VPN gateway namespace";
+            operation = await service.ExecuteAsync(repairTarget.Id, action, cancellationToken);
         }
         else if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
         {
@@ -546,9 +553,13 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                            ?? throw new InvalidOperationException("The VPN Gateway for this Home Lab installation no longer exists.");
             action = HomeLabLifecycleAction.Repair;
             actionLabel = "Repair shared VPN gateway namespace";
+            operation = await service.ExecuteAsync(repairTarget.Id, action, cancellationToken);
+        }
+        else
+        {
+            operation = await service.ExecuteAsync(repairTarget.Id, action, cancellationToken);
         }
 
-        var operation = await service.ExecuteAsync(repairTarget.Id, action, cancellationToken);
         var refreshed = await WaitForHomeLabInstallationAsync(service, installation.Id, cancellationToken);
         var after = await MapHomeLabInstallationAsync(service, refreshed, cancellationToken);
         var app = HomeLabCatalog.GetApp(refreshed.AppId);

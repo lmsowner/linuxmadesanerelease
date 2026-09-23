@@ -13,7 +13,7 @@ public static class HomeLabCatalog
         new(
             "vpn-gateway",
             "VPN Gateway",
-            "Reusable Gluetun gateway for apps that need VPN-routed internet access.",
+            "Reusable VPN gateway for apps that need protected internet access.",
             HomeLabAppCategory.Infrastructure,
             "vpn",
             "https://github.com/qdm12/gluetun",

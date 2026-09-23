@@ -25,6 +25,16 @@ public sealed record HomeLabRecipeInstallRequest(
     IReadOnlySet<string>? AppIds = null,
     IReadOnlyDictionary<string, string>? SecretConfiguration = null);
 
+public sealed record HomeLabContainerVolumeSetting(
+    string HostPath,
+    string ContainerPath,
+    bool ReadOnly = false);
+
+public sealed record HomeLabContainerSettingsUpdate(
+    string Image,
+    IReadOnlyDictionary<string, string> Environment,
+    IReadOnlyList<HomeLabContainerVolumeSetting> Volumes);
+
 public enum HomeLabLifecycleAction
 {
     Start = 0,

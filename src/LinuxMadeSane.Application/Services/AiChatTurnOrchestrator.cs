@@ -1490,10 +1490,13 @@ public sealed class AiChatTurnOrchestrator(
         AiToolDefinition definition)
     {
         var request = DeserializeRequest<RepairHomeLabInstallationToolRequest>(toolCall.ArgumentsJson);
+        var settingsAction = request.RestoreContainerSettings
+            ? " Restore the saved pre-edit image, environment, and volume settings first."
+            : string.Empty;
         return new AiProposedActionProposal
         {
             Title = "Repair Home Lab Docker container",
-            Description = $"Reconcile and reapply the saved image, volumes, listener ports, networking, VPN route, forwarding callbacks, health check, and Caddy access for LMS installation {request.InstallationId}. A VPN-routed target also recreates its shared gateway namespace and reconnects the apps using it.",
+            Description = $"Reconcile and reapply the saved image, volumes, listener ports, networking, VPN route, forwarding callbacks, health check, and Caddy access for LMS installation {request.InstallationId}.{settingsAction} A VPN-routed target also recreates its shared gateway namespace and reconnects the apps using it.",
             ToolName = toolCall.ToolName,
             ProviderToolCallId = toolCall.ProviderToolCallId,
             ToolArgumentsJson = toolCall.ArgumentsJson,

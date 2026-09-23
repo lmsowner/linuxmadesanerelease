@@ -60,7 +60,8 @@ public sealed record HomeLabEffectiveContainer(
     IReadOnlyList<string> Access,
     IReadOnlyList<string> Environment,
     IReadOnlyList<string> Connections,
-    IReadOnlyList<string> Dependencies);
+    IReadOnlyList<string> Dependencies,
+    bool HasCustomSettings = false);
 
 public sealed record HomeLabNetworkSecurity(
     string Status,

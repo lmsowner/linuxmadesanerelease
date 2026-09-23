@@ -33,6 +33,9 @@ public sealed class HomeLabService(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan DockerCommandTimeout = TimeSpan.FromMinutes(5);
+    private const string ContainerSettingsBackupImageKey = "lms-container-backup-image";
+    private const string ContainerSettingsBackupConfigurationKey = "lms-container-backup-configuration";
+    private const string ContainerSettingsBackupVolumesKey = "lms-container-backup-volumes";
 
     public async Task<HomeLabWorkspace> GetWorkspaceAsync(CancellationToken cancellationToken = default)
     {
@@ -600,6 +603,94 @@ public sealed class HomeLabService(
                HomeLabQbittorrentPortForwarding.TryReadSettings(result.StandardOutput, out var settings)
             ? (result, settings)
             : (result, null);
+    }
+
+    public async Task<HomeLabOperationResult> UpdateContainerSettingsAsync(
+        Guid installationId,
+        HomeLabContainerSettingsUpdate settings,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        var installation = await dbContext.HomeLabInstallations
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        var image = NormalizeContainerImage(settings.Image);
+        var environment = NormalizeContainerEnvironment(settings.Environment);
+        var volumes = NormalizeContainerVolumes(settings.Volumes);
+
+        var protectedEnvironmentKeys = app.Ports
+            .Select(port => port.VpnEnvironmentVariable)
+            .Where(key => !string.IsNullOrWhiteSpace(key))
+            .Cast<string>()
+            .Append(app.PublicUrlEnvironmentVariable ?? string.Empty)
+            .Where(key => key.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var secretEnvironmentKeys = DeserializeDictionary(installation.SecretConfigurationJson).Keys
+            .Where(key => !key.StartsWith("FILE:", StringComparison.OrdinalIgnoreCase))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var invalidKey = environment.Keys.FirstOrDefault(key =>
+            protectedEnvironmentKeys.Contains(key) || secretEnvironmentKeys.Contains(key));
+        if (invalidKey is not null)
+        {
+            throw new InvalidOperationException($"'{invalidKey}' is managed by LMS and cannot be changed in the container environment editor.");
+        }
+
+        var existingConfigurationJson = installation.ConfigurationJson;
+        var persistedConfiguration = DeserializeDictionary(existingConfigurationJson)
+            .Where(item => IsInternalConfigurationKey(item.Key))
+            .ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
+        if (!persistedConfiguration.ContainsKey(ContainerSettingsBackupImageKey))
+        {
+            persistedConfiguration[ContainerSettingsBackupImageKey] = installation.Image;
+            persistedConfiguration[ContainerSettingsBackupConfigurationKey] = existingConfigurationJson;
+            persistedConfiguration[ContainerSettingsBackupVolumesKey] = installation.VolumeMappingsJson;
+        }
+        foreach (var item in environment)
+        {
+            persistedConfiguration[item.Key] = item.Value;
+        }
+
+        installation.Image = image;
+        installation.ConfigurationJson = JsonSerializer.Serialize(persistedConfiguration, JsonOptions);
+        installation.VolumeMappingsJson = JsonSerializer.Serialize(
+            volumes.Select(volume => new HomeLabVolumeBinding(volume.HostPath, volume.ContainerPath, volume.ReadOnly)),
+            JsonOptions);
+        installation.HealthState = (int)HomeLabHealthState.Starting;
+        installation.HealthDetail = "Applying edited container settings.";
+        installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return await ExecuteAsync(installation.Id, HomeLabLifecycleAction.Recreate, cancellationToken);
+    }
+
+    public async Task<HomeLabOperationResult> RestoreContainerSettingsAsync(
+        Guid installationId,
+        CancellationToken cancellationToken = default)
+    {
+        var installation = await dbContext.HomeLabInstallations
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        if (!configuration.TryGetValue(ContainerSettingsBackupImageKey, out var image) ||
+            !configuration.TryGetValue(ContainerSettingsBackupConfigurationKey, out var configurationJson) ||
+            !configuration.TryGetValue(ContainerSettingsBackupVolumesKey, out var volumesJson))
+        {
+            throw new InvalidOperationException("This container does not have an edited-settings snapshot to restore.");
+        }
+
+        _ = NormalizeContainerImage(image);
+        _ = DeserializeDictionary(configurationJson);
+        _ = DeserializeBindings(volumesJson);
+        installation.Image = image;
+        installation.ConfigurationJson = configurationJson;
+        installation.VolumeMappingsJson = volumesJson;
+        installation.HealthState = (int)HomeLabHealthState.Starting;
+        installation.HealthDetail = "Restoring the container settings used before manual editing.";
+        installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return await ExecuteAsync(installation.Id, HomeLabLifecycleAction.Recreate, cancellationToken);
     }
 
     public async Task<HomeLabOperationResult> ExecuteAsync(
@@ -1234,9 +1325,9 @@ public sealed class HomeLabService(
         var connections = new List<string>
         {
             usesVpnGateway
-                ? "INTERNET ROUTE: VPN Gateway (Gluetun)"
+                ? "Internet route: VPN Gateway"
                 : app.SupportsVpnGateway
-                    ? "INTERNET ROUTE: Direct (NO VPN)"
+                    ? "Internet route: Direct"
                     : "Internet route: Direct",
             usesVpnGateway
                 ? $"VPN gateway container: {installation.NetworkMode["container:".Length..]}"
@@ -1298,7 +1389,8 @@ public sealed class HomeLabService(
             access,
             environment,
             connections,
-            app.Dependencies);
+            app.Dependencies,
+            configuration.ContainsKey(ContainerSettingsBackupImageKey));
     }
 
     private async Task EnsureCaddyAccessAsync(
@@ -2922,6 +3014,78 @@ public sealed class HomeLabService(
         return normalized;
     }
 
+    private static string NormalizeContainerImage(string image)
+    {
+        var normalized = image?.Trim() ?? string.Empty;
+        if (normalized.Length is < 1 or > 512 || normalized.Any(character => char.IsWhiteSpace(character) || char.IsControl(character)))
+        {
+            throw new InvalidOperationException("Enter a valid Docker image reference without spaces.");
+        }
+
+        return normalized;
+    }
+
+    private static IReadOnlyDictionary<string, string> NormalizeContainerEnvironment(
+        IReadOnlyDictionary<string, string>? environment)
+    {
+        if (environment is null || environment.Count > 128)
+        {
+            throw new InvalidOperationException("Container environment settings must contain no more than 128 entries.");
+        }
+
+        var normalized = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in environment)
+        {
+            var key = item.Key?.Trim() ?? string.Empty;
+            var value = item.Value ?? string.Empty;
+            if (key.Length is < 1 or > 128 ||
+                !(char.IsAsciiLetter(key[0]) || key[0] == '_') ||
+                key.Any(character => !(char.IsAsciiLetterOrDigit(character) || character == '_')))
+            {
+                throw new InvalidOperationException($"'{key}' is not a valid container environment variable name.");
+            }
+            if (value.Length > 32768 || value.Contains('\0'))
+            {
+                throw new InvalidOperationException($"The value for '{key}' is too large or contains an invalid character.");
+            }
+
+            normalized[key] = value;
+        }
+
+        return normalized;
+    }
+
+    private static IReadOnlyList<HomeLabContainerVolumeSetting> NormalizeContainerVolumes(
+        IReadOnlyList<HomeLabContainerVolumeSetting>? volumes)
+    {
+        if (volumes is null || volumes.Count > 64)
+        {
+            throw new InvalidOperationException("Container volume settings must contain no more than 64 mappings.");
+        }
+
+        var normalized = new List<HomeLabContainerVolumeSetting>(volumes.Count);
+        var containerPaths = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var volume in volumes)
+        {
+            var hostPath = volume.HostPath?.Trim() ?? string.Empty;
+            var containerPath = volume.ContainerPath?.Trim() ?? string.Empty;
+            if (!Path.IsPathFullyQualified(hostPath) || !Path.IsPathFullyQualified(containerPath) ||
+                hostPath.Contains(':') || containerPath.Contains(':') ||
+                hostPath.Any(char.IsControl) || containerPath.Any(char.IsControl))
+            {
+                throw new InvalidOperationException("Volume mappings must use absolute host and container paths without colons.");
+            }
+            if (!containerPaths.Add(containerPath))
+            {
+                throw new InvalidOperationException($"Container path '{containerPath}' is mapped more than once.");
+            }
+
+            normalized.Add(new HomeLabContainerVolumeSetting(Path.GetFullPath(hostPath), containerPath, volume.ReadOnly));
+        }
+
+        return normalized;
+    }
+
     private static string BuildContainerName(Guid deploymentId, string appId) =>
         $"lms-homelab-{appId}-{deploymentId.ToString("N")[..8]}";
 
@@ -2971,7 +3135,8 @@ public sealed class HomeLabService(
     private static bool IsInternalConfigurationKey(string key) =>
         key.Equals("network-route", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) ||
-        key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase);
+        key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase) ||
+        key.StartsWith("lms-container-backup-", StringComparison.OrdinalIgnoreCase);
 
     private static void ConfigureVpnPortForwarding(
         IDictionary<string, string> values,

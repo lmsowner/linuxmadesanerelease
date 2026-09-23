@@ -136,7 +136,8 @@ public sealed record InspectHomeLabToolResponse(
     IReadOnlyList<HomeLabAiPromptRecipe> PromptRecipes) : IAiToolResponse;
 
 public sealed record RepairHomeLabInstallationToolRequest(
-    Guid InstallationId) : IAiToolRequest;
+    Guid InstallationId,
+    bool RestoreContainerSettings = false) : IAiToolRequest;
 
 public sealed record RepairHomeLabInstallationToolResponse(
     Guid InstallationId,

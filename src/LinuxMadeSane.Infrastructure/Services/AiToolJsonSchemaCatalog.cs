@@ -226,6 +226,10 @@ public static class AiToolJsonSchemaCatalog
                   "type": "string",
                   "format": "uuid",
                   "description": "The exact LMS Home Lab installation ID returned by inspect_home_lab."
+                },
+                "restoreContainerSettings": {
+                  "type": "boolean",
+                  "description": "Set true only when manual image, environment, or volume edits caused the fault and the user wants the saved pre-edit settings restored."
                 }
               },
               "required": [ "installationId" ]

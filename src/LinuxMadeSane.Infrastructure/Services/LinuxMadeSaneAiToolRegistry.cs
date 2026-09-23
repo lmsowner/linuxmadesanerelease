@@ -92,7 +92,7 @@ public sealed class LinuxMadeSaneAiToolRegistry : IAiToolRegistry
             "IHomeLabService"),
         CreateDefinition<RepairHomeLabInstallationToolRequest, RepairHomeLabInstallationToolResponse>(
             AiToolNames.RepairHomeLabInstallation,
-            "Repair and verify one LMS-managed Home Lab installation by ID. For VPN-routed apps, reconcile and recreate the shared gateway namespace and every routed app, including managed listener ports, port-forward callbacks, networking, health, and Caddy access. Never exposes stored secrets or raw logs.",
+            "Repair and verify one LMS-managed Home Lab installation by ID. Can restore its saved pre-edit container settings when manual edits caused the fault. For VPN-routed apps, reconcile and recreate the shared gateway namespace and every routed app, including managed listener ports, port-forward callbacks, networking, health, and Caddy access. Never exposes stored secrets or raw logs.",
             AiActionRiskLevel.HighRiskMutation,
             AiApprovalRequirement.UserConfirmation,
             false,
