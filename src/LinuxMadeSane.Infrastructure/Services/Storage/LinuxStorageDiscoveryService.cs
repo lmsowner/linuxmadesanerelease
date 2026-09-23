@@ -615,8 +615,13 @@ public sealed class LinuxStorageDiscoveryService(
             ParseMount(element, result);
         }
 
-        return result;
+        return result
+            .Where(IsRelevantStorageMount)
+            .ToArray();
     }
+
+    private static bool IsRelevantStorageMount(RawMount mount) =>
+        !mount.FileSystemType.Equals("squashfs", StringComparison.OrdinalIgnoreCase);
 
     internal static IReadOnlyList<IReadOnlyDictionary<string, string>> ParseLvmRows(string json, string reportName)
     {
