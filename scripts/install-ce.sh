@@ -146,7 +146,7 @@ rollback_failed_install() {
 
 mkdir -p "$RELEASE_DIR" "$DATA_ROOT_ABS" "$CONFIG_ROOT_ABS" "$SYSTEMD_ROOT_ABS" "$SYSTEMD_USER_ROOT_ABS"
 
-lms_install_host_packages sudo openssh-server openssh-client caddy ffmpeg samba-common-bin smbclient cifs-utils
+lms_install_host_packages sudo openssh-server openssh-client caddy ffmpeg samba-common-bin smbclient cifs-utils socat
 lms_ensure_caddy_source_binding
 if [[ "$INSTALL_DESKTOP_HELPER" == "true" ]]; then
   lms_install_optional_host_packages libayatana-appindicator3-1

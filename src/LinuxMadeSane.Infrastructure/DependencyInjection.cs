@@ -107,6 +107,7 @@ public static class DependencyInjection
             client.Timeout = Timeout.InfiniteTimeSpan);
         services.AddSingleton(new FirewallTrialStorageSettings(Path.Combine(databaseDirectory, "firewall-trials")));
         services.AddSingleton(new SshAdminStorageSettings(Path.Combine(databaseDirectory, "ssh-admin-trials")));
+        services.AddSingleton(new PortForwardStorageSettings(Path.Combine(databaseDirectory, "port-forwards")));
         services.Configure<DesktopSessionBrokerOptions>(configuration.GetSection("DesktopSession"));
         services.AddSingleton<IDesktopSessionBroker, DesktopSessionBroker>();
         services.AddHostedService<DesktopSessionBrokerHostedService>();
@@ -173,6 +174,7 @@ public static class DependencyInjection
         services.AddSingleton<IFirewallManagementService>(serviceProvider =>
             serviceProvider.GetRequiredService<LocalUfwFirewallService>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LocalUfwFirewallService>());
+        services.AddSingleton<IPortForwardingService, LocalSocatPortForwardingService>();
         services.AddSingleton<LocalSshAdminService>();
         services.AddSingleton<ISshAdminService>(serviceProvider => serviceProvider.GetRequiredService<LocalSshAdminService>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LocalSshAdminService>());

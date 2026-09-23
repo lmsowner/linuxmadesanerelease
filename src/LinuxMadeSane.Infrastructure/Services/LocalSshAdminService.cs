@@ -633,7 +633,7 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
         var normalized = NormalizeEditor(editor);
         var builder = new StringBuilder();
         builder.AppendLine("# Managed by Linux Made Sane SSH Admin.");
-        builder.AppendLine("# Use LMS Security to change this file; manual edits will be overwritten.");
+        builder.AppendLine("# Use LMS Security & Networking to change this file; manual edits will be overwritten.");
         builder.AppendLine($"Port {normalized.Port}");
         builder.AppendLine($"PermitRootLogin {(normalized.PermitRootLogin ? "yes" : "no")}");
         builder.AppendLine($"PasswordAuthentication {YesNo(normalized.PasswordAuthentication)}");

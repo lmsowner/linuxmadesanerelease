@@ -1,0 +1,515 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using LinuxMadeSane.Application.Contracts.Security
+@using LinuxMadeSane.Application.Interfaces
+@inject IPortForwardingService PortForwardingService
+
+<div class="port-forward-content">
+    <div class="section-heading port-forward-heading">
+        <div>
+            <p class="eyebrow">Simple network relay</p>
+            <h2>Port forwarding with socat</h2>
+            <p class="meta-text">Listen on a chosen address and port, then relay that traffic to another IP and port. LMS creates a persistent, restricted systemd service for each forward.</p>
+        </div>
+        <UiCommandButton Label="@(isLoading ? "Refreshing..." : "Refresh")"
+                         Glyph="UiIconGlyph.Refresh"
+                         Variant="UiButtonVariant.Action"
+                         Disabled="@(isBusy || isLoading)"
+                         OnClick="LoadAsync" />
+    </div>
+
+    <div class="port-forward-explainer" aria-label="How port forwarding works">
+        <div><span>1</span><strong>Listen</strong><small>Choose this server's interface, protocol and source port.</small></div>
+        <div class="port-forward-arrow" aria-hidden="true">→</div>
+        <div><span>2</span><strong>Relay</strong><small>socat passes traffic without changing the application behind it.</small></div>
+        <div class="port-forward-arrow" aria-hidden="true">→</div>
+        <div><span>3</span><strong>Destination</strong><small>Enter the IP address and port that should receive the traffic.</small></div>
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(message))
+    {
+        <p class="callout @(messageIsError ? "error" : "success")" role="status">@message</p>
+    }
+
+    @if (!CanAdminister)
+    {
+        <p class="callout warning">An admitted LMS administrator session is required to install socat or change port-forward services.</p>
+    }
+    else if (isLoading && overview is null)
+    {
+        <section class="surface-subcard"><p class="meta-text">Reading network interfaces, socat and managed forward status...</p></section>
+    }
+    else if (overview is null)
+    {
+        <section class="surface-subcard port-forward-empty-panel">
+            <h3>Port-forward status unavailable</h3>
+            <p>Refresh to inspect this server without changing it.</p>
+        </section>
+    }
+    else
+    {
+        @if (!overview.IsSocatInstalled)
+        {
+            <section class="surface-subcard port-forward-install-panel">
+                <div>
+                    <p class="eyebrow">Required package</p>
+                    <h3>Install socat</h3>
+                    <p>socat is the small relay process used by these managed forwarding services. Installing it does not open a port or create a forward.</p>
+                </div>
+                <UiCommandButton Label="@(isBusy ? "Installing..." : "Install socat")"
+                                 Glyph="UiIconGlyph.Download"
+                                 Disabled="@isBusy"
+                                 OnClick="InstallSocatAsync" />
+            </section>
+        }
+        else
+        {
+            <section class="surface-subcard port-forward-runtime-panel">
+                <div>
+                    <p class="eyebrow">Relay engine</p>
+                    <h3>socat ready</h3>
+                    <p>@overview.SocatVersion</p>
+                </div>
+                <span class="status-pill success">Installed</span>
+            </section>
+
+            <EditForm Model="@editor" OnValidSubmit="SaveAsync" class="surface-subcard stack-form port-forward-editor">
+                <DataAnnotationsValidator />
+                <div class="port-forward-editor-heading">
+                    <div>
+                        <p class="eyebrow">@(editor.Id.HasValue ? "Edit forward" : "New forward")</p>
+                        <h3>@(editor.Id.HasValue ? editor.Name : "Where should traffic go?")</h3>
+                        <p>The availability check reads live TCP and UDP listeners. Saving checks again before systemd starts the relay.</p>
+                    </div>
+                    @if (editor.Id.HasValue)
+                    {
+                        <UiCommandButton Label="Cancel edit"
+                                         Glyph="UiIconGlyph.Clear"
+                                         Variant="UiButtonVariant.Ghost"
+                                         Disabled="@isBusy"
+                                         OnClick="ResetEditorAsync" />
+                    }
+                </div>
+
+                <UiTextField @bind-Value="editor.Name"
+                             Label="Name"
+                             Placeholder="Media server relay"
+                             Helper="A short label that explains what this forward is for." />
+
+                <div class="port-forward-form-section">
+                    <div class="port-forward-form-section-heading">
+                        <span class="port-forward-step">1</span>
+                        <div><strong>Listen on this server</strong><small>Pick one address to limit exposure, or all interfaces when every network should reach it.</small></div>
+                    </div>
+                    <div class="port-forward-field-grid">
+                        <UiSelectField TValue="string"
+                                       Value="@editor.ListenAddress"
+                                       ValueChanged="SetListenAddressAsync"
+                                       Label="Interface and address"
+                                       Helper="The local address socat will bind to.">
+                            @foreach (var option in overview.Interfaces)
+                            {
+                                <option value="@option.Address">@option.Label</option>
+                            }
+                        </UiSelectField>
+                        <UiSelectField TValue="PortForwardProtocol"
+                                       Value="@editor.Protocol"
+                                       ValueChanged="SetProtocolAsync"
+                                       Label="Protocol">
+                            <option value="@PortForwardProtocol.Tcp">TCP</option>
+                            <option value="@PortForwardProtocol.Udp">UDP</option>
+                        </UiSelectField>
+                        <UiNumberField TValue="int"
+                                       Value="@editor.SourcePort"
+                                       ValueChanged="SetSourcePortAsync"
+                                       Label="Source port"
+                                       Helper="The port clients connect to on this LMS server."
+                                       min="1"
+                                       max="65535" />
+                    </div>
+                    <div class="port-forward-port-check-row">
+                        <UiCommandButton Label="@(isCheckingPort ? "Checking..." : "Check source port")"
+                                         Glyph="UiIconGlyph.Search"
+                                         Variant="UiButtonVariant.Action"
+                                         Disabled="@(isBusy || isCheckingPort || editor.SourcePort is < 1 or > 65535)"
+                                         OnClick="CheckPortAsync" />
+                        @if (portCheck is not null)
+                        {
+                            <span class="status-pill @(portCheck.IsAvailable ? "success" : "warning")">@(portCheck.IsAvailable ? "Available" : "In use")</span>
+                            <span class="meta-text">@portCheck.Summary</span>
+                        }
+                    </div>
+                </div>
+
+                <div class="port-forward-form-section">
+                    <div class="port-forward-form-section-heading">
+                        <span class="port-forward-step">2</span>
+                        <div><strong>Send traffic here</strong><small>Use the address that this server can reach, such as a LAN device, container host or VPN peer.</small></div>
+                    </div>
+                    <div class="port-forward-field-grid destination-grid">
+                        <UiTextField @bind-Value="editor.DestinationAddress"
+                                     Label="Destination IP"
+                                     Placeholder="192.168.1.50"
+                                     Helper="IPv4 and IPv6 addresses are supported." />
+                        <UiNumberField TValue="int"
+                                       @bind-Value="editor.DestinationPort"
+                                       Label="Destination port"
+                                       Helper="The port used by the destination service."
+                                       min="1"
+                                       max="65535" />
+                    </div>
+                </div>
+
+                <div class="port-forward-preview">
+                    <span>@FormatProtocol(editor.Protocol)</span>
+                    <code>@FormatEndpoint(editor.ListenAddress, editor.SourcePort)</code>
+                    <span aria-hidden="true">→</span>
+                    <code>@FormatEndpoint(editor.DestinationAddress, editor.DestinationPort)</code>
+                </div>
+
+                <div class="port-forward-save-row">
+                    <UiCheckboxField @bind-Value="editor.IsEnabled"
+                                     Label="Start this forward after saving"
+                                     Helper="Disabled forwards keep their settings without listening on the port." />
+                    <UiCommandButton Label="@(isBusy ? "Saving..." : editor.Id.HasValue ? "Save forward" : "Create forward")"
+                                     Glyph="UiIconGlyph.Save"
+                                     Type="submit"
+                                     Disabled="@isBusy" />
+                </div>
+            </EditForm>
+
+            <section class="surface-subcard port-forward-list-panel">
+                <div class="port-forward-list-heading">
+                    <div>
+                        <p class="eyebrow">Managed forwards</p>
+                        <h3>@(overview.Rules.Count == 0 ? "No forwards yet" : $"{overview.Rules.Count} configured")</h3>
+                        <p>Each enabled entry starts at boot and restarts automatically if its relay process exits.</p>
+                    </div>
+                    <span class="status-pill neutral">systemd managed</span>
+                </div>
+
+                @if (overview.Rules.Count == 0)
+                {
+                    <div class="empty-state compact-empty-state">
+                        <h3>Create your first forward above</h3>
+                        <p>For example, listen on this server at TCP 8443 and forward it to 192.168.1.50:443.</p>
+                    </div>
+                }
+                else
+                {
+                    <div class="port-forward-list">
+                        @foreach (var rule in overview.Rules)
+                        {
+                            <article class="port-forward-row @(!rule.IsEnabled ? "is-disabled" : string.Empty)">
+                                <div class="port-forward-row-main">
+                                    <div class="port-forward-row-title">
+                                        <strong>@rule.Name</strong>
+                                        <span class="status-pill @GetStatusTone(rule)">@GetStatusLabel(rule)</span>
+                                    </div>
+                                    <div class="port-forward-route">
+                                        <span>@FormatProtocol(rule.Protocol)</span>
+                                        <code>@FormatEndpoint(rule.ListenAddress, rule.SourcePort)</code>
+                                        <span aria-hidden="true">→</span>
+                                        <code>@FormatEndpoint(rule.DestinationAddress, rule.DestinationPort)</code>
+                                    </div>
+                                    <span class="meta-text">Listening on @rule.InterfaceName · @rule.UnitName</span>
+                                </div>
+                                <div class="port-forward-row-actions">
+                                    <UiCommandButton Label="Edit"
+                                                     Glyph="UiIconGlyph.Edit"
+                                                     Variant="UiButtonVariant.Action"
+                                                     Disabled="@isBusy"
+                                                     OnClick="@(() => EditAsync(rule))" />
+                                    <UiCommandButton Label="@(rule.IsEnabled ? "Stop" : "Start")"
+                                                     Glyph="@(rule.IsEnabled ? UiIconGlyph.Stop : UiIconGlyph.Run)"
+                                                     Variant="UiButtonVariant.Action"
+                                                     Disabled="@isBusy"
+                                                     OnClick="@(() => ToggleAsync(rule))" />
+                                    <UiCommandButton Label="Remove"
+                                                     Glyph="UiIconGlyph.Delete"
+                                                     Variant="UiButtonVariant.Danger"
+                                                     Disabled="@isBusy"
+                                                     OnClick="@(() => OpenDeleteDialog(rule))" />
+                                </div>
+                            </article>
+                        }
+                    </div>
+                }
+            </section>
+
+            <p class="callout info">A running forward still needs the host firewall and upstream network to allow its source port. Review <a href="/settings?tab=firewall">Firewall</a> if remote clients cannot connect.</p>
+        }
+    }
+</div>
+
+<UiModal IsOpen="@(pendingDelete is not null)"
+         Title="Remove port forward"
+         Subtitle="Stop the relay and remove its persistent systemd service."
+         Class="port-forward-delete-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseDeleteDialog">
+    <ChildContent>
+        @if (pendingDelete is not null)
+        {
+            <div class="port-forward-delete-body">
+                <strong>@pendingDelete.Name</strong>
+                <div class="port-forward-route">
+                    <code>@FormatEndpoint(pendingDelete.ListenAddress, pendingDelete.SourcePort)</code>
+                    <span aria-hidden="true">→</span>
+                    <code>@FormatEndpoint(pendingDelete.DestinationAddress, pendingDelete.DestinationPort)</code>
+                </div>
+                <p class="meta-text">Clients using this source port will stop reaching the destination.</p>
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Cancel"
+                         Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Ghost"
+                         Disabled="@isBusy"
+                         OnClick="CloseDeleteDialog" />
+        <UiCommandButton Label="@(isBusy ? "Removing..." : "Remove forward")"
+                         Glyph="UiIconGlyph.Delete"
+                         Variant="UiButtonVariant.Danger"
+                         Disabled="@isBusy"
+                         OnClick="ConfirmDeleteAsync" />
+    </Footer>
+</UiModal>
+
+@code {
+    [Parameter] public bool CanAdminister { get; set; }
+
+    private PortForwardingOverview? overview;
+    private PortForwardEditor editor = CreateEditor();
+    private PortForwardPortCheck? portCheck;
+    private PortForwardRuleViewModel? pendingDelete;
+    private bool isLoading;
+    private bool isBusy;
+    private bool isCheckingPort;
+    private string? message;
+    private bool messageIsError;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        isLoading = true;
+        try
+        {
+            overview = await PortForwardingService.GetOverviewAsync();
+            EnsureSelectedInterface();
+        }
+        catch (Exception exception)
+        {
+            message = exception.Message;
+            messageIsError = true;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task InstallSocatAsync()
+    {
+        if (!CanAdminister || isBusy)
+        {
+            return;
+        }
+
+        await RunOperationAsync(
+            () => PortForwardingService.InstallSocatAsync(),
+            "socat installed. You can now create a port forward.");
+    }
+
+    private async Task CheckPortAsync()
+    {
+        if (!CanAdminister || isBusy || isCheckingPort)
+        {
+            return;
+        }
+
+        isCheckingPort = true;
+        message = null;
+        try
+        {
+            portCheck = await PortForwardingService.CheckSourcePortAsync(editor);
+        }
+        catch (Exception exception)
+        {
+            portCheck = new PortForwardPortCheck(false, exception.Message);
+        }
+        finally
+        {
+            isCheckingPort = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (!CanAdminister || isBusy)
+        {
+            return;
+        }
+
+        var editing = editor.Id.HasValue;
+        await RunOperationAsync(
+            () => PortForwardingService.SaveAsync(editor),
+            editing ? "Port forward updated." : "Port forward created.",
+            resetEditor: true);
+    }
+
+    private Task ToggleAsync(PortForwardRuleViewModel rule) => RunOperationAsync(
+        () => PortForwardingService.SetEnabledAsync(rule.Id, !rule.IsEnabled),
+        rule.IsEnabled ? $"{rule.Name} stopped." : $"{rule.Name} started.");
+
+    private Task EditAsync(PortForwardRuleViewModel rule)
+    {
+        editor = new PortForwardEditor
+        {
+            Id = rule.Id,
+            Name = rule.Name,
+            ListenAddress = rule.ListenAddress,
+            SourcePort = rule.SourcePort,
+            Protocol = rule.Protocol,
+            DestinationAddress = rule.DestinationAddress,
+            DestinationPort = rule.DestinationPort,
+            IsEnabled = rule.IsEnabled
+        };
+        portCheck = null;
+        message = $"Editing {rule.Name}.";
+        messageIsError = false;
+        return Task.CompletedTask;
+    }
+
+    private Task ResetEditorAsync()
+    {
+        editor = CreateEditor();
+        EnsureSelectedInterface();
+        portCheck = null;
+        return Task.CompletedTask;
+    }
+
+    private Task SetListenAddressAsync(string value)
+    {
+        editor.ListenAddress = value;
+        portCheck = null;
+        return Task.CompletedTask;
+    }
+
+    private Task SetProtocolAsync(PortForwardProtocol value)
+    {
+        editor.Protocol = value;
+        portCheck = null;
+        return Task.CompletedTask;
+    }
+
+    private Task SetSourcePortAsync(int value)
+    {
+        editor.SourcePort = value;
+        portCheck = null;
+        return Task.CompletedTask;
+    }
+
+    private void OpenDeleteDialog(PortForwardRuleViewModel rule) => pendingDelete = rule;
+
+    private void CloseDeleteDialog()
+    {
+        if (!isBusy)
+        {
+            pendingDelete = null;
+        }
+    }
+
+    private async Task ConfirmDeleteAsync()
+    {
+        if (pendingDelete is null || isBusy)
+        {
+            return;
+        }
+
+        var deleted = pendingDelete;
+        await RunOperationAsync(
+            () => PortForwardingService.DeleteAsync(deleted.Id),
+            $"{deleted.Name} removed.",
+            resetEditor: editor.Id == deleted.Id);
+        if (!messageIsError)
+        {
+            pendingDelete = null;
+        }
+    }
+
+    private async Task RunOperationAsync(Func<Task> operation, string successMessage, bool resetEditor = false)
+    {
+        if (!CanAdminister || isBusy)
+        {
+            return;
+        }
+
+        isBusy = true;
+        message = null;
+        messageIsError = false;
+        try
+        {
+            await operation();
+            message = successMessage;
+            if (resetEditor)
+            {
+                editor = CreateEditor();
+                portCheck = null;
+            }
+        }
+        catch (Exception exception)
+        {
+            message = exception.Message;
+            messageIsError = true;
+        }
+        finally
+        {
+            try
+            {
+                overview = await PortForwardingService.GetOverviewAsync();
+                EnsureSelectedInterface();
+            }
+            catch (Exception refreshException)
+            {
+                message = string.IsNullOrWhiteSpace(message)
+                    ? refreshException.Message
+                    : $"{message} Refresh failed: {refreshException.Message}";
+                messageIsError = true;
+            }
+            isBusy = false;
+        }
+    }
+
+    private void EnsureSelectedInterface()
+    {
+        if (overview is not null && overview.Interfaces.All(option =>
+                !option.Address.Equals(editor.ListenAddress, StringComparison.OrdinalIgnoreCase)))
+        {
+            editor.ListenAddress = overview.Interfaces.FirstOrDefault()?.Address ?? "0.0.0.0";
+        }
+    }
+
+    private static PortForwardEditor CreateEditor() => new()
+    {
+        ListenAddress = "0.0.0.0",
+        Protocol = PortForwardProtocol.Tcp,
+        IsEnabled = true
+    };
+
+    private static string GetStatusLabel(PortForwardRuleViewModel rule) =>
+        !rule.IsEnabled ? "Stopped" : rule.IsRunning ? "Running" : rule.Status;
+
+    private static string GetStatusTone(PortForwardRuleViewModel rule) =>
+        !rule.IsEnabled ? "neutral" : rule.IsRunning ? "success" : "warning";
+
+    private static string FormatProtocol(PortForwardProtocol protocol) => protocol == PortForwardProtocol.Tcp ? "TCP" : "UDP";
+
+    private static string FormatEndpoint(string? address, int port)
+    {
+        var host = string.IsNullOrWhiteSpace(address) ? "address" : address;
+        return host.Contains(':', StringComparison.Ordinal) ? $"[{host}]:{port}" : $"{host}:{port}";
+    }
+}

@@ -51,9 +51,9 @@ public sealed class EdgeGatewayServerPublishingService(
         {
             var accounts = await users.ListAsync(cancellationToken);
             if (accounts.Count == 0)
-                throw new InvalidOperationException("Set up an LMS Account in LMS Security first, then publish this server.");
+                throw new InvalidOperationException("Set up an LMS Account in Security & Networking first, then publish this server.");
             if (!accounts.Any(user => user.IsEnabled))
-                throw new InvalidOperationException("Enable an LMS Account in LMS Security before publishing this server.");
+                throw new InvalidOperationException("Enable an LMS Account in Security & Networking before publishing this server.");
 
             var hostname = BuildServerHostname(Environment.MachineName, domainName);
             var dashboard = await gateway.GetDashboardAsync(cancellationToken);
@@ -71,7 +71,7 @@ public sealed class EdgeGatewayServerPublishingService(
 
             var access = await networkAccess.EvaluateAsync(IPAddress.Loopback, hostname, cancellationToken);
             if (!access.IsAllowed)
-                throw new InvalidOperationException("Allow the local gateway connection in LMS Security before publishing this server.");
+                throw new InvalidOperationException("Allow the local gateway connection in Security & Networking before publishing this server.");
             using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
                 timeout.CancelAfter(TimeSpan.FromSeconds(10));

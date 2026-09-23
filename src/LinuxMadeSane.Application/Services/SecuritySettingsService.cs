@@ -486,7 +486,7 @@ public sealed class SecuritySettingsService(
             "Linux Made Sane email test",
             """
             <p>Linux Made Sane email delivery is configured and working.</p>
-            <p>This message was sent from the LMS Security messaging settings test.</p>
+            <p>This message was sent from the LMS Security &amp; Networking messaging settings test.</p>
             """,
             cancellationToken);
 
