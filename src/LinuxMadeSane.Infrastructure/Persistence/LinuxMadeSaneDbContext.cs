@@ -164,6 +164,8 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.HasKey(item => item.Id);
             entity.Property(item => item.Name).HasMaxLength(160);
             entity.Property(item => item.RecipeId).HasMaxLength(120);
+            entity.Property(item => item.PromptRecipeId).HasMaxLength(120);
+            entity.HasIndex(item => item.RecipeRunId);
             entity.Property(item => item.NetworkName).HasMaxLength(160);
             entity.HasMany(item => item.Installations)
                 .WithOne(item => item.Deployment)

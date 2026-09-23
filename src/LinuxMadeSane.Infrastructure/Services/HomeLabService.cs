@@ -170,6 +170,50 @@ public sealed class HomeLabService(
             cancellationToken);
     }
 
+    public async Task AssignRecipeRunAsync(
+        HomeLabRecipeRunAssignment assignment,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(assignment);
+        var recipeId = assignment.RecipeId?.Trim() ?? string.Empty;
+        var recipeName = assignment.RecipeName?.Trim() ?? string.Empty;
+        var installationIds = assignment.InstallationIds.Distinct().ToArray();
+        if (recipeId.Length is < 1 or > 120 || recipeName.Length is < 1 or > 160 ||
+            assignment.RecipeRunId == Guid.Empty || installationIds.Length == 0)
+        {
+            throw new InvalidOperationException("The Home Lab recipe run assignment is incomplete.");
+        }
+
+        var installations = await dbContext.HomeLabInstallations
+            .Where(item => installationIds.Contains(item.Id))
+            .ToListAsync(cancellationToken);
+        if (installations.Count != installationIds.Length)
+        {
+            throw new InvalidOperationException("One or more Home Lab recipe installations no longer exist.");
+        }
+
+        var deploymentIds = installations.Select(item => item.DeploymentId).Distinct().ToArray();
+        var deployments = await dbContext.HomeLabDeployments
+            .Where(item => deploymentIds.Contains(item.Id))
+            .ToListAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        foreach (var deployment in deployments)
+        {
+            deployment.RecipeRunId = assignment.RecipeRunId;
+            deployment.PromptRecipeId = recipeId;
+            deployment.Name = recipeName;
+            deployment.UpdatedAtUtc = now;
+        }
+
+        foreach (var installation in installations)
+        {
+            installation.IsRecipeInstallation = true;
+            installation.UpdatedAtUtc = now;
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
     public async Task<HomeLabOperationResult> ReconfigureVpnGatewayAsync(
         Guid installationId,
         IReadOnlyDictionary<string, string> configuration,
@@ -3384,7 +3428,7 @@ public sealed class HomeLabService(
             : HomeLabHealthState.Failed;
 
     private static HomeLabDeployment MapDeployment(HomeLabDeploymentEntity item) =>
-        new(item.Id, item.Name, item.RecipeId, item.NetworkName, item.CreatedAtUtc, item.UpdatedAtUtc);
+        new(item.Id, item.Name, item.RecipeId, item.RecipeRunId, item.PromptRecipeId, item.NetworkName, item.CreatedAtUtc, item.UpdatedAtUtc);
 
     private static HomeLabStorageRole MapStorageRole(HomeLabStorageRoleEntity item) =>
         new(item.Role, item.HostPath, item.UpdatedAtUtc);

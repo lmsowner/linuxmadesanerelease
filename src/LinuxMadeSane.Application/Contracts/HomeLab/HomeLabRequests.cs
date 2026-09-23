@@ -25,6 +25,12 @@ public sealed record HomeLabRecipeInstallRequest(
     IReadOnlySet<string>? AppIds = null,
     IReadOnlyDictionary<string, string>? SecretConfiguration = null);
 
+public sealed record HomeLabRecipeRunAssignment(
+    string RecipeId,
+    string RecipeName,
+    Guid RecipeRunId,
+    IReadOnlyList<Guid> InstallationIds);
+
 public sealed record HomeLabContainerVolumeSetting(
     string HostPath,
     string ContainerPath,

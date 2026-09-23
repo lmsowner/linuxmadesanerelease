@@ -838,6 +838,8 @@ public sealed class SqliteDatabaseInitializer(
                 Id TEXT NOT NULL PRIMARY KEY,
                 Name TEXT NOT NULL,
                 RecipeId TEXT NULL,
+                RecipeRunId TEXT NULL,
+                PromptRecipeId TEXT NULL,
                 NetworkName TEXT NOT NULL,
                 CreatedAtUtc TEXT NOT NULL,
                 UpdatedAtUtc TEXT NOT NULL
@@ -878,6 +880,8 @@ public sealed class SqliteDatabaseInitializer(
 
         await dbContext.Database.ExecuteSqlRawAsync(deploymentsSql, cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(installationsSql, cancellationToken);
+        await EnsureColumnExistsAsync("home_lab_deployments", "RecipeRunId", "TEXT NULL", cancellationToken);
+        await EnsureColumnExistsAsync("home_lab_deployments", "PromptRecipeId", "TEXT NULL", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "NetworkMode", "TEXT NOT NULL DEFAULT 'bridge'", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "ConfigurationJson", "TEXT NOT NULL DEFAULT '{{}}'", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "SecretConfigurationJson", "TEXT NOT NULL DEFAULT '{{}}'", cancellationToken);

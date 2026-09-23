@@ -8,6 +8,8 @@ public sealed class HomeLabDeploymentEntity
     public Guid Id { get; set; }
     public string Name { get; set; } = string.Empty;
     public string? RecipeId { get; set; }
+    public Guid? RecipeRunId { get; set; }
+    public string? PromptRecipeId { get; set; }
     public string NetworkName { get; set; } = string.Empty;
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }

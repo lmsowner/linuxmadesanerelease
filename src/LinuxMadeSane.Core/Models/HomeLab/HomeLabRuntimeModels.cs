@@ -34,6 +34,8 @@ public sealed record HomeLabDeployment(
     Guid Id,
     string Name,
     string? RecipeId,
+    Guid? RecipeRunId,
+    string? PromptRecipeId,
     string NetworkName,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);

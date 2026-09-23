@@ -12,6 +12,7 @@ public interface IHomeLabService
     Task<HomeLabStorageRole> SaveStorageRoleAsync(string role, string hostPath, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> InstallAppAsync(HomeLabInstallRequest request, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> InstallRecipeAsync(HomeLabRecipeInstallRequest request, CancellationToken cancellationToken = default);
+    Task AssignRecipeRunAsync(HomeLabRecipeRunAssignment assignment, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> ReconfigureVpnGatewayAsync(Guid installationId, IReadOnlyDictionary<string, string> configuration, IReadOnlyDictionary<string, string> secretConfiguration, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> SetNetworkRouteAsync(Guid installationId, bool useVpnGateway, Guid? gatewayInstallationId = null, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> UpdateContainerSettingsAsync(Guid installationId, HomeLabContainerSettingsUpdate settings, CancellationToken cancellationToken = default);

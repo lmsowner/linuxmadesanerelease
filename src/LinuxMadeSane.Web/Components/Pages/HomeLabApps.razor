@@ -405,97 +405,106 @@
                             <span>Use a guided prompt recipe, enter your own request, or add a VPN Gateway.</span>
                         </div>
                     }
-                    @{
-                        var orderedInstallations = workspace.Installations
-                            .OrderBy(item => IsVpnGateway(item) ? 0 : 1)
-                            .ThenBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
-                            .ToArray();
-                        var firstApplicationId = orderedInstallations.FirstOrDefault(item => !IsVpnGateway(item))?.Id;
-                        var hasVpnGateways = orderedInstallations.Any(IsVpnGateway);
-                    }
-                    @foreach (var installation in orderedInstallations)
+                    @foreach (var group in BuildInstallationGroups())
                     {
-                        @if (hasVpnGateways && installation.Id == firstApplicationId)
+                        var expanded = !collapsedInstallationGroups.Contains(group.Key);
+                        <button type="button"
+                                class="home-lab-installation-group-heading"
+                                aria-expanded="@expanded"
+                                aria-controls="@($"home-lab-installation-group-{group.Key}")"
+                                @onclick="() => ToggleInstallationGroup(group.Key)">
+                            <span class="home-lab-installation-group-toggle" aria-hidden="true">@(expanded ? "−" : "+")</span>
+                            <span class="home-lab-installation-group-name">
+                                <strong>@group.Name</strong>
+                                <span>@group.Detail</span>
+                            </span>
+                            <span class="home-lab-installation-group-count">@FormatContainerCount(group.Installations.Count)</span>
+                        </button>
+                        @if (expanded)
                         {
-                            <div class="home-lab-app-group-separator" role="separator" aria-label="End of VPN Gateways"></div>
-                        }
-                        var app = GetApp(installation.AppId);
-                        <div class="home-lab-app-row">
-                            <div class="home-lab-app-name">
-                                <strong>@installation.DisplayName</strong>
-                                <span>@app.Description</span>
-                            </div>
-                            <div class="home-lab-network-compact">
-                                @if (app.SupportsVpnGateway)
-                                {
-                                    <select class="ui-control-input home-lab-route-select"
-                                            aria-label="Internet route for @installation.DisplayName"
-                                            value="@GetRouteSelection(installation)"
-                                            disabled="@busy"
-                                            @onchange="eventArgs => ChangeSummaryRouteAsync(installation, eventArgs.Value?.ToString())">
-                                        <option value="direct" disabled="@app.RequiresVpnGateway">Direct (no VPN)</option>
-                                        @foreach (var gateway in InstalledVpnGateways)
+                            <div id="@($"home-lab-installation-group-{group.Key}")" class="home-lab-installation-group-rows">
+                            @foreach (var installation in group.Installations)
+                            {
+                                var app = GetApp(installation.AppId);
+                                <div class="home-lab-app-row">
+                                    <div class="home-lab-app-name">
+                                        <strong>@installation.DisplayName</strong>
+                                        <span>@app.Description</span>
+                                    </div>
+                                    <div class="home-lab-network-compact">
+                                        @if (app.SupportsVpnGateway)
                                         {
-                                            <option value="@gateway.Id">@gateway.DisplayName</option>
+                                            <select class="ui-control-input home-lab-route-select"
+                                                    aria-label="Internet route for @installation.DisplayName"
+                                                    value="@GetRouteSelection(installation)"
+                                                    disabled="@busy"
+                                                    @onchange="eventArgs => ChangeSummaryRouteAsync(installation, eventArgs.Value?.ToString())">
+                                                <option value="direct" disabled="@app.RequiresVpnGateway">Direct (no VPN)</option>
+                                                @foreach (var gateway in InstalledVpnGateways)
+                                                {
+                                                    <option value="@gateway.Id">@gateway.DisplayName</option>
+                                                }
+                                            </select>
+                                            <UiPill Tone="@GetCompactNetworkTone(installation)">@GetCompactNetworkState(installation)</UiPill>
                                         }
-                                    </select>
-                                    <UiPill Tone="@GetCompactNetworkTone(installation)">@GetCompactNetworkState(installation)</UiPill>
-                                }
-                                else if (IsVpnGateway(installation))
-                                {
-                                    <UiPill Tone="@GetCompactNetworkTone(installation)">VPN Gateway</UiPill>
-                                }
-                                else
-                                {
-                                    <UiPill Tone="@UiPillTone.Neutral">Direct</UiPill>
-                                }
+                                        else if (IsVpnGateway(installation))
+                                        {
+                                            <UiPill Tone="@GetCompactNetworkTone(installation)">VPN Gateway</UiPill>
+                                        }
+                                        else
+                                        {
+                                            <UiPill Tone="@UiPillTone.Neutral">Direct</UiPill>
+                                        }
+                                    </div>
+                                    <UiPill Tone="@GetHealthTone(installation.HealthState)">@installation.HealthState</UiPill>
+                                    <div class="home-lab-row-actions">
+                                        @if (BuildLocalUrl(installation) is { } localUrl)
+                                        {
+                                            <UiCommandButton Label="Open"
+                                                             Glyph="UiIconGlyph.Website"
+                                                             Variant="UiButtonVariant.Action"
+                                                             Href="@localUrl"
+                                                             Target="_blank"
+                                                             Rel="noopener"
+                                                             referrerpolicy="@(installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) ? "no-referrer" : null)" />
+                                        }
+                                        <UiCommandButton Label="AI Help"
+                                                         Title="Open a troubleshooting chat for this Docker container"
+                                                         Glyph="UiIconGlyph.Ai"
+                                                         Variant="UiButtonVariant.PrimaryMuted"
+                                                         Disabled="@(busy || startingPromptRecipeId is not null)"
+                                                         OnClick="() => StartContainerHelpAsync(installation)" />
+                                        <UiCommandButton Label="Settings"
+                                                         Glyph="UiIconGlyph.Edit"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@busy"
+                                                         OnClick="() => ManageAsync(installation)" />
+                                        <select class="ui-control-input home-lab-action-select"
+                                                aria-label="Actions for @installation.DisplayName"
+                                                value=""
+                                                disabled="@busy"
+                                                @onchange="eventArgs => HandleContainerActionAsync(installation, eventArgs.Value?.ToString())">
+                                            <option value="">Actions...</option>
+                                            <option value="start">Start</option>
+                                            <option value="stop">Stop</option>
+                                            <option value="restart">Restart</option>
+                                            @if (CanRepair(installation))
+                                            {
+                                                <option value="repair">Repair</option>
+                                            }
+                                            <option value="update">Update</option>
+                                            @if (IsVpnGateway(installation))
+                                            {
+                                                <option value="rename">Rename</option>
+                                                <option value="vpn-settings">VPN settings</option>
+                                            }
+                                            <option value="remove">Remove...</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            }
                             </div>
-                            <UiPill Tone="@GetHealthTone(installation.HealthState)">@installation.HealthState</UiPill>
-                            <div class="home-lab-row-actions">
-                                @if (BuildLocalUrl(installation) is { } localUrl)
-                                {
-                                    <UiCommandButton Label="Open"
-                                                     Glyph="UiIconGlyph.Website"
-                                                     Variant="UiButtonVariant.Action"
-                                                     Href="@localUrl"
-                                                     Target="_blank"
-                                                     Rel="noopener"
-                                                     referrerpolicy="@(installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) ? "no-referrer" : null)" />
-                                }
-                                <UiCommandButton Label="AI Help"
-                                                 Title="Open a troubleshooting chat for this Docker container"
-                                                 Glyph="UiIconGlyph.Ai"
-                                                 Variant="UiButtonVariant.PrimaryMuted"
-                                                 Disabled="@(busy || startingPromptRecipeId is not null)"
-                                                 OnClick="() => StartContainerHelpAsync(installation)" />
-                                <UiCommandButton Label="Settings"
-                                                 Glyph="UiIconGlyph.Edit"
-                                                 Variant="UiButtonVariant.Ghost"
-                                                 Disabled="@busy"
-                                                 OnClick="() => ManageAsync(installation)" />
-                                <select class="ui-control-input home-lab-action-select"
-                                        aria-label="Actions for @installation.DisplayName"
-                                        value=""
-                                        disabled="@busy"
-                                        @onchange="eventArgs => HandleContainerActionAsync(installation, eventArgs.Value?.ToString())">
-                                    <option value="">Actions...</option>
-                                    <option value="start">Start</option>
-                                    <option value="stop">Stop</option>
-                                    <option value="restart">Restart</option>
-                                    @if (CanRepair(installation))
-                                    {
-                                        <option value="repair">Repair</option>
-                                    }
-                                    <option value="update">Update</option>
-                                    @if (IsVpnGateway(installation))
-                                    {
-                                        <option value="rename">Rename</option>
-                                        <option value="vpn-settings">VPN settings</option>
-                                    }
-                                    <option value="remove">Remove...</option>
-                                </select>
-                            </div>
-                        </div>
+                        }
                     }
                 </div>
             </TabPage>
@@ -639,6 +648,7 @@
     private HomeLabEffectiveConfiguration? effectiveConfiguration;
     private HomeLabNetworkSecurity? networkSecurity;
     private readonly Dictionary<Guid, HomeLabNetworkSecurity> summaryNetworkSecurity = [];
+    private readonly HashSet<string> collapsedInstallationGroups = new(StringComparer.Ordinal);
     private string? selectedLogs;
     private string settingsTab = "overview";
     private string containerImageDraft = string.Empty;
@@ -653,6 +663,147 @@
             .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
         ?? Enumerable.Empty<HomeLabAppInstallation>();
+
+    private IReadOnlyList<HomeLabInstallationGroup> BuildInstallationGroups()
+    {
+        if (workspace is null)
+        {
+            return [];
+        }
+
+        var groups = new List<HomeLabInstallationGroup>();
+        var recipeGroups = new List<HomeLabInstallationGroup>();
+        var assignedInstallationIds = new HashSet<Guid>();
+        var gateways = workspace.Installations
+            .Where(IsVpnGateway)
+            .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (gateways.Length > 0)
+        {
+            assignedInstallationIds.UnionWith(gateways.Select(item => item.Id));
+            groups.Add(new("vpn-gateways", "VPN Gateways", "VPN infrastructure", gateways, DateTimeOffset.MaxValue));
+        }
+
+        foreach (var recipeRun in workspace.Deployments
+                     .Where(item => item.RecipeRunId.HasValue || !string.IsNullOrWhiteSpace(item.RecipeId))
+                     .GroupBy(item => item.RecipeRunId ?? item.Id)
+                     .OrderByDescending(items => items.Max(item => item.RecipeRunId.HasValue ? item.UpdatedAtUtc : item.CreatedAtUtc)))
+        {
+            var deployment = recipeRun.OrderByDescending(item => item.UpdatedAtUtc).First();
+            var deploymentIds = recipeRun.Select(item => item.Id).ToHashSet();
+            var installations = workspace.Installations
+                .Where(item => deploymentIds.Contains(item.DeploymentId) && !assignedInstallationIds.Contains(item.Id))
+                .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (installations.Length == 0)
+            {
+                continue;
+            }
+
+            assignedInstallationIds.UnionWith(installations.Select(item => item.Id));
+            var runDate = deployment.RecipeRunId.HasValue
+                ? recipeRun.Max(item => item.UpdatedAtUtc)
+                : recipeRun.Min(item => item.CreatedAtUtc);
+            recipeGroups.Add(new(
+                $"recipe-{recipeRun.Key:N}",
+                ResolveRecipeName(deployment),
+                FormatRecipeRunDetail(runDate),
+                installations,
+                runDate));
+        }
+
+        // Prompt recipes originally installed each app as a standalone deployment. Match those
+        // legacy installs by the published recipe app list so existing systems gain useful groups.
+        foreach (var recipe in promptRecipes
+                     .OrderByDescending(item => item.AppIds.Count)
+                     .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            var runNumber = 0;
+            while (TryMatchRecipeInstallations(recipe, assignedInstallationIds, out var installations))
+            {
+                runNumber++;
+                assignedInstallationIds.UnionWith(installations.Select(item => item.Id));
+                var createdAt = installations.Min(item => item.CreatedAtUtc);
+                recipeGroups.Add(new(
+                    $"prompt-recipe-{recipe.Id}-{runNumber}",
+                    recipe.Name,
+                    FormatRecipeRunDetail(createdAt),
+                    installations,
+                    createdAt));
+            }
+        }
+
+        groups.AddRange(recipeGroups.OrderByDescending(item => item.SortDate));
+
+        var standalone = workspace.Installations
+            .Where(item => !assignedInstallationIds.Contains(item.Id))
+            .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (standalone.Length > 0)
+        {
+            groups.Add(new("individual", "Individually installed", "Added outside a recipe", standalone, DateTimeOffset.MinValue));
+        }
+
+        return groups;
+    }
+
+    private bool TryMatchRecipeInstallations(
+        HomeLabPromptRecipe recipe,
+        IReadOnlySet<Guid> assignedInstallationIds,
+        out HomeLabAppInstallation[] installations)
+    {
+        var matched = new List<HomeLabAppInstallation>();
+        foreach (var appId in recipe.AppIds)
+        {
+            var installation = workspace!.Installations
+                .Where(item => !assignedInstallationIds.Contains(item.Id) &&
+                               !matched.Any(match => match.Id == item.Id) &&
+                               item.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(item => item.CreatedAtUtc)
+                .FirstOrDefault();
+            if (installation is null)
+            {
+                installations = [];
+                return false;
+            }
+
+            matched.Add(installation);
+        }
+
+        var deploymentIds = matched.Select(item => item.DeploymentId).ToHashSet();
+        installations = workspace!.Installations
+            .Where(item => deploymentIds.Contains(item.DeploymentId) &&
+                           !assignedInstallationIds.Contains(item.Id) &&
+                           !IsVpnGateway(item))
+            .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return installations.Length > 0;
+    }
+
+    private string ResolveRecipeName(HomeLabDeployment deployment) =>
+        promptRecipes.FirstOrDefault(item => item.Id.Equals(deployment.PromptRecipeId ?? deployment.RecipeId, StringComparison.OrdinalIgnoreCase))?.Name
+        ?? workspace?.Recipes.FirstOrDefault(item => item.Id.Equals(deployment.RecipeId, StringComparison.OrdinalIgnoreCase))?.Name
+        ?? deployment.Name;
+
+    private void ToggleInstallationGroup(string key)
+    {
+        if (!collapsedInstallationGroups.Add(key))
+        {
+            collapsedInstallationGroups.Remove(key);
+        }
+    }
+
+    private static string FormatRecipeRunDetail(DateTimeOffset createdAt) =>
+        $"Recipe run · {createdAt.ToLocalTime():d MMM yyyy, HH:mm}";
+
+    private static string FormatContainerCount(int count) => $"{count} {(count == 1 ? "container" : "containers")}";
+
+    private sealed record HomeLabInstallationGroup(
+        string Key,
+        string Name,
+        string Detail,
+        IReadOnlyList<HomeLabAppInstallation> Installations,
+        DateTimeOffset SortDate);
 
     protected override Task OnInitializedAsync() => LoadAsync();
 

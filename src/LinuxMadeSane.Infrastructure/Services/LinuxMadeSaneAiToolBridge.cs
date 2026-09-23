@@ -734,6 +734,17 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             succeeded &= !recipe.RequiresVpnGateway || mapped.IsSecured;
         }
 
+        if (targetInstallations.Count > 0)
+        {
+            await service.AssignRecipeRunAsync(
+                new HomeLabRecipeRunAssignment(
+                    recipe.Id,
+                    recipe.Name,
+                    Guid.NewGuid(),
+                    targetInstallations.Select(item => item.InstallationId).ToArray()),
+                cancellationToken);
+        }
+
         return CreateHomeLabApplyResult(
             definition,
             context.Invocation,
