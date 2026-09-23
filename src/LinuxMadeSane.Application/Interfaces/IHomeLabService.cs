@@ -13,6 +13,7 @@ public interface IHomeLabService
         GetWorkspaceAsync(cancellationToken);
     Task<IReadOnlyList<HomeLabRuntimeHealth>> RefreshRuntimeHealthAsync(CancellationToken cancellationToken = default);
     Task<HomeLabStorageRole> SaveStorageRoleAsync(string role, string hostPath, CancellationToken cancellationToken = default);
+    Task<HomeLabOperationResult> ApplyStandardStorageAsync(CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> InstallAppAsync(HomeLabInstallRequest request, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> InstallRecipeAsync(HomeLabRecipeInstallRequest request, CancellationToken cancellationToken = default);
     Task AssignRecipeRunAsync(HomeLabRecipeRunAssignment assignment, CancellationToken cancellationToken = default);

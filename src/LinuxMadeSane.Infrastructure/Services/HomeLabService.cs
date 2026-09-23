@@ -40,6 +40,8 @@ public sealed class HomeLabService(
     private const string ContainerSettingsBackupVolumesKey = "lms-container-backup-volumes";
     private const string HomeLabFilesRole = "home-lab";
     private const string DefaultHomeLabFilesRoot = "/mnt/storage/home-lab";
+    private const string StandardStorageHostPath = "/mnt/storage";
+    private const string StandardStorageContainerPath = "/storage";
     private const int MaximumConfigFileBytes = 128 * 1024;
     private const int MaximumConfigInspectionBytes = 256 * 1024;
     private static readonly HashSet<string> InspectableConfigExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -200,6 +202,93 @@ public sealed class HomeLabService(
         entity.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
         return MapStorageRole(entity);
+    }
+
+    public async Task<HomeLabOperationResult> ApplyStandardStorageAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var installations = await dbContext.HomeLabInstallations
+            .OrderBy(item => item.DisplayName)
+            .ToListAsync(cancellationToken);
+        if (installations.Count == 0)
+        {
+            return Success(
+                "Standard storage is ready.",
+                $"New HomeLab containers will receive {StandardStorageHostPath} at {StandardStorageContainerPath}.",
+                [],
+                HomeLabHealthState.Healthy);
+        }
+
+        var output = new List<string>();
+        var processed = new HashSet<Guid>();
+        var failed = new List<string>();
+        var recreated = 0;
+        var stopped = 0;
+
+        foreach (var gateway in installations.Where(item =>
+                     item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase)))
+        {
+            var routed = installations.Where(item =>
+                item.NetworkMode.Equals($"container:{gateway.ContainerName}", StringComparison.OrdinalIgnoreCase)).ToArray();
+            processed.Add(gateway.Id);
+            foreach (var installation in routed)
+            {
+                processed.Add(installation.Id);
+            }
+
+            if (ToHealth(gateway.HealthState) == HomeLabHealthState.Stopped)
+            {
+                stopped += 1 + routed.Length;
+                continue;
+            }
+
+            var result = await RecreateVpnGatewayAsync(gateway, [], false, cancellationToken);
+            output.AddRange(result.Output);
+            if (result.Succeeded)
+            {
+                recreated += 1 + routed.Length;
+            }
+            else
+            {
+                failed.Add(gateway.DisplayName);
+            }
+        }
+
+        foreach (var installation in installations.Where(item => !processed.Contains(item.Id)))
+        {
+            if (ToHealth(installation.HealthState) == HomeLabHealthState.Stopped)
+            {
+                stopped++;
+                continue;
+            }
+
+            var result = await ExecuteAsync(installation.Id, HomeLabLifecycleAction.Recreate, cancellationToken);
+            output.AddRange(result.Output);
+            if (result.Succeeded)
+            {
+                recreated++;
+            }
+            else
+            {
+                failed.Add(installation.DisplayName);
+            }
+        }
+
+        if (failed.Count > 0)
+        {
+            return Failure(
+                "Standard storage was only partly applied.",
+                $"{recreated} container(s) now use {StandardStorageContainerPath}. Failed: {string.Join(", ", failed)}.",
+                output,
+                HomeLabHealthState.Degraded);
+        }
+
+        return Success(
+            "Standard storage applied.",
+            $"{recreated} running container(s) now see {StandardStorageHostPath} at {StandardStorageContainerPath} with live host-mount propagation." +
+            (stopped > 0 ? $" {stopped} stopped container(s) will receive it when LMS next recreates them." : string.Empty),
+            output,
+            HomeLabHealthState.Healthy);
     }
 
     public Task<HomeLabOperationResult> InstallAppAsync(
@@ -764,7 +853,8 @@ public sealed class HomeLabService(
         installation.Image = image;
         installation.ConfigurationJson = JsonSerializer.Serialize(persistedConfiguration, JsonOptions);
         installation.VolumeMappingsJson = JsonSerializer.Serialize(
-            volumes.Select(volume => new HomeLabVolumeBinding(volume.HostPath, volume.ContainerPath, volume.ReadOnly)),
+            EnsureStandardStorageBinding(volumes.Select(volume =>
+                new HomeLabVolumeBinding(volume.HostPath, volume.ContainerPath, volume.ReadOnly))),
             JsonOptions);
         installation.HealthState = (int)HomeLabHealthState.Starting;
         installation.HealthDetail = "Applying edited container settings.";
@@ -2515,10 +2605,10 @@ public sealed class HomeLabService(
         bool isRecipe,
         DateTimeOffset now)
     {
-        var bindings = app.Volumes.Select(volume => new HomeLabVolumeBinding(
+        var bindings = EnsureStandardStorageBinding(app.Volumes.Select(volume => new HomeLabVolumeBinding(
             ResolveVolumeHostPath(deployment.Id, app, volume, storagePaths),
             volume.ContainerPath,
-            volume.ReadOnly)).ToArray();
+            volume.ReadOnly)));
         return new HomeLabInstallationEntity
         {
             Id = Guid.NewGuid(),
@@ -2655,7 +2745,17 @@ public sealed class HomeLabService(
 
         foreach (var binding in bindings)
         {
-            args.AddRange(["--volume", $"{binding.HostPath}:{binding.ContainerPath}{(binding.ReadOnly ? ":ro" : string.Empty)}"]);
+            if (IsStandardStorageBinding(binding))
+            {
+                args.AddRange([
+                    "--mount",
+                    $"type=bind,src={binding.HostPath},dst={binding.ContainerPath},bind-propagation=rslave"
+                ]);
+            }
+            else
+            {
+                args.AddRange(["--volume", $"{binding.HostPath}:{binding.ContainerPath}{(binding.ReadOnly ? ":ro" : string.Empty)}"]);
+            }
         }
 
         if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase))
@@ -3432,6 +3532,11 @@ public sealed class HomeLabService(
 
             foreach (var binding in DeserializeBindings(installation.VolumeMappingsJson))
             {
+                if (IsStandardStorageBinding(binding))
+                {
+                    continue;
+                }
+
                 var volume = app.Volumes.FirstOrDefault(item =>
                     item.ContainerPath.Equals(binding.ContainerPath, StringComparison.Ordinal));
                 var volumeName = volume?.Id ?? BuildBrowsableVolumeName(binding.ContainerPath);
@@ -4196,7 +4301,18 @@ public sealed class HomeLabService(
         ?? new(StringComparer.OrdinalIgnoreCase);
 
     private static IReadOnlyList<HomeLabVolumeBinding> DeserializeBindings(string json) =>
-        JsonSerializer.Deserialize<List<HomeLabVolumeBinding>>(json, JsonOptions) ?? [];
+        EnsureStandardStorageBinding(JsonSerializer.Deserialize<List<HomeLabVolumeBinding>>(json, JsonOptions) ?? []);
+
+    private static IReadOnlyList<HomeLabVolumeBinding> EnsureStandardStorageBinding(
+        IEnumerable<HomeLabVolumeBinding> bindings) =>
+        bindings
+            .Where(binding => !binding.ContainerPath.Equals(StandardStorageContainerPath, StringComparison.Ordinal))
+            .Append(new HomeLabVolumeBinding(StandardStorageHostPath, StandardStorageContainerPath, false))
+            .ToArray();
+
+    private static bool IsStandardStorageBinding(HomeLabVolumeBinding binding) =>
+        binding.HostPath.Equals(StandardStorageHostPath, StringComparison.Ordinal) &&
+        binding.ContainerPath.Equals(StandardStorageContainerPath, StringComparison.Ordinal);
 
     private static IReadOnlyList<HomeLabPortBinding> DeserializePortBindings(string json) =>
         JsonSerializer.Deserialize<List<HomeLabPortBinding>>(json, JsonOptions) ?? [];
