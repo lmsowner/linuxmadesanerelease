@@ -31,7 +31,6 @@ public sealed class HomeLabService(
     IEdgeGatewayService edgeGatewayService,
     ICaddyIntegrationService caddyIntegrationService,
     ISecretStore secretStore,
-    HomeLabStorageOptions storageOptions,
     ILogger<HomeLabService> logger) : IHomeLabService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -39,6 +38,8 @@ public sealed class HomeLabService(
     private const string ContainerSettingsBackupImageKey = "lms-container-backup-image";
     private const string ContainerSettingsBackupConfigurationKey = "lms-container-backup-configuration";
     private const string ContainerSettingsBackupVolumesKey = "lms-container-backup-volumes";
+    private const string HomeLabFilesRole = "home-lab";
+    private const string DefaultHomeLabFilesRoot = "/mnt/storage/home-lab";
     private const int MaximumConfigFileBytes = 128 * 1024;
     private const int MaximumConfigInspectionBytes = 256 * 1024;
     private static readonly HashSet<string> InspectableConfigExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -65,7 +66,7 @@ public sealed class HomeLabService(
         return new HomeLabWorkspace(
             HomeLabCatalog.VisibleApps,
             HomeLabCatalog.Recipes,
-            storageRoleEntities.Select(MapStorageRole).ToArray(),
+            BuildStorageRoles(storageRoleEntities),
             deploymentEntities.Select(MapDeployment).ToArray(),
             installationEntities.Select(MapInstallation).ToArray());
     }
@@ -75,6 +76,15 @@ public sealed class HomeLabService(
         var entities = await dbContext.HomeLabInstallations
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
+
+        try
+        {
+            await EnsureBrowsableVolumeLayoutAsync(entities, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Could not prepare the browsable Home Lab files layout.");
+        }
 
         foreach (var entity in entities)
         {
@@ -134,7 +144,7 @@ public sealed class HomeLabService(
             .AsNoTracking()
             .OrderBy(item => item.Role)
             .ToListAsync(cancellationToken);
-        var storageRoles = storageRoleEntities.Select(MapStorageRole).ToArray();
+        var storageRoles = BuildStorageRoles(storageRoleEntities);
 
         return new HomeLabWorkspace(HomeLabCatalog.VisibleApps, HomeLabCatalog.Recipes, storageRoles, deployments, installations);
     }
@@ -3361,7 +3371,95 @@ public sealed class HomeLabService(
             throw new InvalidOperationException($"Choose a host path for shared storage role '{volume.SharedRole}'.");
         }
 
-        return Path.Combine(storageOptions.RootPath, "deployments", deploymentId.ToString("N"), app.Id, volume.Id);
+        return Path.Combine(ResolveHomeLabFilesRoot(storagePaths), BuildContainerName(deploymentId, app.Id), volume.Id);
+    }
+
+    private string ResolveHomeLabFilesRoot(IReadOnlyDictionary<string, string>? storagePaths = null)
+    {
+        var supplied = storagePaths?.FirstOrDefault(item =>
+            item.Key.Equals(HomeLabFilesRole, StringComparison.OrdinalIgnoreCase)).Value;
+        if (!string.IsNullOrWhiteSpace(supplied))
+        {
+            return NormalizeHostPath(supplied);
+        }
+
+        var stored = dbContext.HomeLabStorageRoles
+            .AsNoTracking()
+            .SingleOrDefault(item => item.Role == HomeLabFilesRole);
+        return string.IsNullOrWhiteSpace(stored?.HostPath)
+            ? DefaultHomeLabFilesRoot
+            : NormalizeHostPath(stored.HostPath);
+    }
+
+    private static IReadOnlyList<HomeLabStorageRole> BuildStorageRoles(
+        IReadOnlyList<HomeLabStorageRoleEntity> entities)
+    {
+        var roles = entities.Select(MapStorageRole).ToList();
+        if (roles.All(item => !item.Role.Equals(HomeLabFilesRole, StringComparison.OrdinalIgnoreCase)))
+        {
+            roles.Add(new HomeLabStorageRole(HomeLabFilesRole, DefaultHomeLabFilesRoot, DateTimeOffset.MinValue));
+        }
+
+        return roles.OrderBy(item => item.Role, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private async Task EnsureBrowsableVolumeLayoutAsync(
+        IReadOnlyList<HomeLabInstallationEntity> installations,
+        CancellationToken cancellationToken)
+    {
+        if (installations.Count == 0)
+        {
+            return;
+        }
+
+        var rootPath = ResolveHomeLabFilesRoot();
+        foreach (var installation in installations)
+        {
+            var app = HomeLabCatalog.GetApp(installation.AppId);
+            var containerRoot = Path.Combine(rootPath, installation.ContainerName);
+            if (!Directory.Exists(containerRoot))
+            {
+                var mkdir = await RunAsync(
+                    new LinuxCommandRequest(
+                        "mkdir",
+                        ["-p", containerRoot],
+                        true,
+                        TimeSpan.FromSeconds(30),
+                        $"Prepare browsable files for {installation.DisplayName}"),
+                    cancellationToken);
+                EnsureSuccess(mkdir, $"The files folder for '{installation.DisplayName}' could not be prepared.");
+            }
+
+            foreach (var binding in DeserializeBindings(installation.VolumeMappingsJson))
+            {
+                var volume = app.Volumes.FirstOrDefault(item =>
+                    item.ContainerPath.Equals(binding.ContainerPath, StringComparison.Ordinal));
+                var volumeName = volume?.Id ?? BuildBrowsableVolumeName(binding.ContainerPath);
+                var browsePath = Path.Combine(containerRoot, volumeName);
+                if (Path.GetFullPath(binding.HostPath).Equals(Path.GetFullPath(browsePath), StringComparison.Ordinal) ||
+                    Directory.Exists(browsePath) || File.Exists(browsePath) || new FileInfo(browsePath).LinkTarget is not null)
+                {
+                    continue;
+                }
+
+                var link = await RunAsync(
+                    new LinuxCommandRequest(
+                        "ln",
+                        ["--symbolic", "--force", "--no-dereference", "--no-target-directory", binding.HostPath, browsePath],
+                        true,
+                        TimeSpan.FromSeconds(30),
+                        $"Link {installation.DisplayName} {volumeName} into its browsable files folder"),
+                    cancellationToken);
+                EnsureSuccess(link, $"The files link for '{installation.DisplayName}' volume '{volumeName}' could not be prepared.");
+            }
+        }
+    }
+
+    private static string BuildBrowsableVolumeName(string containerPath)
+    {
+        var leaf = Path.GetFileName(containerPath.TrimEnd('/'));
+        var normalized = Regex.Replace(leaf, "[^a-zA-Z0-9._-]+", "-").Trim('-');
+        return string.IsNullOrWhiteSpace(normalized) ? "files" : normalized;
     }
 
     private async Task<PreparedConfiguration> PrepareConfigurationAsync(

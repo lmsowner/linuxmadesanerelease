@@ -232,6 +232,17 @@
                                                     </ul>
                                                 </div>
                                                 <div class="home-lab-detail-block">
+                                                    <h3>Files</h3>
+                                                    <p class="meta-text">Configuration and shared data are grouped under this container's named folder.</p>
+                                                    <code>@GetContainerFilesPath(selectedInstallation)</code>
+                                                    <UiCommandButton Label="Browse files"
+                                                                     Glyph="UiIconGlyph.FolderOpen"
+                                                                     Variant="UiButtonVariant.ActionSubtle"
+                                                                     Href="@BuildHomeLabFilesUrl(selectedInstallation)"
+                                                                     Target="_blank"
+                                                                     Rel="noopener" />
+                                                </div>
+                                                <div class="home-lab-detail-block">
                                                     <h3>Dependencies</h3>
                                                     @if (selectedDetails.Dependencies.Count == 0)
                                                     {
@@ -804,6 +815,26 @@
             <TabPage Value="storage" Title="Storage">
                 <section class="surface-subcard home-lab-storage-panel">
                     <div>
+                        <p class="eyebrow">HomeLab app files</p>
+                        <h2>One clear folder for every container</h2>
+                        <p class="meta-text">Each container gets a folder named after the Docker container. Its configuration and shared-data mounts appear inside, so you never need to find a deployment ID.</p>
+                    </div>
+                    <div class="home-lab-storage-row">
+                        <label for="storage-home-lab">HomeLab files</label>
+                        <input id="storage-home-lab" class="ui-control-input" @bind="storagePaths[HomeLabFilesRole]" placeholder="/mnt/storage/home-lab" />
+                        <div class="home-lab-storage-actions">
+                            <UiCommandButton Label="Save" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(HomeLabFilesRole)" />
+                            <UiCommandButton Label="Browse all files"
+                                             Glyph="UiIconGlyph.FolderOpen"
+                                             Variant="UiButtonVariant.Action"
+                                             Href="@BuildHomeLabFilesUrl()"
+                                             Target="_blank"
+                                             Rel="noopener" />
+                        </div>
+                    </div>
+                </section>
+                <section class="surface-subcard home-lab-storage-panel">
+                    <div>
                         <p class="eyebrow">Shared storage roles</p>
                         <h2>Choose host locations once</h2>
                         <p class="meta-text">Apps and guided AI setups reuse these paths when mounting shared data into participating containers.</p>
@@ -826,9 +857,11 @@
 </div>
 
 @code {
+    private const string HomeLabFilesRole = "home-lab";
     private static readonly string[] StorageRoles = ["downloads", "movies", "tv", "photos"];
     private readonly Dictionary<string, string> storagePaths = new(StringComparer.OrdinalIgnoreCase)
     {
+        [HomeLabFilesRole] = "/mnt/storage/home-lab",
         ["downloads"] = "/mnt/storage/downloads",
         ["movies"] = "/mnt/storage/movies",
         ["tv"] = "/mnt/storage/tv",
@@ -1324,6 +1357,18 @@
             await HomeLabService.SaveStorageRoleAsync(role, storagePaths[role]);
             SetMessage($"Storage role '{role}' saved.", false);
         });
+    }
+
+    private string GetHomeLabFilesRoot() => storagePaths.GetValueOrDefault(HomeLabFilesRole, "/mnt/storage/home-lab");
+
+    private string GetContainerFilesPath(HomeLabAppInstallation installation) =>
+        Path.Combine(GetHomeLabFilesRoot(), installation.ContainerName);
+
+    private string BuildHomeLabFilesUrl(HomeLabAppInstallation? installation = null)
+    {
+        var path = installation is null ? GetHomeLabFilesRoot() : GetContainerFilesPath(installation);
+        var title = installation is null ? "HomeLab files" : $"{installation.DisplayName} files";
+        return $"/file-browser-window?rootPath={Uri.EscapeDataString(path)}&path={Uri.EscapeDataString(path)}&title={Uri.EscapeDataString(title)}";
     }
 
     private void SelectPromptRecipeCategory(ChangeEventArgs eventArgs)

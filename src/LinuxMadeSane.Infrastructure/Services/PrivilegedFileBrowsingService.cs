@@ -40,7 +40,7 @@ public sealed class PrivilegedFileBrowsingService(
                 full_path = os.path.join(path, entry.name)
                 try:
                     is_link = entry.is_symlink()
-                    is_directory = entry.is_dir(follow_symlinks=False)
+                    is_directory = entry.is_dir(follow_symlinks=True)
                 except OSError:
                     is_link = False
                     is_directory = True
@@ -50,7 +50,7 @@ public sealed class PrivilegedFileBrowsingService(
                     result.append({
                         "Name": entry.name,
                         "FullPath": full_path,
-                        "ItemType": 2 if is_link else (1 if is_directory else 0),
+                        "ItemType": 1 if is_directory else (2 if is_link else 0),
                         "SizeBytes": 0,
                         "LastModifiedUtc": None,
                         "Permissions": "??????????",
@@ -61,7 +61,7 @@ public sealed class PrivilegedFileBrowsingService(
                     })
                     continue
                 mode = info.st_mode
-                item_type = 2 if is_link else (1 if is_directory else 0)
+                item_type = 1 if is_directory else (2 if is_link else 0)
                 try:
                     owner = pwd.getpwuid(info.st_uid).pw_name
                 except KeyError:

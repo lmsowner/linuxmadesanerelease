@@ -40,8 +40,6 @@ public static class DependencyInjection
             configuration.GetConnectionString("LinuxMadeSane") ?? "Data Source=data/linuxmadesane.db",
             contentRootPath);
         var databaseDirectory = Path.GetDirectoryName(new SqliteConnectionStringBuilder(connectionString).DataSource) ?? contentRootPath;
-        services.AddSingleton(new HomeLabStorageOptions(Path.Combine(databaseDirectory, "home-lab")));
-
         services.AddDataProtection()
             .SetApplicationName("LinuxMadeSane")
             .PersistKeysToFileSystem(dataProtectionDirectory);

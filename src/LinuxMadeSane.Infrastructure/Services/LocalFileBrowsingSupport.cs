@@ -23,13 +23,12 @@ internal static class LocalFileBrowsingSupport
     public static SftpItem MapItem(FileSystemInfo item)
     {
         var linkTarget = item.LinkTarget ?? string.Empty;
-        var itemType = !string.IsNullOrWhiteSpace(linkTarget)
-            ? SftpItemType.Link
-            : item.Attributes.HasFlag(FileAttributes.Directory)
+        var isLink = !string.IsNullOrWhiteSpace(linkTarget);
+        var itemType = item.Attributes.HasFlag(FileAttributes.Directory) || isLink && Directory.Exists(item.FullName)
                 ? SftpItemType.Folder
-                : SftpItemType.File;
+                : isLink ? SftpItemType.Link : SftpItemType.File;
         var sizeBytes = item is FileInfo fileInfo ? fileInfo.Length : 0;
-        var metadata = ReadMetadata(item, itemType);
+        var metadata = ReadMetadata(item, isLink ? SftpItemType.Link : itemType);
 
         return new SftpItem(
             item.Name,
