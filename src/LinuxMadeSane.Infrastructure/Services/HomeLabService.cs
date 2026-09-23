@@ -1369,6 +1369,224 @@ public sealed class HomeLabService(
             HomeLabConnectionAddressPlanner.Build(source, candidates));
     }
 
+    public async Task<HomeLabOperationResult> PublishExternalAccessAsync(
+        Guid installationId,
+        HomeLabEdgeGatewayRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var installation = await dbContext.HomeLabInstallations
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        if (!app.EdgeGatewaySupported)
+        {
+            return Failure(
+                "External access is unavailable.",
+                $"{app.Name} cannot be published through Edge Gateway.",
+                [],
+                ToHealth(installation.HealthState));
+        }
+
+        var primaryManifestPort = ResolvePrimaryPort(app);
+        var primaryPort = DeserializePortBindings(installation.PortMappingsJson).FirstOrDefault(port =>
+            primaryManifestPort is not null &&
+            port.Name.Equals(primaryManifestPort.Name, StringComparison.OrdinalIgnoreCase) &&
+            port.HostPort > 0);
+        if (primaryPort is null)
+        {
+            return Failure(
+                "External access is unavailable.",
+                $"{app.Name} does not currently have a published LMS web listener.",
+                [],
+                ToHealth(installation.HealthState));
+        }
+
+        EdgeGatewayRouteEditor? previousEditor = null;
+        if (installation.EdgeGatewayRouteId.HasValue)
+        {
+            previousEditor = await edgeGatewayService.GetEditorAsync(installation.EdgeGatewayRouteId, cancellationToken);
+            if (!previousEditor.Id.HasValue)
+            {
+                previousEditor = null;
+            }
+        }
+        if (previousEditor?.Enabled == true &&
+            (!previousEditor.Hostname.Trim().TrimEnd('.').Equals(request.Hostname.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase) ||
+             !previousEditor.DomainName.Trim().TrimEnd('.').Equals(request.DomainName.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase)))
+        {
+            return Failure(
+                "External hostname was not changed.",
+                "Remove external access first, then publish the app again with its new hostname or Cloudflare zone. This prevents stale DNS and tunnel routes.",
+                [],
+                ToHealth(installation.HealthState));
+        }
+
+        Guid? savedRouteId = null;
+        try
+        {
+            var editor = previousEditor is null
+                ? new EdgeGatewayRouteEditor()
+                : CloneEdgeGatewayRouteEditor(previousEditor);
+            editor.Enabled = true;
+            editor.DisplayName = installation.DisplayName;
+            editor.Hostname = request.Hostname;
+            editor.DomainName = request.DomainName;
+            editor.TargetScheme = EdgeGatewayTargetScheme.Http;
+            editor.TargetHost = "127.0.0.1";
+            editor.TargetPort = primaryPort.HostPort;
+            editor.TargetPathPrefix = string.Empty;
+            editor.AuthMode = request.AuthMode;
+            editor.UsePublicHostHeader = true;
+            editor.StripForwardedFor = true;
+            editor.SkipUpstreamTlsVerification = true;
+            editor.Notes = $"LMS Home Lab app: {installation.AppId}; installation: {installation.Id}";
+
+            savedRouteId = await edgeGatewayService.SaveRouteAsync(editor, cancellationToken);
+            installation.EdgeGatewayRouteId = savedRouteId;
+            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+
+            var published = await edgeGatewayService.ProvisionCloudflareRouteAsync(
+                savedRouteId.Value,
+                replaceExistingDnsRecord: false,
+                cancellationToken);
+            if (!published.Success)
+            {
+                await RestoreExternalRouteAfterPublishFailureAsync(previousEditor, savedRouteId.Value, cancellationToken);
+                var guidance = published.RequiresDnsReplacement
+                    ? " Choose another hostname, or resolve the existing DNS record in Edge Gateway."
+                    : string.Empty;
+                return Failure(
+                    "External access was not enabled.",
+                    $"{published.Summary}{guidance}",
+                    published.Steps.Concat(published.Warnings).ToArray(),
+                    ToHealth(installation.HealthState));
+            }
+
+            return Success(
+                "External access enabled.",
+                $"{installation.DisplayName} is available at https://{published.Hostname} using {FormatEdgeGatewayAuthMode(request.AuthMode)}.",
+                published.Steps.Concat(published.Warnings).ToArray(),
+                ToHealth(installation.HealthState));
+        }
+        catch (Exception exception)
+        {
+            if (savedRouteId.HasValue)
+            {
+                try
+                {
+                    await RestoreExternalRouteAfterPublishFailureAsync(previousEditor, savedRouteId.Value, cancellationToken);
+                }
+                catch (Exception restoreException)
+                {
+                    logger.LogWarning(restoreException, "Could not restore Edge Gateway route {RouteId} after publishing failed.", savedRouteId);
+                }
+            }
+
+            return Failure(
+                "External access was not enabled.",
+                exception.Message,
+                [],
+                ToHealth(installation.HealthState));
+        }
+    }
+
+    public async Task<HomeLabOperationResult> UnpublishExternalAccessAsync(
+        Guid installationId,
+        CancellationToken cancellationToken = default)
+    {
+        var installation = await dbContext.HomeLabInstallations
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        if (installation.EdgeGatewayRouteId is not Guid routeId)
+        {
+            return Success(
+                "External access is already off.",
+                $"{installation.DisplayName} has no LMS-managed Edge Gateway route.",
+                [],
+                ToHealth(installation.HealthState));
+        }
+
+        try
+        {
+            await edgeGatewayService.DeletePublishedRouteAsync(routeId, cancellationToken);
+            installation.EdgeGatewayRouteId = null;
+            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return Success(
+                "External access removed.",
+                $"{installation.DisplayName} is no longer published through Edge Gateway.",
+                [],
+                ToHealth(installation.HealthState));
+        }
+        catch (Exception exception)
+        {
+            return Failure(
+                "External access was not removed.",
+                exception.Message,
+                [],
+                ToHealth(installation.HealthState));
+        }
+    }
+
+    private async Task RestoreExternalRouteAfterPublishFailureAsync(
+        EdgeGatewayRouteEditor? previousEditor,
+        Guid savedRouteId,
+        CancellationToken cancellationToken)
+    {
+        if (previousEditor?.Id.HasValue == true)
+        {
+            await edgeGatewayService.SaveRouteAsync(previousEditor, cancellationToken);
+        }
+        else
+        {
+            var failedEditor = await edgeGatewayService.GetEditorAsync(savedRouteId, cancellationToken);
+            if (failedEditor.Id.HasValue)
+            {
+                failedEditor.Enabled = false;
+                await edgeGatewayService.SaveRouteAsync(failedEditor, cancellationToken);
+            }
+        }
+
+        await edgeGatewayService.ApplyCaddyConfigurationAsync(cancellationToken);
+    }
+
+    private static string FormatEdgeGatewayAuthMode(EdgeGatewayAuthMode authMode) => authMode switch
+    {
+        EdgeGatewayAuthMode.PassThrough => "the app's own security",
+        EdgeGatewayAuthMode.TemporaryIpApproval => "email IP approval",
+        _ => "LMS MFA/passkey protection"
+    };
+
+    private static EdgeGatewayRouteEditor CloneEdgeGatewayRouteEditor(EdgeGatewayRouteEditor source) => new()
+    {
+        Id = source.Id,
+        Enabled = source.Enabled,
+        DisplayName = source.DisplayName,
+        Hostname = source.Hostname,
+        DomainName = source.DomainName,
+        TargetScheme = source.TargetScheme,
+        TargetHost = source.TargetHost,
+        TargetPort = source.TargetPort,
+        TargetPathPrefix = source.TargetPathPrefix,
+        AuthMode = source.AuthMode,
+        UsePublicHostHeader = source.UsePublicHostHeader,
+        UpstreamSourceAddress = source.UpstreamSourceAddress,
+        StripForwardedFor = source.StripForwardedFor,
+        SkipUpstreamTlsVerification = source.SkipUpstreamTlsVerification,
+        AllowedUsers = source.AllowedUsers,
+        AllowedGroups = source.AllowedGroups,
+        AllowLanOnly = source.AllowLanOnly,
+        AllowKnownIps = source.AllowKnownIps,
+        TemporaryIpApprovalRecipients = source.TemporaryIpApprovalRecipients,
+        TemporaryIpApprovalAllowedCountryCodes = source.TemporaryIpApprovalAllowedCountryCodes,
+        TemporaryIpApprovalUseNotFoundResponse = source.TemporaryIpApprovalUseNotFoundResponse,
+        TemporaryIpApprovalIdleTimeoutMinutes = source.TemporaryIpApprovalIdleTimeoutMinutes,
+        TemporaryIpApprovalMaxLifetimeMinutes = source.TemporaryIpApprovalMaxLifetimeMinutes,
+        Notes = source.Notes
+    };
+
     public async Task<HomeLabApplicationConfigInspection> InspectApplicationConfigAsync(
         Guid installationId,
         string? relativePath = null,

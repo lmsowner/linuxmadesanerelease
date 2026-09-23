@@ -5,11 +5,13 @@
 @rendermode InteractiveServer
 @implements IAsyncDisposable
 @using LinuxMadeSane.Application.Contracts.Ai
+@using LinuxMadeSane.Application.Contracts.EdgeGateway
 @using LinuxMadeSane.Application.Contracts.HomeLab
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.HomeLab
 @inject IHomeLabService HomeLabService
+@inject IEdgeGatewayService EdgeGatewayService
 @inject IHomeLabPromptRecipeProvider PromptRecipeProvider
 @inject IAiThreadService AiThreadService
 @inject IAiChatService AiChatService
@@ -353,6 +355,118 @@
                                             </div>
                                         </TabPage>
 
+                                        <TabPage Value="external" Title="External access">
+                                            <div class="home-lab-settings-stack">
+                                                @if (!GetApp(selectedInstallation.AppId).EdgeGatewaySupported)
+                                                {
+                                                    <div class="home-lab-setting-card">
+                                                        <h3>External access unavailable</h3>
+                                                        <p class="meta-text">This service cannot be published through LMS Edge Gateway.</p>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    var externalRoute = GetExternalRoute(selectedInstallation);
+                                                    <div class="home-lab-setting-card">
+                                                        <div class="home-lab-details-heading">
+                                                            <div>
+                                                                <h3>Edge Gateway publishing</h3>
+                                                                <p class="meta-text">Choose exactly which Home Lab services are reachable externally and how Edge Gateway protects them.</p>
+                                                            </div>
+                                                            <UiPill Tone="@(externalRoute is { Enabled: true } ? UiPillTone.Success : UiPillTone.Neutral)">@(externalRoute is { Enabled: true } ? "Published" : "Local only")</UiPill>
+                                                        </div>
+
+                                                        @if (externalRoute is { Enabled: true } && BuildExternalUrl(externalRoute) is { } externalUrl)
+                                                        {
+                                                            <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                                                <dt>External URL</dt><dd><a href="@externalUrl" target="_blank" rel="noopener">@externalUrl</a></dd>
+                                                                <dt>Protection</dt><dd>@FormatExternalAuthMode(externalRoute.AuthMode)</dd>
+                                                            </dl>
+                                                        }
+
+                                                        @if (AvailableExternalDomains.Count == 0)
+                                                        {
+                                                            <p class="meta-text">Set up a Cloudflare domain and relay in Edge Gateway before publishing this service.</p>
+                                                            <UiCommandButton Label="Open Edge Gateway"
+                                                                             Glyph="UiIconGlyph.Website"
+                                                                             Variant="UiButtonVariant.ActionSubtle"
+                                                                             Href="/edge-gateway" />
+                                                        }
+                                                        else
+                                                        {
+                                                            <div class="home-lab-config-grid">
+                                                                <div class="home-lab-config-field">
+                                                                    <label for="home-lab-external-hostname">External hostname</label>
+                                                                    <input id="home-lab-external-hostname"
+                                                                           class="ui-control-input"
+                                                                           value="@externalHostnameDraft"
+                                                                           disabled="@(externalRoute is { Enabled: true })"
+                                                                           @oninput="eventArgs => externalHostnameDraft = eventArgs.Value?.ToString() ?? string.Empty" />
+                                                                    <span class="meta-text">@(externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : "Use a new hostname inside the selected Cloudflare zone.")</span>
+                                                                </div>
+                                                                <div class="home-lab-config-field">
+                                                                    <label for="home-lab-external-domain">Cloudflare zone</label>
+                                                                    <select id="home-lab-external-domain"
+                                                                            class="ui-control-input"
+                                                                            value="@externalDomainDraft"
+                                                                            disabled="@(externalRoute is { Enabled: true })"
+                                                                            @onchange="ChangeExternalDomain">
+                                                                        @foreach (var domain in AvailableExternalDomains)
+                                                                        {
+                                                                            <option value="@domain.DomainName">@domain.DomainName</option>
+                                                                        }
+                                                                    </select>
+                                                                </div>
+                                                                <div class="home-lab-config-field">
+                                                                    <label for="home-lab-external-auth">Protection</label>
+                                                                    <select id="home-lab-external-auth"
+                                                                            class="ui-control-input"
+                                                                            value="@externalAuthModeDraft"
+                                                                            @onchange="ChangeExternalAuthMode">
+                                                                        <option value="@EdgeGatewayAuthMode.RequireMfa">LMS MFA / passkey</option>
+                                                                        <option value="@EdgeGatewayAuthMode.TemporaryIpApproval">Email approve IP</option>
+                                                                        <option value="@EdgeGatewayAuthMode.PassThrough">Pass through to app</option>
+                                                                    </select>
+                                                                    <span class="meta-text">Use pass-through only when the app must handle native clients or provides its own suitable login.</span>
+                                                                </div>
+                                                            </div>
+                                                            <div class="home-lab-setting-card">
+                                                                <strong>Public address</strong>
+                                                                <code>@BuildExternalPreview()</code>
+                                                            </div>
+                                                            <div class="home-lab-action-row">
+                                                                <UiCommandButton Label="@(externalRoute is null ? "Publish externally" : "Save external access")"
+                                                                                 Glyph="UiIconGlyph.Website"
+                                                                                 Variant="UiButtonVariant.Primary"
+                                                                                 Disabled="@(busy || !CanSaveExternalAccess)"
+                                                                                 OnClick="SaveExternalAccessAsync" />
+                                                                @if (selectedInstallation.EdgeGatewayRouteId.HasValue)
+                                                                {
+                                                                    <UiCommandButton Label="Remove external access"
+                                                                                     Glyph="UiIconGlyph.Delete"
+                                                                                     Variant="UiButtonVariant.Danger"
+                                                                                     Disabled="@busy"
+                                                                                     OnClick="RequestExternalUnpublish" />
+                                                                }
+                                                            </div>
+                                                        }
+                                                    </div>
+
+                                                    @if (confirmExternalUnpublish)
+                                                    {
+                                                        <div class="home-lab-setting-card">
+                                                            <strong>Remove external access?</strong>
+                                                            <p class="meta-text">LMS will remove the app's managed DNS record, tunnel ingress, and Edge Gateway route. Local access remains available.</p>
+                                                            <div class="home-lab-action-row">
+                                                                <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelExternalUnpublish" />
+                                                                <UiCommandButton Label="Remove external access" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="UnpublishExternalAccessAsync" />
+                                                            </div>
+                                                        </div>
+                                                    }
+                                                }
+                                            </div>
+                                        </TabPage>
+
                                         <TabPage Value="container" Title="Container">
                                             <div class="home-lab-container-editor">
                                                 <div class="home-lab-config-field">
@@ -510,12 +624,12 @@
                                     </div>
                                     <UiPill Tone="@GetHealthTone(installation.HealthState)">@installation.HealthState</UiPill>
                                     <div class="home-lab-row-actions">
-                                        @if (BuildLocalUrl(installation) is { } localUrl)
+                                        @if (BuildOpenUrl(installation) is { } openUrl)
                                         {
                                             <UiCommandButton Label="Open"
                                                              Glyph="UiIconGlyph.Website"
                                                              Variant="UiButtonVariant.Action"
-                                                             Href="@localUrl"
+                                                             Href="@openUrl"
                                                              Target="_blank"
                                                              Rel="noopener"
                                                              referrerpolicy="@(installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) ? "no-referrer" : null)" />
@@ -700,6 +814,7 @@
     private HomeLabEffectiveConfiguration? effectiveConfiguration;
     private HomeLabConnectionGuide? connectionGuide;
     private HomeLabNetworkSecurity? networkSecurity;
+    private EdgeGatewayDashboardViewModel? edgeGatewayDashboard;
     private readonly Dictionary<Guid, HomeLabNetworkSecurity> summaryNetworkSecurity = [];
     private readonly HashSet<string> collapsedInstallationGroups = new(StringComparer.Ordinal);
     private string? selectedLogs;
@@ -707,6 +822,10 @@
     private string containerImageDraft = string.Empty;
     private string containerEnvironmentDraft = string.Empty;
     private string containerVolumesDraft = string.Empty;
+    private string externalHostnameDraft = string.Empty;
+    private string externalDomainDraft = string.Empty;
+    private EdgeGatewayAuthMode externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+    private bool confirmExternalUnpublish;
     private readonly CancellationTokenSource healthMonitorCancellation = new();
     private Task? healthMonitorTask;
     private bool healthRefreshInProgress;
@@ -720,6 +839,20 @@
             .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
         ?? Enumerable.Empty<HomeLabAppInstallation>();
+
+    private IReadOnlyList<EdgeGatewayCloudflareDomainOption> AvailableExternalDomains =>
+        edgeGatewayDashboard?.Cloudflare.Domains
+            .Where(domain => domain is
+            {
+                Paused: false,
+                RelayConfigured: true,
+                RelayUsesCloudflareTunnel: true,
+                RelayOwnedByThisLms: true
+            })
+            .OrderByDescending(domain => domain.IsSavedDefault)
+            .ThenBy(domain => domain.DomainName, StringComparer.OrdinalIgnoreCase)
+            .ToArray()
+        ?? [];
 
     private IReadOnlyList<HomeLabInstallationGroup> BuildInstallationGroups()
     {
@@ -880,6 +1013,7 @@
         {
             workspace = await HomeLabService.GetWorkspaceAsync();
             promptRecipes = await PromptRecipeProvider.GetRecipesAsync();
+            edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
             foreach (var role in workspace.StorageRoles)
             {
                 storagePaths[role.Role] = role.HostPath;
@@ -992,7 +1126,7 @@
 
     private Task HandleSettingsTabChangedAsync(string? value)
     {
-        settingsTab = value is "connections" or "network" or "container" or "logs" ? value : "overview";
+        settingsTab = value is "connections" or "network" or "external" or "container" or "logs" ? value : "overview";
         return Task.CompletedTask;
     }
 
@@ -1181,6 +1315,8 @@
             effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
             connectionGuide = await HomeLabService.GetConnectionGuideAsync(installation.Id);
             networkSecurity = await HomeLabService.GetNetworkSecurityAsync(installation.Id);
+            edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
+            await LoadExternalAccessDraftAsync(installation);
             selectedLogs = null;
             settingsTab = "overview";
             ResetContainerSettingsDraft();
@@ -1207,6 +1343,10 @@
         containerImageDraft = string.Empty;
         containerEnvironmentDraft = string.Empty;
         containerVolumesDraft = string.Empty;
+        externalHostnameDraft = string.Empty;
+        externalDomainDraft = string.Empty;
+        externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+        confirmExternalUnpublish = false;
     }
 
     private void ResetContainerSettingsDraft()
@@ -1885,6 +2025,7 @@
         {
             await operation();
             workspace = await HomeLabService.GetWorkspaceAsync();
+            edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
             await RefreshSummaryNetworkSecurityAsync();
             if (selectedInstallation is { } openInstallation)
             {
@@ -1898,6 +2039,7 @@
                     networkSecurity = GetSummaryNetworkSecurity(selectedInstallation);
                     effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(selectedInstallation.DeploymentId);
                     connectionGuide = await HomeLabService.GetConnectionGuideAsync(selectedInstallation.Id);
+                    await LoadExternalAccessDraftAsync(selectedInstallation);
                     ResetContainerSettingsDraft();
                     if (selectedInstallation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
                     {
@@ -1915,6 +2057,105 @@
         {
             busy = false;
         }
+    }
+
+    private async Task LoadExternalAccessDraftAsync(HomeLabAppInstallation installation)
+    {
+        confirmExternalUnpublish = false;
+        if (installation.EdgeGatewayRouteId is Guid routeId)
+        {
+            var editor = await EdgeGatewayService.GetEditorAsync(routeId);
+            if (editor.Id.HasValue)
+            {
+                externalHostnameDraft = editor.Hostname;
+                externalDomainDraft = editor.DomainName;
+                externalAuthModeDraft = editor.AuthMode;
+                return;
+            }
+        }
+
+        var domain = AvailableExternalDomains.FirstOrDefault();
+        externalDomainDraft = domain?.DomainName ?? string.Empty;
+        externalHostnameDraft = string.IsNullOrWhiteSpace(externalDomainDraft)
+            ? installation.AppId
+            : $"{BuildAvailableExternalSubdomain(installation)}.{externalDomainDraft}";
+        externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+    }
+
+    private string BuildAvailableExternalSubdomain(HomeLabAppInstallation installation)
+    {
+        var candidate = installation.AppId.Trim().ToLowerInvariant();
+        var hostname = $"{candidate}.{externalDomainDraft}";
+        var isUsed = edgeGatewayDashboard?.Routes.Any(route =>
+            route.Id != installation.EdgeGatewayRouteId &&
+            route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)) == true;
+        return isUsed ? $"{candidate}-{installation.ContainerName[^Math.Min(8, installation.ContainerName.Length)..]}" : candidate;
+    }
+
+    private void ChangeExternalDomain(ChangeEventArgs eventArgs)
+    {
+        var previousDomain = externalDomainDraft;
+        externalDomainDraft = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+        if (selectedInstallation is null || string.IsNullOrWhiteSpace(externalDomainDraft))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(externalHostnameDraft) ||
+            (!string.IsNullOrWhiteSpace(previousDomain) && externalHostnameDraft.EndsWith($".{previousDomain}", StringComparison.OrdinalIgnoreCase)))
+        {
+            externalHostnameDraft = $"{BuildAvailableExternalSubdomain(selectedInstallation)}.{externalDomainDraft}";
+        }
+    }
+
+    private void ChangeExternalAuthMode(ChangeEventArgs eventArgs)
+    {
+        if (Enum.TryParse<EdgeGatewayAuthMode>(eventArgs.Value?.ToString(), out var mode) &&
+            mode is EdgeGatewayAuthMode.RequireMfa or EdgeGatewayAuthMode.TemporaryIpApproval or EdgeGatewayAuthMode.PassThrough)
+        {
+            externalAuthModeDraft = mode;
+        }
+    }
+
+    private bool CanSaveExternalAccess =>
+        selectedInstallation is not null &&
+        !string.IsNullOrWhiteSpace(externalHostnameDraft) &&
+        !string.IsNullOrWhiteSpace(externalDomainDraft) &&
+        AvailableExternalDomains.Any(domain => domain.DomainName.Equals(externalDomainDraft, StringComparison.OrdinalIgnoreCase));
+
+    private async Task SaveExternalAccessAsync()
+    {
+        if (selectedInstallation is null || !CanSaveExternalAccess)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.PublishExternalAccessAsync(
+                selectedInstallation.Id,
+                new HomeLabEdgeGatewayRequest(externalHostnameDraft, externalDomainDraft, externalAuthModeDraft));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private void RequestExternalUnpublish() => confirmExternalUnpublish = true;
+
+    private void CancelExternalUnpublish() => confirmExternalUnpublish = false;
+
+    private async Task UnpublishExternalAccessAsync()
+    {
+        if (selectedInstallation is null || !confirmExternalUnpublish)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.UnpublishExternalAccessAsync(selectedInstallation.Id);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            confirmExternalUnpublish = false;
+        });
     }
 
     private void SetMessage(string text, bool isError)
@@ -1948,6 +2189,69 @@
             item.ContainerName.Equals(gatewayContainer, StringComparison.OrdinalIgnoreCase));
         return gateway?.HealthState is HomeLabHealthState.Healthy or HomeLabHealthState.Degraded or HomeLabHealthState.Failed;
     }
+
+    private EdgeGatewayRouteListItem? GetExternalRoute(HomeLabAppInstallation installation) =>
+        installation.EdgeGatewayRouteId is Guid routeId
+            ? edgeGatewayDashboard?.Routes.FirstOrDefault(route => route.Id == routeId)
+            : null;
+
+    private bool IsEdgeGatewaySession
+    {
+        get
+        {
+            if (!Uri.TryCreate(Navigation.BaseUri, UriKind.Absolute, out var baseUri))
+            {
+                return false;
+            }
+
+            return edgeGatewayDashboard?.Routes.Any(route =>
+                route.Enabled &&
+                route.Hostname.Trim().TrimEnd('.').Equals(baseUri.Host.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase)) == true;
+        }
+    }
+
+    private string? BuildOpenUrl(HomeLabAppInstallation installation)
+    {
+        if (IsEdgeGatewaySession)
+        {
+            var route = GetExternalRoute(installation);
+            return route is { Enabled: true } ? BuildExternalUrl(route) : null;
+        }
+
+        return BuildLocalUrl(installation);
+    }
+
+    private static string? BuildExternalUrl(EdgeGatewayRouteListItem route)
+    {
+        if (string.IsNullOrWhiteSpace(route.Hostname))
+        {
+            return null;
+        }
+
+        var path = route.TargetPathPrefix?.Trim() ?? string.Empty;
+        if (path.Length > 0 && !path.StartsWith("/", StringComparison.Ordinal))
+        {
+            path = $"/{path}";
+        }
+        return $"https://{route.Hostname.Trim().TrimEnd('.')}{path}";
+    }
+
+    private string BuildExternalPreview()
+    {
+        var hostname = externalHostnameDraft.Trim().TrimEnd('.');
+        if (hostname.Length > 0 && !hostname.Contains('.', StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(externalDomainDraft))
+        {
+            hostname = $"{hostname}.{externalDomainDraft.Trim().Trim('.')}";
+        }
+        return hostname.Length == 0 ? "Choose a hostname" : $"https://{hostname}";
+    }
+
+    private static string FormatExternalAuthMode(EdgeGatewayAuthMode mode) => mode switch
+    {
+        EdgeGatewayAuthMode.PassThrough => "Pass through to the app",
+        EdgeGatewayAuthMode.TemporaryIpApproval => "Email approve IP",
+        _ => "LMS MFA / passkey"
+    };
 
     private string? BuildLocalUrl(HomeLabAppInstallation installation)
     {
