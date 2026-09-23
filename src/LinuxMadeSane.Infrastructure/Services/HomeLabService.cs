@@ -2497,7 +2497,7 @@ public sealed class HomeLabService(
         }
     }
 
-    private static HomeLabServiceEndpointEntity UpsertEndpoint(
+    private HomeLabServiceEndpointEntity UpsertEndpoint(
         HomeLabInstallationEntity installation,
         string portName,
         HomeLabEndpointScope scope,
@@ -2526,6 +2526,10 @@ public sealed class HomeLabService(
                 HealthState = (int)HomeLabEndpointHealthState.NotChecked
             };
             installation.ServiceEndpoints.Add(endpoint);
+            // Existing installations are already tracked with a permanent key. A new
+            // dependent that also has a permanent key can otherwise be inferred as
+            // Modified, producing an UPDATE that affects zero rows instead of INSERT.
+            dbContext.HomeLabServiceEndpoints.Add(endpoint);
         }
 
         endpoint.Url = url;
