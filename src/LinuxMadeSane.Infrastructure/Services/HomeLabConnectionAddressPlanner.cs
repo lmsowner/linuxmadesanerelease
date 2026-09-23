@@ -84,7 +84,7 @@ public static class HomeLabConnectionAddressPlanner
             target.Id,
             target.AppId,
             target.DisplayName,
-            DescribePurpose(target.AppId),
+            "Service endpoint",
             host,
             binding.ContainerPort,
             value,
@@ -98,17 +98,6 @@ public static class HomeLabConnectionAddressPlanner
         networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
             ? networkMode["container:".Length..].Trim().TrimStart('/')
             : string.Empty;
-
-    private static string DescribePurpose(string appId) => appId.ToLowerInvariant() switch
-    {
-        "qbittorrent" => "Download client",
-        "prowlarr" => "Indexer manager",
-        "sonarr" => "TV library manager",
-        "radarr" => "Movie library manager",
-        "seerr" => "Request manager",
-        "wordpress-database" => "Database",
-        _ => "App connection"
-    };
 
     private static IReadOnlyList<PortBinding> DeserializePorts(string json) =>
         JsonSerializer.Deserialize<List<PortBinding>>(json, JsonOptions) ?? [];

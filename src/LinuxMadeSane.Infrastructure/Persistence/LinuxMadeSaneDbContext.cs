@@ -72,6 +72,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<MediaItemEntity> MediaItems => Set<MediaItemEntity>();
     public DbSet<HomeLabDeploymentEntity> HomeLabDeployments => Set<HomeLabDeploymentEntity>();
     public DbSet<HomeLabInstallationEntity> HomeLabInstallations => Set<HomeLabInstallationEntity>();
+    public DbSet<HomeLabServiceEndpointEntity> HomeLabServiceEndpoints => Set<HomeLabServiceEndpointEntity>();
     public DbSet<HomeLabStorageRoleEntity> HomeLabStorageRoles => Set<HomeLabStorageRoleEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -165,6 +166,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(item => item.Name).HasMaxLength(160);
             entity.Property(item => item.RecipeId).HasMaxLength(120);
             entity.Property(item => item.PromptRecipeId).HasMaxLength(120);
+            entity.Property(item => item.ConnectivityJson).HasColumnType("TEXT");
             entity.HasIndex(item => item.RecipeRunId);
             entity.Property(item => item.NetworkName).HasMaxLength(160);
             entity.HasMany(item => item.Installations)
@@ -190,6 +192,25 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(item => item.CaddySourcePort);
             entity.Property(item => item.HealthDetail).HasColumnType("TEXT");
             entity.HasIndex(item => new { item.DeploymentId, item.AppId }).IsUnique();
+            entity.HasMany(item => item.ServiceEndpoints)
+                .WithOne(item => item.Installation)
+                .HasForeignKey(item => item.InstallationId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<HomeLabServiceEndpointEntity>(entity =>
+        {
+            entity.ToTable("home_lab_service_endpoints");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.ServiceId).HasMaxLength(120);
+            entity.Property(item => item.PortName).HasMaxLength(80);
+            entity.Property(item => item.Url).HasMaxLength(2048);
+            entity.Property(item => item.Scheme).HasMaxLength(16);
+            entity.Property(item => item.Host).HasMaxLength(255);
+            entity.Property(item => item.PathBase).HasMaxLength(512);
+            entity.Property(item => item.HealthDetail).HasColumnType("TEXT");
+            entity.HasIndex(item => new { item.InstallationId, item.PortName, item.Scope }).IsUnique();
+            entity.HasIndex(item => item.EdgeGatewayRouteId);
         });
 
         modelBuilder.Entity<HomeLabStorageRoleEntity>(entity =>

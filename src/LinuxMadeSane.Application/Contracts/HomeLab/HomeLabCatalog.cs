@@ -76,7 +76,8 @@ public static class HomeLabCatalog
             [],
             new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8080),
             [new("network-route", "Internet route", "select", true, Help: "Direct exposes qBittorrent through the deployment network. VPN Gateway routes its traffic through the selected Gluetun gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries qBittorrent traffic.")],
-            SupportsVpnGateway: true),
+            SupportsVpnGateway: true,
+            Exposure: ClientExposure("/qbittorrent", HomeLabBasePathSupportMode.Transparent)),
         new(
             "wordpress",
             "WordPress",
@@ -92,7 +93,7 @@ public static class HomeLabCatalog
             [new("site", "/var/www/html", HomeLabStorageKind.UserData)],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["WORDPRESS_DB_HOST"] = "wordpress-database:3306",
+                ["WORDPRESS_DB_HOST"] = "${endpoint:wordpress-database:internal:host}:${endpoint:wordpress-database:internal:port}",
                 ["WORDPRESS_DB_USER"] = "lms_wordpress",
                 ["WORDPRESS_DB_PASSWORD"] = "lms-wordpress-internal",
                 ["WORDPRESS_DB_NAME"] = "lms_wordpress"
@@ -111,7 +112,7 @@ public static class HomeLabCatalog
             "mariadb",
             "11",
             "1",
-            [],
+            [new("database", 3306)],
             [new("database", "/var/lib/mysql", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -190,7 +191,8 @@ public static class HomeLabCatalog
             new HomeLabHealthCheckManifest(HttpPath: "/settings", Port: 8080, StartPeriodSeconds: 60),
             [new("network-route", "Internet route", "select", true, Help: "Stremio must use VPN Gateway routing. LMS blocks direct Stremio installations.", Options: new[] { "VPN Gateway (Gluetun)" }), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Stremio traffic.")],
             SupportsVpnGateway: true,
-            RequiresVpnGateway: true),
+            RequiresVpnGateway: true,
+            Exposure: ClientExposure("/stremio", HomeLabBasePathSupportMode.None, streaming: true, rangeRequests: true, webSockets: true)),
         new(
             "immich",
             "Immich",
@@ -206,12 +208,12 @@ public static class HomeLabCatalog
             [new("library", "/data", HomeLabStorageKind.UserData, "photos")],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["DB_HOSTNAME"] = "immich-database",
+                ["DB_HOSTNAME"] = "${endpoint:immich-database:internal:host}",
                 ["DB_USERNAME"] = "postgres",
                 ["DB_PASSWORD"] = "postgres",
                 ["DB_DATABASE_NAME"] = "immich",
-                ["REDIS_HOSTNAME"] = "immich-redis",
-                ["IMMICH_MACHINE_LEARNING_URL"] = "http://immich-machine-learning:3003"
+                ["REDIS_HOSTNAME"] = "${endpoint:immich-redis:internal:host}",
+                ["IMMICH_MACHINE_LEARNING_URL"] = "${endpoint:immich-machine-learning:internal}"
             },
             ["immich-database", "immich-redis", "immich-machine-learning"],
             new HomeLabHealthCheckManifest(HttpPath: "/api/server/ping", Port: 2283), [], IsInstallable: true),
@@ -226,7 +228,7 @@ public static class HomeLabCatalog
             "ghcr.io/immich-app/postgres",
             "14-vectorchord0.4.3-pgvectors0.2.0",
             "1",
-            [],
+            [new("database", 5432)],
             [new("database", "/var/lib/postgresql/data", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -250,7 +252,7 @@ public static class HomeLabCatalog
             "docker.io/valkey/valkey",
             "9",
             "1",
-            [],
+            [new("redis", 6379)],
             [],
             new Dictionary<string, string>(),
             [],
@@ -268,7 +270,7 @@ public static class HomeLabCatalog
             "ghcr.io/immich-app/immich-machine-learning",
             "release",
             "1",
-            [],
+            [new("api", 3003, ApplicationProtocol: "http")],
             [new("cache", "/cache", HomeLabStorageKind.Cache)],
             new Dictionary<string, string>(),
             [],
@@ -293,12 +295,18 @@ public static class HomeLabCatalog
                 VpnContainerPort: 18080,
                 VpnFileOverride: new("/etc/webtor/common.template.env", "WEB_PORT", "/init"))],
             [new("data", "/data", HomeLabStorageKind.UserData), new("database", "/pgdata", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(), [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8080, DockerCommand: "set -a; . /etc/webtor/common.env; PGPASSWORD=\"$PG_PASSWORD\" psql -U \"$PG_USER\" -d \"$PG_DATABASE\" -Atqc 'select 1' | grep -qx 1", StartPeriodSeconds: 45),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["DOMAIN"] = "${endpoint:self:client}" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8080, DockerCommand: "set -a; . /etc/webtor/common.env; PGPASSWORD=\"$PG_PASSWORD\" psql -U \"$PG_USER\" -d \"$PG_DATABASE\" -Atqc 'select 1' | grep -qx 1", StartPeriodSeconds: 45),
             [new("network-route", "Internet route", "select", true, Help: "Webtor must use VPN Gateway routing. LMS blocks direct Webtor installations.", Options: new[] { "VPN Gateway (Gluetun)" }), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Webtor traffic.")],
             SupportsVpnGateway: true,
             RequiresVpnGateway: true,
-            PublicUrlEnvironmentVariable: "DOMAIN")
-        ,
+            Exposure: ClientExposure(
+                "/webtor",
+                HomeLabBasePathSupportMode.Native,
+                streaming: true,
+                rangeRequests: true,
+                webSockets: true,
+                stripPathPrefix: true,
+                rewriteSecureCookiesForHttp: true)),
         new(
             "prowlarr",
             "Prowlarr",
@@ -314,7 +322,8 @@ public static class HomeLabCatalog
             [new("config", "/config", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 9696),
             [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Prowlarr traffic.")],
-            SupportsVpnGateway: true),
+            SupportsVpnGateway: true,
+            Exposure: ArrClientExposure("/prowlarr")),
         new(
             "sonarr",
             "Sonarr",
@@ -334,7 +343,8 @@ public static class HomeLabCatalog
             ],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8989),
             [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Sonarr traffic.")],
-            SupportsVpnGateway: true),
+            SupportsVpnGateway: true,
+            Exposure: ArrClientExposure("/sonarr")),
         new(
             "radarr",
             "Radarr",
@@ -354,7 +364,8 @@ public static class HomeLabCatalog
             ],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 7878),
             [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Radarr traffic.")],
-            SupportsVpnGateway: true),
+            SupportsVpnGateway: true,
+            Exposure: ArrClientExposure("/radarr")),
         new(
             "seerr",
             "Seerr (Overseerr successor)",
@@ -375,6 +386,26 @@ public static class HomeLabCatalog
 
     public static IReadOnlyList<HomeLabRecipeManifest> Recipes { get; } =
     [
+        new(
+            "secure-streaming",
+            "Secure Streaming",
+            "Stremio and Webtor with browser-safe generated endpoints behind a VPN Gateway.",
+            ["vpn-gateway", "stremio-server", "webtor"],
+            [],
+            [
+                new("stremio-server", RouteVia: "vpn-gateway"),
+                new("webtor", RouteVia: "vpn-gateway")
+            ],
+            RequiresVpnGateway: true,
+            ConnectivityDependencies:
+            [
+                new(
+                    "stremio-server",
+                    "webtor",
+                    HomeLabDependencyAccessFrom.Client,
+                    "Stremio browser add-on access",
+                    "${endpoint:webtor:client}")
+            ]),
         new(
             "private-qbittorrent",
             "Private qBittorrent",
@@ -410,7 +441,16 @@ public static class HomeLabCatalog
                 new("radarr", DownloadClient: "qbittorrent", IndexerManager: "prowlarr"),
                 new("seerr", Sonarr: "sonarr", Radarr: "radarr")
             ],
-            IsInstallable: true),
+            IsInstallable: true,
+            ConnectivityDependencies:
+            [
+                new("sonarr", "qbittorrent", HomeLabDependencyAccessFrom.Service, "Download client"),
+                new("sonarr", "prowlarr", HomeLabDependencyAccessFrom.Service, "Indexer manager"),
+                new("radarr", "qbittorrent", HomeLabDependencyAccessFrom.Service, "Download client"),
+                new("radarr", "prowlarr", HomeLabDependencyAccessFrom.Service, "Indexer manager"),
+                new("seerr", "sonarr", HomeLabDependencyAccessFrom.Service, "TV manager"),
+                new("seerr", "radarr", HomeLabDependencyAccessFrom.Service, "Movie manager")
+            ]),
         new(
             "jellyfin-media",
             "Jellyfin Media Stack",
@@ -441,4 +481,48 @@ public static class HomeLabCatalog
     public static HomeLabRecipeManifest GetRecipe(string id) =>
         Recipes.FirstOrDefault(recipe => recipe.Id.Equals(id?.Trim(), StringComparison.OrdinalIgnoreCase))
         ?? throw new InvalidOperationException($"Home Lab recipe '{id}' is not in the catalog.");
+
+    private static HomeLabServiceExposureManifest ClientExposure(
+        string preferredPath,
+        HomeLabBasePathSupportMode basePathSupport,
+        bool streaming = false,
+        bool rangeRequests = false,
+        bool webSockets = false,
+        bool? stripPathPrefix = null,
+        bool rewriteSecureCookiesForHttp = false) =>
+        new(
+            [HomeLabEndpointScope.Internal, HomeLabEndpointScope.Lan, HomeLabEndpointScope.Client, HomeLabEndpointScope.Public],
+            new HomeLabClientAccessManifest(
+                true,
+                "web",
+                HomeLabClientRoutingStrategy.Auto,
+                preferredPath,
+                new HomeLabReverseProxyManifest(
+                    basePathSupport,
+                    StripPathPrefix: stripPathPrefix ?? (basePathSupport != HomeLabBasePathSupportMode.Native),
+                    ForwardPathPrefix: true,
+                    RewriteSecureCookiesForHttp: rewriteSecureCookiesForHttp),
+                new HomeLabEndpointCapabilities(
+                    WebSockets: webSockets,
+                    Streaming: streaming,
+                    RangeRequests: rangeRequests,
+                    Uploads: true,
+                    LongLivedRequests: streaming)));
+
+    private static HomeLabServiceExposureManifest ArrClientExposure(string preferredPath) =>
+        new(
+            [HomeLabEndpointScope.Internal, HomeLabEndpointScope.Lan, HomeLabEndpointScope.Client, HomeLabEndpointScope.Public],
+            new HomeLabClientAccessManifest(
+                true,
+                "web",
+                HomeLabClientRoutingStrategy.Auto,
+                preferredPath,
+                new HomeLabReverseProxyManifest(
+                    HomeLabBasePathSupportMode.Native,
+                    StripPathPrefix: false,
+                    ForwardPathPrefix: true,
+                    Configuration: new HomeLabBasePathConfiguration(
+                        FilePath: "/config/config.xml",
+                        XmlElement: "UrlBase")),
+                new HomeLabEndpointCapabilities(WebSockets: true, Uploads: true)));
 }

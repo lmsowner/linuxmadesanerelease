@@ -17,7 +17,8 @@ public sealed record HomeLabPromptRecipe(
     IReadOnlyList<string> VpnRoutedAppIds,
     string StarterPrompt,
     string TechnicalGuidance,
-    string Prompt)
+    string Prompt,
+    PublishedHomeLabRecipeConnectivity? Connectivity = null)
 {
     public bool RoutesAppThroughVpn(string appId) =>
         VpnRoutedAppIds.Contains(appId, StringComparer.OrdinalIgnoreCase);
@@ -38,7 +39,27 @@ public sealed record PublishedHomeLabPromptRecipe(
     IReadOnlyList<string>? VpnRoutedApps = null,
     string? Category = null,
     IReadOnlyList<string>? Components = null,
-    bool RequiresPlanning = false);
+    bool RequiresPlanning = false,
+    PublishedHomeLabRecipeConnectivity? Connectivity = null);
+
+public sealed record PublishedHomeLabRecipeConnectivity(
+    string PublicOriginMode,
+    IReadOnlyList<PublishedHomeLabRecipeServiceConnectivity> Services,
+    IReadOnlyList<PublishedHomeLabRecipeDependency> Dependencies);
+
+public sealed record PublishedHomeLabRecipeServiceConnectivity(
+    string ServiceId,
+    IReadOnlyList<string> Scopes,
+    bool ClientAccessEnabled = false,
+    string Routing = "auto",
+    string PreferredPath = "");
+
+public sealed record PublishedHomeLabRecipeDependency(
+    string Consumer,
+    string Provider,
+    string AccessFrom = "service",
+    string? Purpose = null,
+    string? Endpoint = null);
 
 public static class HomeLabPromptRecipeCatalog
 {
@@ -77,14 +98,23 @@ public static class HomeLabPromptRecipeCatalog
             ["Webtor", "Stremio", "Gluetun"],
             ["webtor", "stremio-server"], true,
             "Set up Webtor and Stremio behind an existing VPN Gateway with LMS-managed local access. Ask me which gateway to use if there is more than one.",
-            "Preserve Webtor cookie rewriting, distinct shared-namespace ports, and the Stremio-to-host mapping. Use only personal, public-domain, or otherwise lawfully accessed content; do not configure content sources or add-ons."),
+            "Preserve distinct shared-namespace ports and use the generated Webtor client endpoint for browser-facing integration. Use only personal, public-domain, or otherwise lawfully accessed content; do not configure content sources or add-ons.",
+            null,
+            new PublishedHomeLabRecipeConnectivity(
+                "shared",
+                [
+                    new("stremio-server", ["internal", "lan", "client", "public"], true, "auto", "/stremio"),
+                    new("webtor", ["internal", "lan", "client", "public"], true, "auto", "/webtor")
+                ],
+                [new("stremio-server", "webtor", "client", "Browser-facing Webtor add-on endpoint", "${endpoint:webtor:client}")])),
         Deploy("Media", "jellyfin-vpn-automation", "Media Library",
             "Create a Jellyfin library with Seerr, Radarr, Sonarr, Prowlarr, and qBittorrent, while routing automation through Gluetun.",
             ["Jellyfin", "Jellyseerr / Seerr", "Radarr", "Sonarr", "Prowlarr", "qBittorrent", "Gluetun"],
             ["jellyfin", "qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"], true,
             "Set up a complete local Jellyfin media library with Seerr, Radarr, Sonarr, Prowlarr, and qBittorrent. Keep Jellyfin local, route the automation services through one existing VPN Gateway, and reuse LMS-managed downloads, movies, and TV storage.",
             "Never route Jellyfin through Gluetun. Give each routed service a distinct listener and report both LMS local URLs and shared-namespace loopback endpoints. Do not select or configure indexers, catalogues, download sources, or content.",
-            ["qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"]),
+            ["qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"],
+            MediaAutomationConnectivity()),
         Plan("Media", "music-server", "Music Server",
             "Plan a Navidrome music library with an optional lawful download and import pipeline.",
             ["Navidrome", "Optional download/import pipeline"],
@@ -365,7 +395,8 @@ public static class HomeLabPromptRecipeCatalog
             throw new InvalidOperationException($"Published HomeLab Recipe '{id}' has an invalid VPN app list.");
         }
 
-        return Create(category, id, name, description, components, appIds, definition.RequiresPlanning, definition.RequiresVpnGateway, basePrompt, technicalGuidance, vpnRoutedAppIds);
+        ValidatePublishedConnectivity(id, appIds, definition.Connectivity);
+        return Create(category, id, name, description, components, appIds, definition.RequiresPlanning, definition.RequiresVpnGateway, basePrompt, technicalGuidance, vpnRoutedAppIds, definition.Connectivity);
     }
 
     public static string BuildCustomPrompt(string request)
@@ -435,8 +466,29 @@ public static class HomeLabPromptRecipeCatalog
         bool requiresVpnGateway,
         string starterPrompt,
         string technicalGuidance,
-        IReadOnlyList<string>? vpnRoutedAppIds = null) =>
-        Create(category, id, name, description, components, appIds, false, requiresVpnGateway, starterPrompt, technicalGuidance, vpnRoutedAppIds);
+        IReadOnlyList<string>? vpnRoutedAppIds = null,
+        PublishedHomeLabRecipeConnectivity? connectivity = null) =>
+        Create(category, id, name, description, components, appIds, false, requiresVpnGateway, starterPrompt, technicalGuidance, vpnRoutedAppIds, connectivity);
+
+    private static PublishedHomeLabRecipeConnectivity MediaAutomationConnectivity() =>
+        new(
+            "shared",
+            [
+                new("jellyfin", ["internal", "lan", "client", "public"], true, "auto", "/jellyfin"),
+                new("qbittorrent", ["internal", "lan", "client", "public"], true, "auto", "/qbittorrent"),
+                new("prowlarr", ["internal", "lan", "client", "public"], true, "auto", "/prowlarr"),
+                new("sonarr", ["internal", "lan", "client", "public"], true, "auto", "/sonarr"),
+                new("radarr", ["internal", "lan", "client", "public"], true, "auto", "/radarr"),
+                new("seerr", ["internal", "lan", "client", "public"], true, "auto", "/seerr")
+            ],
+            [
+                new("sonarr", "qbittorrent", "service", "Download client", "${endpoint:qbittorrent:internal}"),
+                new("sonarr", "prowlarr", "service", "Indexer manager", "${endpoint:prowlarr:internal}"),
+                new("radarr", "qbittorrent", "service", "Download client", "${endpoint:qbittorrent:internal}"),
+                new("radarr", "prowlarr", "service", "Indexer manager", "${endpoint:prowlarr:internal}"),
+                new("seerr", "sonarr", "service", "TV manager", "${endpoint:sonarr:internal}"),
+                new("seerr", "radarr", "service", "Movie manager", "${endpoint:radarr:internal}")
+            ]);
 
     private static HomeLabPromptRecipe Plan(
         string category,
@@ -459,7 +511,8 @@ public static class HomeLabPromptRecipeCatalog
         bool requiresVpnGateway,
         string starterPrompt,
         string technicalGuidance,
-        IReadOnlyList<string>? vpnRoutedAppIds = null) =>
+        IReadOnlyList<string>? vpnRoutedAppIds = null,
+        PublishedHomeLabRecipeConnectivity? connectivity = null) =>
         new(
             id,
             name,
@@ -484,5 +537,40 @@ public static class HomeLabPromptRecipeCatalog
             {(requiresPlanning
                 ? "Start by inspecting Home Lab. This recipe requires planning because LMS cannot yet deploy every component safely. Ask only for the missing choices, explain exactly which parts LMS supports, and do not call apply_home_lab_prompt_recipe or install a partial stack. Produce a concrete plan the user can review."
                 : "Start by inspecting Home Lab. Explain what already exists, resolve any required infrastructure choice, then ask for approval through the LMS apply tool. After the approved action completes, inspect again and report actual health, network security where applicable, and local access details.")}
-            """);
+            """,
+            connectivity);
+
+    private static void ValidatePublishedConnectivity(
+        string recipeId,
+        IReadOnlyList<string> appIds,
+        PublishedHomeLabRecipeConnectivity? connectivity)
+    {
+        if (connectivity is null)
+        {
+            return;
+        }
+        if (!connectivity.PublicOriginMode.Equals("shared", StringComparison.OrdinalIgnoreCase) ||
+            connectivity.Services.Count > 30 || connectivity.Dependencies.Count > 60)
+        {
+            throw new InvalidOperationException($"Published HomeLab Recipe '{recipeId}' has invalid connectivity settings.");
+        }
+        var serviceIds = connectivity.Services.Select(service => service.ServiceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (serviceIds.Count != connectivity.Services.Count ||
+            serviceIds.Any(serviceId => !appIds.Contains(serviceId, StringComparer.OrdinalIgnoreCase)) ||
+            connectivity.Services.Any(service =>
+                service.Scopes.Any(scope => scope is not ("internal" or "lan" or "client" or "public")) ||
+                service.Routing is not ("auto" or "subpath" or "subdomain") ||
+                service.ClientAccessEnabled && !service.Scopes.Contains("client", StringComparer.OrdinalIgnoreCase)) ||
+            connectivity.Dependencies.Any(dependency =>
+                !serviceIds.Contains(dependency.Consumer) ||
+                !serviceIds.Contains(dependency.Provider) ||
+                dependency.AccessFrom is not ("service" or "client") ||
+                !string.IsNullOrWhiteSpace(dependency.Endpoint) &&
+                !dependency.Endpoint.Equals(
+                    $"${{endpoint:{dependency.Provider}:{(dependency.AccessFrom == "client" ? "client" : "internal")}}}",
+                    StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException($"Published HomeLab Recipe '{recipeId}' has invalid service connectivity intent.");
+        }
+    }
 }

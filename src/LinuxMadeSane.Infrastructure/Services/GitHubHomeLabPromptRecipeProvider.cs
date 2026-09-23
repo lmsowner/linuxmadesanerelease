@@ -34,7 +34,7 @@ public sealed class GitHubHomeLabPromptRecipeProvider(HttpClient httpClient) : I
             try
             {
                 var catalog = await httpClient.GetFromJsonAsync<PublishedHomeLabPromptRecipeCatalog>(CatalogUrl, cancellationToken);
-                if (catalog?.SchemaVersion != 1)
+                if (catalog?.SchemaVersion is not (1 or 2))
                 {
                     throw new InvalidOperationException("The public HomeLab Recipe catalog uses an unsupported schema version.");
                 }

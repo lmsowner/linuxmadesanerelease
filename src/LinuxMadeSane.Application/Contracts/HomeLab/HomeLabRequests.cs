@@ -29,7 +29,8 @@ public sealed record HomeLabRecipeRunAssignment(
     string RecipeId,
     string RecipeName,
     Guid RecipeRunId,
-    IReadOnlyList<Guid> InstallationIds);
+    IReadOnlyList<Guid> InstallationIds,
+    PublishedHomeLabRecipeConnectivity? Connectivity = null);
 
 public sealed record HomeLabContainerVolumeSetting(
     string HostPath,

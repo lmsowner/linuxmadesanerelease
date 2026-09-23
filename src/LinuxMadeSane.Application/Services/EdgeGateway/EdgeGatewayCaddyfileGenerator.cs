@@ -146,7 +146,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
                 builder.AppendLine();
             }
 
-            if (!string.IsNullOrWhiteSpace(pathPrefix))
+            if (!string.IsNullOrWhiteSpace(pathPrefix) && route.StripPathPrefix)
             {
                 builder.AppendLine($"        uri strip_prefix {pathPrefix}");
                 builder.AppendLine();
@@ -257,6 +257,11 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
         builder.AppendLine("            header_up X-Forwarded-Proto https");
         builder.AppendLine("            header_up X-Forwarded-Host {host}");
         builder.AppendLine("            header_up X-Forwarded-Port 443");
+        var pathPrefix = EdgeGatewayRouteValidator.NormalizePathPrefix(route.TargetPathPrefix);
+        if (route.ForwardPathPrefix && !string.IsNullOrWhiteSpace(pathPrefix))
+        {
+            builder.AppendLine($"            header_up X-Forwarded-Prefix {pathPrefix}");
+        }
 
         if (shouldSkipBackendTlsVerification || connectAsLms)
         {

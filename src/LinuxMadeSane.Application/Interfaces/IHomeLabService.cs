@@ -12,6 +12,11 @@ public interface IHomeLabService
     Task<HomeLabWorkspace> GetWorkspaceSnapshotAsync(CancellationToken cancellationToken = default) =>
         GetWorkspaceAsync(cancellationToken);
     Task<IReadOnlyList<HomeLabRuntimeHealth>> RefreshRuntimeHealthAsync(CancellationToken cancellationToken = default);
+    async Task<IReadOnlyList<HomeLabServiceEndpoint>> RefreshEndpointHealthAsync(Guid installationId, CancellationToken cancellationToken = default)
+    {
+        var workspace = await GetWorkspaceSnapshotAsync(cancellationToken);
+        return workspace.Installations.FirstOrDefault(item => item.Id == installationId)?.ServiceEndpoints ?? [];
+    }
     Task<HomeLabStorageRole> SaveStorageRoleAsync(string role, string hostPath, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> ApplyStandardStorageAsync(CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> InstallAppAsync(HomeLabInstallRequest request, CancellationToken cancellationToken = default);

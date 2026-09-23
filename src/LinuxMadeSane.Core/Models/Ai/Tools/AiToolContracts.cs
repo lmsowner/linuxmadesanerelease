@@ -208,7 +208,17 @@ public sealed record HomeLabAiInstallation(
     IReadOnlyList<HomeLabAiPort> Ports,
     string PortForwardingStatus,
     int? ForwardedPort,
-    string PortForwardingDetail);
+    string PortForwardingDetail,
+    IReadOnlyList<HomeLabAiEndpoint>? Endpoints = null);
+
+public sealed record HomeLabAiEndpoint(
+    string ServiceId,
+    string PortName,
+    string Scope,
+    string Url,
+    string RoutingMode,
+    string HealthState,
+    string HealthDetail);
 
 public sealed record HomeLabAiPort(
     string Name,

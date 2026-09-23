@@ -28,7 +28,27 @@ public sealed record HomeLabAppInstallation(
     string HealthDetail,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    bool IsRecipeInstallation);
+    bool IsRecipeInstallation,
+    IReadOnlyList<HomeLabServiceEndpoint>? ServiceEndpoints = null);
+
+public sealed record HomeLabServiceEndpoint(
+    Guid Id,
+    Guid InstallationId,
+    string ServiceId,
+    string PortName,
+    HomeLabEndpointScope Scope,
+    string Url,
+    string Scheme,
+    string Host,
+    int? Port,
+    string PathBase,
+    HomeLabClientRoutingStrategy? RoutingMode,
+    Guid? EdgeGatewayRouteId,
+    HomeLabEndpointHealthState HealthState,
+    string HealthDetail,
+    DateTimeOffset? CheckedAtUtc,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc);
 
 public sealed record HomeLabDeployment(
     Guid Id,

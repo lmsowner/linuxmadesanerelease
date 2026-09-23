@@ -12,6 +12,8 @@ public sealed record EdgeGatewayRouteListItem(
     string Hostname,
     string DomainName,
     string TargetPathPrefix,
+    bool StripPathPrefix,
+    bool ForwardPathPrefix,
     string TargetUrl,
     EdgeGatewayAuthMode AuthMode,
     bool UsePublicHostHeader,

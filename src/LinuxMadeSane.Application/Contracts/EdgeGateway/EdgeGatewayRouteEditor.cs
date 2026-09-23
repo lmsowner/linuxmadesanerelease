@@ -29,6 +29,8 @@ public sealed class EdgeGatewayRouteEditor
     public int TargetPort { get; set; } = 80;
 
     public string TargetPathPrefix { get; set; } = string.Empty;
+    public bool StripPathPrefix { get; set; } = true;
+    public bool ForwardPathPrefix { get; set; } = true;
     public EdgeGatewayAuthMode AuthMode { get; set; } = EdgeGatewayAuthMode.RequireMfa;
     public bool UsePublicHostHeader { get; set; } = true;
     public string UpstreamSourceAddress { get; set; } = string.Empty;

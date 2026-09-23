@@ -693,6 +693,8 @@ public sealed class SqliteDatabaseInitializer(
                 TargetHost TEXT NOT NULL,
                 TargetPort INTEGER NOT NULL,
                 TargetPathPrefix TEXT NOT NULL,
+                StripPathPrefix INTEGER NOT NULL DEFAULT 1,
+                ForwardPathPrefix INTEGER NOT NULL DEFAULT 0,
                 AuthMode INTEGER NOT NULL,
                 UsePublicHostHeader INTEGER NOT NULL DEFAULT 1,
                 StripForwardedFor INTEGER NOT NULL DEFAULT 0,
@@ -716,6 +718,8 @@ public sealed class SqliteDatabaseInitializer(
 
         await dbContext.Database.ExecuteSqlRawAsync(routesSql, cancellationToken);
         await EnsureColumnExistsAsync("edge_gateway_routes", "UsePublicHostHeader", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_routes", "StripPathPrefix", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_routes", "ForwardPathPrefix", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnExistsAsync("edge_gateway_routes", "UpstreamSourceAddress", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync("edge_gateway_routes", "StripForwardedFor", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnExistsAsync("edge_gateway_routes", "SkipUpstreamTlsVerification", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
@@ -840,6 +844,7 @@ public sealed class SqliteDatabaseInitializer(
                 RecipeId TEXT NULL,
                 RecipeRunId TEXT NULL,
                 PromptRecipeId TEXT NULL,
+                ConnectivityJson TEXT NOT NULL DEFAULT '',
                 NetworkName TEXT NOT NULL,
                 CreatedAtUtc TEXT NOT NULL,
                 UpdatedAtUtc TEXT NOT NULL
@@ -878,16 +883,47 @@ public sealed class SqliteDatabaseInitializer(
             );
             """;
 
+        const string serviceEndpointsSql = """
+            CREATE TABLE IF NOT EXISTS home_lab_service_endpoints (
+                Id TEXT NOT NULL PRIMARY KEY,
+                InstallationId TEXT NOT NULL,
+                ServiceId TEXT NOT NULL,
+                PortName TEXT NOT NULL,
+                Scope INTEGER NOT NULL,
+                Url TEXT NOT NULL,
+                Scheme TEXT NOT NULL,
+                Host TEXT NOT NULL,
+                Port INTEGER NULL,
+                PathBase TEXT NOT NULL,
+                RoutingMode INTEGER NULL,
+                EdgeGatewayRouteId TEXT NULL,
+                HealthState INTEGER NOT NULL,
+                HealthDetail TEXT NOT NULL,
+                CheckedAtUtc TEXT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL,
+                FOREIGN KEY (InstallationId) REFERENCES home_lab_installations (Id) ON DELETE CASCADE
+            );
+            """;
+
         await dbContext.Database.ExecuteSqlRawAsync(deploymentsSql, cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(installationsSql, cancellationToken);
         await EnsureColumnExistsAsync("home_lab_deployments", "RecipeRunId", "TEXT NULL", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_deployments", "PromptRecipeId", "TEXT NULL", cancellationToken);
+        await EnsureColumnExistsAsync("home_lab_deployments", "ConnectivityJson", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "NetworkMode", "TEXT NOT NULL DEFAULT 'bridge'", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "ConfigurationJson", "TEXT NOT NULL DEFAULT '{{}}'", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "SecretConfigurationJson", "TEXT NOT NULL DEFAULT '{{}}'", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "CaddyRouteId", "TEXT NULL", cancellationToken);
         await EnsureColumnExistsAsync("home_lab_installations", "CaddySourcePort", "INTEGER NULL", cancellationToken);
         await dbContext.Database.ExecuteSqlRawAsync(storageSql, cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(serviceEndpointsSql, cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE UNIQUE INDEX IF NOT EXISTS IX_home_lab_service_endpoints_InstallationId_PortName_Scope ON home_lab_service_endpoints (InstallationId, PortName, Scope);",
+            cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_home_lab_service_endpoints_EdgeGatewayRouteId ON home_lab_service_endpoints (EdgeGatewayRouteId);",
+            cancellationToken);
     }
 
     private async Task EnsureMessagingTablesAsync(CancellationToken cancellationToken)

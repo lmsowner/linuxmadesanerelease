@@ -26,4 +26,5 @@ public sealed class HomeLabInstallationEntity
     public DateTimeOffset UpdatedAtUtc { get; set; }
     public bool IsRecipeInstallation { get; set; }
     public HomeLabDeploymentEntity? Deployment { get; set; }
+    public List<HomeLabServiceEndpointEntity> ServiceEndpoints { get; } = [];
 }

@@ -840,7 +840,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                     recipe.Id,
                     recipe.Name,
                     Guid.NewGuid(),
-                    targetInstallations.Select(item => item.InstallationId).ToArray()),
+                    targetInstallations.Select(item => item.InstallationId).ToArray(),
+                    recipe.Connectivity),
                 cancellationToken);
         }
 
@@ -929,6 +930,18 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             }
         }
 
+        var endpoints = (installation.ServiceEndpoints ?? [])
+            .Select(endpoint => new HomeLabAiEndpoint(
+                endpoint.ServiceId,
+                endpoint.PortName,
+                endpoint.Scope.ToString(),
+                endpoint.Url,
+                endpoint.RoutingMode?.ToString() ?? string.Empty,
+                endpoint.HealthState.ToString(),
+                endpoint.HealthDetail))
+            .ToArray();
+        var clientEndpoint = (installation.ServiceEndpoints ?? [])
+            .FirstOrDefault(endpoint => endpoint.Scope == HomeLabEndpointScope.Client);
         return new HomeLabAiInstallation(
             installation.Id,
             installation.DeploymentId,
@@ -942,11 +955,12 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             installation.HealthDetail,
             isVpnRouted,
             isSecured,
-            installation.CaddySourcePort is int port ? $"http://<LMS host>:{port}" : string.Empty,
+            clientEndpoint?.Url ?? string.Empty,
             ParseHomeLabAiPorts(installation.PortMappingsJson),
             security?.PortForwardingStatus ?? string.Empty,
             security?.ForwardedPort,
-            security?.PortForwardingDetail ?? string.Empty);
+            security?.PortForwardingDetail ?? string.Empty,
+            endpoints);
     }
 
     private IHomeLabService RequireHomeLabService() =>
@@ -974,7 +988,12 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     }
 
     private static string FormatHomeLabInstallation(HomeLabAiInstallation item) =>
-        $"- {item.Name} ({item.AppId}) | installation={item.InstallationId} | container={item.ContainerName} | image={item.Image} | network={item.NetworkMode} | ports={FormatHomeLabPorts(item.Ports)} | dependencies={string.Join(",", item.Dependencies)} | {item.HealthState}: {item.HealthDetail} | VPN routed={item.IsVpnRouted} | secured={item.IsSecured} | forwarding={FormatHomeLabForwarding(item)} | access={item.AccessUrl}";
+        $"- {item.Name} ({item.AppId}) | installation={item.InstallationId} | container={item.ContainerName} | image={item.Image} | network={item.NetworkMode} | ports={FormatHomeLabPorts(item.Ports)} | dependencies={string.Join(",", item.Dependencies)} | endpoints={FormatHomeLabEndpoints(item.Endpoints)} | {item.HealthState}: {item.HealthDetail} | VPN routed={item.IsVpnRouted} | secured={item.IsSecured} | forwarding={FormatHomeLabForwarding(item)} | access={item.AccessUrl}";
+
+    private static string FormatHomeLabEndpoints(IReadOnlyList<HomeLabAiEndpoint>? endpoints) =>
+        endpoints is not { Count: > 0 }
+            ? "none"
+            : string.Join(",", endpoints.Select(endpoint => $"{endpoint.ServiceId}.{endpoint.Scope}={endpoint.Url}"));
 
     private static IReadOnlyList<HomeLabAiPort> ParseHomeLabAiPorts(string json)
     {

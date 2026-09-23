@@ -382,6 +382,7 @@
                                                 else
                                                 {
                                                     var externalRoute = GetExternalRoute(selectedInstallation);
+                                                    var publicEndpoint = selectedInstallation.ServiceEndpoints?.FirstOrDefault(endpoint => endpoint.Scope == HomeLabEndpointScope.Public);
                                                     <div class="home-lab-setting-card">
                                                         <div class="home-lab-details-heading">
                                                             <div>
@@ -391,12 +392,18 @@
                                                             <UiPill Tone="@(externalRoute is { Enabled: true } ? UiPillTone.Success : UiPillTone.Neutral)">@(externalRoute is { Enabled: true } ? "Published" : "Local only")</UiPill>
                                                         </div>
 
-                                                        @if (externalRoute is { Enabled: true } && BuildExternalUrl(externalRoute) is { } externalUrl)
+                                                        @if (externalRoute is { Enabled: true } && publicEndpoint is not null)
                                                         {
                                                             <dl class="home-lab-detail-list home-lab-detail-definition-list">
-                                                                <dt>External URL</dt><dd><a href="@externalUrl" target="_blank" rel="noopener">@externalUrl</a></dd>
+                                                                <dt>External URL</dt><dd><a href="@publicEndpoint.Url" target="_blank" rel="noopener">@publicEndpoint.Url</a></dd>
                                                                 <dt>Protection</dt><dd>@FormatExternalAuthMode(externalRoute.AuthMode)</dd>
+                                                                <dt>Endpoint health</dt><dd>@publicEndpoint.HealthState — @publicEndpoint.HealthDetail</dd>
                                                             </dl>
+                                                            <UiCommandButton Label="Test endpoint"
+                                                                             Glyph="UiIconGlyph.Refresh"
+                                                                             Variant="UiButtonVariant.ActionSubtle"
+                                                                             Disabled="@busy"
+                                                                             OnClick="TestSelectedEndpointAsync" />
                                                         }
 
                                                         @if (AvailableExternalDomains.Count == 0)
@@ -2299,6 +2306,22 @@
         }
     }
 
+    private async Task TestSelectedEndpointAsync()
+    {
+        if (selectedInstallation is null)
+        {
+            return;
+        }
+        await RunUiOperationAsync(async () =>
+        {
+            var endpoints = await HomeLabService.RefreshEndpointHealthAsync(selectedInstallation.Id);
+            var endpoint = endpoints.FirstOrDefault(item => item.Scope == HomeLabEndpointScope.Public);
+            SetMessage(
+                endpoint is null ? "No public endpoint is registered." : endpoint.HealthDetail,
+                endpoint?.HealthState == HomeLabEndpointHealthState.Broken);
+        });
+    }
+
     private async Task RunUiOperationAsync(Func<Task> operation)
     {
         if (busy) return;
@@ -2507,13 +2530,19 @@
 
     private string? BuildOpenUrl(HomeLabAppInstallation installation)
     {
-        if (IsEdgeGatewaySession)
+        var endpoints = installation.ServiceEndpoints ?? [];
+        var clientEndpoint = endpoints.FirstOrDefault(endpoint => endpoint.Scope == HomeLabEndpointScope.Client);
+        if (clientEndpoint is null)
         {
-            var route = GetExternalRoute(installation);
-            return route is { Enabled: true } ? BuildExternalUrl(route) : null;
+            return null;
         }
-
-        return BuildLocalUrl(installation);
+        if (!IsEdgeGatewaySession)
+        {
+            return clientEndpoint.Url;
+        }
+        return clientEndpoint.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)
+            ? clientEndpoint.Url
+            : null;
     }
 
     private static string? BuildExternalUrl(EdgeGatewayRouteListItem route)
@@ -2548,19 +2577,4 @@
         _ => "LMS MFA / passkey"
     };
 
-    private string? BuildLocalUrl(HomeLabAppInstallation installation)
-    {
-        if (installation.CaddySourcePort is not int caddyPort || caddyPort <= 0)
-        {
-            return null;
-        }
-
-        if (!Uri.TryCreate(Navigation.BaseUri, UriKind.Absolute, out var baseUri) ||
-            string.IsNullOrWhiteSpace(baseUri.Host))
-        {
-            return null;
-        }
-
-        return $"http://{baseUri.Host}:{caddyPort}";
-    }
 }

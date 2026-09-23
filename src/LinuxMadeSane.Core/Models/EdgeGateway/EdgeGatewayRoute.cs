@@ -33,4 +33,6 @@ public sealed record EdgeGatewayRoute(
     DateTimeOffset UpdatedAt,
     EdgeGatewayDiagnosticStatus LastTestStatus,
     string LastTestMessage,
-    string UpstreamSourceAddress = "");
+    string UpstreamSourceAddress = "",
+    bool StripPathPrefix = true,
+    bool ForwardPathPrefix = false);

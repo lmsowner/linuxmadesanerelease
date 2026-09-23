@@ -10,6 +10,7 @@ public sealed class HomeLabDeploymentEntity
     public string? RecipeId { get; set; }
     public Guid? RecipeRunId { get; set; }
     public string? PromptRecipeId { get; set; }
+    public string ConnectivityJson { get; set; } = string.Empty;
     public string NetworkName { get; set; } = string.Empty;
     public DateTimeOffset CreatedAtUtc { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }

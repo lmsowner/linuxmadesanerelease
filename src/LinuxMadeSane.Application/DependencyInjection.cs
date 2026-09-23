@@ -37,6 +37,7 @@ public static class DependencyInjection
         services.AddScoped<ICaddyIntegrationService, CaddyIntegrationService>();
         services.AddScoped<EdgeGatewayCaddyfileGenerator>();
         services.AddScoped<IEdgeGatewayService, EdgeGatewayService>();
+        services.AddScoped<IEdgeGatewayRouteRegistrationService, EdgeGatewayRouteRegistrationService>();
         services.AddScoped<EdgeGatewayServerPublishingService>();
         services.AddScoped<OnDemandAppService>();
         services.AddScoped<LmsServerEmailSetupService>();

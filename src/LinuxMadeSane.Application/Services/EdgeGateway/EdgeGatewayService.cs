@@ -391,6 +391,8 @@ public sealed class EdgeGatewayService(
                 TargetHost = route.TargetHost,
                 TargetPort = route.TargetPort,
                 TargetPathPrefix = route.TargetPathPrefix,
+                StripPathPrefix = route.StripPathPrefix,
+                ForwardPathPrefix = route.ForwardPathPrefix,
                 AuthMode = NormalizePublicAuthMode(route.AuthMode),
                 UsePublicHostHeader = route.UsePublicHostHeader,
                 StripForwardedFor = route.StripForwardedFor,
@@ -446,7 +448,9 @@ public sealed class EdgeGatewayService(
             now,
             existing?.LastTestStatus ?? EdgeGatewayDiagnosticStatus.NotConfigured,
             existing?.LastTestMessage ?? string.Empty,
-            editor.UpstreamSourceAddress?.Trim() ?? string.Empty);
+            editor.UpstreamSourceAddress?.Trim() ?? string.Empty,
+            editor.StripPathPrefix,
+            editor.ForwardPathPrefix);
 
         EdgeGatewayRouteValidator.ValidateRoute(route);
         await store.SaveRouteAsync(route, cancellationToken);
@@ -1351,6 +1355,23 @@ public sealed class EdgeGatewayService(
 
         var normalizedDomain = EdgeGatewayRouteValidator.NormalizeDomainName(route.DomainName);
         var normalizedHostname = EdgeGatewayRouteValidator.NormalizeHostname(route.Hostname);
+        var siblingRoutes = (await store.ListRoutesAsync(cancellationToken))
+            .Where(candidate => candidate.Id != route.Id &&
+                                candidate.Enabled &&
+                                candidate.Hostname.Equals(normalizedHostname, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (siblingRoutes.Length > 0)
+        {
+            await store.DeleteRouteAsync(route.Id, cancellationToken);
+            var siblingApply = await ApplyCaddyConfigurationAsync(cancellationToken);
+            if (!siblingApply.Success)
+            {
+                await store.SaveRouteAsync(route, cancellationToken);
+                throw new InvalidOperationException($"The route was removed, but Caddy did not reload: {siblingApply.Summary}");
+            }
+            return;
+        }
+
         var settings = await GetGatewaySettingsAsync(cancellationToken);
         var gatewayDomainName = BuildGatewayDomainName(normalizedDomain, settings.GatewaySubdomain);
         var relativeHostname = ResolveRelativeHostname(normalizedHostname, normalizedDomain);
@@ -3167,6 +3188,8 @@ public sealed class EdgeGatewayService(
             route.Hostname,
             route.DomainName,
             route.TargetPathPrefix,
+            route.StripPathPrefix,
+            route.ForwardPathPrefix,
             EdgeGatewayRouteValidator.BuildTargetUrl(route),
             NormalizePublicAuthMode(route.AuthMode),
             route.UsePublicHostHeader,

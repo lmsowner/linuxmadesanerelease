@@ -14,6 +14,8 @@ public sealed class EdgeGatewayRouteEntity
     public string TargetHost { get; set; } = string.Empty;
     public int TargetPort { get; set; }
     public string TargetPathPrefix { get; set; } = string.Empty;
+    public bool StripPathPrefix { get; set; } = true;
+    public bool ForwardPathPrefix { get; set; }
     public int AuthMode { get; set; }
     public bool UsePublicHostHeader { get; set; }
     public string UpstreamSourceAddress { get; set; } = string.Empty;
