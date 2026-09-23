@@ -178,7 +178,7 @@ public static class HomeLabCatalog
             "https://github.com/tsaridas/stremio-docker",
             "tsaridas/stremio-docker",
             "latest",
-            "2",
+            "3",
             [new("web", 8080, Primary: true, VpnContainerPort: 18081, VpnEnvironmentVariable: "WEBUI_INTERNAL_PORT")],
             [new("config", "/root/.stremio-server", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -192,6 +192,7 @@ public static class HomeLabCatalog
             [new("network-route", "Internet route", "select", true, Help: "Stremio must use VPN Gateway routing. LMS blocks direct Stremio installations.", Options: new[] { "VPN Gateway (Gluetun)" }), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Stremio traffic.")],
             SupportsVpnGateway: true,
             RequiresVpnGateway: true,
+            PublicUrlEnvironmentVariable: "SERVER_URL",
             Exposure: ClientExposure("/stremio", HomeLabBasePathSupportMode.None, streaming: true, rangeRequests: true, webSockets: true)),
         new(
             "immich",
