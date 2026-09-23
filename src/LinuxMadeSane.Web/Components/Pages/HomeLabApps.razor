@@ -1175,26 +1175,64 @@
             var promptRecipeProvider = scope.ServiceProvider.GetRequiredService<IHomeLabPromptRecipeProvider>();
             var edgeGatewayService = scope.ServiceProvider.GetRequiredService<IEdgeGatewayService>();
 
-            var recipeTask = promptRecipeProvider.GetRecipesAsync(cancellationToken);
-            var refreshedWorkspace = await homeLabService.GetWorkspaceAsync(cancellationToken);
-            var refreshedSecurity = new Dictionary<Guid, HomeLabNetworkSecurity>();
-            foreach (var installation in refreshedWorkspace.Installations)
+            // Page entry must remain a read-only snapshot operation. Full workspace
+            // reconciliation can execute container configuration checks and is reserved
+            // for explicit lifecycle operations.
+            var refreshedWorkspace = await homeLabService.GetWorkspaceSnapshotAsync(cancellationToken);
+            await InvokeAsync(() =>
             {
+                if (disposed)
+                {
+                    return;
+                }
+
+                workspace = refreshedWorkspace;
+                var installationIds = refreshedWorkspace.Installations.Select(item => item.Id).ToHashSet();
+                foreach (var staleId in summaryNetworkSecurity.Keys.Where(id => !installationIds.Contains(id)).ToArray())
+                {
+                    summaryNetworkSecurity.Remove(staleId);
+                }
+
+                foreach (var role in refreshedWorkspace.StorageRoles)
+                {
+                    storagePaths[role.Role] = role.HostPath;
+                }
+
+                StateHasChanged();
+            });
+
+            // Only VPN-routed apps need a summary probe. Direct apps and VPN gateways
+            // already have a deterministic compact state, and probing their public IP
+            // can add tens of seconds per container when the Internet is unavailable.
+            foreach (var installation in refreshedWorkspace.Installations.Where(item => IsVpnRoute(item.NetworkMode)))
+            {
+                HomeLabNetworkSecurity security;
                 try
                 {
-                    refreshedSecurity[installation.Id] = await homeLabService.GetNetworkSecurityAsync(
-                        installation.Id,
-                        cancellationToken);
+                    security = await homeLabService.GetNetworkSecurityAsync(installation.Id, cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
                     throw;
                 }
-                catch
+                catch (Exception exception)
                 {
-                    // Stopped or unavailable containers remain unverified in the saved snapshot.
+                    security = CreateUnavailableNetworkSecurity(installation, exception.Message);
                 }
+
+                await InvokeAsync(() =>
+                {
+                    if (disposed)
+                    {
+                        return;
+                    }
+
+                    summaryNetworkSecurity[installation.Id] = security;
+                    StateHasChanged();
+                });
             }
+
+            var refreshedRecipes = await promptRecipeProvider.GetRecipesAsync(cancellationToken);
 
             IReadOnlyList<EdgeGatewayRouteListItem>? refreshedRoutes = null;
             EdgeGatewayDashboardViewModel? refreshedDashboard = null;
@@ -1212,7 +1250,6 @@
                 // Keep the currently displayed Edge Gateway state if its refresh is unavailable.
             }
 
-            var refreshedRecipes = await recipeTask;
             await InvokeAsync(() =>
             {
                 if (disposed)
@@ -1226,17 +1263,6 @@
                 {
                     edgeGatewayRoutes = refreshedRoutes;
                     edgeGatewayDashboard = refreshedDashboard;
-                }
-
-                summaryNetworkSecurity.Clear();
-                foreach (var entry in refreshedSecurity)
-                {
-                    summaryNetworkSecurity[entry.Key] = entry.Value;
-                }
-
-                foreach (var role in refreshedWorkspace.StorageRoles)
-                {
-                    storagePaths[role.Role] = role.HostPath;
                 }
 
                 StateHasChanged();
@@ -1779,23 +1805,49 @@
 
     private async Task RefreshSummaryNetworkSecurityAsync()
     {
-        summaryNetworkSecurity.Clear();
         if (workspace is null)
         {
             return;
         }
 
-        foreach (var installation in workspace.Installations)
+        var installationIds = workspace.Installations.Select(item => item.Id).ToHashSet();
+        foreach (var staleId in summaryNetworkSecurity.Keys.Where(id => !installationIds.Contains(id)).ToArray())
+        {
+            summaryNetworkSecurity.Remove(staleId);
+        }
+
+        foreach (var installation in workspace.Installations.Where(item => IsVpnRoute(item.NetworkMode)))
         {
             try
             {
                 summaryNetworkSecurity[installation.Id] = await HomeLabService.GetNetworkSecurityAsync(installation.Id);
             }
-            catch
+            catch (Exception exception)
             {
-                // A stopped or unavailable container is represented in the summary as unverified.
+                summaryNetworkSecurity[installation.Id] = CreateUnavailableNetworkSecurity(installation, exception.Message);
             }
+
+            StateHasChanged();
         }
+    }
+
+    private static HomeLabNetworkSecurity CreateUnavailableNetworkSecurity(
+        HomeLabAppInstallation installation,
+        string detail)
+    {
+        var gatewayContainer = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
+            ? installation.NetworkMode["container:".Length..]
+            : string.Empty;
+        return new HomeLabNetworkSecurity(
+            "UNVERIFIED",
+            true,
+            false,
+            $"VPN Gateway: {gatewayContainer}",
+            gatewayContainer,
+            "Unavailable",
+            null,
+            string.IsNullOrWhiteSpace(detail) ? "LMS could not verify this VPN route." : detail,
+            DateTimeOffset.UtcNow);
     }
 
     private HomeLabNetworkSecurity? GetSummaryNetworkSecurity(HomeLabAppInstallation installation) =>
