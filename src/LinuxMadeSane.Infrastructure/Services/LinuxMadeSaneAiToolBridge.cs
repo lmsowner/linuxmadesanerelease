@@ -497,7 +497,10 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                     recipe.Id,
                     recipe.Name,
                     recipe.Description,
+                    recipe.Category,
+                    recipe.Components,
                     recipe.AppIds,
+                    recipe.RequiresPlanning,
                     recipe.RequiresVpnGateway,
                     recipe.VpnRoutedAppIds))
                 .ToArray());
@@ -689,6 +692,16 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     {
         var request = DeserializeRequest<ApplyHomeLabPromptRecipeToolRequest>(context.Invocation.ArgumentsJson);
         var recipe = await GetPromptRecipeAsync(request.PromptRecipeId, cancellationToken);
+        if (recipe.RequiresPlanning)
+        {
+            return CreateHomeLabApplyResult(
+                definition,
+                context.Invocation,
+                recipe,
+                false,
+                [],
+                ["This HomeLab Recipe needs the choices described in its starting prompt before LMS can safely deploy it. Review those choices in the AI conversation; LMS will not apply an incomplete or misleading partial stack."]);
+        }
         var service = RequireHomeLabService();
         var workspace = await service.GetWorkspaceAsync(cancellationToken);
         var details = new List<string>();
@@ -863,8 +876,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             response,
             succeeded ? AiExecutionOutcome.Succeeded : AiExecutionOutcome.Failed,
             succeeded
-                ? $"Applied and verified Home Lab prompt recipe {recipe.Name}."
-                : $"Home Lab prompt recipe {recipe.Name} needs attention.",
+                ? $"Applied and verified HomeLab Recipe {recipe.Name}."
+                : $"HomeLab Recipe {recipe.Name} needs attention.",
             string.Join(Environment.NewLine, details.Concat(installations.Select(FormatHomeLabInstallation))),
             succeeded ? string.Empty : "One or more requested apps did not reach a secured, usable LMS state.",
             succeeded ? 0 : 1);

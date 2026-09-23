@@ -219,7 +219,10 @@ public sealed record HomeLabAiPromptRecipe(
     string Id,
     string Name,
     string Description,
+    string Category,
+    IReadOnlyList<string> Components,
     IReadOnlyList<string> AppIds,
+    bool RequiresPlanning,
     bool RequiresVpnGateway,
     IReadOnlyList<string> VpnRoutedAppIds);
 

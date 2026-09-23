@@ -568,7 +568,7 @@
                     {
                         <div class="home-lab-empty-state">
                             <strong>No Docker containers have been set up yet.</strong>
-                            <span>Use a guided prompt recipe, enter your own request, or add a VPN Gateway.</span>
+                            <span>Use a HomeLab Recipe, enter your own request, or add a VPN Gateway.</span>
                         </div>
                     }
                     @foreach (var group in BuildInstallationGroups())
@@ -675,25 +675,30 @@
                 </div>
             </TabPage>
 
-            <TabPage Value="prompts" Title="Prompt recipes">
+            <TabPage Value="prompts" Title="HomeLab Recipes">
                 <section class="surface-subcard home-lab-prompt-intro">
                     <div>
                         <p class="eyebrow">Guided AI deployments</p>
-                        <h2>Start with a proven prompt, then make it yours</h2>
+                        <h2>Start with a HomeLab Recipe, then make it yours</h2>
                         <p class="meta-text">Choose a recipe from the public Linux Made Sane GitHub catalog. New compatible recipes appear here automatically, and the packaged catalog remains available if GitHub cannot be reached.</p>
                     </div>
                 </section>
                 <section class="surface-card home-lab-recipe-selector">
                     <div class="home-lab-recipe-choice">
-                        <label for="home-lab-prompt-recipe">Prompt recipe</label>
+                        <label for="home-lab-prompt-recipe">HomeLab Recipe</label>
                         <select id="home-lab-prompt-recipe"
                                 class="ui-control-input"
                                 value="@selectedPromptRecipeId"
                                 @onchange="SelectPromptRecipe">
                             <option value="">Choose a recipe...</option>
-                            @foreach (var promptRecipe in promptRecipes)
+                            @foreach (var category in promptRecipes.GroupBy(recipe => recipe.Category))
                             {
-                                <option value="@promptRecipe.Id">@promptRecipe.Name</option>
+                                <optgroup label="@category.Key">
+                                    @foreach (var promptRecipe in category)
+                                    {
+                                        <option value="@promptRecipe.Id">@promptRecipe.Name</option>
+                                    }
+                                </optgroup>
                             }
                             <option value="custom">Enter your own</option>
                         </select>
@@ -706,17 +711,21 @@
                                 <p class="eyebrow">@selectedRecipe.Name</p>
                                 <p class="meta-text">@selectedRecipe.Description</p>
                             </div>
-                            <strong class="home-lab-recipe-field-label">Apps being deployed</strong>
-                            <div class="home-lab-recipe-apps" aria-label="Apps being deployed">
-                                @foreach (var appId in selectedRecipe.AppIds)
+                            <strong class="home-lab-recipe-field-label">@(selectedRecipe.RequiresPlanning ? "Recipe components" : "Apps being deployed")</strong>
+                            <div class="home-lab-recipe-apps" aria-label="Recipe components">
+                                @foreach (var component in selectedRecipe.Components)
                                 {
-                                    <span>@HomeLabCatalog.GetApp(appId).Name</span>
+                                    <span>@component</span>
                                 }
                                 @if (selectedRecipe.RequiresVpnGateway)
                                 {
                                     <span>Existing VPN Gateway</span>
                                 }
                             </div>
+                            @if (selectedRecipe.RequiresPlanning)
+                            {
+                                <p class="meta-text">This recipe needs choices from you before LMS can safely deploy it. The AI will identify supported parts and will not install a misleading partial stack.</p>
+                            }
                             <label for="home-lab-recipe-prompt">Base recipe prompt</label>
                             <textarea id="home-lab-recipe-prompt"
                                       class="ui-control-textarea"
@@ -729,7 +738,7 @@
                                                  Variant="UiButtonVariant.ActionSubtle"
                                                  Disabled="@(startingPromptRecipeId is not null)"
                                                  OnClick="ResetPromptRecipeDraft" />
-                                <UiCommandButton Label="Start guided AI task"
+                                <UiCommandButton Label="@(selectedRecipe.RequiresPlanning ? "Plan with AI" : "Start guided AI task")"
                                                  Glyph="UiIconGlyph.Ai"
                                                  Variant="UiButtonVariant.PrimaryMuted"
                                                  Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft))"
@@ -903,7 +912,7 @@
                 runDate));
         }
 
-        // Prompt recipes originally installed each app as a standalone deployment. Match those
+        // HomeLab Recipes originally installed each app as a standalone deployment. Match those
         // legacy installs by the published recipe app list so existing systems gain useful groups.
         foreach (var recipe in promptRecipes
                      .OrderByDescending(item => item.AppIds.Count)

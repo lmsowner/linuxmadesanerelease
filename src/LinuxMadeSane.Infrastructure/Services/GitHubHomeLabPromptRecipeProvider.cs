@@ -36,7 +36,7 @@ public sealed class GitHubHomeLabPromptRecipeProvider(HttpClient httpClient) : I
                 var catalog = await httpClient.GetFromJsonAsync<PublishedHomeLabPromptRecipeCatalog>(CatalogUrl, cancellationToken);
                 if (catalog?.SchemaVersion != 1)
                 {
-                    throw new InvalidOperationException("The public Home Lab prompt recipe catalog uses an unsupported schema version.");
+                    throw new InvalidOperationException("The public HomeLab Recipe catalog uses an unsupported schema version.");
                 }
                 var recipes = (catalog?.Recipes ?? [])
                     .Take(100)
@@ -47,7 +47,7 @@ public sealed class GitHubHomeLabPromptRecipeProvider(HttpClient httpClient) : I
                     .ToArray();
                 if (recipes.Length == 0)
                 {
-                    throw new InvalidOperationException("The public Home Lab prompt recipe catalog did not contain any compatible recipes.");
+                    throw new InvalidOperationException("The public HomeLab Recipe catalog did not contain any compatible recipes.");
                 }
 
                 cachedRecipes = recipes;
@@ -73,7 +73,7 @@ public sealed class GitHubHomeLabPromptRecipeProvider(HttpClient httpClient) : I
     public async Task<HomeLabPromptRecipe> GetRecipeAsync(string id, CancellationToken cancellationToken = default) =>
         (await GetRecipesAsync(cancellationToken))
         .FirstOrDefault(recipe => recipe.Id.Equals(id?.Trim(), StringComparison.OrdinalIgnoreCase))
-        ?? throw new InvalidOperationException($"Home Lab prompt recipe '{id}' is not available from the public catalog or packaged fallback.");
+        ?? throw new InvalidOperationException($"HomeLab Recipe '{id}' is not available from the public catalog or packaged fallback.");
 
     private static HomeLabPromptRecipe? TryCreateRecipe(PublishedHomeLabPromptRecipe definition)
     {

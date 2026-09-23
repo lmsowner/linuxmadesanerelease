@@ -272,12 +272,12 @@ public static class AiToolJsonSchemaCatalog
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 80,
-                  "description": "The exact supported LMS Home Lab prompt recipe ID returned by inspect_home_lab."
+                  "description": "The exact deployable LMS HomeLab Recipe ID returned by inspect_home_lab. Recipes marked as requiring planning cannot be applied until LMS supports the requested components."
                 },
                 "vpnGatewayInstallationId": {
                   "type": [ "string", "null" ],
                   "format": "uuid",
-                  "description": "The existing LMS VPN Gateway installation to reuse. Required when the prompt recipe needs VPN and more than one usable gateway exists."
+                  "description": "The existing LMS VPN Gateway installation to reuse. Required when the HomeLab Recipe needs VPN and more than one usable gateway exists."
                 }
               },
               "required": [ "promptRecipeId" ]

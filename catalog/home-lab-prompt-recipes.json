@@ -2,95 +2,858 @@
   "schemaVersion": 1,
   "recipes": [
     {
-      "id": "wordpress-site",
-      "recipeName": "WordPress website",
-      "description": "Create a WordPress instance with its managed database, persistent files, health checks, and an LMS local access route.",
-      "baseRecipePrompt": "Set up a private WordPress website with persistent site files and an LMS-managed database. Use the supported defaults unless I specify a WordPress version, variant, database choice, database administration tool, domain, or other requirement below.",
-      "appsBeingDeployed": ["wordpress"],
+      "id": "local-ai-server",
+      "recipeName": "Local AI Server",
+      "description": "Plan a private Ollama and Open WebUI server with hardware-aware acceleration.",
+      "baseRecipePrompt": "Set up a private local AI server with Ollama and Open WebUI. Detect my available GPU and ask which model sizes and access policy I want before deployment.",
+      "appsBeingDeployed": [],
       "requiresVpnGateway": false,
-      "technicalGuidance": "Keep WordPress and its database on the private LMS deployment network. Verify the database dependency before reporting the website ready."
+      "technicalGuidance": "Confirm CPU-only, NVIDIA, AMD, or other acceleration and available memory. Do not claim GPU support until LMS can validate the runtime and device mapping.",
+      "vpnRoutedApps": null,
+      "category": "AI / Development",
+      "components": [
+        "Ollama",
+        "Open WebUI",
+        "GPU detection"
+      ],
+      "requiresPlanning": true
     },
     {
-      "id": "forward-proxy",
-      "recipeName": "Forward proxy server",
-      "description": "Create a private forward proxy for devices on networks you control and verify the proxy listener without publishing an internet-facing admin page.",
-      "baseRecipePrompt": "Set up a private forward proxy for devices on networks I control. Keep it private unless I explicitly describe a trusted network or access requirement.",
-      "appsBeingDeployed": ["squid-proxy"],
+      "id": "ai-coding-box",
+      "recipeName": "AI Coding Box",
+      "description": "Plan a local coding assistant with a web UI, code models, and controlled Git access.",
+      "baseRecipePrompt": "Set up an AI coding box with Open WebUI, Ollama, suitable local code models, and Git integration. Ask which repositories, languages, GPU, model size, and Git permissions I want.",
+      "appsBeingDeployed": [],
       "requiresVpnGateway": false,
-      "technicalGuidance": "Treat this as a private network service. Do not expose it through Edge Gateway or configure it as an open public proxy."
+      "technicalGuidance": "Treat repository access and Git credentials as protected configuration. Do not choose a model or grant write access without the user\u0027s requirements.",
+      "vpnRoutedApps": null,
+      "category": "AI / Development",
+      "components": [
+        "Open WebUI",
+        "Ollama",
+        "Code models",
+        "Git integration"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "private-git-platform",
+      "recipeName": "Private Git Platform",
+      "description": "Plan a private Forgejo service with PostgreSQL and an explicitly registered runner.",
+      "baseRecipePrompt": "Set up a private Forgejo Git platform with PostgreSQL and a runner. Ask about the hostname, storage, runner workloads, registration token flow, and external access before deployment.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep PostgreSQL private. Register the runner only after Forgejo is healthy and never place its registration token in chat.",
+      "vpnRoutedApps": null,
+      "category": "AI / Development",
+      "components": [
+        "Forgejo",
+        "Forgejo Runner",
+        "PostgreSQL"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "disposable-dev-environment",
+      "recipeName": "Disposable Dev Environment",
+      "description": "Plan a browser-based development environment with Git and chosen language SDKs.",
+      "baseRecipePrompt": "Set up a disposable code-server development environment with Git. Ask which language SDKs, versions, extensions, repository access, persistence, and resource limits I need.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not guess the SDK image or persist Git credentials in the container definition.",
+      "vpnRoutedApps": null,
+      "category": "AI / Development",
+      "components": [
+        "code-server",
+        "Git",
+        "Language SDKs"
+      ],
+      "requiresPlanning": true
     },
     {
       "id": "secure-streaming",
-      "recipeName": "Webtor and Stremio through VPN",
+      "recipeName": "Instant Streaming",
       "description": "Set up Webtor and Stremio behind one reusable VPN Gateway, with LMS-managed local access and streaming connectivity.",
       "baseRecipePrompt": "Set up Webtor and Stremio behind an existing VPN Gateway with LMS-managed local access. Ask me which gateway to use if there is more than one.",
-      "appsBeingDeployed": ["webtor", "stremio-server"],
+      "appsBeingDeployed": [
+        "webtor",
+        "stremio-server"
+      ],
       "requiresVpnGateway": true,
-      "technicalGuidance": "Preserve trusted local Caddy access, Webtor HTTP cookie rewriting, separate internal ports in the shared VPN namespace, and the Stremio-to-host gateway mapping used for local Webtor streams. This is for personal, public-domain, or otherwise lawfully accessed content; do not configure content sources or add-ons."
+      "technicalGuidance": "Preserve Webtor cookie rewriting, distinct shared-namespace ports, and the Stremio-to-host mapping. Use only personal, public-domain, or otherwise lawfully accessed content; do not configure content sources or add-ons.",
+      "vpnRoutedApps": [
+        "webtor",
+        "stremio-server"
+      ],
+      "category": "Media",
+      "components": [
+        "Webtor",
+        "Stremio",
+        "Gluetun"
+      ],
+      "requiresPlanning": false
+    },
+    {
+      "id": "jellyfin-vpn-automation",
+      "recipeName": "Media Library",
+      "description": "Create a Jellyfin library with Seerr, Radarr, Sonarr, Prowlarr, and qBittorrent, while routing automation through Gluetun.",
+      "baseRecipePrompt": "Set up a complete local Jellyfin media library with Seerr, Radarr, Sonarr, Prowlarr, and qBittorrent. Keep Jellyfin local, route the automation services through one existing VPN Gateway, and reuse LMS-managed downloads, movies, and TV storage.",
+      "appsBeingDeployed": [
+        "jellyfin",
+        "qbittorrent",
+        "prowlarr",
+        "sonarr",
+        "radarr",
+        "seerr"
+      ],
+      "requiresVpnGateway": true,
+      "technicalGuidance": "Never route Jellyfin through Gluetun. Give each routed service a distinct listener and report both LMS local URLs and shared-namespace loopback endpoints. Do not select or configure indexers, catalogues, download sources, or content.",
+      "vpnRoutedApps": [
+        "qbittorrent",
+        "prowlarr",
+        "sonarr",
+        "radarr",
+        "seerr"
+      ],
+      "category": "Media",
+      "components": [
+        "Jellyfin",
+        "Jellyseerr / Seerr",
+        "Radarr",
+        "Sonarr",
+        "Prowlarr",
+        "qBittorrent",
+        "Gluetun"
+      ],
+      "requiresPlanning": false
+    },
+    {
+      "id": "music-server",
+      "recipeName": "Music Server",
+      "description": "Plan a Navidrome music library with an optional lawful download and import pipeline.",
+      "baseRecipePrompt": "Set up Navidrome for my local music library. Ask about storage, metadata, users, external access, and whether I want an authorised download or import pipeline.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep the library persistent and do not invent content sources. Treat the optional pipeline as a separate choice.",
+      "vpnRoutedApps": null,
+      "category": "Media",
+      "components": [
+        "Navidrome",
+        "Optional download/import pipeline"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "private-photo-library",
+      "recipeName": "Photo Library",
+      "description": "Set up Immich with its managed PostgreSQL, cache, and machine-learning services.",
+      "baseRecipePrompt": "Set up a private Immich photo and video library with persistent storage, database, cache, and machine-learning services. Ask about storage and access requirements not already configured.",
+      "appsBeingDeployed": [
+        "immich"
+      ],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Verify every managed dependency and the LMS local access route before reporting the library ready.",
+      "vpnRoutedApps": null,
+      "category": "Media",
+      "components": [
+        "Immich",
+        "PostgreSQL",
+        "Redis / Valkey",
+        "Machine learning"
+      ],
+      "requiresPlanning": false
     },
     {
       "id": "secure-qbittorrent",
       "recipeName": "qBittorrent through VPN",
-      "description": "Set up qBittorrent behind an existing reusable VPN Gateway and verify that its traffic cannot bypass the gateway.",
-      "baseRecipePrompt": "Set up qBittorrent behind an existing VPN Gateway, store downloads in my LMS Home Lab storage, and verify that its traffic cannot bypass the gateway.",
-      "appsBeingDeployed": ["qbittorrent"],
+      "description": "Set up qBittorrent behind a reusable VPN Gateway and verify its traffic cannot bypass the gateway.",
+      "baseRecipePrompt": "Set up qBittorrent behind an existing VPN Gateway and store downloads in LMS Home Lab storage.",
+      "appsBeingDeployed": [
+        "qbittorrent"
+      ],
       "requiresVpnGateway": true,
-      "technicalGuidance": "Do not require inbound port forwarding: it is optional and some VPN providers support P2P without it. Preserve the trusted local LMS Caddy route and its first-open referrer handling."
+      "technicalGuidance": "Inbound port forwarding is optional. Preserve the LMS route and verify VPN security.",
+      "vpnRoutedApps": [
+        "qbittorrent"
+      ],
+      "category": "Media",
+      "components": [
+        "qBittorrent",
+        "Gluetun"
+      ],
+      "requiresPlanning": false
     },
     {
       "id": "vpn-media-automation",
-      "recipeName": "qBittorrent and media automation through VPN",
-      "description": "Set up qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr behind one reusable VPN Gateway.",
-      "baseRecipePrompt": "Set up qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr behind one existing VPN Gateway. Reuse my LMS Home Lab storage and ask before making any choice that depends on my environment.",
-      "appsBeingDeployed": ["qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"],
+      "recipeName": "Media Automation through VPN",
+      "description": "Set up qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr behind one VPN Gateway.",
+      "baseRecipePrompt": "Set up qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr behind one existing VPN Gateway.",
+      "appsBeingDeployed": [
+        "qbittorrent",
+        "prowlarr",
+        "sonarr",
+        "radarr",
+        "seerr"
+      ],
       "requiresVpnGateway": true,
-      "technicalGuidance": "Route every requested service through the selected gateway and preserve a distinct internal listener for each web interface. Use the shared VPN namespace loopback endpoints when describing app-to-app connections. Do not select, recommend, or configure indexers, catalogues, download sources, or content. The user completes any source-specific configuration for services they are authorised to use."
+      "technicalGuidance": "Use distinct shared-namespace listeners. Do not select or configure indexers, catalogues, download sources, or content.",
+      "vpnRoutedApps": [
+        "qbittorrent",
+        "prowlarr",
+        "sonarr",
+        "radarr",
+        "seerr"
+      ],
+      "category": "Media",
+      "components": [
+        "qBittorrent",
+        "Prowlarr",
+        "Sonarr",
+        "Radarr",
+        "Jellyseerr / Seerr",
+        "Gluetun"
+      ],
+      "requiresPlanning": false
     },
     {
       "id": "jellyfin-local-library",
-      "recipeName": "Jellyfin local media library",
-      "description": "Create a standalone Jellyfin server for movies and TV stored on this LMS host, with local network streaming and persistent configuration.",
-      "baseRecipePrompt": "Set up Jellyfin for local network streaming from my LMS-managed movies and TV storage. Keep the media mounts read-only and let me add any library, client, transcoding, or access requirements below.",
-      "appsBeingDeployed": ["jellyfin"],
+      "recipeName": "Jellyfin Local Library",
+      "description": "Create a standalone Jellyfin server for locally hosted movies and television.",
+      "baseRecipePrompt": "Set up Jellyfin for local network streaming from LMS-managed movies and TV storage.",
+      "appsBeingDeployed": [
+        "jellyfin"
+      ],
       "requiresVpnGateway": false,
-      "technicalGuidance": "Keep Jellyfin on its direct local LMS network route. Do not route Jellyfin through a VPN Gateway. Verify the movies and TV storage mounts, Jellyfin health endpoint, and LMS local access URL before reporting it ready."
+      "technicalGuidance": "Keep Jellyfin direct, with read-only media mounts, and verify its local route.",
+      "vpnRoutedApps": null,
+      "category": "Media",
+      "components": [
+        "Jellyfin"
+      ],
+      "requiresPlanning": false
     },
     {
       "id": "jellyfin-arr-library",
       "recipeName": "Jellyfin with Sonarr and Radarr",
-      "description": "Create a local Jellyfin library alongside Sonarr and Radarr, sharing LMS-managed movie and TV storage.",
-      "baseRecipePrompt": "Set up Jellyfin with Sonarr and Radarr for a local movie and TV library. Reuse my LMS-managed movies and TV storage, keep Jellyfin local, and let me add precise library or automation requirements below.",
-      "appsBeingDeployed": ["jellyfin", "sonarr", "radarr"],
+      "description": "Create a local Jellyfin library alongside Sonarr and Radarr.",
+      "baseRecipePrompt": "Set up Jellyfin with Sonarr and Radarr using LMS-managed movies and TV storage.",
+      "appsBeingDeployed": [
+        "jellyfin",
+        "sonarr",
+        "radarr"
+      ],
       "requiresVpnGateway": false,
-      "technicalGuidance": "Keep Jellyfin on a direct local route and mount its movies and TV folders read-only. Give Sonarr and Radarr write access to their matching library folders. Report the LMS local URL for each app and explain that a download client and authorised indexer source are still needed before automated acquisition can work; do not invent or configure either."
+      "technicalGuidance": "Explain that a download client and authorised indexer source are still needed; do not invent either.",
+      "vpnRoutedApps": null,
+      "category": "Media",
+      "components": [
+        "Jellyfin",
+        "Sonarr",
+        "Radarr"
+      ],
+      "requiresPlanning": false
     },
     {
       "id": "jellyfin-local-automation",
-      "recipeName": "Jellyfin with local media automation",
-      "description": "Create a complete direct-network Jellyfin library with qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr.",
-      "baseRecipePrompt": "Set up a complete local Jellyfin media library with qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr. Keep every app on a direct local route, reuse my LMS-managed downloads, movies, and TV storage, and let me add precise requirements below.",
-      "appsBeingDeployed": ["jellyfin", "qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"],
+      "recipeName": "Jellyfin with Local Automation",
+      "description": "Create a direct-network Jellyfin library with qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr.",
+      "baseRecipePrompt": "Set up a complete local Jellyfin media library and keep every app on a direct LMS route.",
+      "appsBeingDeployed": [
+        "jellyfin",
+        "qbittorrent",
+        "prowlarr",
+        "sonarr",
+        "radarr",
+        "seerr"
+      ],
       "requiresVpnGateway": false,
-      "technicalGuidance": "Keep every app on a direct LMS route and preserve a distinct listener port for each web interface. Jellyfin reads the shared movies and TV folders while the automation services manage them. Report every LMS local URL and use those URLs when explaining how to connect Seerr, Sonarr, Radarr, Prowlarr, and qBittorrent. State clearly that qBittorrent traffic is not VPN protected in this recipe. Do not select, recommend, or configure indexers, catalogues, download sources, or content."
+      "technicalGuidance": "State clearly that qBittorrent is not VPN protected. Do not configure indexers, catalogues, download sources, or content.",
+      "vpnRoutedApps": null,
+      "category": "Media",
+      "components": [
+        "Jellyfin",
+        "qBittorrent",
+        "Prowlarr",
+        "Sonarr",
+        "Radarr",
+        "Jellyseerr / Seerr"
+      ],
+      "requiresPlanning": false
     },
     {
-      "id": "jellyfin-vpn-automation",
-      "recipeName": "Jellyfin with VPN media automation",
-      "description": "Create a complete local Jellyfin library with qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr, while keeping Jellyfin local and routing the automation services through one VPN Gateway.",
-      "baseRecipePrompt": "Set up a complete Jellyfin media library with qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr. Keep Jellyfin available directly on my local network, route the download and automation services through one existing VPN Gateway, reuse my LMS-managed downloads, movies, and TV storage, and let me add precise requirements below.",
-      "appsBeingDeployed": ["jellyfin", "qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"],
-      "requiresVpnGateway": true,
-      "vpnRoutedApps": ["qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"],
-      "technicalGuidance": "Never route Jellyfin through Gluetun: it is the local playback server and must use its direct LMS route. Route qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr through the selected gateway, with a distinct listener port for every service. Jellyfin reads the shared movies and TV storage while the automation services manage those folders. Report every LMS local URL plus the shared VPN namespace loopback endpoints for app-to-app automation. Use Jellyfin's LMS local URL when explaining the Seerr connection. Do not select, recommend, or configure indexers, catalogues, download sources, or content."
+      "id": "private-vpn",
+      "recipeName": "Private VPN",
+      "description": "Plan a WireGuard server for secure access to the home network.",
+      "baseRecipePrompt": "Set up a private WireGuard VPN server. Ask about the LAN subnet, public endpoint, DNS, client count, router forwarding, and whether the host is behind CGNAT.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not confuse a WireGuard server with the existing outbound Gluetun VPN Gateway.",
+      "vpnRoutedApps": null,
+      "category": "Networking",
+      "components": [
+        "WireGuard"
+      ],
+      "requiresPlanning": true
     },
     {
-      "id": "private-photo-library",
-      "recipeName": "Immich photo library",
-      "description": "Set up Immich and its managed database, cache, and machine-learning dependencies for a private photo and video library.",
-      "baseRecipePrompt": "Set up a private Immich photo and video library with persistent storage and its LMS-managed database, cache, and machine-learning services. Ask me about storage or access requirements that are not already configured.",
-      "appsBeingDeployed": ["immich"],
+      "id": "vpn-exit-node",
+      "recipeName": "VPN Exit Node",
+      "description": "Plan a WireGuard exit node split between this server and a chosen VPS.",
+      "baseRecipePrompt": "Set up a WireGuard VPN exit node using a VPS. Ask which VPS, operating system, public address, routed subnets, DNS, and client platforms I use.",
+      "appsBeingDeployed": [],
       "requiresVpnGateway": false,
-      "technicalGuidance": "Verify every managed Immich dependency and the LMS local access route before reporting the library ready."
+      "technicalGuidance": "This spans an external machine. Separate local LMS work from VPS commands and require the user to confirm the remote target.",
+      "vpnRoutedApps": null,
+      "category": "Networking",
+      "components": [
+        "WireGuard",
+        "VPS"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "network-ad-blocking",
+      "recipeName": "Network Ad Blocking",
+      "description": "Plan network-wide DNS filtering with AdGuard Home or Pi-hole and Unbound.",
+      "baseRecipePrompt": "Set up network ad blocking. Ask me to choose AdGuard Home or Pi-hole, then plan Unbound, a dedicated LAN address, router DNS changes, upstream policy, and recovery DNS.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "DNS must bind the correct LAN address and port 53 without colliding with the host resolver. Do not deploy both front ends.",
+      "vpnRoutedApps": null,
+      "category": "Networking",
+      "components": [
+        "AdGuard Home or Pi-hole",
+        "Unbound"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "private-remote-access",
+      "recipeName": "Private Remote Access",
+      "description": "Plan a private Headscale control plane and enrolment of Tailscale clients.",
+      "baseRecipePrompt": "Set up private remote access with Headscale and Tailscale clients. Ask about the public hostname, certificates, users, routes, exit nodes, and each client platform.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Client enrolment and auth keys occur after the control plane is reachable; never place reusable keys in chat.",
+      "vpnRoutedApps": null,
+      "category": "Networking",
+      "components": [
+        "Headscale",
+        "Tailscale clients"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "reverse-proxy",
+      "recipeName": "Reverse Proxy",
+      "description": "Plan Caddy or Traefik routing with certificates and an explicit exposure policy.",
+      "baseRecipePrompt": "Set up a reverse proxy. Ask me to choose Caddy or Traefik and provide domains, internal targets, certificate method, authentication, and exposure requirements.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Inspect LMS Caddy and Edge Gateway first to avoid duplicate bindings on ports 80 and 443.",
+      "vpnRoutedApps": null,
+      "category": "Networking",
+      "components": [
+        "Caddy or Traefik",
+        "TLS certificates"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "home-assistant",
+      "recipeName": "Home Assistant",
+      "description": "Plan Home Assistant with MQTT and Zigbee device integration.",
+      "baseRecipePrompt": "Set up Home Assistant with Mosquitto and Zigbee2MQTT. Ask for my Zigbee adapter path, adapter type, MQTT credentials, discovery needs, timezone, and storage.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Hardware discovery may require host networking or explicit devices. Validate the adapter before deploying Zigbee2MQTT.",
+      "vpnRoutedApps": null,
+      "category": "Home",
+      "components": [
+        "Home Assistant",
+        "Mosquitto",
+        "Zigbee2MQTT"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "cctv",
+      "recipeName": "CCTV",
+      "description": "Plan Frigate with MQTT and validated GPU or Coral acceleration.",
+      "baseRecipePrompt": "Set up Frigate CCTV with MQTT. Ask about cameras, retention, recording storage, detector hardware, GPU or Coral devices, and Home Assistant integration.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Never guess camera credentials, stream URLs, or detector devices. Size storage before enabling recording.",
+      "vpnRoutedApps": null,
+      "category": "Home",
+      "components": [
+        "Frigate",
+        "MQTT",
+        "GPU or Coral detection"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "energy-monitor",
+      "recipeName": "Energy Monitor",
+      "description": "Plan energy collection and dashboards using Home Assistant, InfluxDB, and Grafana.",
+      "baseRecipePrompt": "Set up an energy monitoring stack with Home Assistant, InfluxDB, and Grafana. Ask which meters or integrations provide readings, retention requirements, units, and dashboards.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep database credentials private and define retention before collecting high-frequency metrics.",
+      "vpnRoutedApps": null,
+      "category": "Home",
+      "components": [
+        "Home Assistant",
+        "InfluxDB",
+        "Grafana"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "personal-cloud",
+      "recipeName": "Personal Cloud",
+      "description": "Plan Nextcloud with a private database and Redis cache.",
+      "baseRecipePrompt": "Set up a personal Nextcloud cloud with a private database and Redis. Ask about data storage, hostname, external access, mail, backups, and expected user count.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep the database and Redis private and separate application data from database backups.",
+      "vpnRoutedApps": null,
+      "category": "Storage / Backup",
+      "components": [
+        "Nextcloud",
+        "Database",
+        "Redis"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "dropbox-replacement",
+      "recipeName": "Dropbox Replacement",
+      "description": "Plan device-to-device file synchronisation with Syncthing.",
+      "baseRecipePrompt": "Set up Syncthing as a Dropbox replacement. Ask which folders, devices, versioning, ignore rules, storage paths, and remote access I need.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not expose the admin interface publicly and do not share device IDs beyond the intended peers.",
+      "vpnRoutedApps": null,
+      "category": "Storage / Backup",
+      "components": [
+        "Syncthing"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "backup-server",
+      "recipeName": "Backup Server",
+      "description": "Plan Restic or Borg backups with an optional MinIO object target.",
+      "baseRecipePrompt": "Set up a backup server. Ask me to choose Restic or Borg, identify source machines, retention, encryption, schedule, storage capacity, off-site copy, and whether MinIO is required.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "A backup is not complete until a restore test is defined. Keep repository keys out of chat.",
+      "vpnRoutedApps": null,
+      "category": "Storage / Backup",
+      "components": [
+        "Restic or Borg",
+        "MinIO"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "s3-server",
+      "recipeName": "S3 Server",
+      "description": "Plan a private MinIO-compatible object store.",
+      "baseRecipePrompt": "Set up a private MinIO S3 server. Ask about data disks, erasure coding, hostname, TLS, users, bucket policy, backups, and external access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not deploy distributed or erasure-coded storage without enough independent disks.",
+      "vpnRoutedApps": null,
+      "category": "Storage / Backup",
+      "components": [
+        "MinIO"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "google-photos-replacement",
+      "recipeName": "Google Photos Replacement",
+      "description": "Use Immich as a private photo and video library.",
+      "baseRecipePrompt": "Set up Immich as my Google Photos replacement. Ask about library storage, mobile upload, import, users, backups, and external access.",
+      "appsBeingDeployed": [
+        "immich"
+      ],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Verify all managed dependencies and explain that cloud export/import remains a separate user-authorised step.",
+      "vpnRoutedApps": null,
+      "category": "Privacy",
+      "components": [
+        "Immich",
+        "PostgreSQL",
+        "Redis / Valkey",
+        "Machine learning"
+      ],
+      "requiresPlanning": false
+    },
+    {
+      "id": "google-drive-replacement",
+      "recipeName": "Google Drive Replacement",
+      "description": "Plan Nextcloud as a private file sync and sharing service.",
+      "baseRecipePrompt": "Set up Nextcloud as my Google Drive replacement. Ask about storage, desktop and mobile clients, sharing, office integration, backups, and external access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep its database and Redis private; do not claim existing cloud data has been migrated.",
+      "vpnRoutedApps": null,
+      "category": "Privacy",
+      "components": [
+        "Nextcloud",
+        "Database",
+        "Redis"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "password-vault",
+      "recipeName": "Password Vault",
+      "description": "Plan a private Vaultwarden service with backups and secure external access.",
+      "baseRecipePrompt": "Set up Vaultwarden as a private password vault. Ask about hostname, TLS, account sign-up policy, email, backups, and whether access stays local or uses Edge Gateway.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Require HTTPS for non-local use, disable open sign-ups after onboarding, and verify backup recovery.",
+      "vpnRoutedApps": null,
+      "category": "Privacy",
+      "components": [
+        "Vaultwarden"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "private-search",
+      "recipeName": "Private Search",
+      "description": "Plan a private metasearch service using SearXNG.",
+      "baseRecipePrompt": "Set up a private SearXNG search service. Ask about enabled engines, rate limiting, language, hostname, authentication, and external access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Use a persistent secret key and do not expose an unrestricted public instance by default.",
+      "vpnRoutedApps": null,
+      "category": "Privacy",
+      "components": [
+        "SearXNG"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "private-analytics",
+      "recipeName": "Private Analytics",
+      "description": "Plan privacy-focused web analytics with Umami and PostgreSQL.",
+      "baseRecipePrompt": "Set up private Umami analytics with PostgreSQL. Ask about tracked sites, hostname, retention, backups, external access, and privacy settings.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep PostgreSQL private and do not add tracking code to sites without explicit instruction.",
+      "vpnRoutedApps": null,
+      "category": "Privacy",
+      "components": [
+        "Umami",
+        "PostgreSQL"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "internet-archive-box",
+      "recipeName": "Internet Archive Box",
+      "description": "Plan a personal web archive using ArchiveBox.",
+      "baseRecipePrompt": "Set up ArchiveBox. Ask about archive storage, import sources, crawl depth, browser dependencies, schedule, users, and access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Estimate storage and respect site permissions and applicable archiving rules.",
+      "vpnRoutedApps": null,
+      "category": "Useful / Geeky",
+      "components": [
+        "ArchiveBox"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "rss-news-server",
+      "recipeName": "RSS / News Server",
+      "description": "Plan a private FreshRSS feed reader.",
+      "baseRecipePrompt": "Set up FreshRSS. Ask about users, imports, refresh schedule, authentication, storage, and external access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep scheduled refreshes reasonable and protect external access.",
+      "vpnRoutedApps": null,
+      "category": "Useful / Geeky",
+      "components": [
+        "FreshRSS"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "pdf-toolkit",
+      "recipeName": "PDF Toolkit",
+      "description": "Plan a private Stirling-PDF toolbox.",
+      "baseRecipePrompt": "Set up Stirling-PDF for private document processing. Ask about OCR languages, resource limits, authentication, storage, and external access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Treat uploaded documents as sensitive and avoid public anonymous exposure.",
+      "vpnRoutedApps": null,
+      "category": "Useful / Geeky",
+      "components": [
+        "Stirling-PDF"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "document-management",
+      "recipeName": "Document Management",
+      "description": "Plan Paperless-ngx with database, cache, OCR, and document storage.",
+      "baseRecipePrompt": "Set up Paperless-ngx. Ask about consume and archive folders, OCR languages, users, scanner workflow, retention, backups, and external access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep database and Redis private and validate writable document paths.",
+      "vpnRoutedApps": null,
+      "category": "Useful / Geeky",
+      "components": [
+        "Paperless-ngx",
+        "PostgreSQL",
+        "Redis",
+        "OCR"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "personal-wiki",
+      "recipeName": "Personal Wiki",
+      "description": "Plan a private BookStack knowledge base.",
+      "baseRecipePrompt": "Set up BookStack as a personal wiki. Ask about hostname, users, database, attachments, mail, backups, and external access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep the database private and preserve both uploads and application keys.",
+      "vpnRoutedApps": null,
+      "category": "Useful / Geeky",
+      "components": [
+        "BookStack",
+        "Database"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "status-page",
+      "recipeName": "Status Page",
+      "description": "Plan service monitoring and a status dashboard with Uptime Kuma.",
+      "baseRecipePrompt": "Set up Uptime Kuma. Ask which services to monitor, check intervals, notification channels, status-page visibility, storage, and external access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not place notification secrets in chat and avoid publishing internal target details.",
+      "vpnRoutedApps": null,
+      "category": "Useful / Geeky",
+      "components": [
+        "Uptime Kuma"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "speed-test-history",
+      "recipeName": "Speed Test History",
+      "description": "Plan scheduled connection tests and history using Speedtest Tracker.",
+      "baseRecipePrompt": "Set up Speedtest Tracker. Ask about schedule, server selection, retention, notifications, timezone, storage, and external access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Avoid an excessive test schedule that distorts bandwidth use.",
+      "vpnRoutedApps": null,
+      "category": "Useful / Geeky",
+      "components": [
+        "Speedtest Tracker"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "wordpress-site",
+      "recipeName": "WordPress Website",
+      "description": "Create WordPress with its managed database and persistent site files.",
+      "baseRecipePrompt": "Set up a private WordPress website. Let me specify a version, variant, database choice, administration tool, domain, or other requirement.",
+      "appsBeingDeployed": [
+        "wordpress"
+      ],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep the managed database private and explain unsupported variants before applying.",
+      "vpnRoutedApps": null,
+      "category": "Useful / Geeky",
+      "components": [
+        "WordPress",
+        "MariaDB"
+      ],
+      "requiresPlanning": false
+    },
+    {
+      "id": "forward-proxy",
+      "recipeName": "Forward Proxy Server",
+      "description": "Create a private Squid forward proxy for networks the user controls.",
+      "baseRecipePrompt": "Set up a private forward proxy for devices on networks I control.",
+      "appsBeingDeployed": [
+        "squid-proxy"
+      ],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not expose it through Edge Gateway or configure an open public proxy.",
+      "vpnRoutedApps": null,
+      "category": "Useful / Geeky",
+      "components": [
+        "Squid"
+      ],
+      "requiresPlanning": false
+    },
+    {
+      "id": "retro-gaming-library",
+      "recipeName": "Retro Gaming Library",
+      "description": "Plan a RomM library with browser emulation.",
+      "baseRecipePrompt": "Set up a RomM retro gaming library with browser emulation. Ask about ROM storage, metadata providers, users, save storage, controllers, and access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "The user supplies lawfully obtained game files and any metadata credentials through protected fields.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "RomM",
+        "Browser emulation"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "private-game-store",
+      "recipeName": "Private Game Store",
+      "description": "Plan a private LANCommander game library.",
+      "baseRecipePrompt": "Set up LANCommander as a private game store. Ask about library storage, users, authentication, game imports, and LAN-only or remote access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not source or distribute game files; the user provides authorised installers.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "LANCommander"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "cloud-gaming-server",
+      "recipeName": "Cloud Gaming Server",
+      "description": "Plan Sunshine streaming with Moonlight clients and validated graphics hardware.",
+      "baseRecipePrompt": "Set up a Sunshine cloud gaming server for Moonlight clients. Ask about GPU, display session, audio, input devices, games, network, resolution, and remote access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Validate hardware encoding, display access, and host device mappings before deployment.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "Sunshine",
+        "Moonlight clients"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "minecraft-server",
+      "recipeName": "Minecraft Server",
+      "description": "Plan a Java, Bedrock, or modded Minecraft server.",
+      "baseRecipePrompt": "Set up a Minecraft server. Ask me to choose Java, Bedrock, or a modpack and provide version, player count, world source, memory, backups, allowlist, and access requirements.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not choose an edition, accept third-party mod terms, or expose a port until the user specifies the variant.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "Minecraft Java, Bedrock, or modded server"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "steam-dedicated-server",
+      "recipeName": "Steam Dedicated Server",
+      "description": "Plan one explicitly selected SteamCMD-supported dedicated game server.",
+      "baseRecipePrompt": "Set up a Steam dedicated server. Ask which supported game and then collect its app ID, ports, anonymous or authenticated install mode, player count, storage, config, backups, and access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Never deploy a generic idle SteamCMD container or guess a game. Protect any Steam credentials.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "SteamCMD",
+        "Selected dedicated game server"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "valheim-server",
+      "recipeName": "Valheim Server",
+      "description": "Plan a persistent Valheim dedicated server.",
+      "baseRecipePrompt": "Set up a Valheim server. Ask about world name or import, server name, password handling, player count, crossplay, mods, backups, updates, and access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Keep the server password in protected configuration and verify every required UDP port.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "Valheim dedicated server"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "factorio-server",
+      "recipeName": "Factorio Server",
+      "description": "Plan a persistent Factorio dedicated server.",
+      "baseRecipePrompt": "Set up a Factorio server. Ask about game version, save import or generation, visibility, player count, mods, credentials, backups, updates, and access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Protect account tokens and preserve saves before updates.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "Factorio dedicated server"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "satisfactory-server",
+      "recipeName": "Satisfactory Server",
+      "description": "Plan a persistent Satisfactory dedicated server.",
+      "baseRecipePrompt": "Set up a Satisfactory server. Ask about save import, player count, server claiming, storage, backups, updates, and LAN or internet access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Validate the required TCP and UDP listeners without colliding with other containers.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "Satisfactory dedicated server"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "terraria-server",
+      "recipeName": "Terraria Server",
+      "description": "Plan a vanilla or modded Terraria dedicated server.",
+      "baseRecipePrompt": "Set up a Terraria server. Ask about vanilla or tModLoader, version, world import or generation, difficulty, players, password handling, mods, backups, and access.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not choose a mod loader or overwrite a world without explicit requirements.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "Terraria or tModLoader server"
+      ],
+      "requiresPlanning": true
+    },
+    {
+      "id": "lan-party",
+      "recipeName": "LAN Party",
+      "description": "Plan LANCommander, voice chat, and explicitly selected game servers.",
+      "baseRecipePrompt": "Set up a LAN party environment with LANCommander, a voice server, and game servers I select. Ask about games, clients, users, storage, voice choice, network, schedule, and teardown or persistence.",
+      "appsBeingDeployed": [],
+      "requiresVpnGateway": false,
+      "technicalGuidance": "Do not deploy every game template. Produce a port plan first and reject duplicate host or shared-namespace listeners.",
+      "vpnRoutedApps": null,
+      "category": "Gaming",
+      "components": [
+        "LANCommander",
+        "Voice server",
+        "Selected game servers"
+      ],
+      "requiresPlanning": true
     }
   ]
 }

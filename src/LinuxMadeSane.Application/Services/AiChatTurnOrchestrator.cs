@@ -1541,8 +1541,8 @@ public sealed class AiChatTurnOrchestrator(
 
         return new AiProposedActionProposal
         {
-            Title = $"Apply Home Lab prompt recipe: {request.PromptRecipeId}",
-            Description = $"Install, route, repair, and verify public Home Lab prompt recipe {request.PromptRecipeId} through LMS{gateway}.",
+            Title = $"Apply HomeLab Recipe: {request.PromptRecipeId}",
+            Description = $"Install, route, repair, and verify public HomeLab Recipe {request.PromptRecipeId} through LMS{gateway}.",
             ToolName = toolCall.ToolName,
             ProviderToolCallId = toolCall.ProviderToolCallId,
             ToolArgumentsJson = toolCall.ArgumentsJson,

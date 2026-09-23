@@ -85,7 +85,7 @@ public sealed class LinuxMadeSaneAiToolRegistry : IAiToolRegistry
             supportsRememberDecision: false),
         CreateDefinition<InspectHomeLabToolRequest, InspectHomeLabToolResponse>(
             AiToolNames.InspectHomeLab,
-            "Inspect LMS-managed Home Lab apps, VPN gateways, health, secured routing, local access routes, and available prompt recipes without exposing secrets.",
+            "Inspect LMS-managed Home Lab apps, VPN gateways, health, secured routing, local access routes, and available HomeLab Recipes without exposing secrets.",
             AiActionRiskLevel.ReadOnly,
             AiApprovalRequirement.AutoRun,
             false,
@@ -115,7 +115,7 @@ public sealed class LinuxMadeSaneAiToolRegistry : IAiToolRegistry
             supportsRememberDecision: false),
         CreateDefinition<ApplyHomeLabPromptRecipeToolRequest, ApplyHomeLabPromptRecipeToolResponse>(
             AiToolNames.ApplyHomeLabPromptRecipe,
-            "Apply or repair a supported Home Lab prompt recipe through LMS-managed app, VPN, Caddy, storage, health, and networking services. Never accepts VPN credentials.",
+            "Apply or repair a deployable HomeLab Recipe through LMS-managed app, VPN, Caddy, storage, health, and networking services. Never accepts VPN credentials.",
             AiActionRiskLevel.HighRiskMutation,
             AiApprovalRequirement.UserConfirmation,
             false,
