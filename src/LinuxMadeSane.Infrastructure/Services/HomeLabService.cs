@@ -1823,9 +1823,9 @@ public sealed class HomeLabService(
         var candidates = await dbContext.HomeLabInstallations
             .Include(item => item.ServiceEndpoints)
             .Where(item => deploymentIds.Contains(item.DeploymentId))
-            .OrderBy(item => item.CreatedAtUtc)
             .ToListAsync(cancellationToken);
         var exposed = candidates
+            .OrderBy(item => item.CreatedAtUtc)
             .Select(item => (Installation: item, App: HomeLabCatalog.GetApp(item.AppId)))
             .Select(item => (item.Installation, item.App, Access: ResolveRecipeClientAccess(item.App, connectivity)))
             .Where(item => item.App.EdgeGatewaySupported && item.Access is not null)
