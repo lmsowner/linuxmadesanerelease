@@ -57,7 +57,6 @@ public sealed class HomeLabService(
     public async Task<HomeLabWorkspace> GetWorkspaceSnapshotAsync(CancellationToken cancellationToken = default)
     {
         var installationEntities = await dbContext.HomeLabInstallations
-            .AsNoTracking()
             .Include(item => item.ServiceEndpoints)
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
@@ -70,12 +69,67 @@ public sealed class HomeLabService(
             .OrderBy(item => item.Role)
             .ToListAsync(cancellationToken);
 
+        // Endpoint metadata is required to render access links and resolve recipe
+        // dependencies. Older installations may predate the endpoint table, so repair
+        // only this local metadata here without inspecting or changing containers.
+        var endpointMetadataChanged = false;
+        foreach (var entity in installationEntities.Where(NeedsLocalEndpointSynchronization))
+        {
+            SynchronizeLocalEndpoints(entity);
+            endpointMetadataChanged = true;
+        }
+
+        if (endpointMetadataChanged)
+        {
+            try
+            {
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException exception)
+            {
+                // Concurrent page loads can both discover the same missing metadata.
+                // The in-memory snapshot is still complete for this request, and the
+                // next snapshot will read the rows committed by the winning request.
+                logger.LogDebug(exception, "Could not persist repaired Home Lab endpoint metadata.");
+            }
+        }
+
         return new HomeLabWorkspace(
             HomeLabCatalog.VisibleApps,
             HomeLabCatalog.Recipes,
             BuildStorageRoles(storageRoleEntities),
             deploymentEntities.Select(MapDeployment).ToArray(),
             installationEntities.Select(MapInstallation).ToArray());
+    }
+
+    private static bool NeedsLocalEndpointSynchronization(HomeLabInstallationEntity installation)
+    {
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        if (HomeLabEndpointPlanner.IncludesScope(app, HomeLabEndpointScope.Internal) &&
+            app.Ports.Any(port => installation.ServiceEndpoints.All(endpoint =>
+                !endpoint.PortName.Equals(port.Name, StringComparison.OrdinalIgnoreCase) ||
+                endpoint.Scope != (int)HomeLabEndpointScope.Internal)))
+        {
+            return true;
+        }
+
+        var clientAccess = HomeLabEndpointPlanner.ResolveClientAccess(app);
+        var bindings = DeserializePortBindings(installation.PortMappingsJson);
+        var hasClientBinding = clientAccess is not null &&
+                               bindings.Any(port => port.Name.Equals(clientAccess.PortName, StringComparison.OrdinalIgnoreCase));
+        if (!hasClientBinding || installation.CaddySourcePort is not > 0)
+        {
+            return false;
+        }
+
+        var clientEndpointMissing = installation.ServiceEndpoints.All(endpoint =>
+            !endpoint.PortName.Equals(clientAccess!.PortName, StringComparison.OrdinalIgnoreCase) ||
+            endpoint.Scope != (int)HomeLabEndpointScope.Client);
+        var lanEndpointMissing = HomeLabEndpointPlanner.IncludesScope(app, HomeLabEndpointScope.Lan) &&
+                                 installation.ServiceEndpoints.All(endpoint =>
+                                     !endpoint.PortName.Equals(clientAccess!.PortName, StringComparison.OrdinalIgnoreCase) ||
+                                     endpoint.Scope != (int)HomeLabEndpointScope.Lan);
+        return clientEndpointMissing || lanEndpointMissing;
     }
 
     public async Task<HomeLabWorkspace> GetWorkspaceAsync(CancellationToken cancellationToken = default)
