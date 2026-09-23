@@ -498,7 +498,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                     recipe.Name,
                     recipe.Description,
                     recipe.AppIds,
-                    recipe.RequiresVpnGateway))
+                    recipe.RequiresVpnGateway,
+                    recipe.VpnRoutedAppIds))
                 .ToArray());
         var output = BuildHomeLabInspectionOutput(response);
 
@@ -754,6 +755,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         var succeeded = true;
         foreach (var appId in recipe.AppIds)
         {
+            var routeThroughVpn = recipe.RoutesAppThroughVpn(appId);
             workspace = await service.GetWorkspaceAsync(cancellationToken);
             var installation = workspace.Installations
                 .Where(item => item.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase))
@@ -762,7 +764,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
 
             if (installation is null)
             {
-                var configuration = recipe.RequiresVpnGateway
+                var configuration = routeThroughVpn
                     ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                     {
                         ["network-route"] = "VPN Gateway (Gluetun)",
@@ -797,7 +799,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 continue;
             }
 
-            if (recipe.RequiresVpnGateway)
+            if (routeThroughVpn)
             {
                 var route = await service.SetNetworkRouteAsync(installation.Id, true, gateway!.Id, cancellationToken);
                 details.Add($"{installation.DisplayName}: {route.Summary} {route.Detail}");
@@ -815,7 +817,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             var mapped = await MapHomeLabInstallationAsync(service, installation, cancellationToken);
             targetInstallations.Add(mapped);
             succeeded &= installation.HealthState is HomeLabHealthState.Healthy or HomeLabHealthState.Degraded;
-            succeeded &= !recipe.RequiresVpnGateway || mapped.IsSecured;
+            succeeded &= !routeThroughVpn || mapped.IsSecured;
         }
 
         if (targetInstallations.Count > 0)

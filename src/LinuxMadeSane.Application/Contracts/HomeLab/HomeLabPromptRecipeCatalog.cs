@@ -11,8 +11,13 @@ public sealed record HomeLabPromptRecipe(
     string Description,
     IReadOnlyList<string> AppIds,
     bool RequiresVpnGateway,
+    IReadOnlyList<string> VpnRoutedAppIds,
     string StarterPrompt,
-    string Prompt);
+    string Prompt)
+{
+    public bool RoutesAppThroughVpn(string appId) =>
+        VpnRoutedAppIds.Contains(appId, StringComparer.OrdinalIgnoreCase);
+}
 
 public sealed record PublishedHomeLabPromptRecipeCatalog(
     int SchemaVersion,
@@ -25,7 +30,8 @@ public sealed record PublishedHomeLabPromptRecipe(
     string BaseRecipePrompt,
     IReadOnlyList<string> AppsBeingDeployed,
     bool RequiresVpnGateway,
-    string TechnicalGuidance);
+    string TechnicalGuidance,
+    IReadOnlyList<string>? VpnRoutedApps = null);
 
 public static class HomeLabPromptRecipeCatalog
 {
@@ -79,6 +85,39 @@ public static class HomeLabPromptRecipeCatalog
             "Set up qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr behind one existing VPN Gateway. Reuse my LMS Home Lab storage and ask before making any choice that depends on my environment.",
             "Route every requested service through the selected gateway and preserve a distinct internal listener for each web interface. Use the shared VPN namespace loopback endpoints when describing app-to-app connections. Do not select, recommend, or configure indexers, catalogues, download sources, or content. The user completes any source-specific configuration for services they are authorised to use."),
         Create(
+            "jellyfin-local-library",
+            "Jellyfin local media library",
+            "Create a standalone Jellyfin server for movies and TV stored on this LMS host, with local network streaming and persistent configuration.",
+            ["jellyfin"],
+            false,
+            "Set up Jellyfin for local network streaming from my LMS-managed movies and TV storage. Keep the media mounts read-only and let me add any library, client, transcoding, or access requirements below.",
+            "Keep Jellyfin on its direct local LMS network route. Do not route Jellyfin through a VPN Gateway. Verify the movies and TV storage mounts, Jellyfin health endpoint, and LMS local access URL before reporting it ready."),
+        Create(
+            "jellyfin-arr-library",
+            "Jellyfin with Sonarr and Radarr",
+            "Create a local Jellyfin library alongside Sonarr and Radarr, sharing LMS-managed movie and TV storage.",
+            ["jellyfin", "sonarr", "radarr"],
+            false,
+            "Set up Jellyfin with Sonarr and Radarr for a local movie and TV library. Reuse my LMS-managed movies and TV storage, keep Jellyfin local, and let me add precise library or automation requirements below.",
+            "Keep Jellyfin on a direct local route and mount its movies and TV folders read-only. Give Sonarr and Radarr write access to their matching library folders. Report the LMS local URL for each app and explain that a download client and authorised indexer source are still needed before automated acquisition can work; do not invent or configure either."),
+        Create(
+            "jellyfin-seerr-library",
+            "Jellyfin with Seerr requests",
+            "Create Jellyfin and Seerr for a locally streamed media library with a separate request interface.",
+            ["jellyfin", "seerr"],
+            false,
+            "Set up Jellyfin with Seerr as the request interface for my local media library. Keep both locally accessible and let me add any library, user, or access requirements below.",
+            "Keep Jellyfin and Seerr on direct local routes. Report both LMS local URLs and use the Jellyfin LMS local URL when explaining how to connect Seerr. Explain that Sonarr and Radarr must be added before Seerr can fulfil movie or TV requests."),
+        Create(
+            "jellyfin-vpn-automation",
+            "Jellyfin with VPN media automation",
+            "Create a complete local Jellyfin library with qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr, while keeping Jellyfin local and routing the automation services through one VPN Gateway.",
+            ["jellyfin", "qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"],
+            true,
+            "Set up a complete Jellyfin media library with qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr. Keep Jellyfin available directly on my local network, route the download and automation services through one existing VPN Gateway, reuse my LMS-managed downloads, movies, and TV storage, and let me add precise requirements below.",
+            "Never route Jellyfin through Gluetun: it is the local playback server and must use its direct LMS route. Route qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr through the selected gateway, with a distinct listener port for every service. Jellyfin reads the shared movies and TV storage while the automation services manage those folders. Report every LMS local URL plus the shared VPN namespace loopback endpoints for app-to-app automation. Use Jellyfin's LMS local URL when explaining the Seerr connection. Do not select, recommend, or configure indexers, catalogues, download sources, or content.",
+            ["qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"]),
+        Create(
             "private-photo-library",
             "Immich photo library",
             "Set up Immich and its managed database, cache, and machine-learning dependencies for a private photo and video library.",
@@ -105,6 +144,11 @@ public static class HomeLabPromptRecipeCatalog
             .Where(appId => appId.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        var vpnRoutedAppIds = (definition.VpnRoutedApps ?? (definition.RequiresVpnGateway ? appIds : []))
+            .Select(appId => appId?.Trim() ?? string.Empty)
+            .Where(appId => appId.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         if (id.Length is < 1 or > 80 || id.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
         {
@@ -118,8 +162,14 @@ public static class HomeLabPromptRecipeCatalog
         {
             throw new InvalidOperationException($"Published Home Lab prompt recipe '{id}' contains unsupported LMS app IDs.");
         }
+        if (definition.RequiresVpnGateway != (vpnRoutedAppIds.Length > 0) ||
+            vpnRoutedAppIds.Any(appId => !appIds.Contains(appId, StringComparer.OrdinalIgnoreCase)) ||
+            vpnRoutedAppIds.Any(appId => !HomeLabCatalog.GetApp(appId).SupportsVpnGateway))
+        {
+            throw new InvalidOperationException($"Published Home Lab prompt recipe '{id}' has an invalid VPN app list.");
+        }
 
-        return Create(id, name, description, appIds, definition.RequiresVpnGateway, basePrompt, technicalGuidance);
+        return Create(id, name, description, appIds, definition.RequiresVpnGateway, basePrompt, technicalGuidance, vpnRoutedAppIds);
     }
 
     public static string BuildCustomPrompt(string request)
@@ -186,13 +236,15 @@ public static class HomeLabPromptRecipeCatalog
         IReadOnlyList<string> appIds,
         bool requiresVpnGateway,
         string starterPrompt,
-        string technicalGuidance) =>
+        string technicalGuidance,
+        IReadOnlyList<string>? vpnRoutedAppIds = null) =>
         new(
             id,
             name,
             description,
             appIds,
             requiresVpnGateway,
+            vpnRoutedAppIds ?? (requiresVpnGateway ? appIds : []),
             starterPrompt,
             $"""
             {OperatingContract}

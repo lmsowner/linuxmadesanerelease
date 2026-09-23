@@ -220,7 +220,8 @@ public sealed record HomeLabAiPromptRecipe(
     string Name,
     string Description,
     IReadOnlyList<string> AppIds,
-    bool RequiresVpnGateway);
+    bool RequiresVpnGateway,
+    IReadOnlyList<string> VpnRoutedAppIds);
 
 public sealed record RollbackSafeChangeToolRequest(
     Guid OriginalActionId) : IAiToolRequest;
