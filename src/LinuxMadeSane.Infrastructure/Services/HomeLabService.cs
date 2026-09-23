@@ -1307,6 +1307,57 @@ public sealed class HomeLabService(
                 edgeGatewayRoutesByInstallation.GetValueOrDefault(item.Id))).ToArray());
     }
 
+    public async Task<HomeLabConnectionGuide> GetConnectionGuideAsync(
+        Guid installationId,
+        CancellationToken cancellationToken = default)
+    {
+        var installations = await dbContext.HomeLabInstallations
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+        var sourceEntity = installations.SingleOrDefault(item => item.Id == installationId)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var deployments = await dbContext.HomeLabDeployments
+            .AsNoTracking()
+            .ToDictionaryAsync(item => item.Id, cancellationToken);
+        var sourceDeployment = deployments.GetValueOrDefault(sourceEntity.DeploymentId);
+        var source = MapInstallation(sourceEntity);
+        var candidates = installations
+            .Where(item => item.Id != sourceEntity.Id &&
+                           (AreConnectionPeers(sourceEntity, item) ||
+                            sourceDeployment?.RecipeRunId is Guid recipeRunId &&
+                            deployments.TryGetValue(item.DeploymentId, out var deployment) &&
+                            deployment.RecipeRunId == recipeRunId))
+            .Select(MapInstallation)
+            .ToArray();
+
+        return new HomeLabConnectionGuide(
+            source.Id,
+            source.DisplayName,
+            HomeLabConnectionAddressPlanner.Build(source, candidates));
+    }
+
+    private static bool AreConnectionPeers(
+        HomeLabInstallationEntity source,
+        HomeLabInstallationEntity target)
+    {
+        if (source.DeploymentId == target.DeploymentId)
+        {
+            return true;
+        }
+
+        var sourceUsesVpn = source.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
+        var targetUsesVpn = target.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
+        if (sourceUsesVpn || targetUsesVpn)
+        {
+            return sourceUsesVpn && targetUsesVpn &&
+                   source.NetworkMode["container:".Length..].TrimStart('/').Equals(
+                       target.NetworkMode["container:".Length..].TrimStart('/'),
+                       StringComparison.OrdinalIgnoreCase);
+        }
+
+        return source.NetworkName.Equals(target.NetworkName, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static HomeLabEffectiveContainer BuildEffectiveContainer(
         HomeLabInstallationEntity installation,
         IReadOnlyList<HomeLabInstallationEntity> installations,

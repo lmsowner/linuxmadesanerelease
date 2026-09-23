@@ -13,6 +13,7 @@
 @inject IAiThreadService AiThreadService
 @inject IAiChatService AiChatService
 @inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
 
 <PageTitle>Home Lab | Linux Made Sane</PageTitle>
 
@@ -226,15 +227,6 @@
                                                     </ul>
                                                 </div>
                                                 <div class="home-lab-detail-block">
-                                                    <h3>Connections</h3>
-                                                    <ul class="home-lab-detail-list">
-                                                        @foreach (var item in selectedDetails.Connections)
-                                                        {
-                                                            <li>@item</li>
-                                                        }
-                                                    </ul>
-                                                </div>
-                                                <div class="home-lab-detail-block">
                                                     <h3>Dependencies</h3>
                                                     @if (selectedDetails.Dependencies.Count == 0)
                                                     {
@@ -252,6 +244,65 @@
                                                 </div>
                                             </div>
                                         </TabPage>
+
+                                        @if (!IsVpnGateway(selectedInstallation))
+                                        {
+                                        <TabPage Value="connections" Title="Connections">
+                                            <div class="home-lab-settings-stack">
+                                                <div class="home-lab-connection-intro">
+                                                    <strong>Addresses to use inside @selectedInstallation.DisplayName</strong>
+                                                    <span>Copy these values into this app when it asks for another LMS-managed service. Do not use a Docker IP or the browser Open address; Docker IPs change and browser routes are intended for people.</span>
+                                                </div>
+                                                @if (connectionGuide is null)
+                                                {
+                                                    <p class="meta-text">Loading connection addresses...</p>
+                                                }
+                                                else if (connectionGuide.Addresses.Count == 0)
+                                                {
+                                                    <div class="home-lab-setting-card">
+                                                        <strong>No connected app endpoints were found.</strong>
+                                                        <span class="meta-text">Run related apps from one recipe or route them through the same VPN Gateway so LMS can provide a stable internal address.</span>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    @foreach (var connection in connectionGuide.Addresses)
+                                                    {
+                                                        <div class="home-lab-connection-card">
+                                                            <div class="home-lab-connection-heading">
+                                                                <div>
+                                                                    <strong>@connection.TargetName</strong>
+                                                                    <span>@connection.Purpose</span>
+                                                                </div>
+                                                                <UiPill Tone="@(connection.IsReachable ? UiPillTone.Success : UiPillTone.Warning)">@(connection.IsReachable ? "Ready" : "Network change needed")</UiPill>
+                                                            </div>
+                                                            @if (connection.IsReachable)
+                                                            {
+                                                                <div class="home-lab-connection-value">
+                                                                    <code>@connection.Url</code>
+                                                                    <UiCommandButton Label="Copy address"
+                                                                                     Glyph="UiIconGlyph.Copy"
+                                                                                     Variant="UiButtonVariant.ActionSubtle"
+                                                                                     OnClick="() => CopyConnectionAddressAsync(connection)" />
+                                                                </div>
+                                                            }
+                                                            <dl class="home-lab-detail-list home-lab-detail-definition-list home-lab-connection-details">
+                                                                @if (connection.IsReachable)
+                                                                {
+                                                                    <dt>Host</dt><dd><code>@connection.Host</code></dd>
+                                                                    <dt>Port</dt><dd><code>@connection.Port</code></dd>
+                                                                }
+                                                                <dt>Network path</dt><dd>@connection.NetworkPath</dd>
+                                                                <dt>Extra port mapping</dt><dd>@connection.PortMapping</dd>
+                                                            </dl>
+                                                            <p class="meta-text">@connection.Detail</p>
+                                                        </div>
+                                                    }
+                                                }
+                                                <p class="meta-text">The address establishes the network connection. If the target app requires an API key or login, obtain that value from the target app itself.</p>
+                                            </div>
+                                        </TabPage>
+                                        }
 
                                         <TabPage Value="network" Title="Network">
                                             <div class="home-lab-settings-stack">
@@ -646,6 +697,7 @@
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
     private HomeLabAppInstallation? selectedInstallation;
     private HomeLabEffectiveConfiguration? effectiveConfiguration;
+    private HomeLabConnectionGuide? connectionGuide;
     private HomeLabNetworkSecurity? networkSecurity;
     private readonly Dictionary<Guid, HomeLabNetworkSecurity> summaryNetworkSecurity = [];
     private readonly HashSet<string> collapsedInstallationGroups = new(StringComparer.Ordinal);
@@ -844,7 +896,7 @@
 
     private Task HandleSettingsTabChangedAsync(string? value)
     {
-        settingsTab = value is "network" or "container" or "logs" ? value : "overview";
+        settingsTab = value is "connections" or "network" or "container" or "logs" ? value : "overview";
         return Task.CompletedTask;
     }
 
@@ -1031,6 +1083,7 @@
         {
             selectedInstallation = installation;
             effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
+            connectionGuide = await HomeLabService.GetConnectionGuideAsync(installation.Id);
             networkSecurity = await HomeLabService.GetNetworkSecurityAsync(installation.Id);
             selectedLogs = null;
             settingsTab = "overview";
@@ -1051,6 +1104,7 @@
     {
         selectedInstallation = null;
         effectiveConfiguration = null;
+        connectionGuide = null;
         networkSecurity = null;
         selectedLogs = null;
         settingsTab = "overview";
@@ -1326,6 +1380,19 @@
         {
             busy = false;
         }
+    }
+
+    private async Task CopyConnectionAddressAsync(HomeLabConnectionAddress connection)
+    {
+        if (!connection.IsReachable || string.IsNullOrWhiteSpace(connection.Url))
+        {
+            return;
+        }
+
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", connection.Url);
+        SetMessage(
+            copied ? $"{connection.TargetName} connection address copied." : "Clipboard access was blocked by the browser.",
+            !copied);
     }
 
     private async Task ResetSelectedCredentialsAsync()
@@ -1734,6 +1801,7 @@
                 {
                     networkSecurity = GetSummaryNetworkSecurity(selectedInstallation);
                     effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(selectedInstallation.DeploymentId);
+                    connectionGuide = await HomeLabService.GetConnectionGuideAsync(selectedInstallation.Id);
                     ResetContainerSettingsDraft();
                     if (selectedInstallation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
                     {

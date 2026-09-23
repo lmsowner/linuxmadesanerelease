@@ -65,6 +65,24 @@ public sealed record HomeLabEffectiveContainer(
     IReadOnlyList<string> Dependencies,
     bool HasCustomSettings = false);
 
+public sealed record HomeLabConnectionGuide(
+    Guid SourceInstallationId,
+    string SourceName,
+    IReadOnlyList<HomeLabConnectionAddress> Addresses);
+
+public sealed record HomeLabConnectionAddress(
+    Guid TargetInstallationId,
+    string TargetAppId,
+    string TargetName,
+    string Purpose,
+    string Host,
+    int Port,
+    string Url,
+    bool IsReachable,
+    string NetworkPath,
+    string PortMapping,
+    string Detail);
+
 public sealed record HomeLabNetworkSecurity(
     string Status,
     bool IsVpnRouted,
