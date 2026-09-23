@@ -47,6 +47,12 @@ public sealed record HomeLabWorkspace(
     IReadOnlyList<HomeLabDeployment> Deployments,
     IReadOnlyList<HomeLabAppInstallation> Installations);
 
+public sealed record HomeLabRuntimeHealth(
+    Guid InstallationId,
+    HomeLabHealthState HealthState,
+    string HealthDetail,
+    DateTimeOffset UpdatedAtUtc);
+
 public sealed record HomeLabEffectiveConfiguration(
     Guid DeploymentId,
     string NetworkName,

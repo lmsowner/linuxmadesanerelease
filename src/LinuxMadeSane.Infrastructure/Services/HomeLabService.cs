@@ -116,6 +116,29 @@ public sealed class HomeLabService(
         return new HomeLabWorkspace(HomeLabCatalog.VisibleApps, HomeLabCatalog.Recipes, storageRoles, deployments, installations);
     }
 
+    public async Task<IReadOnlyList<HomeLabRuntimeHealth>> RefreshRuntimeHealthAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var installations = await dbContext.HomeLabInstallations
+            .OrderBy(item => item.DisplayName)
+            .ToListAsync(cancellationToken);
+        foreach (var installation in installations)
+        {
+            await RefreshHealthInternalAsync(installation, cancellationToken);
+        }
+
+        if (installations.Count > 0)
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        return installations.Select(item => new HomeLabRuntimeHealth(
+            item.Id,
+            ToHealth(item.HealthState),
+            item.HealthDetail,
+            item.UpdatedAtUtc)).ToArray();
+    }
+
     public async Task<HomeLabStorageRole> SaveStorageRoleAsync(
         string role,
         string hostPath,

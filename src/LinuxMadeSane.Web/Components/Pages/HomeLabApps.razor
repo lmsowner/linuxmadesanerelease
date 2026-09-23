@@ -3,6 +3,7 @@
 
 @page "/home-lab/apps"
 @rendermode InteractiveServer
+@implements IAsyncDisposable
 @using LinuxMadeSane.Application.Contracts.Ai
 @using LinuxMadeSane.Application.Contracts.HomeLab
 @using LinuxMadeSane.Application.Interfaces
@@ -706,6 +707,10 @@
     private string containerImageDraft = string.Empty;
     private string containerEnvironmentDraft = string.Empty;
     private string containerVolumesDraft = string.Empty;
+    private readonly CancellationTokenSource healthMonitorCancellation = new();
+    private Task? healthMonitorTask;
+    private bool healthRefreshInProgress;
+    private bool disposed;
 
     [SupplyParameterFromQuery(Name = "tab")]
     public string? RequestedTab { get; set; }
@@ -857,7 +862,11 @@
         IReadOnlyList<HomeLabAppInstallation> Installations,
         DateTimeOffset SortDate);
 
-    protected override Task OnInitializedAsync() => LoadAsync();
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        healthMonitorTask = MonitorRuntimeHealthAsync(healthMonitorCancellation.Token);
+    }
 
     protected override void OnParametersSet()
     {
@@ -885,6 +894,93 @@
         {
             busy = false;
         }
+    }
+
+    private async Task MonitorRuntimeHealthAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+            var stableTicks = 0;
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await InvokeAsync(async () =>
+                {
+                    if (disposed || busy || healthRefreshInProgress || workspace is null)
+                    {
+                        return;
+                    }
+
+                    var hasTransitionalState = workspace.Installations.Any(item =>
+                        item.HealthState is HomeLabHealthState.Starting or HomeLabHealthState.Degraded or HomeLabHealthState.Blocked);
+                    if (!hasTransitionalState && ++stableTicks < 8)
+                    {
+                        return;
+                    }
+
+                    stableTicks = 0;
+                    healthRefreshInProgress = true;
+                    try
+                    {
+                        var health = await HomeLabService.RefreshRuntimeHealthAsync(cancellationToken);
+                        ApplyRuntimeHealth(health);
+                        StateHasChanged();
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+                    catch
+                    {
+                        // Keep the current snapshot and try again on the next interval.
+                    }
+                    finally
+                    {
+                        healthRefreshInProgress = false;
+                    }
+                });
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private void ApplyRuntimeHealth(IReadOnlyList<HomeLabRuntimeHealth> health)
+    {
+        if (workspace is null || health.Count == 0)
+        {
+            return;
+        }
+
+        var healthByInstallation = health.ToDictionary(item => item.InstallationId);
+        var installations = workspace.Installations.Select(installation =>
+        {
+            if (!healthByInstallation.TryGetValue(installation.Id, out var current))
+            {
+                return installation;
+            }
+
+            return installation with
+            {
+                HealthState = current.HealthState,
+                HealthDetail = current.HealthDetail,
+                UpdatedAtUtc = current.UpdatedAtUtc
+            };
+        }).ToArray();
+        workspace = workspace with { Installations = installations };
+
+        if (selectedInstallation is { } selected)
+        {
+            selectedInstallation = installations.FirstOrDefault(item => item.Id == selected.Id);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+        await healthMonitorCancellation.CancelAsync();
+        if (healthMonitorTask is not null)
+        {
+            try { await healthMonitorTask; }
+            catch (OperationCanceledException) { }
+        }
+        healthMonitorCancellation.Dispose();
     }
 
     private Task HandleTabChangedAsync(string? value)
