@@ -179,49 +179,6 @@
                         </ChildContent>
                     </TabPage>
 
-                    <TabPage Value="cpu" Title="CPU">
-                        <ChildContent>
-                            <div class="system-analysis-tab-content">
-                                <div class="system-analysis-breakdown-grid">
-                                    @CpuBreakdown("Total active", snapshot.Cpu.UsagePercent)
-                                    @CpuBreakdown("User", snapshot.Cpu.UserPercent)
-                                    @CpuBreakdown("Kernel", snapshot.Cpu.SystemPercent)
-                                    @CpuBreakdown("I/O wait", snapshot.Cpu.IoWaitPercent)
-                                    @CpuBreakdown("Steal", snapshot.Cpu.StealPercent)
-                                </div>
-                                <section class="surface-card system-analysis-table-card">
-                                    <div class="table-header">
-                                        <h2>CPU by process</h2>
-                                        <span>100% equals one fully occupied logical CPU</span>
-                                    </div>
-                                    @ProcessTable(GetCpuProcesses(75), showIo: false, showPorts: false, showActions: false)
-                                </section>
-                            </div>
-                        </ChildContent>
-                    </TabPage>
-
-                    <TabPage Value="memory" Title="Memory">
-                        <ChildContent>
-                            <div class="system-analysis-tab-content">
-                                <div class="system-analysis-metric-grid compact">
-                                    @MemoryCard("Total", snapshot.Memory.TotalBytes)
-                                    @MemoryCard("Used", snapshot.Memory.UsedBytes)
-                                    @MemoryCard("Available", snapshot.Memory.AvailableBytes)
-                                    @MemoryCard("Cache", snapshot.Memory.CacheBytes)
-                                    @MemoryCard("Swap used", snapshot.Memory.SwapUsedBytes)
-                                    @MemoryCard("Swap total", snapshot.Memory.SwapTotalBytes)
-                                </div>
-                                <section class="surface-card system-analysis-table-card">
-                                    <div class="table-header">
-                                        <h2>Memory by process</h2>
-                                        <span>Resident memory, highest first</span>
-                                    </div>
-                                    @ProcessTable(GetMemoryProcesses(75), showIo: false, showPorts: false, showActions: false)
-                                </section>
-                            </div>
-                        </ChildContent>
-                    </TabPage>
-
                     <TabPage Value="network" Title="Network">
                         <ChildContent>
                             <div class="system-analysis-tab-content">
@@ -267,7 +224,7 @@
                                         </table>
                                     </div>
                                 </section>
-                                <p class="meta-text system-analysis-note">Network counters and established TCP sessions are sampled only while this tab is open. Process-owned listening ports are collected on the Processes tab.</p>
+                                <p class="meta-text system-analysis-note">Network counters and established TCP sessions are sampled only while this tab is open. Process-owned listening ports are collected on the Process Details tab.</p>
                             </div>
                         </ChildContent>
                     </TabPage>
@@ -416,7 +373,7 @@
                                         </table>
                                     </div>
                                 </section>
-                                <p class="meta-text system-analysis-note">Per-process disk I/O is collected on the Processes tab so this view can use inexpensive block-device counters.</p>
+                                <p class="meta-text system-analysis-note">This view reads block-device counters only. Per-process disk I/O is collected on the Process Details tab.</p>
                             </div>
                         </ChildContent>
                     </TabPage>
@@ -591,7 +548,7 @@
                         </ChildContent>
                     </TabPage>
 
-                    <TabPage Value="processes" Title="Processes">
+                    <TabPage Value="processes" Title="Process Details">
                         <ChildContent>
                             <div class="system-analysis-tab-content">
                                 <section class="surface-card system-analysis-process-controls">
@@ -615,7 +572,7 @@
                                     <span class="meta-text">Showing @FilteredProcesses.Count() of @snapshot.ProcessCount processes</span>
                                 </section>
                                 <section class="surface-card system-analysis-table-card">
-                                    @ProcessTable(FilteredProcesses.Take(150), showIo: true, showPorts: true, showActions: true)
+                                    @ProcessTable(FilteredProcesses, showIo: true, showPorts: true, showActions: true)
                                     <p class="meta-text system-analysis-note">Process disk I/O and listening-port ownership are sampled only while this tab is open. PID is the stable default order; CPU is the only order that continuously re-ranks rows.</p>
                                 </section>
                             </div>
@@ -707,8 +664,6 @@
     private static readonly IReadOnlySet<string> SupportedTabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         "overview",
-        "cpu",
-        "memory",
         "network",
         "configuration",
         "disk",
@@ -1161,12 +1116,6 @@
             .ThenByDescending(process => process.ResidentMemoryBytes)
             .Take(count) ?? [];
 
-    private IEnumerable<LocalProcessMetric> GetMemoryProcesses(int count) =>
-        snapshot?.Processes
-            .OrderByDescending(process => process.ResidentMemoryBytes)
-            .ThenByDescending(process => process.CpuPercent ?? -1)
-            .Take(count) ?? [];
-
     private IEnumerable<LocalProcessMetric> FilteredProcesses
     {
         get
@@ -1311,16 +1260,6 @@
             </table>
         </div>;
     }
-
-    private RenderFragment CpuBreakdown(string label, double? value) => @<article class="system-analysis-breakdown-card">
-            <div><span>@label</span><strong>@FormatPercent(value)</strong></div>
-            <div class="system-analysis-meter"><i style="@MeterStyle(value)"></i></div>
-        </article>;
-
-    private RenderFragment MemoryCard(string label, long value) => @<article class="system-analysis-metric-card">
-            <span>@label</span>
-            <strong>@FormatBytes(value)</strong>
-        </article>;
 
     private static double GetTotalProcessIo(LocalProcessMetric process) =>
         (process.ReadBytesPerSecond ?? 0) + (process.WriteBytesPerSecond ?? 0);

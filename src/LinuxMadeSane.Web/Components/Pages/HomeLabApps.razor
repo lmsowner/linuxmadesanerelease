@@ -680,36 +680,67 @@
                     <div>
                         <p class="eyebrow">Guided AI deployments</p>
                         <h2>Start with a HomeLab Recipe, then make it yours</h2>
-                        <p class="meta-text">Choose a recipe from the public Linux Made Sane GitHub catalog. New compatible recipes appear here automatically, and the packaged catalog remains available if GitHub cannot be reached.</p>
+                        <p class="meta-text">Choose a category, then a recipe from the public Linux Made Sane GitHub catalog. Review what LMS will do, add any precise requirements, then select Go.</p>
                     </div>
                 </section>
                 <section class="surface-card home-lab-recipe-selector">
-                    <div class="home-lab-recipe-choice">
-                        <label for="home-lab-prompt-recipe">HomeLab Recipe</label>
-                        <select id="home-lab-prompt-recipe"
-                                class="ui-control-input"
-                                value="@selectedPromptRecipeId"
-                                @onchange="SelectPromptRecipe">
-                            <option value="">Choose a recipe...</option>
-                            @foreach (var category in promptRecipes.GroupBy(recipe => recipe.Category))
-                            {
-                                <optgroup label="@category.Key">
-                                    @foreach (var promptRecipe in category)
+                    <div class="home-lab-recipe-steps">
+                        <div class="home-lab-recipe-choice">
+                            <label for="home-lab-recipe-category">1. Category</label>
+                            <select id="home-lab-recipe-category"
+                                    class="ui-control-input"
+                                    value="@selectedRecipeCategory"
+                                    @onchange="SelectPromptRecipeCategory">
+                                <option value="">Choose a category...</option>
+                                @foreach (var category in RecipeCategories)
+                                {
+                                    <option value="@category">@category</option>
+                                }
+                                <option value="custom">Enter your own</option>
+                            </select>
+                        </div>
+                        @if (!string.IsNullOrWhiteSpace(selectedRecipeCategory) &&
+                             !selectedRecipeCategory.Equals("custom", StringComparison.OrdinalIgnoreCase))
+                        {
+                            <div class="home-lab-recipe-choice">
+                                <label for="home-lab-prompt-recipe">2. Recipe</label>
+                                <select id="home-lab-prompt-recipe"
+                                        class="ui-control-input"
+                                        value="@selectedPromptRecipeId"
+                                        @onchange="SelectPromptRecipe">
+                                    <option value="">Choose a recipe...</option>
+                                    @foreach (var promptRecipe in RecipesInSelectedCategory)
                                     {
                                         <option value="@promptRecipe.Id">@promptRecipe.Name</option>
                                     }
-                                </optgroup>
-                            }
-                            <option value="custom">Enter your own</option>
-                        </select>
+                                </select>
+                            </div>
+                        }
                     </div>
 
                     @if (customizingPromptRecipe is { } selectedRecipe)
                     {
                         <div class="home-lab-selected-recipe">
-                            <div>
-                                <p class="eyebrow">@selectedRecipe.Name</p>
-                                <p class="meta-text">@selectedRecipe.Description</p>
+                            <div class="home-lab-recipe-summary">
+                                <div>
+                                    <p class="eyebrow">@selectedRecipe.Category</p>
+                                    <h3>@selectedRecipe.Name</h3>
+                                    <p>@selectedRecipe.Description</p>
+                                </div>
+                                <dl class="home-lab-recipe-summary-facts">
+                                    <div>
+                                        <dt>What LMS will do</dt>
+                                        <dd>@(selectedRecipe.RequiresPlanning
+                                            ? "Open a guided AI plan, collect the choices this setup needs, and identify what LMS can deploy safely."
+                                            : "Open a guided AI task, inspect the current HomeLab, confirm your requirements, and deploy the supported stack.")</dd>
+                                    </div>
+                                    <div>
+                                        <dt>Network</dt>
+                                        <dd>@(selectedRecipe.RequiresVpnGateway
+                                            ? "Reuse an existing VPN Gateway and route only the apps defined by this recipe."
+                                            : "Use LMS-managed local access unless you add different requirements below.")</dd>
+                                    </div>
+                                </dl>
                             </div>
                             <strong class="home-lab-recipe-field-label">@(selectedRecipe.RequiresPlanning ? "Recipe components" : "Apps being deployed")</strong>
                             <div class="home-lab-recipe-apps" aria-label="Recipe components">
@@ -738,7 +769,7 @@
                                                  Variant="UiButtonVariant.ActionSubtle"
                                                  Disabled="@(startingPromptRecipeId is not null)"
                                                  OnClick="ResetPromptRecipeDraft" />
-                                <UiCommandButton Label="@(selectedRecipe.RequiresPlanning ? "Plan with AI" : "Start guided AI task")"
+                                <UiCommandButton Label="Go"
                                                  Glyph="UiIconGlyph.Ai"
                                                  Variant="UiButtonVariant.PrimaryMuted"
                                                  Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft))"
@@ -758,7 +789,7 @@
                                       @bind="customPrompt"
                                       @bind:event="oninput"
                                       placeholder="For example: WordPress, a database, and a database administration tool"></textarea>
-                            <UiCommandButton Label="Start custom AI task"
+                            <UiCommandButton Label="Go"
                                              Glyph="UiIconGlyph.Ai"
                                              Variant="UiButtonVariant.PrimaryMuted"
                                              Disabled="@(busy || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(customPrompt))"
@@ -807,11 +838,17 @@
     private bool busy;
     private string activeTab = "apps";
     private string? startingPromptRecipeId;
+    private string selectedRecipeCategory = string.Empty;
     private string selectedPromptRecipeId = string.Empty;
     private string customPrompt = string.Empty;
     private IReadOnlyList<HomeLabPromptRecipe> promptRecipes = HomeLabPromptRecipeCatalog.All;
     private HomeLabPromptRecipe? customizingPromptRecipe;
     private string recipePromptDraft = string.Empty;
+    private IEnumerable<string> RecipeCategories => promptRecipes
+        .Select(recipe => recipe.Category)
+        .Distinct(StringComparer.OrdinalIgnoreCase);
+    private IEnumerable<HomeLabPromptRecipe> RecipesInSelectedCategory => promptRecipes
+        .Where(recipe => recipe.Category.Equals(selectedRecipeCategory, StringComparison.OrdinalIgnoreCase));
     private HomeLabAppManifest? configuringApp;
     private HomeLabAppInstallation? configuringInstallation;
     private HomeLabAppInstallation? renamingGateway;
@@ -1147,6 +1184,16 @@
             await HomeLabService.SaveStorageRoleAsync(role, storagePaths[role]);
             SetMessage($"Storage role '{role}' saved.", false);
         });
+    }
+
+    private void SelectPromptRecipeCategory(ChangeEventArgs eventArgs)
+    {
+        selectedRecipeCategory = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+        selectedPromptRecipeId = selectedRecipeCategory.Equals("custom", StringComparison.OrdinalIgnoreCase)
+            ? "custom"
+            : string.Empty;
+        customizingPromptRecipe = null;
+        recipePromptDraft = string.Empty;
     }
 
     private void SelectPromptRecipe(ChangeEventArgs eventArgs)
