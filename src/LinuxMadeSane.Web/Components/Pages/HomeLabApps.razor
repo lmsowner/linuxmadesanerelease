@@ -406,7 +406,11 @@
                                                                              OnClick="TestSelectedEndpointAsync" />
                                                         }
 
-                                                        @if (AvailableExternalDomains.Count == 0)
+                                                        @if (externalAccessLoading)
+                                                        {
+                                                            <p class="meta-text">Loading Edge Gateway publishing options...</p>
+                                                        }
+                                                        else if (AvailableExternalDomains.Count == 0)
                                                         {
                                                             <p class="meta-text">Set up a Cloudflare domain and relay in Edge Gateway before publishing this service.</p>
                                                             <UiCommandButton Label="Open Edge Gateway"
@@ -933,6 +937,7 @@
     private string externalHostnameDraft = string.Empty;
     private string externalDomainDraft = string.Empty;
     private EdgeGatewayAuthMode externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+    private bool externalAccessLoading;
     private bool confirmExternalUnpublish;
     private readonly CancellationTokenSource healthMonitorCancellation = new();
     private Task? healthMonitorTask;
@@ -1232,8 +1237,6 @@
                 });
             }
 
-            var refreshedRecipes = await promptRecipeProvider.GetRecipesAsync(cancellationToken);
-
             IReadOnlyList<EdgeGatewayRouteListItem>? refreshedRoutes = null;
             EdgeGatewayDashboardViewModel? refreshedDashboard = null;
             try
@@ -1258,13 +1261,24 @@
                 }
 
                 workspace = refreshedWorkspace;
-                promptRecipes = refreshedRecipes;
                 if (refreshedRoutes is not null)
                 {
                     edgeGatewayRoutes = refreshedRoutes;
                     edgeGatewayDashboard = refreshedDashboard;
                 }
 
+                StateHasChanged();
+            });
+
+            var refreshedRecipes = await promptRecipeProvider.GetRecipesAsync(cancellationToken);
+            await InvokeAsync(() =>
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                promptRecipes = refreshedRecipes;
                 StateHasChanged();
             });
         }
@@ -1396,10 +1410,28 @@
         return Task.CompletedTask;
     }
 
-    private Task HandleSettingsTabChangedAsync(string? value)
+    private async Task HandleSettingsTabChangedAsync(string? value)
     {
         settingsTab = value is "connections" or "network" or "external" or "container" or "logs" ? value : "overview";
-        return Task.CompletedTask;
+        if (settingsTab != "external" || selectedInstallation is null)
+        {
+            return;
+        }
+
+        externalAccessLoading = true;
+        try
+        {
+            await RefreshEdgeGatewayStateAsync();
+            await LoadExternalAccessDraftAsync(selectedInstallation);
+        }
+        catch (Exception exception)
+        {
+            SetMessage($"Could not load Edge Gateway publishing options: {exception.Message}", true);
+        }
+        finally
+        {
+            externalAccessLoading = false;
+        }
     }
 
     private async Task SaveStorageRoleAsync(string role)
@@ -1626,14 +1658,18 @@
         busy = true;
         try
         {
+            var loadedConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
+            var loadedConnectionGuide = await HomeLabService.GetConnectionGuideAsync(installation.Id);
+            effectiveConfiguration = loadedConfiguration;
+            connectionGuide = loadedConnectionGuide;
+            networkSecurity = GetSummaryNetworkSecurity(installation);
             selectedInstallation = installation;
-            effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
-            connectionGuide = await HomeLabService.GetConnectionGuideAsync(installation.Id);
-            networkSecurity = await HomeLabService.GetNetworkSecurityAsync(installation.Id);
-            await RefreshEdgeGatewayStateAsync();
-            await LoadExternalAccessDraftAsync(installation);
             selectedLogs = null;
             settingsTab = "overview";
+            externalHostnameDraft = string.Empty;
+            externalDomainDraft = string.Empty;
+            externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+            externalAccessLoading = false;
             ResetContainerSettingsDraft();
             activeTab = "apps";
         }
@@ -1660,6 +1696,7 @@
         containerVolumesDraft = string.Empty;
         externalHostnameDraft = string.Empty;
         externalDomainDraft = string.Empty;
+        externalAccessLoading = false;
         externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
         confirmExternalUnpublish = false;
     }
