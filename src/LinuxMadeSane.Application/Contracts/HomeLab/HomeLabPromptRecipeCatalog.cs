@@ -14,6 +14,19 @@ public sealed record HomeLabPromptRecipe(
     string StarterPrompt,
     string Prompt);
 
+public sealed record PublishedHomeLabPromptRecipeCatalog(
+    int SchemaVersion,
+    IReadOnlyList<PublishedHomeLabPromptRecipe> Recipes);
+
+public sealed record PublishedHomeLabPromptRecipe(
+    string Id,
+    string RecipeName,
+    string Description,
+    string BaseRecipePrompt,
+    IReadOnlyList<string> AppsBeingDeployed,
+    bool RequiresVpnGateway,
+    string TechnicalGuidance);
+
 public static class HomeLabPromptRecipeCatalog
 {
     private const string OperatingContract =
@@ -78,6 +91,36 @@ public static class HomeLabPromptRecipeCatalog
     public static HomeLabPromptRecipe Get(string id) =>
         All.FirstOrDefault(recipe => recipe.Id.Equals(id?.Trim(), StringComparison.OrdinalIgnoreCase))
         ?? throw new InvalidOperationException($"Home Lab prompt recipe '{id}' is not available.");
+
+    public static HomeLabPromptRecipe CreatePublished(PublishedHomeLabPromptRecipe definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        var id = definition.Id?.Trim() ?? string.Empty;
+        var name = definition.RecipeName?.Trim() ?? string.Empty;
+        var description = definition.Description?.Trim() ?? string.Empty;
+        var basePrompt = definition.BaseRecipePrompt?.Trim() ?? string.Empty;
+        var technicalGuidance = definition.TechnicalGuidance?.Trim() ?? string.Empty;
+        var appIds = (definition.AppsBeingDeployed ?? [])
+            .Select(appId => appId?.Trim() ?? string.Empty)
+            .Where(appId => appId.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (id.Length is < 1 or > 80 || id.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
+        {
+            throw new InvalidOperationException("Published Home Lab prompt recipe IDs must use 1-80 ASCII letters, numbers, hyphens, or underscores.");
+        }
+        if (name.Length is < 1 or > 160 || description.Length is < 1 or > 600 || basePrompt.Length is < 1 or > 4000 || technicalGuidance.Length > 8000)
+        {
+            throw new InvalidOperationException($"Published Home Lab prompt recipe '{id}' has an invalid text field length.");
+        }
+        if (appIds.Length is < 1 or > 20 || appIds.Any(appId => !HomeLabCatalog.Apps.Any(app => app.Id.Equals(appId, StringComparison.OrdinalIgnoreCase) && app.IsInstallable)))
+        {
+            throw new InvalidOperationException($"Published Home Lab prompt recipe '{id}' contains unsupported LMS app IDs.");
+        }
+
+        return Create(id, name, description, appIds, definition.RequiresVpnGateway, basePrompt, technicalGuidance);
+    }
 
     public static string BuildCustomPrompt(string request)
     {

@@ -9,6 +9,7 @@
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.HomeLab
 @inject IHomeLabService HomeLabService
+@inject IHomeLabPromptRecipeProvider PromptRecipeProvider
 @inject IAiThreadService AiThreadService
 @inject IAiChatService AiChatService
 @inject NavigationManager Navigation
@@ -70,58 +71,6 @@
                                              Variant="UiButtonVariant.PrimaryMuted"
                                              Disabled="@(busy || !CanRenameGateway)"
                                              OnClick="RenameGatewayAsync" />
-                        </div>
-                    </section>
-                </ChildContent>
-            </UiModal>
-        }
-
-        @if (customizingPromptRecipe is { } recipeToCustomize)
-        {
-            <UiModal IsOpen="true"
-                     Title="@($"Customize {recipeToCustomize.Name}")"
-                     Subtitle="Use the recipe as a starting point, then add the exact versions, variants, companion services, storage, access, or other requirements you need."
-                     Class="home-lab-prompt-modal"
-                     Resizable="true"
-                     OnClose="CancelPromptRecipeCustomization">
-                <ChildContent>
-                    <section class="home-lab-prompt-editor">
-                        <div>
-                            <p class="eyebrow">Starting prompt</p>
-                            <p class="meta-text">The recipe still supplies its LMS safety, networking, health-check, and deployment rules. Edit this request in plain language.</p>
-                        </div>
-                        <textarea id="home-lab-recipe-prompt"
-                                  class="ui-control-textarea"
-                                  @bind="recipePromptDraft"
-                                  @bind:event="oninput"
-                                  autofocus></textarea>
-                        <div class="home-lab-recipe-apps" aria-label="Recipe starting applications">
-                            @foreach (var appId in recipeToCustomize.AppIds)
-                            {
-                                <span>@HomeLabCatalog.GetApp(appId).Name</span>
-                            }
-                            @if (recipeToCustomize.RequiresVpnGateway)
-                            {
-                                <span>Existing VPN Gateway</span>
-                            }
-                        </div>
-                        <p class="meta-text">If a requested version, variant, or companion service is not supported by the current LMS catalog, the AI will explain that before proposing any change.</p>
-                        <div class="home-lab-prompt-actions">
-                            <UiCommandButton Label="Cancel"
-                                             Glyph="UiIconGlyph.Clear"
-                                             Variant="UiButtonVariant.Ghost"
-                                             Disabled="@(startingPromptRecipeId is not null)"
-                                             OnClick="CancelPromptRecipeCustomization" />
-                            <UiCommandButton Label="Reset starting prompt"
-                                             Glyph="UiIconGlyph.Refresh"
-                                             Variant="UiButtonVariant.ActionSubtle"
-                                             Disabled="@(startingPromptRecipeId is not null)"
-                                             OnClick="ResetPromptRecipeDraft" />
-                            <UiCommandButton Label="Start guided AI task"
-                                             Glyph="UiIconGlyph.Ai"
-                                             Variant="UiButtonVariant.PrimaryMuted"
-                                             Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft))"
-                                             OnClick="StartPromptRecipeAsync" />
                         </div>
                     </section>
                 </ChildContent>
@@ -646,49 +595,82 @@
                     <div>
                         <p class="eyebrow">Guided AI deployments</p>
                         <h2>Start with a proven prompt, then make it yours</h2>
-                        <p class="meta-text">Each recipe gives you an editable starting request. Add versions, variants, databases, admin tools, domains, storage, or other details before the AI inspects your Home Lab and proposes an LMS-managed deployment.</p>
+                        <p class="meta-text">Choose a recipe from the public Linux Made Sane GitHub catalog. New compatible recipes appear here automatically, and the packaged catalog remains available if GitHub cannot be reached.</p>
                     </div>
                 </section>
-                <div class="surface-card home-lab-recipe-list">
-                    @foreach (var promptRecipe in HomeLabPromptRecipeCatalog.All)
+                <section class="surface-card home-lab-recipe-selector">
+                    <div class="home-lab-recipe-choice">
+                        <label for="home-lab-prompt-recipe">Prompt recipe</label>
+                        <select id="home-lab-prompt-recipe"
+                                class="ui-control-input"
+                                value="@selectedPromptRecipeId"
+                                @onchange="SelectPromptRecipe">
+                            <option value="">Choose a recipe...</option>
+                            @foreach (var promptRecipe in promptRecipes)
+                            {
+                                <option value="@promptRecipe.Id">@promptRecipe.Name</option>
+                            }
+                            <option value="custom">Enter your own</option>
+                        </select>
+                    </div>
+
+                    @if (customizingPromptRecipe is { } selectedRecipe)
                     {
-                        <div class="home-lab-recipe-row">
+                        <div class="home-lab-selected-recipe">
                             <div>
-                                <strong>@promptRecipe.Name</strong>
-                                <span>@promptRecipe.Description</span>
+                                <p class="eyebrow">@selectedRecipe.Name</p>
+                                <p class="meta-text">@selectedRecipe.Description</p>
                             </div>
-                            <div class="home-lab-recipe-apps">
-                                @foreach (var appId in promptRecipe.AppIds)
+                            <strong class="home-lab-recipe-field-label">Apps being deployed</strong>
+                            <div class="home-lab-recipe-apps" aria-label="Apps being deployed">
+                                @foreach (var appId in selectedRecipe.AppIds)
                                 {
                                     <span>@HomeLabCatalog.GetApp(appId).Name</span>
                                 }
-                                @if (promptRecipe.RequiresVpnGateway)
+                                @if (selectedRecipe.RequiresVpnGateway)
                                 {
                                     <span>Existing VPN Gateway</span>
                                 }
                             </div>
-                            <UiCommandButton Label="Customize prompt"
-                                             Glyph="UiIconGlyph.Ai"
-                                             Variant="UiButtonVariant.PrimaryMuted"
-                                             Disabled="@(busy || startingPromptRecipeId is not null)"
-                                             OnClick="() => BeginPromptRecipeCustomization(promptRecipe)" />
+                            <label for="home-lab-recipe-prompt">Base recipe prompt</label>
+                            <textarea id="home-lab-recipe-prompt"
+                                      class="ui-control-textarea"
+                                      @bind="recipePromptDraft"
+                                      @bind:event="oninput"></textarea>
+                            <p class="meta-text">Add versions, variants, databases, admin tools, domains, storage, or other requirements. The AI will explain unsupported details before proposing changes.</p>
+                            <div class="home-lab-prompt-actions">
+                                <UiCommandButton Label="Reset base prompt"
+                                                 Glyph="UiIconGlyph.Refresh"
+                                                 Variant="UiButtonVariant.ActionSubtle"
+                                                 Disabled="@(startingPromptRecipeId is not null)"
+                                                 OnClick="ResetPromptRecipeDraft" />
+                                <UiCommandButton Label="Start guided AI task"
+                                                 Glyph="UiIconGlyph.Ai"
+                                                 Variant="UiButtonVariant.PrimaryMuted"
+                                                 Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft))"
+                                                 OnClick="StartPromptRecipeAsync" />
+                            </div>
                         </div>
                     }
-                </div>
-                <section class="surface-subcard home-lab-custom-prompt">
-                    <div>
-                        <p class="eyebrow">Enter your own</p>
-                        <h2>Tell the Home Lab AI what you want to run</h2>
-                        <p class="meta-text">The AI starts by inspecting LMS, uses supported managed apps where possible, and presents changes for approval.</p>
-                    </div>
-                    <textarea class="ui-control-textarea"
-                              @bind="customPrompt"
-                              placeholder="For example: set up a private dashboard for services already installed on this server"></textarea>
-                    <UiCommandButton Label="Start custom AI task"
-                                     Glyph="UiIconGlyph.Ai"
-                                     Variant="UiButtonVariant.PrimaryMuted"
-                                     Disabled="@(busy || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(customPrompt))"
-                                     OnClick="StartCustomPromptAsync" />
+                    else if (selectedPromptRecipeId.Equals("custom", StringComparison.OrdinalIgnoreCase))
+                    {
+                        <div class="home-lab-selected-recipe">
+                            <div>
+                                <p class="eyebrow">Enter your own</p>
+                                <h2>Enter the apps you would like made available by LMS</h2>
+                            </div>
+                            <textarea id="home-lab-custom-prompt"
+                                      class="ui-control-textarea"
+                                      @bind="customPrompt"
+                                      @bind:event="oninput"
+                                      placeholder="For example: WordPress, a database, and a database administration tool"></textarea>
+                            <UiCommandButton Label="Start custom AI task"
+                                             Glyph="UiIconGlyph.Ai"
+                                             Variant="UiButtonVariant.PrimaryMuted"
+                                             Disabled="@(busy || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(customPrompt))"
+                                             OnClick="StartCustomPromptAsync" />
+                        </div>
+                    }
                 </section>
             </TabPage>
 
@@ -731,7 +713,9 @@
     private bool busy;
     private string activeTab = "apps";
     private string? startingPromptRecipeId;
+    private string selectedPromptRecipeId = string.Empty;
     private string customPrompt = string.Empty;
+    private IReadOnlyList<HomeLabPromptRecipe> promptRecipes = HomeLabPromptRecipeCatalog.All;
     private HomeLabPromptRecipe? customizingPromptRecipe;
     private string recipePromptDraft = string.Empty;
     private HomeLabAppManifest? configuringApp;
@@ -768,6 +752,7 @@
         try
         {
             workspace = await HomeLabService.GetWorkspaceAsync();
+            promptRecipes = await PromptRecipeProvider.GetRecipesAsync();
             foreach (var role in workspace.StorageRoles)
             {
                 storagePaths[role.Role] = role.HostPath;
@@ -800,10 +785,20 @@
         });
     }
 
-    private void BeginPromptRecipeCustomization(HomeLabPromptRecipe promptRecipe)
+    private void SelectPromptRecipe(ChangeEventArgs eventArgs)
     {
+        selectedPromptRecipeId = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+        if (selectedPromptRecipeId.Equals("custom", StringComparison.OrdinalIgnoreCase))
+        {
+            customizingPromptRecipe = null;
+            recipePromptDraft = string.Empty;
+            return;
+        }
+
+        var promptRecipe = promptRecipes.FirstOrDefault(recipe =>
+            recipe.Id.Equals(selectedPromptRecipeId, StringComparison.OrdinalIgnoreCase));
         customizingPromptRecipe = promptRecipe;
-        recipePromptDraft = promptRecipe.StarterPrompt;
+        recipePromptDraft = promptRecipe?.StarterPrompt ?? string.Empty;
     }
 
     private void ResetPromptRecipeDraft()
@@ -812,17 +807,6 @@
         {
             recipePromptDraft = promptRecipe.StarterPrompt;
         }
-    }
-
-    private void CancelPromptRecipeCustomization()
-    {
-        if (startingPromptRecipeId is not null)
-        {
-            return;
-        }
-
-        customizingPromptRecipe = null;
-        recipePromptDraft = string.Empty;
     }
 
     private async Task StartPromptRecipeAsync()

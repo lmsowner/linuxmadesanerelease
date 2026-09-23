@@ -184,6 +184,11 @@ public static class DependencyInjection
         services.AddScoped<IOllamaRuntimeService, OllamaRuntimeService>();
         services.AddScoped<IDockerAiEngineDiscoveryService, DockerAiEngineDiscoveryService>();
         services.AddScoped<IHomeLabService, HomeLabService>();
+        services.AddHttpClient<IHomeLabPromptRecipeProvider, GitHubHomeLabPromptRecipeProvider>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(5);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("LinuxMadeSane-HomeLabRecipes/1.0");
+        });
         services.AddScoped<IRemoteLmsAiEngineGateway, DisabledRemoteLmsAiEngineGateway>();
         services.AddScoped<ISshHostDiscoveryService, SshHostDiscoveryService>();
         services.AddScoped<IDesktopInspectionService, DesktopInspectionService>();

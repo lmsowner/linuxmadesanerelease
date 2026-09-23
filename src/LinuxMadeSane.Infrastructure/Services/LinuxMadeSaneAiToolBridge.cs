@@ -25,7 +25,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     IAiSafeChangeService safeChangeService,
     ICommandExecutionService commandExecutionService,
     IManagedHostFileAccessService fileAccessService,
-    IHomeLabService? homeLabService = null) : IAiToolBridge
+    IHomeLabService? homeLabService = null,
+    IHomeLabPromptRecipeProvider? promptRecipeProvider = null) : IAiToolBridge
 {
     public LinuxMadeSaneAiToolBridge(
         IAiToolRegistry toolRegistry,
@@ -482,13 +483,14 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             installations.Add(await MapHomeLabInstallationAsync(service, installation, cancellationToken));
         }
 
+        var promptRecipes = await GetPromptRecipesAsync(cancellationToken);
         var response = new InspectHomeLabToolResponse(
             workspace.Installations
                 .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
                 .Select(item => new HomeLabAiGateway(item.Id, item.DisplayName, item.HealthState.ToString(), item.HealthDetail))
                 .ToArray(),
             installations,
-            HomeLabPromptRecipeCatalog.All
+            promptRecipes
                 .Select(recipe => new HomeLabAiPromptRecipe(
                     recipe.Id,
                     recipe.Name,
@@ -590,7 +592,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         CancellationToken cancellationToken)
     {
         var request = DeserializeRequest<ApplyHomeLabPromptRecipeToolRequest>(context.Invocation.ArgumentsJson);
-        var recipe = HomeLabPromptRecipeCatalog.Get(request.PromptRecipeId);
+        var recipe = await GetPromptRecipeAsync(request.PromptRecipeId, cancellationToken);
         var service = RequireHomeLabService();
         var workspace = await service.GetWorkspaceAsync(cancellationToken);
         var details = new List<string>();
@@ -828,6 +830,15 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
 
     private IHomeLabService RequireHomeLabService() =>
         homeLabService ?? throw new InvalidOperationException("LMS Home Lab services are unavailable to this AI session.");
+
+    private Task<IReadOnlyList<HomeLabPromptRecipe>> GetPromptRecipesAsync(CancellationToken cancellationToken) =>
+        promptRecipeProvider?.GetRecipesAsync(cancellationToken)
+        ?? Task.FromResult(HomeLabPromptRecipeCatalog.All);
+
+    private async Task<HomeLabPromptRecipe> GetPromptRecipeAsync(string id, CancellationToken cancellationToken) =>
+        promptRecipeProvider is null
+            ? HomeLabPromptRecipeCatalog.Get(id)
+            : await promptRecipeProvider.GetRecipeAsync(id, cancellationToken);
 
     private static string BuildHomeLabInspectionOutput(InspectHomeLabToolResponse response)
     {

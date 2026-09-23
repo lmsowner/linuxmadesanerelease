@@ -1506,15 +1506,14 @@ public sealed class AiChatTurnOrchestrator(
         AiToolDefinition definition)
     {
         var request = DeserializeRequest<ApplyHomeLabPromptRecipeToolRequest>(toolCall.ArgumentsJson);
-        var recipe = HomeLabPromptRecipeCatalog.Get(request.PromptRecipeId);
         var gateway = request.VpnGatewayInstallationId.HasValue
             ? $" using VPN Gateway {request.VpnGatewayInstallationId.Value}"
             : string.Empty;
 
         return new AiProposedActionProposal
         {
-            Title = $"Apply Home Lab prompt recipe: {recipe.Name}",
-            Description = $"Install, route, repair, and verify {string.Join(", ", recipe.AppIds)} through LMS{gateway}.",
+            Title = $"Apply Home Lab prompt recipe: {request.PromptRecipeId}",
+            Description = $"Install, route, repair, and verify public Home Lab prompt recipe {request.PromptRecipeId} through LMS{gateway}.",
             ToolName = toolCall.ToolName,
             ProviderToolCallId = toolCall.ProviderToolCallId,
             ToolArgumentsJson = toolCall.ArgumentsJson,
