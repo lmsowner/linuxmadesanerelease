@@ -3749,17 +3749,30 @@ public sealed class HomeLabService(
                 return (HomeLabHealthState.Healthy, $"Container is running and HTTP port {binding.ContainerPort} responded.");
             }
 
+            if (IsWithinHttpHealthStartPeriod(inspect, app))
+            {
+                return (HomeLabHealthState.Starting, "Container is running; waiting for its HTTP endpoint to start.");
+            }
+
             return (HomeLabHealthState.Degraded, $"The container is running, but its HTTP health check returned {(int)response.StatusCode}.");
         }
         catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
         {
-            var startedAtText = inspect["State"]?["StartedAt"]?.GetValue<string>();
-            var withinStartPeriod = DateTimeOffset.TryParse(startedAtText, out var startedAt) &&
-                                    DateTimeOffset.UtcNow - startedAt < TimeSpan.FromSeconds(app.HealthCheck?.StartPeriodSeconds ?? 20);
-            return withinStartPeriod
+            return IsWithinHttpHealthStartPeriod(inspect, app)
                 ? (HomeLabHealthState.Starting, "Container is running; waiting for its HTTP endpoint to start.")
                 : (HomeLabHealthState.Degraded, $"The container is running, but its HTTP endpoint is unavailable: {exception.Message}");
         }
+    }
+
+    internal static bool IsWithinHttpHealthStartPeriod(
+        JsonObject inspect,
+        HomeLabAppManifest app,
+        DateTimeOffset? now = null)
+    {
+        var startedAtText = inspect["State"]?["StartedAt"]?.GetValue<string>();
+        return DateTimeOffset.TryParse(startedAtText, out var startedAt) &&
+               (now ?? DateTimeOffset.UtcNow) - startedAt <
+               TimeSpan.FromSeconds(app.HealthCheck?.StartPeriodSeconds ?? 20);
     }
 
     private async Task EnforceRequiredVpnRouteAsync(
