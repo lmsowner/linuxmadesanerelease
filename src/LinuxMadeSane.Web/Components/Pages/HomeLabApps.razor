@@ -113,7 +113,6 @@
                              Title="@(configuringInstallation is null ? $"Configure {appToConfigure.Name}" : $"Edit {configuringInstallation.DisplayName}")"
                              Subtitle="Container settings are applied by LMS. Secrets are stored securely and are not shown again."
                              Class="home-lab-settings-modal"
-                             Resizable="true"
                              CloseOnBackdrop="false"
                              OnClose="CancelConfiguration">
                         <ChildContent>
@@ -193,19 +192,10 @@
                                  Title="@($"Settings · {selectedInstallation.DisplayName}")"
                                  Subtitle="View and edit this LMS-managed Docker container. Secrets remain protected."
                                  Class="home-lab-settings-modal"
-                                 Resizable="true"
                                  CloseOnBackdrop="false"
                                  OnClose="CloseDetails">
                             <ChildContent>
                                 <section class="home-lab-details-panel">
-                                    <div class="home-lab-details-heading">
-                                        <div>
-                                            <p class="eyebrow">Container settings</p>
-                                            <h2>@selectedInstallation.DisplayName</h2>
-                                        </div>
-                                        <UiCommandButton Label="Close" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CloseDetails" />
-                                    </div>
-
                                     <TabControl ActiveValue="@settingsTab"
                                                 ActiveValueChanged="HandleSettingsTabChangedAsync"
                                                 Class="home-lab-settings-tabs"
@@ -260,6 +250,23 @@
                                                         </ul>
                                                     }
                                                 </div>
+                                            </div>
+                                            <div class="home-lab-setting-card home-lab-overview-logs">
+                                                <div class="home-lab-logs-heading">
+                                                    <div>
+                                                        <h3>Latest container logs</h3>
+                                                        <p class="meta-text">Shown automatically when this window opens. Use Logs for the full view.</p>
+                                                    </div>
+                                                    <UiCommandButton Label="Refresh logs" Glyph="UiIconGlyph.Terminal" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="LoadSelectedLogsAsync" />
+                                                </div>
+                                                @if (selectedLogs is null)
+                                                {
+                                                    <p class="meta-text">Loading the latest output...</p>
+                                                }
+                                                else
+                                                {
+                                                    <pre class="home-lab-detail-code home-lab-logs home-lab-overview-logs-output">@selectedLogs</pre>
+                                                }
                                             </div>
                                         </TabPage>
 
@@ -322,13 +329,13 @@
                                         </TabPage>
                                         }
 
-                                        <TabPage Value="network" Title="Network">
+                                        <TabPage Value="network" Title="Network &amp; VPN">
                                             <div class="home-lab-settings-stack">
                                                 <div class="home-lab-setting-card">
                                                     <div class="home-lab-details-heading">
                                                         <div>
-                                                            <h3>Network status</h3>
-                                                            <p class="meta-text">Live routing information for this container.</p>
+                                                            <h3>Network and VPN status</h3>
+                                                            <p class="meta-text">Route, gateway, security, and port forwarding for this container.</p>
                                                         </div>
                                                         <UiPill Tone="@GetCompactNetworkTone(selectedInstallation)">@GetCompactNetworkState(selectedInstallation)</UiPill>
                                                     </div>
@@ -345,16 +352,14 @@
                                                             <dt>Checked</dt><dd>@security.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</dd>
                                                         </dl>
                                                     }
-                                                    <UiCommandButton Label="Check now"
+                                                    <UiCommandButton Label="Check network now"
                                                                      Glyph="UiIconGlyph.Refresh"
                                                                      Variant="UiButtonVariant.ActionSubtle"
                                                                      Disabled="@busy"
                                                                      OnClick="VerifySecurityAsync" />
-                                                </div>
-
-                                                @if (IsVpnGateway(selectedInstallation))
-                                                {
-                                                    <div class="home-lab-setting-card">
+                                                    @if (IsVpnGateway(selectedInstallation))
+                                                    {
+                                                        <div class="home-lab-network-gateway-details">
                                                         <h3>VPN gateway</h3>
                                                         <dl class="home-lab-detail-list home-lab-detail-definition-list">
                                                             <dt>Name</dt><dd>@selectedInstallation.DisplayName</dd>
@@ -365,8 +370,9 @@
                                                             <UiCommandButton Label="Edit VPN settings" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="BeginVpnReconfiguration" />
                                                             <UiCommandButton Label="Rename gateway" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => BeginGatewayRename(selectedInstallation)" />
                                                         </div>
-                                                    </div>
-                                                }
+                                                        </div>
+                                                    }
+                                                </div>
                                             </div>
                                         </TabPage>
 
@@ -1728,6 +1734,7 @@
             externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
             externalAccessLoading = false;
             ResetContainerSettingsDraft();
+            await LoadSelectedLogsCoreAsync();
             activeTab = "apps";
         }
         catch (Exception exception)
@@ -2034,6 +2041,23 @@
         busy = true;
         try
         {
+            await LoadSelectedLogsCoreAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task LoadSelectedLogsCoreAsync()
+    {
+        if (selectedInstallation is null)
+        {
+            return;
+        }
+
+        try
+        {
             var result = await HomeLabService.GetLogsAsync(selectedInstallation.Id);
             selectedLogs = result.Succeeded
                 ? result.Logs
@@ -2045,11 +2069,8 @@
         }
         catch (Exception exception)
         {
+            selectedLogs = $"Could not read container logs: {exception.Message}";
             SetMessage(exception.Message, true);
-        }
-        finally
-        {
-            busy = false;
         }
     }
 
@@ -2492,11 +2513,7 @@
                     connectionGuide = await HomeLabService.GetConnectionGuideAsync(selectedInstallation.Id);
                     await LoadExternalAccessDraftAsync(selectedInstallation);
                     ResetContainerSettingsDraft();
-                    if (selectedInstallation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var logs = await HomeLabService.GetLogsAsync(selectedInstallation.Id);
-                        selectedLogs = logs.Succeeded ? logs.Logs : $"Could not read container logs: {logs.Error}";
-                    }
+                    await LoadSelectedLogsCoreAsync();
                 }
             }
         }
