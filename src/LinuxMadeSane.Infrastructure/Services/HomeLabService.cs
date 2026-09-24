@@ -3523,14 +3523,13 @@ public sealed class HomeLabService(
             "--label", $"com.linuxmadesane.homelab.app={app.Id}",
             "--label", $"com.linuxmadesane.homelab.deployment={installation.DeploymentId}"
         };
+        var usesSharedNetworkNamespace = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
         var networkGateway = await ResolveNetworkGatewayAsync(installation.NetworkName, cancellationToken);
-        if (networkGateway is not null)
+        if (!usesSharedNetworkNamespace && networkGateway is not null)
         {
             // Home Lab apps use the host name in generated browser and
-            // integration URLs. The host's normal DNS entry can resolve
-            // to loopback, including inside a shared VPN namespace, so
-            // make it resolve to the Docker bridge gateway in every
-            // container namespace.
+            // integration URLs. From a bridge network, make the host name
+            // resolve to the Docker bridge gateway instead of loopback.
             args.AddRange(["--add-host", $"{Dns.GetHostName()}:{networkGateway}"]);
         }
         if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase))
@@ -3657,6 +3656,24 @@ public sealed class HomeLabService(
         if (run.ExitCode != 0)
         {
             return ContainerRunResult.Failed(Failure("Home Lab container creation failed.", NormalizeFailure(run), output, HomeLabHealthState.Failed));
+        }
+
+        if (usesSharedNetworkNamespace && networkGateway is not null)
+        {
+            // Docker rejects --add-host together with --network container:.
+            // Apply the same host mapping after creation so routed apps can
+            // reach LMS/Caddy while retaining the gateway network namespace.
+            var hostName = Dns.GetHostName();
+            var mappingScript = $"set -eu; if ! grep -qF {ShellQuote($" {hostName}")} /etc/hosts; then printf '%s %s\\n' {ShellQuote(networkGateway)} {ShellQuote(hostName)} >> /etc/hosts; fi";
+            var mapping = await RunDockerAsync(
+                ["exec", installation.ContainerName, "/bin/sh", "-c", mappingScript],
+                $"Configure Home Lab host mapping for {app.Name}",
+                cancellationToken);
+            AppendOutput(output, mapping);
+            if (mapping.ExitCode != 0)
+            {
+                return ContainerRunResult.Failed(Failure("Home Lab host mapping failed.", NormalizeFailure(mapping), output, HomeLabHealthState.Failed));
+            }
         }
 
         var inspect = await InspectContainerAsync(installation.ContainerName, cancellationToken);
