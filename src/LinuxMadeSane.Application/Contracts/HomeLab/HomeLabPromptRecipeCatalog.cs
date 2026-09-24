@@ -417,7 +417,11 @@ public static class HomeLabPromptRecipeCatalog
             """;
     }
 
-    public static string BuildRecipePrompt(HomeLabPromptRecipe recipe, string request)
+    public static string BuildRecipePrompt(
+        HomeLabPromptRecipe recipe,
+        string request,
+        Guid? vpnGatewayInstallationId = null,
+        string? vpnGatewayName = null)
     {
         ArgumentNullException.ThrowIfNull(recipe);
         var normalized = request?.Trim() ?? string.Empty;
@@ -426,8 +430,18 @@ public static class HomeLabPromptRecipeCatalog
             throw new InvalidOperationException("Describe what you want from this HomeLab Recipe.");
         }
 
+        var vpnGatewaySelection = recipe.RequiresVpnGateway && vpnGatewayInstallationId is { } gatewayId
+            ? $"""
+            The user selected the existing VPN Gateway{(string.IsNullOrWhiteSpace(vpnGatewayName) ? string.Empty : $" '{vpnGatewayName}'")} for this recipe.
+            Use this exact VPN Gateway installation ID when calling apply_home_lab_prompt_recipe: {gatewayId}
+            Do not ask the user to choose a gateway again unless this installation no longer exists.
+            """
+            : string.Empty;
+
         return $"""
             {recipe.Prompt}
+
+            {vpnGatewaySelection}
 
             User-edited requirements for this recipe:
             {normalized}

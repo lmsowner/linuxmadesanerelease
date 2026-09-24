@@ -1100,7 +1100,7 @@
 
         SyncApprovalDrafts();
         await SyncRequiredHomeLabStorageAsync();
-        SyncRequiredHomeLabVpnGatewayChoice();
+        await SyncRequiredHomeLabVpnGatewayChoiceAsync();
         ScheduleTimelineScroll();
         UpdateWorkspaceRefreshLoop();
     }
@@ -1115,7 +1115,7 @@
         workspace = await ChatService.GetWorkspaceAsync(ThreadId.Value);
         SyncApprovalDrafts();
         await SyncRequiredHomeLabStorageAsync();
-        SyncRequiredHomeLabVpnGatewayChoice();
+        await SyncRequiredHomeLabVpnGatewayChoiceAsync();
         ScheduleTimelineScroll();
         ReturnToHomeLabWhenApprovedChangeCompletes();
         UpdateWorkspaceRefreshLoop();
@@ -1706,7 +1706,7 @@
                         workspace = await ChatService.GetWorkspaceAsync(threadId);
                         SyncApprovalDrafts();
                         await SyncRequiredHomeLabStorageAsync();
-                        SyncRequiredHomeLabVpnGatewayChoice();
+                        await SyncRequiredHomeLabVpnGatewayChoiceAsync();
                         ScheduleTimelineScroll();
                         ReturnToHomeLabWhenApprovedChangeCompletes();
                         UpdateWorkspaceRefreshLoop();
@@ -1805,7 +1805,7 @@
         homeLabStorageError = string.Empty;
     }
 
-    private void SyncRequiredHomeLabVpnGatewayChoice()
+    private async Task SyncRequiredHomeLabVpnGatewayChoiceAsync()
     {
         if (workspace is null)
         {
@@ -1828,6 +1828,12 @@
             return;
         }
 
+        if (invocation.InvocationId == requiredHomeLabVpnGatewayInvocationId &&
+            requiredHomeLabVpnGateways.Count > 0)
+        {
+            return;
+        }
+
         ApplyHomeLabPromptRecipeToolResponse? response = null;
         try
         {
@@ -1839,7 +1845,24 @@
         {
         }
 
-        requiredHomeLabVpnGateways = response?.RequiredVpnGateways ?? [];
+        var choices = response?.RequiredVpnGateways;
+        var needsGatewayChoice = response?.Details.Any(detail =>
+                detail.Contains("Several VPN Gateways", StringComparison.OrdinalIgnoreCase)) == true ||
+            invocation.OutputText.Contains("Several VPN Gateways", StringComparison.OrdinalIgnoreCase);
+        if ((choices is null || choices.Count == 0) && needsGatewayChoice)
+        {
+            var homeLabWorkspace = await HomeLabService.GetWorkspaceAsync();
+            choices = homeLabWorkspace.Installations
+                .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+                .Select(item => new HomeLabAiGateway(
+                    item.Id,
+                    item.DisplayName,
+                    item.HealthState.ToString(),
+                    item.HealthDetail))
+                .ToArray();
+        }
+
+        requiredHomeLabVpnGateways = choices ?? [];
         requiredHomeLabVpnGatewayInvocationId = invocation.InvocationId;
     }
 

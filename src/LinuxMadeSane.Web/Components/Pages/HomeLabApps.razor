@@ -783,6 +783,35 @@
                                     <span>Existing VPN Gateway</span>
                                 }
                             </div>
+                            @if (selectedRecipe.RequiresVpnGateway)
+                            {
+                                <div class="home-lab-recipe-choice home-lab-recipe-vpn-choice">
+                                    <label for="home-lab-recipe-vpn-gateway">VPN Gateway</label>
+                                    @if (InstalledVpnGateways.Any())
+                                    {
+                                        <select id="home-lab-recipe-vpn-gateway"
+                                                class="ui-control-input"
+                                                value="@selectedPromptVpnGatewayId"
+                                                @onchange="SelectPromptVpnGateway">
+                                            <option value="">Choose a VPN Gateway...</option>
+                                            @foreach (var gateway in InstalledVpnGateways)
+                                            {
+                                                <option value="@gateway.Id">@gateway.DisplayName (@gateway.HealthState)</option>
+                                            }
+                                        </select>
+                                        <span class="meta-text">Choose the existing gateway that should carry this recipe's VPN-routed apps.</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="meta-text">Add a VPN Gateway in the Docker tab before starting this recipe.</span>
+                                        <UiCommandButton Label="Add VPN Gateway"
+                                                         Glyph="UiIconGlyph.Plus"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         Disabled="@(busy || startingPromptRecipeId is not null)"
+                                                         OnClick='() => InstallAsync(GetApp("vpn-gateway"))' />
+                                    }
+                                </div>
+                            }
                             @if (selectedRecipe.RequiresPlanning)
                             {
                                 <p class="meta-text">This recipe needs choices from you before LMS can safely deploy it. The AI will identify supported parts and will not install a misleading partial stack.</p>
@@ -802,7 +831,7 @@
                                 <UiCommandButton Label="Go"
                                                  Glyph="UiIconGlyph.Ai"
                                                  Variant="UiButtonVariant.PrimaryMuted"
-                                                 Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft))"
+                                                 Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft) || (selectedRecipe.RequiresVpnGateway && selectedPromptVpnGatewayId is null))"
                                                  OnClick="StartPromptRecipeAsync" />
                             </div>
                         </div>
@@ -913,6 +942,7 @@
     private IReadOnlyList<HomeLabPromptRecipe> promptRecipes = HomeLabPromptRecipeCatalog.All;
     private HomeLabPromptRecipe? customizingPromptRecipe;
     private string recipePromptDraft = string.Empty;
+    private Guid? selectedPromptVpnGatewayId;
     private IEnumerable<string> RecipeCategories => promptRecipes
         .Select(recipe => recipe.Category)
         .Distinct(StringComparer.OrdinalIgnoreCase);
@@ -1493,6 +1523,7 @@
     private void SelectPromptRecipe(ChangeEventArgs eventArgs)
     {
         selectedPromptRecipeId = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+        selectedPromptVpnGatewayId = null;
         if (selectedPromptRecipeId.Equals("custom", StringComparison.OrdinalIgnoreCase))
         {
             customizingPromptRecipe = null;
@@ -1504,6 +1535,14 @@
             recipe.Id.Equals(selectedPromptRecipeId, StringComparison.OrdinalIgnoreCase));
         customizingPromptRecipe = promptRecipe;
         recipePromptDraft = promptRecipe?.StarterPrompt ?? string.Empty;
+        selectedPromptVpnGatewayId = null;
+    }
+
+    private void SelectPromptVpnGateway(ChangeEventArgs eventArgs)
+    {
+        selectedPromptVpnGatewayId = Guid.TryParse(eventArgs.Value?.ToString(), out var gatewayId)
+            ? gatewayId
+            : null;
     }
 
     private void ResetPromptRecipeDraft()
@@ -1521,10 +1560,24 @@
             return;
         }
 
+        if (promptRecipe.RequiresVpnGateway && selectedPromptVpnGatewayId is null)
+        {
+            SetMessage("Choose a VPN Gateway before starting this recipe.", true);
+            return;
+        }
+
+        var selectedGatewayName = selectedPromptVpnGatewayId is { } gatewayId
+            ? InstalledVpnGateways.FirstOrDefault(gateway => gateway.Id == gatewayId)?.DisplayName
+            : null;
+
         await StartAiPromptAsync(
             promptRecipe.Id,
             promptRecipe.Name,
-            HomeLabPromptRecipeCatalog.BuildRecipePrompt(promptRecipe, recipePromptDraft));
+            HomeLabPromptRecipeCatalog.BuildRecipePrompt(
+                promptRecipe,
+                recipePromptDraft,
+                selectedPromptVpnGatewayId,
+                selectedGatewayName));
     }
 
     private async Task StartCustomPromptAsync()
