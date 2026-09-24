@@ -208,6 +208,55 @@ public static class AiToolJsonSchemaCatalog
               "required": [ "serverId", "packageNames" ]
             }
             """,
+        AiToolNames.SearchWeb =>
+            """
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "description": "A focused search query containing the application, version, observed error, or behaviour that local evidence does not explain."
+                },
+                "domains": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": { "type": "string" },
+                  "description": "Optional primary-source domains to prefer or constrain, such as the vendor documentation host or github.com."
+                },
+                "maxResults": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8,
+                  "description": "Maximum number of search results to return."
+                }
+              },
+              "required": [ "query" ]
+            }
+            """,
+        AiToolNames.FetchWebPage =>
+            """
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "format": "uri",
+                  "description": "The public HTTP(S) URL returned by search_web or supplied as a relevant primary source."
+                },
+                "maxCharacters": {
+                  "type": "integer",
+                  "minimum": 1000,
+                  "maximum": 20000,
+                  "description": "Maximum documentation text to return."
+                }
+              },
+              "required": [ "url" ]
+            }
+            """,
         AiToolNames.InspectHomeLab =>
             """
             {

@@ -1286,6 +1286,24 @@ public sealed class AiChatTurnOrchestrator(
             AiToolNames.RunCommand => BuildRunCommandAction(toolCall, attachedServers, definition),
             AiToolNames.WriteFileWithConfirmation => BuildWriteFileAction(toolCall, attachedServers, definition),
             AiToolNames.InstallPackageWithConfirmation => BuildInstallPackageAction(toolCall, attachedServers, definition),
+            AiToolNames.SearchWeb => new AiProposedActionProposal
+            {
+                Title = "Research the public web",
+                Description = "Search public sources for current documentation, releases, issues, or configuration details to compare with the local evidence.",
+                ToolName = toolCall.ToolName,
+                ProviderToolCallId = toolCall.ProviderToolCallId,
+                ToolArgumentsJson = toolCall.ArgumentsJson,
+                RiskLevel = definition.Approval.RiskLevel
+            },
+            AiToolNames.FetchWebPage => new AiProposedActionProposal
+            {
+                Title = "Read a public documentation page",
+                Description = "Retrieve the selected public primary source so the diagnosis can be checked against current documentation or issue evidence.",
+                ToolName = toolCall.ToolName,
+                ProviderToolCallId = toolCall.ProviderToolCallId,
+                ToolArgumentsJson = toolCall.ArgumentsJson,
+                RiskLevel = definition.Approval.RiskLevel
+            },
             AiToolNames.InspectHomeLab => new AiProposedActionProposal
             {
                 Title = "Inspect LMS Home Lab",

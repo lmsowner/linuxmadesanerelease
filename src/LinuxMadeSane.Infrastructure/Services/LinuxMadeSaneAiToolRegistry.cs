@@ -83,6 +83,20 @@ public sealed class LinuxMadeSaneAiToolRegistry : IAiToolRegistry
             true,
             "ICommandExecutionService",
             supportsRememberDecision: false),
+        CreateDefinition<SearchWebToolRequest, SearchWebToolResponse>(
+            AiToolNames.SearchWeb,
+            "Search the public web when local LMS evidence is insufficient. Prefer official vendor documentation, GitHub issues/releases, and other primary sources; use the returned URLs as leads and verify them against the local installation.",
+            AiActionRiskLevel.ReadOnly,
+            AiApprovalRequirement.AutoRun,
+            false,
+            "IWebResearchService"),
+        CreateDefinition<FetchWebPageToolRequest, FetchWebPageToolResponse>(
+            AiToolNames.FetchWebPage,
+            "Retrieve a public documentation or issue page selected during research. Use this to read the relevant primary-source details before forming a diagnosis; it does not change the local machine.",
+            AiActionRiskLevel.ReadOnly,
+            AiApprovalRequirement.AutoRun,
+            false,
+            "IWebResearchService"),
         CreateDefinition<InspectHomeLabToolRequest, InspectHomeLabToolResponse>(
             AiToolNames.InspectHomeLab,
             "Inspect LMS-managed Home Lab apps, VPN gateways, health, secured routing, local access routes, and available HomeLab Recipes without exposing secrets.",
@@ -107,7 +121,7 @@ public sealed class LinuxMadeSaneAiToolRegistry : IAiToolRegistry
             supportsRememberDecision: false),
         CreateDefinition<RepairHomeLabInstallationToolRequest, RepairHomeLabInstallationToolResponse>(
             AiToolNames.RepairHomeLabInstallation,
-            "Repair and verify one unhealthy LMS-managed Home Lab installation by ID. Healthy apps are never recreated. A VPN-routed app is repaired alone unless security checks prove the shared gateway is faulty. Can restore saved pre-edit container settings. Never exposes stored secrets or raw logs.",
+            "Repair and verify one LMS-managed Home Lab installation by ID. An explicit repair may recreate an apparently healthy app when its health check does not cover the reported symptom. A VPN-routed app is repaired alone unless security checks prove the shared gateway is faulty. Can restore saved pre-edit container settings. Never exposes stored secrets or raw logs.",
             AiActionRiskLevel.HighRiskMutation,
             AiApprovalRequirement.UserConfirmation,
             false,

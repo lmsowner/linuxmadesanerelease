@@ -129,6 +129,33 @@ public sealed record InstallPackageWithConfirmationToolResponse(
     DateTimeOffset StartedAtUtc,
     DateTimeOffset CompletedAtUtc) : IAiToolResponse;
 
+public sealed record SearchWebToolRequest(
+    string Query,
+    IReadOnlyList<string>? Domains = null,
+    int MaxResults = 5) : IAiToolRequest;
+
+public sealed record SearchWebToolResponse(
+    string Query,
+    IReadOnlyList<AiWebSearchResult> Results,
+    DateTimeOffset SearchedAtUtc) : IAiToolResponse;
+
+public sealed record FetchWebPageToolRequest(
+    string Url,
+    int MaxCharacters = 12000) : IAiToolRequest;
+
+public sealed record FetchWebPageToolResponse(
+    string Url,
+    string? Title,
+    string Content,
+    bool IsTruncated,
+    DateTimeOffset RetrievedAtUtc) : IAiToolResponse;
+
+public sealed record AiWebSearchResult(
+    string Title,
+    string Url,
+    string Snippet,
+    string SourceDomain);
+
 public sealed record InspectHomeLabToolRequest() : IAiToolRequest;
 
 public sealed record InspectHomeLabToolResponse(

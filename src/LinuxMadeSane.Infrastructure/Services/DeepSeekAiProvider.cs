@@ -194,7 +194,7 @@ public sealed class DeepSeekAiProvider(
         {
             builder.AppendLine();
             builder.AppendLine();
-            builder.AppendLine("Internet research was requested, but this DeepSeek chat adapter does not expose a provider-hosted web-search tool. Use only the provided context and available Linux Made Sane tools.");
+            builder.AppendLine("This provider adapter does not expose a provider-hosted web-search tool. Use the published Linux Made Sane search_web and fetch_web_page tools when research is needed.");
         }
 
         return builder.ToString().Trim();

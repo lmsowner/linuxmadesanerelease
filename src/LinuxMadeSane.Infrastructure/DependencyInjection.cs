@@ -189,6 +189,17 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(5);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("LinuxMadeSane-HomeLabRecipes/1.0");
         });
+        services.AddHttpClient<IWebResearchService, WebResearchService>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(15);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("LinuxMadeSane-AIResearch/1.0");
+        })
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseProxy = false,
+            ConnectTimeout = TimeSpan.FromSeconds(5)
+        });
         services.AddScoped<IRemoteLmsAiEngineGateway, DisabledRemoteLmsAiEngineGateway>();
         services.AddScoped<ISshHostDiscoveryService, SshHostDiscoveryService>();
         services.AddScoped<IDesktopInspectionService, DesktopInspectionService>();

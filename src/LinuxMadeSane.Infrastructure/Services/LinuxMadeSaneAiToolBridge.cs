@@ -26,7 +26,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     ICommandExecutionService commandExecutionService,
     IManagedHostFileAccessService fileAccessService,
     IHomeLabService? homeLabService = null,
-    IHomeLabPromptRecipeProvider? promptRecipeProvider = null) : IAiToolBridge
+    IHomeLabPromptRecipeProvider? promptRecipeProvider = null,
+    IWebResearchService? webResearchService = null) : IAiToolBridge
 {
     public LinuxMadeSaneAiToolBridge(
         IAiToolRegistry toolRegistry,
@@ -82,6 +83,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             AiToolNames.RunCommand => await ExecuteRunCommandAsync(definition, context, cancellationToken),
             AiToolNames.WriteFileWithConfirmation => await ExecuteWriteFileAsync(definition, context, cancellationToken),
             AiToolNames.InstallPackageWithConfirmation => await ExecuteInstallPackageAsync(definition, context, cancellationToken),
+            AiToolNames.SearchWeb => await ExecuteSearchWebAsync(definition, context, cancellationToken),
+            AiToolNames.FetchWebPage => await ExecuteFetchWebPageAsync(definition, context, cancellationToken),
             AiToolNames.InspectHomeLab => await ExecuteInspectHomeLabAsync(definition, context, cancellationToken),
             AiToolNames.InspectHomeLabApplicationConfig => await ExecuteInspectHomeLabApplicationConfigAsync(definition, context, cancellationToken),
             AiToolNames.RepairHomeLabApplicationConfig => await ExecuteRepairHomeLabApplicationConfigAsync(definition, context, cancellationToken),
@@ -469,6 +472,80 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             BuildCommandOutput(result),
             result.StandardError,
             result.ExitCode);
+    }
+
+    private async Task<AiToolExecutionResult> ExecuteSearchWebAsync(
+        AiToolDefinition definition,
+        AiToolExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var request = DeserializeRequest<SearchWebToolRequest>(context.Invocation.ArgumentsJson);
+        try
+        {
+            var response = await RequireWebResearchService().SearchAsync(request, cancellationToken);
+            var output = response.Results.Count == 0
+                ? $"No public results were returned for: {response.Query}"
+                : string.Join(Environment.NewLine, response.Results.Select((result, index) =>
+                    $"{index + 1}. {result.Title}{Environment.NewLine}URL: {result.Url}{Environment.NewLine}Source: {result.SourceDomain}{Environment.NewLine}Snippet: {result.Snippet}"));
+            return CreateExecutionResult(
+                definition,
+                context.Invocation,
+                response,
+                AiExecutionOutcome.Succeeded,
+                response.Results.Count == 0
+                    ? "Web research returned no results."
+                    : $"Web research returned {response.Results.Count} public result(s).",
+                output,
+                string.Empty,
+                0);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            var response = new SearchWebToolResponse(request.Query?.Trim() ?? string.Empty, [], DateTimeOffset.UtcNow);
+            return CreateExecutionResult(
+                definition,
+                context.Invocation,
+                response,
+                AiExecutionOutcome.Failed,
+                "Web research failed before results were returned.",
+                string.Empty,
+                exception.Message,
+                1);
+        }
+    }
+
+    private async Task<AiToolExecutionResult> ExecuteFetchWebPageAsync(
+        AiToolDefinition definition,
+        AiToolExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var request = DeserializeRequest<FetchWebPageToolRequest>(context.Invocation.ArgumentsJson);
+        try
+        {
+            var response = await RequireWebResearchService().FetchPageAsync(request, cancellationToken);
+            return CreateExecutionResult(
+                definition,
+                context.Invocation,
+                response,
+                AiExecutionOutcome.Succeeded,
+                $"Retrieved public documentation page{(string.IsNullOrWhiteSpace(response.Title) ? string.Empty : $" '{response.Title}'")}.",
+                $"URL: {response.Url}{Environment.NewLine}{response.Content}",
+                string.Empty,
+                0);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            var response = new FetchWebPageToolResponse(request.Url?.Trim() ?? string.Empty, null, string.Empty, false, DateTimeOffset.UtcNow);
+            return CreateExecutionResult(
+                definition,
+                context.Invocation,
+                response,
+                AiExecutionOutcome.Failed,
+                "Web page retrieval failed before documentation was returned.",
+                string.Empty,
+                exception.Message,
+                1);
+        }
     }
 
     private async Task<AiToolExecutionResult> ExecuteInspectHomeLabAsync(
@@ -997,6 +1074,9 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
 
     private IHomeLabService RequireHomeLabService() =>
         homeLabService ?? throw new InvalidOperationException("LMS Home Lab services are unavailable to this AI session.");
+
+    private IWebResearchService RequireWebResearchService() =>
+        webResearchService ?? throw new InvalidOperationException("LMS web research services are unavailable to this AI session.");
 
     private Task<IReadOnlyList<HomeLabPromptRecipe>> GetPromptRecipesAsync(CancellationToken cancellationToken) =>
         promptRecipeProvider?.GetRecipesAsync(cancellationToken)

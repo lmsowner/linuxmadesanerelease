@@ -23,4 +23,6 @@ public static class AiToolNames
     public const string RollbackSafeChange = "rollback_safe_change";
     public const string DesktopSetKeyboardLayout = "desktop_set_keyboard_layout";
     public const string DesktopInstallAptPackages = "desktop_install_apt_packages";
+    public const string SearchWeb = "search_web";
+    public const string FetchWebPage = "fetch_web_page";
 }
