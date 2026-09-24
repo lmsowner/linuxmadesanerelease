@@ -421,15 +421,16 @@
                                                         else
                                                         {
                                                             var needsSharedRecipeHostnameMigration = RecipeNeedsSharedHostnameMigration(selectedInstallation);
+                                                            var isExternalRecipeGroup = IsExternalRecipeGroup(selectedInstallation);
                                                             <div class="home-lab-config-grid">
                                                                 <div class="home-lab-config-field">
-                                                                    <label for="home-lab-external-hostname">@(selectedInstallation.IsRecipeInstallation ? "Shared recipe hostname" : "External hostname")</label>
+                                                                    <label for="home-lab-external-hostname">@(isExternalRecipeGroup ? "Shared recipe hostname" : "External hostname")</label>
                                                                     <input id="home-lab-external-hostname"
                                                                            class="ui-control-input"
                                                                            value="@externalHostnameDraft"
                                                                            disabled="@(externalRoute is { Enabled: true } && !needsSharedRecipeHostnameMigration)"
                                                                            @oninput="eventArgs => externalHostnameDraft = eventArgs.Value?.ToString() ?? string.Empty" />
-                                                                    <span class="meta-text">@(needsSharedRecipeHostnameMigration ? "These recipe services currently use different hostnames. Save once to move them onto this shared hostname." : externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : selectedInstallation.IsRecipeInstallation ? "All externally published services in this recipe share this hostname; each Docker listener is exposed under its host port path." : "Use a new hostname inside the selected Cloudflare zone.")</span>
+                                                                    <span class="meta-text">@(needsSharedRecipeHostnameMigration ? "These recipe services currently use different hostnames. Save once to move them onto this shared hostname." : externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : isExternalRecipeGroup ? "All externally published services in this recipe share this hostname; each Docker listener is exposed under its host port path." : "Use a new hostname inside the selected Cloudflare zone.")</span>
                                                                 </div>
                                                                 <div class="home-lab-config-field">
                                                                     <label for="home-lab-external-domain">Cloudflare zone</label>
@@ -460,7 +461,7 @@
                                                             <div class="home-lab-setting-card">
                                                                 <strong>Public address</strong>
                                                                 <code>@BuildExternalPreview()</code>
-                                                                @if (selectedInstallation.IsRecipeInstallation)
+                                                                @if (isExternalRecipeGroup)
                                                                 {
                                                                     <p class="meta-text">LMS keeps internal Docker URLs private. Recipe services share this hostname and are addressed as <code>/&lt;Docker host port&gt;</code>, for example <code>/39001</code>.</p>
                                                                 }
@@ -2522,7 +2523,7 @@
         var isUsed = edgeGatewayRoutes.Any(route =>
             route.Id != installation.EdgeGatewayRouteId &&
             route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)) == true;
-        return isUsed && !installation.IsRecipeInstallation
+        return isUsed && !IsExternalRecipeGroup(installation)
             ? $"{candidate}-{installation.ContainerName[^Math.Min(8, installation.ContainerName.Length)..]}"
             : candidate;
     }
@@ -2530,7 +2531,7 @@
     private string BuildExternalSubdomainCandidate(HomeLabAppInstallation installation)
     {
         var recipeName = ResolveRecipeExternalName(installation);
-        var source = installation.IsRecipeInstallation && !string.IsNullOrWhiteSpace(recipeName)
+        var source = IsExternalRecipeGroup(installation) && !string.IsNullOrWhiteSpace(recipeName)
             ? recipeName
             : installation.AppId;
         var builder = new System.Text.StringBuilder();
@@ -2564,9 +2565,51 @@
         }
 
         var recipeId = deployment.PromptRecipeId ?? deployment.RecipeId;
-        return promptRecipes.FirstOrDefault(item => item.Id.Equals(recipeId, StringComparison.OrdinalIgnoreCase))?.Name
+        var declaredRecipeName = promptRecipes.FirstOrDefault(item => item.Id.Equals(recipeId, StringComparison.OrdinalIgnoreCase))?.Name
                ?? workspace?.Recipes.FirstOrDefault(item => item.Id.Equals(recipeId, StringComparison.OrdinalIgnoreCase))?.Name
-               ?? deployment.Name;
+               ?? (IsExternalRecipeGroup(installation)
+                   ? promptRecipes.FirstOrDefault(item => item.AppIds.Count > 1 &&
+                       ResolveExternalGroupInstallations(installation).Select(member => member.AppId)
+                           .ToHashSet(StringComparer.OrdinalIgnoreCase)
+                           .SetEquals(item.AppIds))?.Name
+                   : null);
+        return declaredRecipeName ?? deployment.Name;
+    }
+
+    private bool IsExternalRecipeGroup(HomeLabAppInstallation installation) =>
+        installation.IsRecipeInstallation || ResolveExternalGroupInstallations(installation).Count > 1;
+
+    private IReadOnlyList<HomeLabAppInstallation> ResolveExternalGroupInstallations(HomeLabAppInstallation installation)
+    {
+        if (workspace is null)
+        {
+            return [installation];
+        }
+
+        var deployment = workspace.Deployments.FirstOrDefault(item => item.Id == installation.DeploymentId);
+        if (deployment?.RecipeRunId is Guid recipeRunId)
+        {
+            var deploymentIds = workspace.Deployments
+                .Where(item => item.RecipeRunId == recipeRunId)
+                .Select(item => item.Id)
+                .ToHashSet();
+            return workspace.Installations
+                .Where(item => deploymentIds.Contains(item.DeploymentId))
+                .ToArray();
+        }
+
+        foreach (var recipe in promptRecipes
+                     .Where(item => !item.RequiresPlanning && item.AppIds.Count > 1)
+                     .OrderByDescending(item => item.AppIds.Count))
+        {
+            if (TryMatchRecipeInstallations(recipe, new HashSet<Guid>(), out var members) &&
+                members.Any(item => item.Id == installation.Id))
+            {
+                return members;
+            }
+        }
+
+        return [installation];
     }
 
     private EdgeGatewayRouteListItem? FindPublishedRecipeRoute(HomeLabAppInstallation installation)
@@ -2582,15 +2625,14 @@
 
     private IReadOnlyList<EdgeGatewayRouteListItem> FindPublishedRecipeRoutes(HomeLabAppInstallation installation)
     {
-        if (!installation.IsRecipeInstallation || workspace is null)
+        if (workspace is null)
         {
             return [];
         }
 
-        var deployment = workspace.Deployments.FirstOrDefault(item => item.Id == installation.DeploymentId);
-        var peerDeploymentIds = deployment?.RecipeRunId is Guid recipeRunId
-            ? workspace.Deployments.Where(item => item.RecipeRunId == recipeRunId).Select(item => item.Id).ToHashSet()
-            : new HashSet<Guid> { installation.DeploymentId };
+        var peerDeploymentIds = ResolveExternalGroupInstallations(installation)
+            .Select(item => item.DeploymentId)
+            .ToHashSet();
         var routeIds = workspace.Installations
             .Where(item => peerDeploymentIds.Contains(item.DeploymentId))
             .SelectMany(item => (item.ServiceEndpoints ?? [])

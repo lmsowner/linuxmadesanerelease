@@ -1838,13 +1838,10 @@ public sealed class HomeLabService(
                 ToHealth(installation.HealthState));
         }
 
-        var deploymentIds = sourceDeployment.RecipeRunId is Guid recipeRunId
-            ? await dbContext.HomeLabDeployments
-                .AsNoTracking()
-                .Where(item => item.RecipeRunId == recipeRunId)
-                .Select(item => item.Id)
-                .ToArrayAsync(cancellationToken)
-            : [installation.DeploymentId];
+        var deploymentIds = await ResolveExternalDeploymentIdsAsync(
+            installation,
+            sourceDeployment,
+            cancellationToken);
         var candidates = await dbContext.HomeLabInstallations
             .Include(item => item.ServiceEndpoints)
             .Where(item => deploymentIds.Contains(item.DeploymentId))
@@ -1855,7 +1852,8 @@ public sealed class HomeLabService(
             .Select(item => (item.Installation, item.App, Accesses: ResolveRecipeClientAccesses(item.App, connectivity)))
             .Where(item => item.App.EdgeGatewaySupported && item.Accesses.Count > 0)
             .ToArray();
-        var useSharedRecipeOrigin = sourceDeployment.RecipeId is not null ||
+        var useSharedRecipeOrigin = deploymentIds.Length > 1 ||
+                                    sourceDeployment.RecipeId is not null ||
                                     sourceDeployment.PromptRecipeId is not null ||
                                     exposed.Length > 1 ||
                                     exposed.Any(item => item.Installation.IsRecipeInstallation || item.Accesses.Count > 1);
@@ -2037,10 +2035,19 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
-        var routeIds = installation.ServiceEndpoints
-            .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public && endpoint.EdgeGatewayRouteId.HasValue)
-            .Select(endpoint => endpoint.EdgeGatewayRouteId!.Value)
-            .Append(installation.EdgeGatewayRouteId ?? Guid.Empty)
+        var sourceDeployment = await dbContext.HomeLabDeployments
+            .AsNoTracking()
+            .SingleAsync(item => item.Id == installation.DeploymentId, cancellationToken);
+        var deploymentIds = await ResolveExternalDeploymentIdsAsync(installation, sourceDeployment, cancellationToken);
+        var groupInstallations = await dbContext.HomeLabInstallations
+            .Include(item => item.ServiceEndpoints)
+            .Where(item => deploymentIds.Contains(item.DeploymentId))
+            .ToListAsync(cancellationToken);
+        var routeIds = groupInstallations
+            .SelectMany(item => item.ServiceEndpoints
+                .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public && endpoint.EdgeGatewayRouteId.HasValue)
+                .Select(endpoint => endpoint.EdgeGatewayRouteId!.Value)
+                .Append(item.EdgeGatewayRouteId ?? Guid.Empty))
             .Where(routeId => routeId != Guid.Empty)
             .Distinct()
             .ToArray();
@@ -2048,7 +2055,9 @@ public sealed class HomeLabService(
         {
             return Success(
                 "External access is already off.",
-                $"{installation.DisplayName} has no LMS-managed Edge Gateway route.",
+                groupInstallations.Count > 1
+                    ? $"The {sourceDeployment.Name} recipe group has no LMS-managed Edge Gateway route."
+                    : $"{installation.DisplayName} has no LMS-managed Edge Gateway route.",
                 [],
                 ToHealth(installation.HealthState));
         }
@@ -2059,26 +2068,34 @@ public sealed class HomeLabService(
             {
                 await edgeGatewayRouteRegistrationService.UnregisterClientRouteAsync(routeId, cancellationToken);
             }
-            var publicEndpoints = installation.ServiceEndpoints
-                .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public)
-                .ToArray();
-            dbContext.HomeLabServiceEndpoints.RemoveRange(publicEndpoints);
-            foreach (var clientEndpoint in installation.ServiceEndpoints.Where(endpoint =>
-                         endpoint.Scope == (int)HomeLabEndpointScope.Client &&
-                         endpoint.EdgeGatewayRouteId.HasValue &&
-                         routeIds.Contains(endpoint.EdgeGatewayRouteId.Value)))
+            foreach (var member in groupInstallations)
             {
-                clientEndpoint.EdgeGatewayRouteId = null;
+                var publicEndpoints = member.ServiceEndpoints
+                    .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public)
+                    .ToArray();
+                dbContext.HomeLabServiceEndpoints.RemoveRange(publicEndpoints);
+                foreach (var clientEndpoint in member.ServiceEndpoints.Where(endpoint =>
+                             endpoint.Scope == (int)HomeLabEndpointScope.Client &&
+                             endpoint.EdgeGatewayRouteId.HasValue &&
+                             routeIds.Contains(endpoint.EdgeGatewayRouteId.Value)))
+                {
+                    clientEndpoint.EdgeGatewayRouteId = null;
+                }
+                member.EdgeGatewayRouteId = null;
+                SynchronizeLocalEndpoints(member);
+                member.UpdatedAtUtc = DateTimeOffset.UtcNow;
             }
-            installation.EdgeGatewayRouteId = null;
-            SynchronizeLocalEndpoints(installation);
-            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
             await dbContext.SaveChangesAsync(cancellationToken);
-            if (HomeLabCatalog.GetApp(installation.AppId) is { } unpublishedApp &&
-                (unpublishedApp.Environment.Values.Any(value => value.Contains("${endpoint:", StringComparison.Ordinal)) ||
-                 !string.IsNullOrWhiteSpace(unpublishedApp.PublicUrlEnvironmentVariable)))
+            foreach (var member in groupInstallations)
             {
-                var recreate = await ExecuteAsync(installation.Id, HomeLabLifecycleAction.Recreate, cancellationToken);
+                if (HomeLabCatalog.GetApp(member.AppId) is not { } unpublishedApp ||
+                    (!unpublishedApp.Environment.Values.Any(value => value.Contains("${endpoint:", StringComparison.Ordinal)) &&
+                     string.IsNullOrWhiteSpace(unpublishedApp.PublicUrlEnvironmentVariable)))
+                {
+                    continue;
+                }
+
+                var recreate = await ExecuteAsync(member.Id, HomeLabLifecycleAction.Recreate, cancellationToken);
                 if (!recreate.Succeeded)
                 {
                     return Failure(
@@ -2090,7 +2107,9 @@ public sealed class HomeLabService(
             }
             return Success(
                 "External access removed.",
-                $"{installation.DisplayName} is no longer published through Edge Gateway.",
+                groupInstallations.Count > 1
+                    ? $"The {sourceDeployment.Name} recipe group is no longer published through Edge Gateway."
+                    : $"{installation.DisplayName} is no longer published through Edge Gateway.",
                 [],
                 ToHealth(installation.HealthState));
         }
@@ -2102,6 +2121,65 @@ public sealed class HomeLabService(
                 [],
                 ToHealth(installation.HealthState));
         }
+    }
+
+    private async Task<Guid[]> ResolveExternalDeploymentIdsAsync(
+        HomeLabInstallationEntity sourceInstallation,
+        HomeLabDeploymentEntity sourceDeployment,
+        CancellationToken cancellationToken)
+    {
+        if (sourceDeployment.RecipeRunId is Guid recipeRunId)
+        {
+            return await dbContext.HomeLabDeployments
+                .AsNoTracking()
+                .Where(item => item.RecipeRunId == recipeRunId)
+                .Select(item => item.Id)
+                .ToArrayAsync(cancellationToken);
+        }
+
+        var allInstallations = await dbContext.HomeLabInstallations
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+        var legacyRecipeMembers = FindLegacyRecipeMembers(sourceInstallation, allInstallations);
+        return legacyRecipeMembers.Count > 1
+            ? legacyRecipeMembers.Select(item => item.DeploymentId).Distinct().ToArray()
+            : [sourceInstallation.DeploymentId];
+    }
+
+    private static IReadOnlyList<HomeLabInstallationEntity> FindLegacyRecipeMembers(
+        HomeLabInstallationEntity sourceInstallation,
+        IReadOnlyList<HomeLabInstallationEntity> installations)
+    {
+        foreach (var recipe in HomeLabPromptRecipeCatalog.All
+                     .Where(item => !item.RequiresPlanning && item.AppIds.Count > 1)
+                     .OrderByDescending(item => item.AppIds.Count))
+        {
+            var matched = new List<HomeLabInstallationEntity>();
+            var complete = true;
+            foreach (var appId in recipe.AppIds)
+            {
+                var candidate = installations
+                    .Where(item => item.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase) &&
+                                   !matched.Contains(item) &&
+                                   AreConnectionPeers(sourceInstallation, item))
+                    .OrderBy(item => item.CreatedAtUtc)
+                    .FirstOrDefault();
+                if (candidate is null)
+                {
+                    complete = false;
+                    break;
+                }
+
+                matched.Add(candidate);
+            }
+
+            if (complete && matched.Contains(sourceInstallation))
+            {
+                return matched;
+            }
+        }
+
+        return [sourceInstallation];
     }
 
     private async Task RestoreExternalRouteAfterPublishFailureAsync(
