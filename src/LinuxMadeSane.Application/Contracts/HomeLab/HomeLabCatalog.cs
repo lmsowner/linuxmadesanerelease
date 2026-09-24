@@ -202,7 +202,7 @@ public static class HomeLabCatalog
                     "web",
                     HomeLabClientRoutingStrategy.Auto,
                     "/stremio",
-                    new HomeLabReverseProxyManifest(HomeLabBasePathSupportMode.Transparent),
+                    new HomeLabReverseProxyManifest(HomeLabBasePathSupportMode.None),
                     new HomeLabEndpointCapabilities(Streaming: true, RangeRequests: true, WebSockets: true, Uploads: true, LongLivedRequests: true)),
                 [new HomeLabClientAccessManifest(
                     true,

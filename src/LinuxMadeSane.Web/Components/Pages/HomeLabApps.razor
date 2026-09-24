@@ -387,7 +387,7 @@
                                                         <div class="home-lab-details-heading">
                                                             <div>
                                                                 <h3>Edge Gateway publishing</h3>
-                                                                <p class="meta-text">Choose which recipe services are reachable externally. A published recipe uses one authenticated origin and maps each client listener to its LAN port path, such as <code>/39001</code> or <code>/39002</code>.</p>
+                                                                <p class="meta-text">Choose whether this Home Lab service is reachable externally and how Edge Gateway protects it.</p>
                                                             </div>
                                                             <UiPill Tone="@(externalRoute is { Enabled: true } ? UiPillTone.Success : UiPillTone.Neutral)">@(externalRoute is { Enabled: true } ? "Published" : "Local only")</UiPill>
                                                         </div>
@@ -420,24 +420,22 @@
                                                         }
                                                         else
                                                         {
-                                                            var needsSharedRecipeHostnameMigration = RecipeNeedsSharedHostnameMigration(selectedInstallation);
-                                                            var isExternalRecipeGroup = IsExternalRecipeGroup(selectedInstallation);
                                                             <div class="home-lab-config-grid">
                                                                 <div class="home-lab-config-field">
-                                                                    <label for="home-lab-external-hostname">@(isExternalRecipeGroup ? "Shared recipe hostname" : "External hostname")</label>
+                                                                    <label for="home-lab-external-hostname">External hostname</label>
                                                                     <input id="home-lab-external-hostname"
                                                                            class="ui-control-input"
                                                                            value="@externalHostnameDraft"
-                                                                           disabled="@(externalRoute is { Enabled: true } && !needsSharedRecipeHostnameMigration)"
+                                                                           disabled="@(externalRoute is { Enabled: true })"
                                                                            @oninput="eventArgs => externalHostnameDraft = eventArgs.Value?.ToString() ?? string.Empty" />
-                                                                    <span class="meta-text">@(needsSharedRecipeHostnameMigration ? "These services currently use different or container-specific hostnames. Save once to move them onto this shared recipe hostname." : externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : isExternalRecipeGroup ? "All externally published services in this recipe share this hostname; each Docker listener is exposed under its host port path." : "Use a new hostname inside the selected Cloudflare zone.")</span>
+                                                                    <span class="meta-text">@(externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : "Use a new hostname inside the selected Cloudflare zone.")</span>
                                                                 </div>
                                                                 <div class="home-lab-config-field">
                                                                     <label for="home-lab-external-domain">Cloudflare zone</label>
                                                                     <select id="home-lab-external-domain"
                                                                             class="ui-control-input"
                                                                             value="@externalDomainDraft"
-                                                                            disabled="@(externalRoute is { Enabled: true } && !needsSharedRecipeHostnameMigration)"
+                                                                            disabled="@(externalRoute is { Enabled: true })"
                                                                             @onchange="ChangeExternalDomain">
                                                                         @foreach (var domain in AvailableExternalDomains)
                                                                         {
@@ -461,13 +459,13 @@
                                                             <div class="home-lab-setting-card">
                                                                 <strong>Public address</strong>
                                                                 <code>@BuildExternalPreview()</code>
-                                                                @if (isExternalRecipeGroup)
+                                                                @if (selectedInstallation.IsRecipeInstallation)
                                                                 {
-                                                                    <p class="meta-text">LMS keeps internal Docker URLs private. Recipe services share this hostname and are addressed as <code>/&lt;Docker host port&gt;</code>, for example <code>/39001</code>.</p>
+                                                                    <p class="meta-text">LMS keeps the local Docker URL private. This service has its own public hostname.</p>
                                                                 }
                                                             </div>
                                                             <div class="home-lab-action-row">
-                                                                <UiCommandButton Label="@(needsSharedRecipeHostnameMigration ? "Use shared recipe hostname" : externalRoute is null ? "Publish externally" : "Save external access")"
+                                                                <UiCommandButton Label="@(externalRoute is null ? "Publish externally" : "Save external access")"
                                                                                  Glyph="UiIconGlyph.Website"
                                                                                  Variant="UiButtonVariant.Primary"
                                                                                  Disabled="@(busy || !CanSaveExternalAccess)"
@@ -2462,11 +2460,10 @@
     private async Task LoadExternalAccessDraftAsync(HomeLabAppInstallation installation)
     {
         confirmExternalUnpublish = false;
-        var needsSharedRecipeHostnameMigration = RecipeNeedsSharedHostnameMigration(installation);
         if (installation.EdgeGatewayRouteId is Guid routeId)
         {
             var editor = await EdgeGatewayService.GetEditorAsync(routeId);
-            if (editor.Id.HasValue && !needsSharedRecipeHostnameMigration)
+            if (editor.Id.HasValue)
             {
                 externalHostnameDraft = editor.Hostname;
                 externalDomainDraft = editor.DomainName;
@@ -2477,30 +2474,10 @@
 
         var domain = AvailableExternalDomains.FirstOrDefault();
         externalDomainDraft = domain?.DomainName ?? string.Empty;
-        var existingEditor = installation.EdgeGatewayRouteId is Guid existingRouteId
-            ? await EdgeGatewayService.GetEditorAsync(existingRouteId)
-            : null;
-        if (needsSharedRecipeHostnameMigration && existingEditor?.Id is not null &&
-            AvailableExternalDomains.Any(item => item.DomainName.Equals(existingEditor.DomainName, StringComparison.OrdinalIgnoreCase)))
-        {
-            externalDomainDraft = existingEditor.DomainName;
-        }
-
-        var existingRecipeRoute = needsSharedRecipeHostnameMigration ? null : FindPublishedRecipeRoute(installation);
-        if (existingRecipeRoute is not null)
-        {
-            externalHostnameDraft = existingRecipeRoute.Hostname;
-            externalDomainDraft = existingRecipeRoute.DomainName;
-        }
-        else
-        {
-            externalHostnameDraft = string.IsNullOrWhiteSpace(externalDomainDraft)
-                ? BuildAvailableExternalSubdomain(installation)
-                : $"{BuildAvailableExternalSubdomain(installation)}.{externalDomainDraft}";
-        }
-        externalAuthModeDraft = existingEditor?.Id is not null
-            ? existingEditor.AuthMode
-            : EdgeGatewayAuthMode.RequireMfa;
+        externalHostnameDraft = string.IsNullOrWhiteSpace(externalDomainDraft)
+            ? installation.AppId
+            : $"{BuildAvailableExternalSubdomain(installation)}.{externalDomainDraft}";
+        externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
     }
 
     private async Task RefreshEdgeGatewayStateAsync()
@@ -2518,147 +2495,12 @@
 
     private string BuildAvailableExternalSubdomain(HomeLabAppInstallation installation)
     {
-        var candidate = BuildExternalSubdomainCandidate(installation);
+        var candidate = installation.AppId.Trim().ToLowerInvariant();
         var hostname = $"{candidate}.{externalDomainDraft}";
         var isUsed = edgeGatewayRoutes.Any(route =>
             route.Id != installation.EdgeGatewayRouteId &&
             route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)) == true;
-        return isUsed && !IsExternalRecipeGroup(installation)
-            ? $"{candidate}-{installation.ContainerName[^Math.Min(8, installation.ContainerName.Length)..]}"
-            : candidate;
-    }
-
-    private string BuildExternalSubdomainCandidate(HomeLabAppInstallation installation)
-    {
-        var recipeName = ResolveRecipeExternalName(installation);
-        var source = IsExternalRecipeGroup(installation) && !string.IsNullOrWhiteSpace(recipeName)
-            ? recipeName
-            : installation.AppId;
-        var builder = new System.Text.StringBuilder();
-        foreach (var character in source.Trim().ToLowerInvariant())
-        {
-            if (character is >= 'a' and <= 'z' or >= '0' and <= '9')
-            {
-                builder.Append(character);
-            }
-            else if (builder.Length > 0 && builder[^1] != '-')
-            {
-                builder.Append('-');
-            }
-        }
-
-        var candidate = builder.ToString().Trim('-');
-        if (candidate.Length == 0)
-        {
-            candidate = installation.AppId.Trim().ToLowerInvariant();
-        }
-
-        return candidate.Length <= 63 ? candidate : candidate[..63].TrimEnd('-');
-    }
-
-    private string? ResolveRecipeExternalName(HomeLabAppInstallation installation)
-    {
-        var deployment = workspace?.Deployments.FirstOrDefault(item => item.Id == installation.DeploymentId);
-        if (deployment is null)
-        {
-            return null;
-        }
-
-        var recipeId = deployment.PromptRecipeId ?? deployment.RecipeId;
-        var declaredRecipeName = promptRecipes.FirstOrDefault(item => item.Id.Equals(recipeId, StringComparison.OrdinalIgnoreCase))?.Name
-               ?? workspace?.Recipes.FirstOrDefault(item => item.Id.Equals(recipeId, StringComparison.OrdinalIgnoreCase))?.Name
-               ?? (IsExternalRecipeGroup(installation)
-                   ? promptRecipes.FirstOrDefault(item => item.AppIds.Count > 1 &&
-                       ResolveExternalGroupInstallations(installation).Select(member => member.AppId)
-                           .ToHashSet(StringComparer.OrdinalIgnoreCase)
-                           .SetEquals(item.AppIds))?.Name
-                   : null);
-        return declaredRecipeName ?? deployment.Name;
-    }
-
-    private bool IsExternalRecipeGroup(HomeLabAppInstallation installation) =>
-        installation.IsRecipeInstallation || ResolveExternalGroupInstallations(installation).Count > 1;
-
-    private IReadOnlyList<HomeLabAppInstallation> ResolveExternalGroupInstallations(HomeLabAppInstallation installation)
-    {
-        if (workspace is null)
-        {
-            return [installation];
-        }
-
-        var deployment = workspace.Deployments.FirstOrDefault(item => item.Id == installation.DeploymentId);
-        if (deployment?.RecipeRunId is Guid recipeRunId)
-        {
-            var deploymentIds = workspace.Deployments
-                .Where(item => item.RecipeRunId == recipeRunId)
-                .Select(item => item.Id)
-                .ToHashSet();
-            return workspace.Installations
-                .Where(item => deploymentIds.Contains(item.DeploymentId))
-                .ToArray();
-        }
-
-        foreach (var recipe in promptRecipes
-                     .Where(item => !item.RequiresPlanning && item.AppIds.Count > 1)
-                     .OrderByDescending(item => item.AppIds.Count))
-        {
-            if (TryMatchRecipeInstallations(recipe, new HashSet<Guid>(), out var members) &&
-                members.Any(item => item.Id == installation.Id))
-            {
-                return members;
-            }
-        }
-
-        return [installation];
-    }
-
-    private EdgeGatewayRouteListItem? FindPublishedRecipeRoute(HomeLabAppInstallation installation)
-    {
-        return FindPublishedRecipeRoutes(installation).FirstOrDefault();
-    }
-
-    private bool RecipeNeedsSharedHostnameMigration(HomeLabAppInstallation installation)
-    {
-        var routes = FindPublishedRecipeRoutes(installation);
-        if (routes
-            .Select(route => route.Hostname.Trim().TrimEnd('.'))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count() > 1)
-        {
-            return true;
-        }
-
-        if (installation.IsRecipeInstallation || routes.Count == 0 || !IsExternalRecipeGroup(installation))
-        {
-            return false;
-        }
-
-        var domain = routes[0].DomainName.Trim().TrimEnd('.');
-        var expectedHostname = $"{BuildExternalSubdomainCandidate(installation)}.{domain}";
-        return routes.Any(route =>
-            !route.Hostname.Trim().TrimEnd('.').Equals(expectedHostname, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private IReadOnlyList<EdgeGatewayRouteListItem> FindPublishedRecipeRoutes(HomeLabAppInstallation installation)
-    {
-        if (workspace is null)
-        {
-            return [];
-        }
-
-        var peerDeploymentIds = ResolveExternalGroupInstallations(installation)
-            .Select(item => item.DeploymentId)
-            .ToHashSet();
-        var routeIds = workspace.Installations
-            .Where(item => peerDeploymentIds.Contains(item.DeploymentId))
-            .SelectMany(item => (item.ServiceEndpoints ?? [])
-                .Where(endpoint => endpoint.Scope == HomeLabEndpointScope.Public && endpoint.EdgeGatewayRouteId.HasValue)
-                .Select(endpoint => endpoint.EdgeGatewayRouteId!.Value)
-                .Append(item.EdgeGatewayRouteId ?? Guid.Empty))
-            .Where(routeId => routeId != Guid.Empty)
-            .ToHashSet();
-
-        return edgeGatewayRoutes.Where(route => routeIds.Contains(route.Id)).ToArray();
+        return isUsed ? $"{candidate}-{installation.ContainerName[^Math.Min(8, installation.ContainerName.Length)..]}" : candidate;
     }
 
     private void ChangeExternalDomain(ChangeEventArgs eventArgs)
@@ -2790,7 +2632,7 @@
         if (IsEdgeGatewaySession)
         {
             return endpoints.FirstOrDefault(endpoint =>
-                endpoint.Scope == HomeLabEndpointScope.Client &&
+                endpoint.Scope == HomeLabEndpointScope.Public &&
                 IsPrimary(endpoint) &&
                 endpoint.EdgeGatewayRouteId.HasValue &&
                 endpoint.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))?.Url;

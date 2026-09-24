@@ -85,16 +85,6 @@ internal static partial class HomeLabEndpointPlanner
         return candidate;
     }
 
-    public static string BuildRecipePortPath(int hostPort)
-    {
-        if (hostPort is < 1 or > 65535)
-        {
-            throw new InvalidOperationException("A published Home Lab service must have a valid host port before it can be exposed through a recipe origin.");
-        }
-
-        return $"/{hostPort}";
-    }
-
     public static string ResolveInternalHost(HomeLabInstallationEntity installation) => installation.AppId;
 
     public static int ResolveInternalPort(HomeLabPortManifest port, HomeLabInstallationEntity installation) =>

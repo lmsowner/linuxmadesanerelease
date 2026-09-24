@@ -121,6 +121,7 @@ public sealed class HomeLabService(
         }
 
         var primaryPortName = HomeLabEndpointPlanner.ResolveClientAccess(app)?.PortName;
+        var lanHost = Dns.GetHostName();
         foreach (var access in clientAccesses)
         {
             var binding = bindings.FirstOrDefault(port =>
@@ -133,9 +134,16 @@ public sealed class HomeLabService(
                 continue;
             }
 
-            if (installation.ServiceEndpoints.All(endpoint =>
-                    !endpoint.PortName.Equals(access.PortName, StringComparison.OrdinalIgnoreCase) ||
-                    endpoint.Scope != (int)HomeLabEndpointScope.Client))
+            var existingClient = installation.ServiceEndpoints.FirstOrDefault(endpoint =>
+                endpoint.PortName.Equals(access.PortName, StringComparison.OrdinalIgnoreCase) &&
+                endpoint.Scope == (int)HomeLabEndpointScope.Client);
+            if (existingClient is null ||
+                existingClient.EdgeGatewayRouteId.HasValue ||
+                !existingClient.Url.Equals($"http://{lanHost}:{localPort}", StringComparison.OrdinalIgnoreCase) ||
+                !existingClient.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase) ||
+                !existingClient.Host.Equals(lanHost, StringComparison.OrdinalIgnoreCase) ||
+                existingClient.Port != localPort ||
+                !string.IsNullOrEmpty(existingClient.PathBase))
             {
                 return true;
             }
@@ -1838,25 +1846,10 @@ public sealed class HomeLabService(
                 ToHealth(installation.HealthState));
         }
 
-        var deploymentIds = await ResolveExternalDeploymentIdsAsync(
-            installation,
-            sourceDeployment,
-            cancellationToken);
-        var candidates = await dbContext.HomeLabInstallations
-            .Include(item => item.ServiceEndpoints)
-            .Where(item => deploymentIds.Contains(item.DeploymentId))
-            .ToListAsync(cancellationToken);
-        var exposed = candidates
-            .OrderBy(item => item.CreatedAtUtc)
-            .Select(item => (Installation: item, App: HomeLabCatalog.GetApp(item.AppId)))
-            .Select(item => (item.Installation, item.App, Accesses: ResolveRecipeClientAccesses(item.App, connectivity)))
-            .Where(item => item.App.EdgeGatewaySupported && item.Accesses.Count > 0)
-            .ToArray();
-        var useSharedRecipeOrigin = deploymentIds.Length > 1 ||
-                                    sourceDeployment.RecipeId is not null ||
-                                    sourceDeployment.PromptRecipeId is not null ||
-                                    exposed.Length > 1 ||
-                                    exposed.Any(item => item.Installation.IsRecipeInstallation || item.Accesses.Count > 1);
+        var exposed = new[]
+        {
+            (Installation: installation, App: app, Accesses: requestedClientAccesses)
+        };
         var registeredRouteIds = new List<Guid>();
         var output = new List<string>();
         try
@@ -1889,20 +1882,10 @@ public sealed class HomeLabService(
                         throw new InvalidOperationException($"{item.App.Name} does not have a local proxy listener for '{access.PortName}'.");
                     }
 
-                    var useRecipePortPath = useSharedRecipeOrigin &&
-                                            (access.ReverseProxy?.BasePathSupport ?? HomeLabBasePathSupportMode.None) != HomeLabBasePathSupportMode.None;
-                    var preferredPath = useRecipePortPath
-                        ? HomeLabEndpointPlanner.BuildRecipePortPath(binding.HostPort)
-                        : access.PreferredPath;
-                    var routing = useRecipePortPath
-                        ? HomeLabClientRoutingStrategy.Subpath
-                        : access.Routing;
-                    
                     var existing = item.Installation.ServiceEndpoints.FirstOrDefault(endpoint =>
                         endpoint.PortName.Equals(access.PortName, StringComparison.OrdinalIgnoreCase) &&
                         endpoint.Scope == (int)HomeLabEndpointScope.Public);
-                    var isPrimarySingleServiceRoute = !useSharedRecipeOrigin &&
-                                                       exposed.Length == 1 &&
+                    var isPrimarySingleServiceRoute = exposed.Length == 1 &&
                                                        access.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase);
                     var endpoint = await edgeGatewayRouteRegistrationService.RegisterClientRouteAsync(
                         new EdgeGatewayClientRouteRegistration(
@@ -1914,8 +1897,8 @@ public sealed class HomeLabService(
                             request.DomainName,
                             "127.0.0.1",
                             targetPort.Value,
-                            isPrimarySingleServiceRoute ? "/" : preferredPath,
-                            isPrimarySingleServiceRoute ? HomeLabClientRoutingStrategy.Subpath : routing,
+                            isPrimarySingleServiceRoute ? "/" : access.PreferredPath,
+                            isPrimarySingleServiceRoute ? HomeLabClientRoutingStrategy.Subpath : access.Routing,
                             isPrimarySingleServiceRoute ? HomeLabBasePathSupportMode.Transparent : proxy.BasePathSupport,
                             proxy.StripPathPrefix,
                             proxy.ForwardPathPrefix,
@@ -1940,18 +1923,6 @@ public sealed class HomeLabService(
                         endpoint.RoutingMode,
                         endpoint.RouteId,
                         now);
-                    UpsertEndpoint(
-                        item.Installation,
-                        access.PortName,
-                        HomeLabEndpointScope.Client,
-                        endpoint.Url,
-                        endpoint.Scheme,
-                        endpoint.Host,
-                        null,
-                        endpoint.PathBase,
-                        endpoint.RoutingMode,
-                        endpoint.RouteId,
-                        now);
                     if (isPrimarySingleServiceRoute ||
                         access.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -1960,6 +1931,11 @@ public sealed class HomeLabService(
                     item.Installation.UpdatedAtUtc = now;
                     output.Add($"{item.Installation.DisplayName} ({access.PortName}): {endpoint.Url}");
                 }
+
+                // Keep local Client endpoints independent from the public Edge
+                // Gateway routes so applications continue to receive a local
+                // host-and-port URL inside the LAN.
+                SynchronizeLocalEndpoints(item.Installation);
             }
 
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -2035,19 +2011,10 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
-        var sourceDeployment = await dbContext.HomeLabDeployments
-            .AsNoTracking()
-            .SingleAsync(item => item.Id == installation.DeploymentId, cancellationToken);
-        var deploymentIds = await ResolveExternalDeploymentIdsAsync(installation, sourceDeployment, cancellationToken);
-        var groupInstallations = await dbContext.HomeLabInstallations
-            .Include(item => item.ServiceEndpoints)
-            .Where(item => deploymentIds.Contains(item.DeploymentId))
-            .ToListAsync(cancellationToken);
-        var routeIds = groupInstallations
-            .SelectMany(item => item.ServiceEndpoints
-                .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public && endpoint.EdgeGatewayRouteId.HasValue)
-                .Select(endpoint => endpoint.EdgeGatewayRouteId!.Value)
-                .Append(item.EdgeGatewayRouteId ?? Guid.Empty))
+        var routeIds = installation.ServiceEndpoints
+            .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public && endpoint.EdgeGatewayRouteId.HasValue)
+            .Select(endpoint => endpoint.EdgeGatewayRouteId!.Value)
+            .Append(installation.EdgeGatewayRouteId ?? Guid.Empty)
             .Where(routeId => routeId != Guid.Empty)
             .Distinct()
             .ToArray();
@@ -2055,9 +2022,7 @@ public sealed class HomeLabService(
         {
             return Success(
                 "External access is already off.",
-                groupInstallations.Count > 1
-                    ? $"The {sourceDeployment.Name} recipe group has no LMS-managed Edge Gateway route."
-                    : $"{installation.DisplayName} has no LMS-managed Edge Gateway route.",
+                $"{installation.DisplayName} has no LMS-managed Edge Gateway route.",
                 [],
                 ToHealth(installation.HealthState));
         }
@@ -2068,34 +2033,26 @@ public sealed class HomeLabService(
             {
                 await edgeGatewayRouteRegistrationService.UnregisterClientRouteAsync(routeId, cancellationToken);
             }
-            foreach (var member in groupInstallations)
+            var publicEndpoints = installation.ServiceEndpoints
+                .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public)
+                .ToArray();
+            dbContext.HomeLabServiceEndpoints.RemoveRange(publicEndpoints);
+            foreach (var clientEndpoint in installation.ServiceEndpoints.Where(endpoint =>
+                         endpoint.Scope == (int)HomeLabEndpointScope.Client &&
+                         endpoint.EdgeGatewayRouteId.HasValue &&
+                         routeIds.Contains(endpoint.EdgeGatewayRouteId.Value)))
             {
-                var publicEndpoints = member.ServiceEndpoints
-                    .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public)
-                    .ToArray();
-                dbContext.HomeLabServiceEndpoints.RemoveRange(publicEndpoints);
-                foreach (var clientEndpoint in member.ServiceEndpoints.Where(endpoint =>
-                             endpoint.Scope == (int)HomeLabEndpointScope.Client &&
-                             endpoint.EdgeGatewayRouteId.HasValue &&
-                             routeIds.Contains(endpoint.EdgeGatewayRouteId.Value)))
-                {
-                    clientEndpoint.EdgeGatewayRouteId = null;
-                }
-                member.EdgeGatewayRouteId = null;
-                SynchronizeLocalEndpoints(member);
-                member.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                clientEndpoint.EdgeGatewayRouteId = null;
             }
+            installation.EdgeGatewayRouteId = null;
+            SynchronizeLocalEndpoints(installation);
+            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
             await dbContext.SaveChangesAsync(cancellationToken);
-            foreach (var member in groupInstallations)
+            if (HomeLabCatalog.GetApp(installation.AppId) is { } unpublishedApp &&
+                (unpublishedApp.Environment.Values.Any(value => value.Contains("${endpoint:", StringComparison.Ordinal)) ||
+                 !string.IsNullOrWhiteSpace(unpublishedApp.PublicUrlEnvironmentVariable)))
             {
-                if (HomeLabCatalog.GetApp(member.AppId) is not { } unpublishedApp ||
-                    (!unpublishedApp.Environment.Values.Any(value => value.Contains("${endpoint:", StringComparison.Ordinal)) &&
-                     string.IsNullOrWhiteSpace(unpublishedApp.PublicUrlEnvironmentVariable)))
-                {
-                    continue;
-                }
-
-                var recreate = await ExecuteAsync(member.Id, HomeLabLifecycleAction.Recreate, cancellationToken);
+                var recreate = await ExecuteAsync(installation.Id, HomeLabLifecycleAction.Recreate, cancellationToken);
                 if (!recreate.Succeeded)
                 {
                     return Failure(
@@ -2107,9 +2064,7 @@ public sealed class HomeLabService(
             }
             return Success(
                 "External access removed.",
-                groupInstallations.Count > 1
-                    ? $"The {sourceDeployment.Name} recipe group is no longer published through Edge Gateway."
-                    : $"{installation.DisplayName} is no longer published through Edge Gateway.",
+                $"{installation.DisplayName} is no longer published through Edge Gateway.",
                 [],
                 ToHealth(installation.HealthState));
         }
@@ -2121,65 +2076,6 @@ public sealed class HomeLabService(
                 [],
                 ToHealth(installation.HealthState));
         }
-    }
-
-    private async Task<Guid[]> ResolveExternalDeploymentIdsAsync(
-        HomeLabInstallationEntity sourceInstallation,
-        HomeLabDeploymentEntity sourceDeployment,
-        CancellationToken cancellationToken)
-    {
-        if (sourceDeployment.RecipeRunId is Guid recipeRunId)
-        {
-            return await dbContext.HomeLabDeployments
-                .AsNoTracking()
-                .Where(item => item.RecipeRunId == recipeRunId)
-                .Select(item => item.Id)
-                .ToArrayAsync(cancellationToken);
-        }
-
-        var allInstallations = await dbContext.HomeLabInstallations
-            .AsNoTracking()
-            .ToListAsync(cancellationToken);
-        var legacyRecipeMembers = FindLegacyRecipeMembers(sourceInstallation, allInstallations);
-        return legacyRecipeMembers.Count > 1
-            ? legacyRecipeMembers.Select(item => item.DeploymentId).Distinct().ToArray()
-            : [sourceInstallation.DeploymentId];
-    }
-
-    private static IReadOnlyList<HomeLabInstallationEntity> FindLegacyRecipeMembers(
-        HomeLabInstallationEntity sourceInstallation,
-        IReadOnlyList<HomeLabInstallationEntity> installations)
-    {
-        foreach (var recipe in HomeLabPromptRecipeCatalog.All
-                     .Where(item => !item.RequiresPlanning && item.AppIds.Count > 1)
-                     .OrderByDescending(item => item.AppIds.Count))
-        {
-            var matched = new List<HomeLabInstallationEntity>();
-            var complete = true;
-            foreach (var appId in recipe.AppIds)
-            {
-                var candidate = installations
-                    .Where(item => item.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase) &&
-                                   !matched.Contains(item) &&
-                                   AreConnectionPeers(sourceInstallation, item))
-                    .OrderBy(item => item.CreatedAtUtc)
-                    .FirstOrDefault();
-                if (candidate is null)
-                {
-                    complete = false;
-                    break;
-                }
-
-                matched.Add(candidate);
-            }
-
-            if (complete && matched.Contains(sourceInstallation))
-            {
-                return matched;
-            }
-        }
-
-        return [sourceInstallation];
     }
 
     private async Task RestoreExternalRouteAfterPublishFailureAsync(
@@ -2636,24 +2532,18 @@ public sealed class HomeLabService(
                     now);
             }
 
-            var existingClient = installation.ServiceEndpoints.FirstOrDefault(endpoint =>
-                endpoint.PortName.Equals(clientAccess.PortName, StringComparison.OrdinalIgnoreCase) &&
-                endpoint.Scope == (int)HomeLabEndpointScope.Client);
-            if (existingClient?.EdgeGatewayRouteId is null)
-            {
-                UpsertEndpoint(
-                    installation,
-                    clientAccess.PortName,
-                    HomeLabEndpointScope.Client,
-                    lanUrl,
-                    "http",
-                    lanHost,
-                    localPort,
-                    string.Empty,
-                    null,
-                    null,
-                    now);
-            }
+            UpsertEndpoint(
+                installation,
+                clientAccess.PortName,
+                HomeLabEndpointScope.Client,
+                lanUrl,
+                "http",
+                lanHost,
+                localPort,
+                string.Empty,
+                null,
+                null,
+                now);
         }
     }
 
@@ -2746,7 +2636,6 @@ public sealed class HomeLabService(
                 ? HomeLabClientRoutingStrategy.Subdomain
                 : HomeLabClientRoutingStrategy.Subpath;
             UpsertEndpoint(installation, access.PortName, HomeLabEndpointScope.Public, url, "https", host, null, path, routing, publishedRouteId, now);
-            UpsertEndpoint(installation, access.PortName, HomeLabEndpointScope.Client, url, "https", host, null, path, routing, publishedRouteId, now);
         }
     }
 
@@ -4161,26 +4050,26 @@ public sealed class HomeLabService(
         if (!string.IsNullOrWhiteSpace(app.PublicUrlEnvironmentVariable) &&
             installation.CaddySourcePort is int caddyPort)
         {
-            var clientEndpoint = installation.ServiceEndpoints.FirstOrDefault(endpoint =>
-                endpoint.Scope == (int)HomeLabEndpointScope.Client &&
+            var publicEndpoint = installation.ServiceEndpoints.FirstOrDefault(endpoint =>
+                endpoint.Scope == (int)HomeLabEndpointScope.Public &&
                 endpoint.PortName.Equals(primaryAccess?.PortName ?? "web", StringComparison.OrdinalIgnoreCase));
             values.Add(new KeyValuePair<string, string>(
                 app.PublicUrlEnvironmentVariable,
-                clientEndpoint?.Url ?? $"http://{Dns.GetHostName()}:{caddyPort}"));
+                publicEndpoint?.Url ?? $"http://{Dns.GetHostName()}:{caddyPort}"));
         }
 
         foreach (var access in HomeLabEndpointPlanner.ResolveClientAccesses(app)
                      .Where(access => !string.IsNullOrWhiteSpace(access.PublicUrlEnvironmentVariable)))
         {
-            var clientEndpoint = installation.ServiceEndpoints.FirstOrDefault(endpoint =>
-                endpoint.Scope == (int)HomeLabEndpointScope.Client &&
+            var publicEndpoint = installation.ServiceEndpoints.FirstOrDefault(endpoint =>
+                endpoint.Scope == (int)HomeLabEndpointScope.Public &&
                 endpoint.PortName.Equals(access.PortName, StringComparison.OrdinalIgnoreCase) &&
                 endpoint.EdgeGatewayRouteId.HasValue);
-            if (clientEndpoint is not null)
+            if (publicEndpoint is not null)
             {
                 values.Add(new KeyValuePair<string, string>(
                     access.PublicUrlEnvironmentVariable!,
-                    clientEndpoint.Url));
+                    publicEndpoint.Url));
             }
         }
 
