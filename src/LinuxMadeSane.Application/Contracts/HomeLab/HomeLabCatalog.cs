@@ -178,8 +178,11 @@ public static class HomeLabCatalog
             "https://github.com/tsaridas/stremio-docker",
             "tsaridas/stremio-docker",
             "latest",
-            "3",
-            [new("web", 8080, Primary: true, VpnContainerPort: 18081, VpnEnvironmentVariable: "WEBUI_INTERNAL_PORT")],
+            "4",
+            [
+                new("web", 8080, Primary: true, VpnContainerPort: 18081, VpnEnvironmentVariable: "WEBUI_INTERNAL_PORT"),
+                new("stream", 11470)
+            ],
             [new("config", "/root/.stremio-server", HomeLabStorageKind.Configuration)],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -192,8 +195,31 @@ public static class HomeLabCatalog
             [new("network-route", "Internet route", "select", true, Help: "Stremio must use VPN Gateway routing. LMS blocks direct Stremio installations.", Options: new[] { "VPN Gateway (Gluetun)" }), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Stremio traffic.")],
             SupportsVpnGateway: true,
             RequiresVpnGateway: true,
-            PublicUrlEnvironmentVariable: "SERVER_URL",
-            Exposure: ClientExposure("/stremio", HomeLabBasePathSupportMode.None, streaming: true, rangeRequests: true, webSockets: true)),
+            Exposure: new HomeLabServiceExposureManifest(
+                [HomeLabEndpointScope.Internal, HomeLabEndpointScope.Lan, HomeLabEndpointScope.Client, HomeLabEndpointScope.Public],
+                new HomeLabClientAccessManifest(
+                    true,
+                    "web",
+                    HomeLabClientRoutingStrategy.Auto,
+                    "/stremio",
+                    new HomeLabReverseProxyManifest(HomeLabBasePathSupportMode.None),
+                    new HomeLabEndpointCapabilities(Streaming: true, RangeRequests: true, WebSockets: true, Uploads: true, LongLivedRequests: true)),
+                [new HomeLabClientAccessManifest(
+                    true,
+                    "stream",
+                    HomeLabClientRoutingStrategy.Subpath,
+                    "/stream",
+                    new HomeLabReverseProxyManifest(
+                        HomeLabBasePathSupportMode.Transparent,
+                        StripPathPrefix: true,
+                        ForwardPathPrefix: false),
+                    new HomeLabEndpointCapabilities(
+                        WebSockets: true,
+                        Streaming: true,
+                        RangeRequests: true,
+                        Uploads: true,
+                        LongLivedRequests: true),
+                    PublicUrlEnvironmentVariable: "SERVER_URL")])),
         new(
             "immich",
             "Immich",

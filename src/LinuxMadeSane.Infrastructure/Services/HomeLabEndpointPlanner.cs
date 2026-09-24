@@ -13,23 +13,37 @@ internal static partial class HomeLabEndpointPlanner
 {
     public static HomeLabClientAccessManifest? ResolveClientAccess(HomeLabAppManifest app)
     {
+        return ResolveClientAccesses(app).FirstOrDefault();
+    }
+
+    public static IReadOnlyList<HomeLabClientAccessManifest> ResolveClientAccesses(HomeLabAppManifest app)
+    {
         if (app.Exposure is not null)
         {
-            return app.Exposure.ClientAccess is { Enabled: true } client &&
-                   app.Exposure.Scopes.Contains(HomeLabEndpointScope.Client)
-                ? client
-                : null;
+            if (!app.Exposure.Scopes.Contains(HomeLabEndpointScope.Client))
+            {
+                return [];
+            }
+
+            return (app.Exposure.ClientAccess is { Enabled: true } primaryAccess
+                    ? new[] { primaryAccess }
+                    : Array.Empty<HomeLabClientAccessManifest>())
+                .Concat(app.Exposure.AdditionalClientAccess ?? [])
+                .Where(access => access.Enabled)
+                .GroupBy(access => access.PortName, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .ToArray();
         }
 
         var primary = app.Ports.FirstOrDefault(port => port.Primary) ?? app.Ports.FirstOrDefault();
         return primary?.Name.Equals("web", StringComparison.OrdinalIgnoreCase) == true
-            ? new HomeLabClientAccessManifest(
+            ? [new HomeLabClientAccessManifest(
                 true,
                 primary.Name,
                 HomeLabClientRoutingStrategy.Auto,
                 $"/{app.Id}",
-                new HomeLabReverseProxyManifest(HomeLabBasePathSupportMode.None))
-            : null;
+                new HomeLabReverseProxyManifest(HomeLabBasePathSupportMode.None))]
+            : [];
     }
 
     public static bool IncludesScope(HomeLabAppManifest app, HomeLabEndpointScope scope)

@@ -77,11 +77,13 @@ public sealed record HomeLabClientAccessManifest(
     HomeLabClientRoutingStrategy Routing = HomeLabClientRoutingStrategy.Auto,
     string PreferredPath = "",
     HomeLabReverseProxyManifest? ReverseProxy = null,
-    HomeLabEndpointCapabilities? Capabilities = null);
+    HomeLabEndpointCapabilities? Capabilities = null,
+    string? PublicUrlEnvironmentVariable = null);
 
 public sealed record HomeLabServiceExposureManifest(
     IReadOnlyList<HomeLabEndpointScope> Scopes,
-    HomeLabClientAccessManifest? ClientAccess = null);
+    HomeLabClientAccessManifest? ClientAccess = null,
+    IReadOnlyList<HomeLabClientAccessManifest>? AdditionalClientAccess = null);
 
 public sealed record HomeLabRecipeDependency(
     string Consumer,
