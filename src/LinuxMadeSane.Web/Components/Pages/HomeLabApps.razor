@@ -2620,10 +2620,16 @@
     private string? BuildOpenUrl(HomeLabAppInstallation installation)
     {
         var endpoints = installation.ServiceEndpoints ?? [];
+        var primaryPortName = GetApp(installation.AppId).Ports
+            .FirstOrDefault(port => port.Primary)?.Name
+            ?? GetApp(installation.AppId).Ports.FirstOrDefault()?.Name;
+        bool IsPrimary(HomeLabServiceEndpoint endpoint) =>
+            primaryPortName is null || endpoint.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase);
         if (IsEdgeGatewaySession)
         {
             return endpoints.FirstOrDefault(endpoint =>
                 endpoint.Scope == HomeLabEndpointScope.Client &&
+                IsPrimary(endpoint) &&
                 endpoint.EdgeGatewayRouteId.HasValue &&
                 endpoint.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))?.Url;
         }
@@ -2631,7 +2637,8 @@
         // A local LMS session should stay on the host/LAN route even when this
         // installation also has a published Edge Gateway endpoint. The Client
         // record is intentionally shared with the public route after publishing.
-        var lanEndpoint = endpoints.FirstOrDefault(endpoint => endpoint.Scope == HomeLabEndpointScope.Lan);
+        var lanEndpoint = endpoints.FirstOrDefault(endpoint =>
+            endpoint.Scope == HomeLabEndpointScope.Lan && IsPrimary(endpoint));
         if (lanEndpoint is not null)
         {
             return lanEndpoint.Url;
@@ -2639,6 +2646,7 @@
 
         return endpoints.FirstOrDefault(endpoint =>
             endpoint.Scope == HomeLabEndpointScope.Client &&
+            IsPrimary(endpoint) &&
             !endpoint.EdgeGatewayRouteId.HasValue)?.Url;
     }
 
