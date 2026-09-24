@@ -1887,10 +1887,18 @@ public sealed class HomeLabService(
                         throw new InvalidOperationException($"{item.App.Name} does not have a local proxy listener for '{access.PortName}'.");
                     }
 
+                    var useRecipePortPath = sourceDeployment.RecipeId is not null &&
+                                            access.Routing is not HomeLabClientRoutingStrategy.Subdomain &&
+                                            (access.ReverseProxy?.BasePathSupport ?? HomeLabBasePathSupportMode.None) != HomeLabBasePathSupportMode.None;
+                    var preferredPath = useRecipePortPath
+                        ? HomeLabEndpointPlanner.BuildRecipePortPath(binding.HostPort)
+                        : access.PreferredPath;
+                    
                     var existing = item.Installation.ServiceEndpoints.FirstOrDefault(endpoint =>
                         endpoint.PortName.Equals(access.PortName, StringComparison.OrdinalIgnoreCase) &&
                         endpoint.Scope == (int)HomeLabEndpointScope.Public);
-                    var isPrimarySingleServiceRoute = exposed.Length == 1 &&
+                    var isPrimarySingleServiceRoute = sourceDeployment.RecipeId is null &&
+                                                       exposed.Length == 1 &&
                                                        access.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase);
                     var endpoint = await edgeGatewayRouteRegistrationService.RegisterClientRouteAsync(
                         new EdgeGatewayClientRouteRegistration(
@@ -1902,7 +1910,7 @@ public sealed class HomeLabService(
                             request.DomainName,
                             "127.0.0.1",
                             targetPort.Value,
-                            isPrimarySingleServiceRoute ? "/" : access.PreferredPath,
+                            isPrimarySingleServiceRoute ? "/" : preferredPath,
                             isPrimarySingleServiceRoute ? HomeLabClientRoutingStrategy.Subpath : access.Routing,
                             isPrimarySingleServiceRoute ? HomeLabBasePathSupportMode.Transparent : proxy.BasePathSupport,
                             proxy.StripPathPrefix,
