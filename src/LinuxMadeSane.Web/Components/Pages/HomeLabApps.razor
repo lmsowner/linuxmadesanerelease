@@ -430,7 +430,7 @@
                                                                            value="@externalHostnameDraft"
                                                                            disabled="@(externalRoute is { Enabled: true } && !needsSharedRecipeHostnameMigration)"
                                                                            @oninput="eventArgs => externalHostnameDraft = eventArgs.Value?.ToString() ?? string.Empty" />
-                                                                    <span class="meta-text">@(needsSharedRecipeHostnameMigration ? "These recipe services currently use different hostnames. Save once to move them onto this shared hostname." : externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : isExternalRecipeGroup ? "All externally published services in this recipe share this hostname; each Docker listener is exposed under its host port path." : "Use a new hostname inside the selected Cloudflare zone.")</span>
+                                                                    <span class="meta-text">@(needsSharedRecipeHostnameMigration ? "These services currently use different or container-specific hostnames. Save once to move them onto this shared recipe hostname." : externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : isExternalRecipeGroup ? "All externally published services in this recipe share this hostname; each Docker listener is exposed under its host port path." : "Use a new hostname inside the selected Cloudflare zone.")</span>
                                                                 </div>
                                                                 <div class="home-lab-config-field">
                                                                     <label for="home-lab-external-domain">Cloudflare zone</label>
@@ -2617,11 +2617,27 @@
         return FindPublishedRecipeRoutes(installation).FirstOrDefault();
     }
 
-    private bool RecipeNeedsSharedHostnameMigration(HomeLabAppInstallation installation) =>
-        FindPublishedRecipeRoutes(installation)
+    private bool RecipeNeedsSharedHostnameMigration(HomeLabAppInstallation installation)
+    {
+        var routes = FindPublishedRecipeRoutes(installation);
+        if (routes
             .Select(route => route.Hostname.Trim().TrimEnd('.'))
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count() > 1;
+            .Count() > 1)
+        {
+            return true;
+        }
+
+        if (installation.IsRecipeInstallation || routes.Count == 0 || !IsExternalRecipeGroup(installation))
+        {
+            return false;
+        }
+
+        var domain = routes[0].DomainName.Trim().TrimEnd('.');
+        var expectedHostname = $"{BuildExternalSubdomainCandidate(installation)}.{domain}";
+        return routes.Any(route =>
+            !route.Hostname.Trim().TrimEnd('.').Equals(expectedHostname, StringComparison.OrdinalIgnoreCase));
+    }
 
     private IReadOnlyList<EdgeGatewayRouteListItem> FindPublishedRecipeRoutes(HomeLabAppInstallation installation)
     {
