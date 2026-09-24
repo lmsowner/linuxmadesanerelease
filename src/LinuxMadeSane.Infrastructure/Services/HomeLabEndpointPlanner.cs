@@ -57,34 +57,6 @@ internal static partial class HomeLabEndpointPlanner
                ResolveClientAccess(app) is not null && scope is HomeLabEndpointScope.Lan or HomeLabEndpointScope.Client;
     }
 
-    public static HomeLabClientRoutingStrategy ResolvePublicRouting(HomeLabClientAccessManifest access) =>
-        access.Routing switch
-        {
-            HomeLabClientRoutingStrategy.Subpath when access.ReverseProxy?.BasePathSupport == HomeLabBasePathSupportMode.None =>
-                throw new InvalidOperationException("This service declares no reverse-proxy base-path support and cannot use subpath routing."),
-            HomeLabClientRoutingStrategy.Auto when access.ReverseProxy?.BasePathSupport == HomeLabBasePathSupportMode.None =>
-                HomeLabClientRoutingStrategy.Subdomain,
-            HomeLabClientRoutingStrategy.Auto => HomeLabClientRoutingStrategy.Subpath,
-            _ => access.Routing
-        };
-
-    public static string NormalizePreferredPath(string serviceId, string? preferredPath)
-    {
-        var candidate = string.IsNullOrWhiteSpace(preferredPath) ? $"/{serviceId}" : preferredPath.Trim();
-        if (!candidate.StartsWith("/", StringComparison.Ordinal))
-        {
-            candidate = $"/{candidate}";
-        }
-
-        candidate = candidate.TrimEnd('/');
-        if (candidate.Length < 2 || candidate.Contains("..", StringComparison.Ordinal) || candidate.Contains('\\'))
-        {
-            throw new InvalidOperationException($"The preferred client path for '{serviceId}' is invalid.");
-        }
-
-        return candidate;
-    }
-
     public static string ResolveInternalHost(HomeLabInstallationEntity installation) => installation.AppId;
 
     public static int ResolveInternalPort(HomeLabPortManifest port, HomeLabInstallationEntity installation) =>

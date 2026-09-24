@@ -77,7 +77,7 @@ public static class HomeLabCatalog
             new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8080),
             [new("network-route", "Internet route", "select", true, Help: "Direct exposes qBittorrent through the deployment network. VPN Gateway routes its traffic through the selected Gluetun gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries qBittorrent traffic.")],
             SupportsVpnGateway: true,
-            Exposure: ClientExposure("/qbittorrent", HomeLabBasePathSupportMode.Transparent)),
+            Exposure: ClientExposure(HomeLabBasePathSupportMode.Transparent)),
         new(
             "wordpress",
             "WordPress",
@@ -200,15 +200,15 @@ public static class HomeLabCatalog
                 new HomeLabClientAccessManifest(
                     true,
                     "web",
-                    HomeLabClientRoutingStrategy.Auto,
-                    "/stremio",
+                    HomeLabClientRoutingStrategy.Subdomain,
+                    "",
                     new HomeLabReverseProxyManifest(HomeLabBasePathSupportMode.None),
                     new HomeLabEndpointCapabilities(Streaming: true, RangeRequests: true, WebSockets: true, Uploads: true, LongLivedRequests: true)),
                 [new HomeLabClientAccessManifest(
                     true,
                     "stream",
-                    HomeLabClientRoutingStrategy.Subpath,
-                    "/stream",
+                    HomeLabClientRoutingStrategy.Subdomain,
+                    "",
                     new HomeLabReverseProxyManifest(
                         HomeLabBasePathSupportMode.Transparent,
                         StripPathPrefix: true,
@@ -327,7 +327,6 @@ public static class HomeLabCatalog
             SupportsVpnGateway: true,
             RequiresVpnGateway: true,
             Exposure: ClientExposure(
-                "/webtor",
                 HomeLabBasePathSupportMode.Native,
                 streaming: true,
                 rangeRequests: true,
@@ -350,7 +349,7 @@ public static class HomeLabCatalog
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 9696),
             [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Prowlarr traffic.")],
             SupportsVpnGateway: true,
-            Exposure: ArrClientExposure("/prowlarr")),
+            Exposure: ArrClientExposure()),
         new(
             "sonarr",
             "Sonarr",
@@ -371,7 +370,7 @@ public static class HomeLabCatalog
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8989),
             [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Sonarr traffic.")],
             SupportsVpnGateway: true,
-            Exposure: ArrClientExposure("/sonarr")),
+            Exposure: ArrClientExposure()),
         new(
             "radarr",
             "Radarr",
@@ -392,7 +391,7 @@ public static class HomeLabCatalog
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PUID"] = "1000", ["PGID"] = "1000", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 7878),
             [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Radarr traffic.")],
             SupportsVpnGateway: true,
-            Exposure: ArrClientExposure("/radarr")),
+            Exposure: ArrClientExposure()),
         new(
             "seerr",
             "Seerr (Overseerr successor)",
@@ -510,7 +509,6 @@ public static class HomeLabCatalog
         ?? throw new InvalidOperationException($"Home Lab recipe '{id}' is not in the catalog.");
 
     private static HomeLabServiceExposureManifest ClientExposure(
-        string preferredPath,
         HomeLabBasePathSupportMode basePathSupport,
         bool streaming = false,
         bool rangeRequests = false,
@@ -522,8 +520,8 @@ public static class HomeLabCatalog
             new HomeLabClientAccessManifest(
                 true,
                 "web",
-                HomeLabClientRoutingStrategy.Auto,
-                preferredPath,
+                HomeLabClientRoutingStrategy.Subdomain,
+                "",
                 new HomeLabReverseProxyManifest(
                     basePathSupport,
                     StripPathPrefix: stripPathPrefix ?? (basePathSupport != HomeLabBasePathSupportMode.Native),
@@ -536,14 +534,14 @@ public static class HomeLabCatalog
                     Uploads: true,
                     LongLivedRequests: streaming)));
 
-    private static HomeLabServiceExposureManifest ArrClientExposure(string preferredPath) =>
+    private static HomeLabServiceExposureManifest ArrClientExposure() =>
         new(
             [HomeLabEndpointScope.Internal, HomeLabEndpointScope.Lan, HomeLabEndpointScope.Client, HomeLabEndpointScope.Public],
             new HomeLabClientAccessManifest(
                 true,
                 "web",
-                HomeLabClientRoutingStrategy.Auto,
-                preferredPath,
+                HomeLabClientRoutingStrategy.Subdomain,
+                "",
                 new HomeLabReverseProxyManifest(
                     HomeLabBasePathSupportMode.Native,
                     StripPathPrefix: false,

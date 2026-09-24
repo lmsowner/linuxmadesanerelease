@@ -60,7 +60,7 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
-        await RemoveLegacyRecipePortRoutesAsync(installationEntities, cancellationToken);
+        await RemoveHomeLabSubpathRoutesAsync(installationEntities, cancellationToken);
         var deploymentEntities = await dbContext.HomeLabDeployments
             .AsNoTracking()
             .OrderBy(item => item.Name)
@@ -168,7 +168,7 @@ public sealed class HomeLabService(
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
 
-        await RemoveLegacyRecipePortRoutesAsync(entities, cancellationToken);
+        await RemoveHomeLabSubpathRoutesAsync(entities, cancellationToken);
 
         try
         {
@@ -243,7 +243,7 @@ public sealed class HomeLabService(
         return new HomeLabWorkspace(HomeLabCatalog.VisibleApps, HomeLabCatalog.Recipes, storageRoles, deployments, installations);
     }
 
-    private async Task RemoveLegacyRecipePortRoutesAsync(
+    private async Task RemoveHomeLabSubpathRoutesAsync(
         IReadOnlyList<HomeLabInstallationEntity> installations,
         CancellationToken cancellationToken)
     {
@@ -261,12 +261,12 @@ public sealed class HomeLabService(
             .Where(routeId => routeId != Guid.Empty)
             .ToHashSet();
         var legacyRoutes = routes
-            .Where(route => IsLegacyRecipePortPath(route.TargetPathPrefix))
+            .Where(route => IsHomeLabSubpath(route.TargetPathPrefix))
             .Where(route => referencedRouteIds.Contains(route.Id) || installations.Any(installation =>
                 installation.ServiceEndpoints.Any(endpoint =>
                     endpoint.Scope == (int)HomeLabEndpointScope.Public &&
                     endpoint.Host.Equals(route.Hostname, StringComparison.OrdinalIgnoreCase) &&
-                    IsLegacyRecipePortPath(endpoint.PathBase) &&
+                    IsHomeLabSubpath(endpoint.PathBase) &&
                     NormalizeEndpointPath(endpoint.PathBase).Equals(
                         NormalizeEndpointPath(route.TargetPathPrefix),
                         StringComparison.OrdinalIgnoreCase))))
@@ -284,7 +284,7 @@ public sealed class HomeLabService(
             {
                 logger.LogWarning(
                     exception,
-                    "Could not remove legacy Home Lab Edge Gateway route {RouteId} at {Path}.",
+                    "Could not remove Home Lab subpath Edge Gateway route {RouteId} at {Path}.",
                     route.Id,
                     route.TargetPathPrefix);
             }
@@ -299,7 +299,7 @@ public sealed class HomeLabService(
         {
             var stalePublicEndpoints = installation.ServiceEndpoints
                 .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public &&
-                    (IsLegacyRecipePortPath(endpoint.PathBase) &&
+                    (IsHomeLabSubpath(endpoint.PathBase) &&
                      (!endpoint.EdgeGatewayRouteId.HasValue || removedRouteIds.Contains(endpoint.EdgeGatewayRouteId.Value))))
                 .ToArray();
             if (stalePublicEndpoints.Length > 0)
@@ -327,16 +327,14 @@ public sealed class HomeLabService(
         if (changed)
         {
             await dbContext.SaveChangesAsync(cancellationToken);
-            logger.LogInformation("Removed {Count} legacy Home Lab numeric public endpoint route(s).", removedRouteIds.Count);
+            logger.LogInformation("Removed {Count} Home Lab subpath public endpoint route(s).", removedRouteIds.Count);
         }
     }
 
-    internal static bool IsLegacyRecipePortPath(string? path)
+    internal static bool IsHomeLabSubpath(string? path)
     {
         var normalized = NormalizeEndpointPath(path);
-        return normalized.Length > 1 &&
-               normalized.Length <= 6 &&
-               normalized[1..].All(character => character is >= '0' and <= '9');
+        return normalized.Length > 0;
     }
 
     private static string NormalizeEndpointPath(string? path)
@@ -2099,8 +2097,8 @@ public sealed class HomeLabService(
                     var existing = item.Installation.ServiceEndpoints.FirstOrDefault(endpoint =>
                         endpoint.PortName.Equals(access.PortName, StringComparison.OrdinalIgnoreCase) &&
                         endpoint.Scope == (int)HomeLabEndpointScope.Public);
-                    var isPrimarySingleServiceRoute = exposed.Length == 1 &&
-                                                       access.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase);
+                    var isPrimaryAccess = exposed.Length == 1 &&
+                                          access.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase);
                     var endpoint = await edgeGatewayRouteRegistrationService.RegisterClientRouteAsync(
                         new EdgeGatewayClientRouteRegistration(
                             "homelab-deployment",
@@ -2111,9 +2109,9 @@ public sealed class HomeLabService(
                             request.DomainName,
                             "127.0.0.1",
                             targetPort.Value,
-                            isPrimarySingleServiceRoute ? "/" : access.PreferredPath,
-                            isPrimarySingleServiceRoute ? HomeLabClientRoutingStrategy.Subpath : access.Routing,
-                            isPrimarySingleServiceRoute ? HomeLabBasePathSupportMode.Transparent : proxy.BasePathSupport,
+                            "/",
+                            HomeLabClientRoutingStrategy.Subdomain,
+                            HomeLabBasePathSupportMode.None,
                             proxy.StripPathPrefix,
                             proxy.ForwardPathPrefix,
                             proxy.UsePublicHostHeader,
@@ -2137,7 +2135,7 @@ public sealed class HomeLabService(
                         endpoint.RoutingMode,
                         endpoint.RouteId,
                         now);
-                    if (isPrimarySingleServiceRoute ||
+                    if (isPrimaryAccess ||
                         access.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase))
                     {
                         item.Installation.EdgeGatewayRouteId = endpoint.RouteId;
@@ -2843,12 +2841,15 @@ public sealed class HomeLabService(
                 continue;
             }
 
-            var path = EdgeGatewayRouteValidator.NormalizePathPrefix(accessEditor.TargetPathPrefix);
+            if (IsHomeLabSubpath(accessEditor.TargetPathPrefix))
+            {
+                continue;
+            }
+
+            var path = string.Empty;
             var host = accessEditor.Hostname.Trim().TrimEnd('.');
             var url = $"https://{host}{path}";
-            var routing = string.IsNullOrWhiteSpace(path)
-                ? HomeLabClientRoutingStrategy.Subdomain
-                : HomeLabClientRoutingStrategy.Subpath;
+            var routing = HomeLabClientRoutingStrategy.Subdomain;
             UpsertEndpoint(installation, access.PortName, HomeLabEndpointScope.Public, url, "https", host, null, path, routing, publishedRouteId, now);
         }
     }
@@ -5341,21 +5342,11 @@ public sealed class HomeLabService(
                 new HomeLabReverseProxyManifest(HomeLabBasePathSupportMode.None))];
         }
 
-        if (!Enum.TryParse<HomeLabClientRoutingStrategy>(service.Routing, true, out var routing))
-        {
-            throw new InvalidOperationException($"Recipe service '{service.ServiceId}' has an invalid routing strategy.");
-        }
-
-        var primaryPortName = accesses[0].PortName;
         return accesses
             .Select(access => access with
             {
-                Routing = routing,
-                PreferredPath = !access.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase)
-                    ? access.PreferredPath
-                    : string.IsNullOrWhiteSpace(service.PreferredPath)
-                    ? access.PreferredPath
-                    : service.PreferredPath
+                Routing = HomeLabClientRoutingStrategy.Subdomain,
+                PreferredPath = string.Empty
             })
             .ToArray();
     }

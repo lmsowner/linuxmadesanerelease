@@ -16,7 +16,10 @@ public sealed partial class EdgeGatewayRouteRegistrationService(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(registration);
-        var routing = ResolveRouting(registration.RoutingStrategy, registration.BasePathSupport);
+        var isHomeLabRoute = registration.OwnerType.StartsWith("homelab-", StringComparison.OrdinalIgnoreCase);
+        var routing = isHomeLabRoute
+            ? HomeLabClientRoutingStrategy.Subdomain
+            : ResolveRouting(registration.RoutingStrategy, registration.BasePathSupport);
         var originHost = EdgeGatewayRouteValidator.NormalizeHostname(registration.OriginHostname);
         var domain = EdgeGatewayRouteValidator.NormalizeDomainName(registration.DomainName);
         var host = routing == HomeLabClientRoutingStrategy.Subdomain

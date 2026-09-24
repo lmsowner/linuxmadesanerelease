@@ -103,8 +103,8 @@ public static class HomeLabPromptRecipeCatalog
             new PublishedHomeLabRecipeConnectivity(
                 "shared",
                 [
-                    new("stremio-server", ["internal", "lan", "client", "public"], true, "auto", "/stremio"),
-                    new("webtor", ["internal", "lan", "client", "public"], true, "auto", "/webtor")
+                    new("stremio-server", ["internal", "lan", "client", "public"], true, "subdomain"),
+                    new("webtor", ["internal", "lan", "client", "public"], true, "subdomain")
                 ],
                 [new("stremio-server", "webtor", "client", "Browser-facing Webtor add-on endpoint", "${endpoint:webtor:client}")])),
         Deploy("Media", "jellyfin-vpn-automation", "Media Library",
@@ -488,12 +488,12 @@ public static class HomeLabPromptRecipeCatalog
         new(
             "shared",
             [
-                new("jellyfin", ["internal", "lan", "client", "public"], true, "auto", "/jellyfin"),
-                new("qbittorrent", ["internal", "lan", "client", "public"], true, "auto", "/qbittorrent"),
-                new("prowlarr", ["internal", "lan", "client", "public"], true, "auto", "/prowlarr"),
-                new("sonarr", ["internal", "lan", "client", "public"], true, "auto", "/sonarr"),
-                new("radarr", ["internal", "lan", "client", "public"], true, "auto", "/radarr"),
-                new("seerr", ["internal", "lan", "client", "public"], true, "auto", "/seerr")
+                new("jellyfin", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("qbittorrent", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("prowlarr", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("sonarr", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("radarr", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("seerr", ["internal", "lan", "client", "public"], true, "subdomain")
             ],
             [
                 new("sonarr", "qbittorrent", "service", "Download client", "${endpoint:qbittorrent:internal}"),
