@@ -322,7 +322,11 @@ public static class HomeLabCatalog
                 VpnContainerPort: 18080,
                 VpnFileOverride: new("/etc/webtor/common.template.env", "WEB_PORT", "/init"))],
             [new("data", "/data", HomeLabStorageKind.UserData), new("database", "/pgdata", HomeLabStorageKind.Configuration)],
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["DOMAIN"] = "${endpoint:self:client}" }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8080, DockerCommand: "set -a; . /etc/webtor/common.env; PGPASSWORD=\"$PG_PASSWORD\" psql -U \"$PG_USER\" -d \"$PG_DATABASE\" -Atqc 'select 1' | grep -qx 1", StartPeriodSeconds: 45),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["DOMAIN"] = "${endpoint:self:client}",
+                ["DISABLE_VIDEO_TRANSCODING"] = "false"
+            }, [], new HomeLabHealthCheckManifest(HttpPath: "/", Port: 8080, DockerCommand: "set -a; . /etc/webtor/common.env; PGPASSWORD=\"$PG_PASSWORD\" psql -U \"$PG_USER\" -d \"$PG_DATABASE\" -Atqc 'select 1' | grep -qx 1", StartPeriodSeconds: 45),
             [new("network-route", "Internet route", "select", true, Help: "Webtor must use VPN Gateway routing. LMS blocks direct Webtor installations.", Options: new[] { "VPN Gateway (Gluetun)" }), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Webtor traffic.")],
             SupportsVpnGateway: true,
             RequiresVpnGateway: true,
