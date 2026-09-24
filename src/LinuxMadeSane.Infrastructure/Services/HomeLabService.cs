@@ -3523,17 +3523,15 @@ public sealed class HomeLabService(
             "--label", $"com.linuxmadesane.homelab.app={app.Id}",
             "--label", $"com.linuxmadesane.homelab.deployment={installation.DeploymentId}"
         };
-        if (!installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        var networkGateway = await ResolveNetworkGatewayAsync(installation.NetworkName, cancellationToken);
+        if (networkGateway is not null)
         {
-            var networkGateway = await ResolveNetworkGatewayAsync(installation.NetworkName, cancellationToken);
-            if (networkGateway is not null)
-            {
-                // Home Lab apps use the host name in generated browser and
-                // integration URLs. From a VPN namespace, the host's normal
-                // DNS entry can resolve to loopback, so make it resolve to
-                // the Docker bridge gateway inside the namespace.
-                args.AddRange(["--add-host", $"{Dns.GetHostName()}:{networkGateway}"]);
-            }
+            // Home Lab apps use the host name in generated browser and
+            // integration URLs. The host's normal DNS entry can resolve
+            // to loopback, including inside a shared VPN namespace, so
+            // make it resolve to the Docker bridge gateway in every
+            // container namespace.
+            args.AddRange(["--add-host", $"{Dns.GetHostName()}:{networkGateway}"]);
         }
         if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase))
         {
