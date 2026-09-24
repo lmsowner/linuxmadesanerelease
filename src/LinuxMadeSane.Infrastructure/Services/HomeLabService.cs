@@ -2023,7 +2023,14 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
-        if (installation.EdgeGatewayRouteId is not Guid routeId)
+        var routeIds = installation.ServiceEndpoints
+            .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public && endpoint.EdgeGatewayRouteId.HasValue)
+            .Select(endpoint => endpoint.EdgeGatewayRouteId!.Value)
+            .Append(installation.EdgeGatewayRouteId ?? Guid.Empty)
+            .Where(routeId => routeId != Guid.Empty)
+            .Distinct()
+            .ToArray();
+        if (routeIds.Length == 0)
         {
             return Success(
                 "External access is already off.",
@@ -2034,14 +2041,18 @@ public sealed class HomeLabService(
 
         try
         {
-            await edgeGatewayRouteRegistrationService.UnregisterClientRouteAsync(routeId, cancellationToken);
+            foreach (var routeId in routeIds)
+            {
+                await edgeGatewayRouteRegistrationService.UnregisterClientRouteAsync(routeId, cancellationToken);
+            }
             var publicEndpoints = installation.ServiceEndpoints
                 .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public)
                 .ToArray();
             dbContext.HomeLabServiceEndpoints.RemoveRange(publicEndpoints);
             foreach (var clientEndpoint in installation.ServiceEndpoints.Where(endpoint =>
                          endpoint.Scope == (int)HomeLabEndpointScope.Client &&
-                         endpoint.EdgeGatewayRouteId == routeId))
+                         endpoint.EdgeGatewayRouteId.HasValue &&
+                         routeIds.Contains(endpoint.EdgeGatewayRouteId.Value)))
             {
                 clientEndpoint.EdgeGatewayRouteId = null;
             }
