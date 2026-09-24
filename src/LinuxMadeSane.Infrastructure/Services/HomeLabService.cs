@@ -1867,6 +1867,11 @@ public sealed class HomeLabService(
             foreach (var item in exposed)
             {
                 var bindings = DeserializePortBindings(item.Installation.PortMappingsJson);
+                // A routed container can acquire a different host listener when its
+                // shared VPN namespace is recreated. Refresh the managed local
+                // Caddy hop before publishing the external routes so the primary
+                // endpoint cannot retain a stale destination port.
+                await UpdateCaddyAccessAsync(item.Installation, item.App, bindings, cancellationToken);
                 var primaryPortName = HomeLabEndpointPlanner.ResolveClientAccess(item.App)?.PortName;
                 foreach (var access in item.Accesses)
                 {
