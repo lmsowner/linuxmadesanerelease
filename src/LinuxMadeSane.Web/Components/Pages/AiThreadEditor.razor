@@ -401,6 +401,16 @@
 
     private AiChatRun? DisplayedRun => ActiveRun ?? LatestRun;
 
+    private AiChatMessage? LatestAssistantMessage => workspace?.Timeline
+        .OfType<AiChatMessageTimelineItemViewModel>()
+        .Select(item => item.Message)
+        .LastOrDefault(message => message.Role == AiChatMessageRole.Assistant);
+
+    private bool IsResponseNeeded =>
+        IsWaitingForChatInput &&
+        LatestAssistantMessage is { } assistantMessage &&
+        LooksLikeResponseRequest(assistantMessage.Content);
+
     private bool ShouldDisplayRunStatus =>
         DisplayedRun is not null &&
         DisplayedRun.Status != AiChatRunStatus.AwaitingApproval &&
@@ -423,6 +433,9 @@
         requiredHomeLabVpnGateways.Count > 0 ||
         requiredHomeLabStorageRoles.Count > 0 ||
         PendingApprovalRequests.Count > 0;
+
+    private bool IsAssistantResponseNeeded(AiChatMessage message) =>
+        IsResponseNeeded && LatestAssistantMessage?.Id == message.Id;
 
     private bool ShouldPollRun =>
         returnToHomeLabActionId.HasValue ||
@@ -593,6 +606,15 @@
                     }
                 </div>
 
+                @if (IsResponseNeeded)
+                {
+                    <div class="chat-response-needed" role="alert">
+                        <span class="chat-response-needed-label">Your response is needed</span>
+                        <strong>Reply to the highlighted assistant message below.</strong>
+                        <span>Type your answer in the response box and send it to continue.</span>
+                    </div>
+                }
+
                 @if (workspace!.Timeline.Count == 0)
                 {
                     <div class="empty-state">
@@ -608,10 +630,14 @@
                             {
                                 var message = messageItem.Message;
 
-                                <article class="chat-message-card @GetMessageCardClass(message)">
+                                <article class="chat-message-card @GetMessageCardClass(message) @(IsAssistantResponseNeeded(message) ? "chat-message-needs-response" : string.Empty)">
                                     <div class="chat-card-header">
                                         <div class="row-action-cluster">
                                             <span class="status-pill @GetMessagePillClass(message.Role)">@message.Role</span>
+                                            @if (IsAssistantResponseNeeded(message))
+                                            {
+                                                <span class="status-pill warning">Needs your response</span>
+                                            }
                                             <span class="meta-text">#@message.SequenceNumber</span>
                                             <span class="meta-text">@message.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
                                         </div>
@@ -634,17 +660,7 @@
                                             </div>
                                         }
                                     </div>
-                                    @if (message.Content.Length > 560)
-                                    {
-                                        <details class="chat-message-details">
-                                            <summary>@BuildMessagePreview(message.Content)</summary>
-                                            <p class="chat-message-content">@message.Content</p>
-                                        </details>
-                                    }
-                                    else
-                                    {
-                                        <p class="chat-message-content">@message.Content</p>
-                                    }
+                                    <p class="chat-message-content">@message.Content</p>
                                 </article>
                             }
                             else if (timelineItem is AiChatToolExecutionTimelineItemViewModel toolItem)
@@ -830,8 +846,15 @@
 
             <aside class="ai-chat-action-pane" aria-label="Prompt and actions">
                 <div class="ai-action-heading">
-                    <h2>Ask LMS</h2>
-                    @if (IsWaitingForUserInput)
+                    <h2>@(IsResponseNeeded ? "Reply to LMS" : "Ask LMS")</h2>
+                    @if (IsResponseNeeded)
+                    {
+                        <span class="ai-input-needed ai-input-needed-strong" role="status" aria-live="polite">
+                            <span class="ai-input-needed-dot" aria-hidden="true"></span>
+                            Response needed
+                        </span>
+                    }
+                    else if (IsWaitingForUserInput)
                     {
                         <span class="ai-input-needed" role="status" aria-live="polite">
                             <span class="ai-input-needed-dot" aria-hidden="true"></span>
@@ -842,7 +865,7 @@
 
                 <EditForm Model="@messageComposer"
                           OnValidSubmit="SendMessageAsync"
-                          class="@(IsWaitingForChatInput ? "stack-form chat-compose-form awaiting-user-input" : "stack-form chat-compose-form")">
+                          class="@(IsResponseNeeded ? "stack-form chat-compose-form awaiting-user-input chat-compose-response-needed" : "stack-form chat-compose-form")">
                     <DataAnnotationsValidator />
 
                     @if (!string.IsNullOrWhiteSpace(messageError))
@@ -851,13 +874,14 @@
                     }
 
                     <label>
-                        <span>What do you need?</span>
-                        <InputTextArea @bind-Value="messageComposer.Content" placeholder="Ask a question or describe what needs fixing." />
+                        <span>@(IsResponseNeeded ? "Your response" : "What do you need?")</span>
+                        <InputTextArea @bind-Value="messageComposer.Content"
+                                       placeholder="@(IsResponseNeeded ? "Answer the highlighted question..." : "Ask a question or describe what needs fixing.")" />
                         <ValidationMessage For="@(() => messageComposer.Content)" />
                     </label>
 
                     <div class="hero-actions">
-                        <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Working..." : "Send")"
+                        <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Working..." : IsResponseNeeded ? "Send response" : "Send")"
                                          Glyph="UiIconGlyph.Send"
                                          Type="submit"
                                          Disabled="@(isSendingMessage || HasActiveRun)" />
@@ -1627,10 +1651,34 @@
     private static string FormatCommandForDisplay(string commandText) =>
         AiCommandDisplayFormatter.SanitizeDisplayText(commandText);
 
-    private static string BuildMessagePreview(string content)
+    private static bool LooksLikeResponseRequest(string content)
     {
-        var normalized = string.Join(' ', content.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        return normalized.Length <= 180 ? normalized : $"{normalized[..177]}...";
+        var normalized = content.Trim();
+        if (normalized.Contains('?'))
+        {
+            return true;
+        }
+
+        string[] responseRequestPhrases =
+        [
+            "please tell me",
+            "please provide",
+            "please choose",
+            "please select",
+            "let me know",
+            "would you like",
+            "do you want",
+            "which ",
+            "what ",
+            "where ",
+            "how ",
+            "choose ",
+            "select ",
+            "confirm ",
+            "describe "
+        ];
+
+        return responseRequestPhrases.Any(phrase => normalized.Contains(phrase, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string BuildThreadTabTooltip(AiChatThreadListItemViewModel thread) =>
