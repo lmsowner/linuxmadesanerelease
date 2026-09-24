@@ -81,6 +81,11 @@ window.lmsFileBrowser = (() => {
                 return;
             }
 
+            const suggestionCount = Number.parseInt(element.getAttribute("data-lms-suggestion-count") ?? "0", 10) || 0;
+            if (event.key === "Tab" && suggestionCount === 0) {
+                return;
+            }
+
             event.preventDefault();
             event.stopImmediatePropagation();
 
