@@ -1855,6 +1855,10 @@ public sealed class HomeLabService(
             .Select(item => (item.Installation, item.App, Accesses: ResolveRecipeClientAccesses(item.App, connectivity)))
             .Where(item => item.App.EdgeGatewaySupported && item.Accesses.Count > 0)
             .ToArray();
+        var useSharedRecipeOrigin = sourceDeployment.RecipeId is not null ||
+                                    sourceDeployment.PromptRecipeId is not null ||
+                                    exposed.Length > 1 ||
+                                    exposed.Any(item => item.Installation.IsRecipeInstallation || item.Accesses.Count > 1);
         var registeredRouteIds = new List<Guid>();
         var output = new List<string>();
         try
@@ -1887,7 +1891,7 @@ public sealed class HomeLabService(
                         throw new InvalidOperationException($"{item.App.Name} does not have a local proxy listener for '{access.PortName}'.");
                     }
 
-                    var useRecipePortPath = sourceDeployment.RecipeId is not null &&
+                    var useRecipePortPath = useSharedRecipeOrigin &&
                                             access.Routing is not HomeLabClientRoutingStrategy.Subdomain &&
                                             (access.ReverseProxy?.BasePathSupport ?? HomeLabBasePathSupportMode.None) != HomeLabBasePathSupportMode.None;
                     var preferredPath = useRecipePortPath
@@ -1897,7 +1901,7 @@ public sealed class HomeLabService(
                     var existing = item.Installation.ServiceEndpoints.FirstOrDefault(endpoint =>
                         endpoint.PortName.Equals(access.PortName, StringComparison.OrdinalIgnoreCase) &&
                         endpoint.Scope == (int)HomeLabEndpointScope.Public);
-                    var isPrimarySingleServiceRoute = sourceDeployment.RecipeId is null &&
+                    var isPrimarySingleServiceRoute = !useSharedRecipeOrigin &&
                                                        exposed.Length == 1 &&
                                                        access.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase);
                     var endpoint = await edgeGatewayRouteRegistrationService.RegisterClientRouteAsync(
