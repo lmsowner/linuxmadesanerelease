@@ -47,8 +47,6 @@ Known package license metadata at the time of this review:
 | SQLitePCLRaw packages | Apache License 2.0 package metadata; SQLite itself is public-domain software where applicable |
 | Avalonia, Avalonia.Desktop, Avalonia.Themes.Fluent | MIT package family used by the Desktop Assistant helper native Linux UI and tray integration |
 | SkiaSharp, HarfBuzzSharp, MicroCom.Runtime, Tmds.DBus.Protocol | MIT package families pulled by Avalonia for Linux rendering, text shaping, native interop, and desktop bus integration |
-| Microsoft.Playwright | Apache License 2.0 package used by LMS Demo Mode browser automation |
-| YamlDotNet | MIT package used by LMS Demo Mode YAML script parsing |
 | Newtonsoft.Json | MIT |
 | xUnit and .NET test packages | Test-only dependencies; retain package notices if redistributed in a test bundle |
 

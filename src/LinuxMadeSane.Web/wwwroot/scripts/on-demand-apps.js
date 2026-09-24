@@ -1,3 +1,6 @@
+/* Copyright (c) Linux Made Sane.
+ * Licensed under the Business Source License 1.1. See LICENSE.md for details. */
+
 (() => {
     const active = new Map();
     const heartbeatIntervalMs = 30000;

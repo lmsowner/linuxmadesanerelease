@@ -1,4 +1,4 @@
-// Copyright (c) Richard D. Kiernan.
+// Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Application.Interfaces;
@@ -7,7 +7,6 @@ using LinuxMadeSane.Application.Services.EdgeGateway;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Abstractions.Portal;
 using LinuxMadeSane.Core.Models.Cloudflare;
-using LinuxMadeSane.DemoMode.Contracts;
 using LinuxMadeSane.Infrastructure.Persistence;
 using LinuxMadeSane.Infrastructure.Services.Cloudflare;
 using LinuxMadeSane.Infrastructure.Services;
@@ -110,7 +109,6 @@ public static class DependencyInjection
         services.AddSingleton(new SshAdminStorageSettings(Path.Combine(databaseDirectory, "ssh-admin-trials")));
         services.AddSingleton(new PortForwardStorageSettings(Path.Combine(databaseDirectory, "port-forwards")));
         services.Configure<DesktopSessionBrokerOptions>(configuration.GetSection("DesktopSession"));
-        services.Configure<DemoModeOptions>(configuration.GetSection("DemoMode"));
         services.AddSingleton<IDesktopSessionBroker, DesktopSessionBroker>();
         services.AddHostedService<DesktopSessionBrokerHostedService>();
         services.AddHostedService<TemporaryShareMountCleanupService>();
@@ -157,7 +155,6 @@ public static class DependencyInjection
         services.AddScoped<ILinuxServiceModuleDataService, SqliteLinuxServiceModuleDataService>();
         services.AddScoped<ILinuxSchedulingModuleDataService, SqliteLinuxSchedulingModuleDataService>();
         services.AddScoped<ICaddyIntegrationDataService, SqliteCaddyIntegrationDataService>();
-        services.AddScoped<IDemoDataResetService, DemoModeDataResetService>();
         services.AddScoped<IEdgeGatewayStore, SqliteEdgeGatewayStore>();
         services.AddSingleton<IOnDemandAppFavouriteStore, JsonOnDemandAppFavouriteStore>();
         services.AddScoped<IEdgeGatewayTemporaryIpApprovalService, EdgeGatewayTemporaryIpApprovalService>();
