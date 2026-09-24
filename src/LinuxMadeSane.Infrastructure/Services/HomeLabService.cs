@@ -4010,6 +4010,21 @@ public sealed class HomeLabService(
                 installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
                 return;
             }
+
+            // Shared-namespace apps do not have their own Docker port map. Their
+            // host ports come from the current gateway container. Refresh the
+            // saved bindings here so a gateway recreation cannot leave Caddy
+            // pointing at another app's old host port.
+            var currentBindings = ParsePortBindings(gateway, app, true);
+            if (currentBindings.Count == app.Ports.Count &&
+                currentBindings.Any(binding => binding.HostPort > 0))
+            {
+                var savedBindings = DeserializePortBindings(installation.PortMappingsJson);
+                if (!PortBindingsMatch(savedBindings, currentBindings))
+                {
+                    installation.PortMappingsJson = JsonSerializer.Serialize(currentBindings, JsonOptions);
+                }
+            }
         }
 
         var inspect = await InspectContainerAsync(installation.ContainerName, cancellationToken);
@@ -4250,6 +4265,15 @@ public sealed class HomeLabService(
         }
         return result;
     }
+
+    private static bool PortBindingsMatch(
+        IReadOnlyList<HomeLabPortBinding> saved,
+        IReadOnlyList<HomeLabPortBinding> current) =>
+        saved.Count == current.Count &&
+        saved.All(binding => current.Any(candidate =>
+            candidate.Name.Equals(binding.Name, StringComparison.OrdinalIgnoreCase) &&
+            candidate.ContainerPort == binding.ContainerPort &&
+            candidate.HostPort == binding.HostPort));
 
     private static (HomeLabHealthState, string) ResolveHealth(JsonObject inspect)
     {
