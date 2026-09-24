@@ -749,7 +749,23 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 var reason = gateways.Length == 0
                     ? "No VPN Gateway is installed. Configure one in Home Lab > Apps so credentials remain in LMS secret fields."
                     : "Several VPN Gateways are installed. Inspect Home Lab and choose one by installation ID.";
-                return CreateHomeLabApplyResult(definition, context.Invocation, recipe, false, [], [reason]);
+                var choices = gateways.Length > 1
+                    ? gateways
+                        .Select(item => new HomeLabAiGateway(
+                            item.Id,
+                            item.DisplayName,
+                            item.HealthState.ToString(),
+                            item.HealthDetail))
+                        .ToArray()
+                    : null;
+                return CreateHomeLabApplyResult(
+                    definition,
+                    context.Invocation,
+                    recipe,
+                    false,
+                    [],
+                    [reason],
+                    requiredVpnGateways: choices);
             }
 
             if (gateway.HealthState == HomeLabHealthState.Stopped)
@@ -861,7 +877,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         bool succeeded,
         IReadOnlyList<HomeLabAiInstallation> installations,
         IReadOnlyList<string> details,
-        IReadOnlyList<string>? requiredStorageRoles = null)
+        IReadOnlyList<string>? requiredStorageRoles = null,
+        IReadOnlyList<HomeLabAiGateway>? requiredVpnGateways = null)
     {
         var response = new ApplyHomeLabPromptRecipeToolResponse(
             recipe.Id,
@@ -870,7 +887,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             installations,
             details,
             DateTimeOffset.UtcNow,
-            requiredStorageRoles);
+            requiredStorageRoles,
+            requiredVpnGateways);
         return CreateExecutionResult(
             definition,
             invocation,

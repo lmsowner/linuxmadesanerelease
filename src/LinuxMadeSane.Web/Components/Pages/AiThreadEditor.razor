@@ -224,10 +224,14 @@
     private string lastTimelineScrollKey = string.Empty;
     private Guid? returnToHomeLabActionId;
     private Guid? processedStorageSetupInvocationId;
+    private Guid? requiredHomeLabVpnGatewayInvocationId;
+    private Guid? dismissedVpnGatewayChoiceInvocationId;
     private string? storagePickerRole;
     private IReadOnlyList<string> requiredHomeLabStorageRoles = [];
+    private IReadOnlyList<HomeLabAiGateway> requiredHomeLabVpnGateways = [];
     private readonly Dictionary<string, string> selectedHomeLabStoragePaths = new(StringComparer.OrdinalIgnoreCase);
     private bool isSavingHomeLabStorage;
+    private bool isSelectingHomeLabVpnGateway;
     private string homeLabStorageError = string.Empty;
     private readonly HashSet<Guid> submittingApprovalIds = [];
     private readonly HashSet<Guid> mutatingMessageIds = [];
@@ -410,11 +414,13 @@
         HasActiveWorkspace &&
         !HasActiveRun &&
         !isSendingMessage &&
+        requiredHomeLabVpnGateways.Count == 0 &&
         requiredHomeLabStorageRoles.Count == 0 &&
         PendingApprovalRequests.Count == 0;
 
     private bool IsWaitingForUserInput =>
         IsWaitingForChatInput ||
+        requiredHomeLabVpnGateways.Count > 0 ||
         requiredHomeLabStorageRoles.Count > 0 ||
         PendingApprovalRequests.Count > 0;
 
@@ -867,6 +873,33 @@
                     <div class="callout error">@workspaceError</div>
                 }
 
+                @if (requiredHomeLabVpnGateways.Count > 0)
+                {
+                    <div class="surface-subcard home-lab-vpn-gateway-choice-card awaiting-user-input">
+                        <div class="stack-tight">
+                            <strong>Choose the VPN Gateway for this install</strong>
+                            <p class="helper-text">Select the gateway that should carry the routed apps. LMS will continue the installation after you choose.</p>
+                        </div>
+
+                        <div class="home-lab-vpn-gateway-choice-grid">
+                            @foreach (var gateway in requiredHomeLabVpnGateways)
+                            {
+                                <div class="home-lab-vpn-gateway-choice-row">
+                                    <div class="stack-tight">
+                                        <strong>@gateway.Name</strong>
+                                        <span class="meta-text">@gateway.HealthState · @gateway.InstallationId</span>
+                                    </div>
+                                    <UiCommandButton Label="Use this gateway"
+                                                     Glyph="UiIconGlyph.Connect"
+                                                     Variant="UiButtonVariant.Action"
+                                                     Disabled="@(isSendingMessage || isSelectingHomeLabVpnGateway || HasActiveRun)"
+                                                     OnClick="@(() => SelectHomeLabVpnGatewayAsync(gateway))" />
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+
                 @if (requiredHomeLabStorageRoles.Count > 0)
                 {
                     <div class="surface-subcard home-lab-storage-choice-card awaiting-user-input">
@@ -1067,6 +1100,7 @@
 
         SyncApprovalDrafts();
         await SyncRequiredHomeLabStorageAsync();
+        SyncRequiredHomeLabVpnGatewayChoice();
         ScheduleTimelineScroll();
         UpdateWorkspaceRefreshLoop();
     }
@@ -1081,6 +1115,7 @@
         workspace = await ChatService.GetWorkspaceAsync(ThreadId.Value);
         SyncApprovalDrafts();
         await SyncRequiredHomeLabStorageAsync();
+        SyncRequiredHomeLabVpnGatewayChoice();
         ScheduleTimelineScroll();
         ReturnToHomeLabWhenApprovedChangeCompletes();
         UpdateWorkspaceRefreshLoop();
@@ -1671,6 +1706,7 @@
                         workspace = await ChatService.GetWorkspaceAsync(threadId);
                         SyncApprovalDrafts();
                         await SyncRequiredHomeLabStorageAsync();
+                        SyncRequiredHomeLabVpnGatewayChoice();
                         ScheduleTimelineScroll();
                         ReturnToHomeLabWhenApprovedChangeCompletes();
                         UpdateWorkspaceRefreshLoop();
@@ -1767,6 +1803,80 @@
         selectedHomeLabStoragePaths.Clear();
         storagePickerRole = null;
         homeLabStorageError = string.Empty;
+    }
+
+    private void SyncRequiredHomeLabVpnGatewayChoice()
+    {
+        if (workspace is null)
+        {
+            requiredHomeLabVpnGateways = [];
+            requiredHomeLabVpnGatewayInvocationId = null;
+            return;
+        }
+
+        var invocation = workspace.Timeline
+            .OfType<AiChatToolExecutionTimelineItemViewModel>()
+            .Where(item => item.ToolName.Equals(AiToolNames.ApplyHomeLabPromptRecipe, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(item => item.StartedAtUtc)
+            .FirstOrDefault();
+        if (invocation is null ||
+            invocation.Status != AiInvocationStatus.Failed ||
+            invocation.InvocationId == dismissedVpnGatewayChoiceInvocationId)
+        {
+            requiredHomeLabVpnGateways = [];
+            requiredHomeLabVpnGatewayInvocationId = invocation?.InvocationId;
+            return;
+        }
+
+        ApplyHomeLabPromptRecipeToolResponse? response = null;
+        try
+        {
+            response = JsonSerializer.Deserialize<ApplyHomeLabPromptRecipeToolResponse>(
+                invocation.PayloadText,
+                ToolPayloadSerializerOptions);
+        }
+        catch (JsonException)
+        {
+        }
+
+        requiredHomeLabVpnGateways = response?.RequiredVpnGateways ?? [];
+        requiredHomeLabVpnGatewayInvocationId = invocation.InvocationId;
+    }
+
+    private async Task SelectHomeLabVpnGatewayAsync(HomeLabAiGateway gateway)
+    {
+        if (!ThreadId.HasValue ||
+            isSendingMessage ||
+            isSelectingHomeLabVpnGateway ||
+            HasActiveRun)
+        {
+            return;
+        }
+
+        isSelectingHomeLabVpnGateway = true;
+        messageError = string.Empty;
+        dismissedVpnGatewayChoiceInvocationId = requiredHomeLabVpnGatewayInvocationId;
+
+        try
+        {
+            await ChatService.SendUserMessageAsync(
+                ThreadId.Value,
+                new AiChatMessageComposer
+                {
+                    Content = $"Use the existing VPN Gateway \"{gateway.Name}\" with installation ID {gateway.InstallationId} for the requested Home Lab installation and continue now."
+                });
+            requiredHomeLabVpnGateways = [];
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            isSelectingHomeLabVpnGateway = false;
+        }
     }
 
     private static IReadOnlyList<string> GetRequiredStorageRoles(string payloadText)
