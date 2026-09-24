@@ -129,6 +129,11 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
 
             builder.AppendLine($"    handle @{matcherName} {{");
 
+            // Capture the browser-facing URI before a path route strips its prefix.
+            // Edge Gateway auth must validate the public route path, while the
+            // upstream application receives the stripped path when configured.
+            builder.AppendLine("        vars lms_edge_request_uri {uri}");
+
             if (route.AuthMode != EdgeGatewayAuthMode.PassThrough)
             {
                 builder.AppendLine($"        forward_auth 127.0.0.1:{Math.Clamp(options.LmsForwardAuthPort, 1, 65535)} {{");
@@ -139,7 +144,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
                 builder.AppendLine("            header_up X-Forwarded-For \"{vars.lms_edge_client_ip}, 127.0.0.1\"");
                 builder.AppendLine("            header_up X-Forwarded-Proto https");
                 builder.AppendLine("            header_up X-Forwarded-Host {host}");
-                builder.AppendLine("            header_up X-Forwarded-Uri {uri}");
+                builder.AppendLine("            header_up X-Forwarded-Uri {vars.lms_edge_request_uri}");
                 builder.AppendLine("            header_up X-Forwarded-Port 443");
                 builder.AppendLine("            copy_headers X-LMS-User X-LMS-Email X-LMS-Groups");
                 builder.AppendLine("        }");
