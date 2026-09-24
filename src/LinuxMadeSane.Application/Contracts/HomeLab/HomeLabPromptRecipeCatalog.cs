@@ -67,7 +67,7 @@ public static class HomeLabPromptRecipeCatalog
         """
         Treat this as a guided Linux Made Sane Home Lab task. Use inspect_home_lab before proposing changes. Use apply_home_lab_prompt_recipe for supported deployments and repairs; do not replace the LMS-managed deployment with raw docker, docker compose, or shell commands. Never request or repeat passwords, API keys, VPN profiles, or other secrets in chat.
 
-        LMS must remain the source of truth for container state, storage, local access routes, health checks, and network routing. Reuse healthy installed infrastructure where the selected recipe requires it. If required infrastructure is missing, direct me to the appropriate LMS form so credentials remain in protected fields. Inspect the result after changes and do not claim success until every requested app is present and LMS reports a usable health state.
+        LMS must remain the source of truth for container state, storage, local access routes, health checks, and network routing. Reuse healthy installed infrastructure where the selected recipe requires it. If the user reports a web or playback symptom, an HTTP health check is not proof that the app works: use the repair tool and report the actual before/after change. If required infrastructure is missing, direct me to the appropriate LMS form so credentials remain in protected fields. Inspect the result after changes and do not claim success unless the requested app is present, the reported path is verified, and the tool output says what changed or why no fix was possible.
         """;
 
     public static IReadOnlyList<HomeLabPromptRecipe> All { get; } =

@@ -233,6 +233,7 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
 
         var builder = new StringBuilder();
         builder.AppendLine($"        reverse_proxy {targetUrl} {{");
+        builder.AppendLine("            flush_interval -1");
         builder.AppendLine(route.UsePublicHostHeader
             ? "            header_up Host {host}"
             : "            header_up Host {upstream_hostport}");

@@ -172,6 +172,7 @@ public sealed class CaddyIntegrationService(
         if (route.DestinationScheme == CaddyProxyTargetScheme.Https || route.RewriteSecureCookiesForHttp)
         {
             builder.AppendLine($"    reverse_proxy {targetUrl} {{");
+            builder.AppendLine("        flush_interval -1");
             if (route.RewriteSecureCookiesForHttp)
             {
                 builder.AppendLine("        header_down Set-Cookie \"Secure; SameSite=None\" \"SameSite=Lax\"");
@@ -186,7 +187,9 @@ public sealed class CaddyIntegrationService(
         }
         else
         {
-            builder.AppendLine($"    reverse_proxy {targetUrl}");
+            builder.AppendLine($"    reverse_proxy {targetUrl} {{");
+            builder.AppendLine("        flush_interval -1");
+            builder.AppendLine("    }");
         }
 
         builder.Append('}');

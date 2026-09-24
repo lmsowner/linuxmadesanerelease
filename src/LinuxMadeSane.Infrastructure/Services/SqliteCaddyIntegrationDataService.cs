@@ -593,6 +593,7 @@ public sealed class SqliteCaddyIntegrationDataService(
         if (destinationScheme == CaddyProxyTargetScheme.Https || rewriteSecureCookiesForHttp)
         {
             builder.AppendLine($"    reverse_proxy {targetUrl} {{");
+            builder.AppendLine("        flush_interval -1");
             if (rewriteSecureCookiesForHttp)
             {
                 builder.AppendLine("        header_down Set-Cookie \"Secure; SameSite=None\" \"SameSite=Lax\"");
@@ -607,7 +608,9 @@ public sealed class SqliteCaddyIntegrationDataService(
         }
         else
         {
-            builder.AppendLine($"    reverse_proxy {targetUrl}");
+            builder.AppendLine($"    reverse_proxy {targetUrl} {{");
+            builder.AppendLine("        flush_interval -1");
+            builder.AppendLine("    }");
         }
 
         builder.AppendLine("}");

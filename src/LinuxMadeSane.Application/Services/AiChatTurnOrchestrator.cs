@@ -1506,7 +1506,7 @@ public sealed class AiChatTurnOrchestrator(
         return new AiProposedActionProposal
         {
             Title = "Repair Home Lab Docker container",
-            Description = $"Repair the unhealthy LMS installation {request.InstallationId}.{settingsAction} LMS will refuse to recreate a healthy app and will touch a shared VPN gateway only when its security checks show that the gateway is faulty.",
+            Description = $"Reapply and verify the saved container settings for LMS installation {request.InstallationId}.{settingsAction} This is an explicit repair request, so LMS may recreate an apparently healthy container when its web health check does not cover the reported symptom. A shared VPN gateway is repaired when the routed namespace requires it.",
             ToolName = toolCall.ToolName,
             ProviderToolCallId = toolCall.ProviderToolCallId,
             ToolArgumentsJson = toolCall.ArgumentsJson,

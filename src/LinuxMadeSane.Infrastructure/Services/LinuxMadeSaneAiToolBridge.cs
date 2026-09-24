@@ -539,34 +539,11 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) &&
                 item.ContainerName.Equals(gatewayContainerName, StringComparison.OrdinalIgnoreCase));
         }
-        if (!request.RestoreContainerSettings && installation.HealthState is HomeLabHealthState.Healthy or HomeLabHealthState.Starting)
-        {
-            var guardedResponse = new RepairHomeLabInstallationToolResponse(
-                installation.Id,
-                installation.DisplayName,
-                "No container repair performed",
-                true,
-                before,
-                before,
-                installation.HealthState == HomeLabHealthState.Healthy
-                    ? "LMS refused to recreate a healthy container. Inspect the app's persistent configuration and local access before proposing a scoped configuration repair."
-                    : "LMS refused to recreate a container whose health check is still starting. Inspect it again after startup completes.",
-                DateTimeOffset.UtcNow);
-            return CreateExecutionResult(
-                definition,
-                context.Invocation,
-                guardedResponse,
-                AiExecutionOutcome.Succeeded,
-                $"Protected healthy Home Lab container {installation.DisplayName} from an unnecessary rebuild.",
-                guardedResponse.Detail,
-                string.Empty,
-                0);
-        }
         var action = installation.HealthState switch
         {
             HomeLabHealthState.Stopped => HomeLabLifecycleAction.Start,
             HomeLabHealthState.Degraded or HomeLabHealthState.Failed or HomeLabHealthState.Blocked => HomeLabLifecycleAction.Repair,
-            _ => HomeLabLifecycleAction.RefreshHealth
+            _ => HomeLabLifecycleAction.Repair
         };
         var actionLabel = action.ToString();
         HomeLabOperationResult operation;
@@ -623,11 +600,48 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             response,
             succeeded ? AiExecutionOutcome.Succeeded : AiExecutionOutcome.Failed,
             succeeded
-                ? $"Repaired and verified Home Lab container {refreshed.DisplayName}."
-                : $"Home Lab container {refreshed.DisplayName} still needs attention.",
+                ? BuildRepairSummary(before, after, actionLabel)
+                : $"No verified fix: {refreshed.DisplayName} still needs attention after {actionLabel}.",
             output,
             succeeded ? string.Empty : "The container did not reach a healthy LMS-managed state after the repair attempt.",
             succeeded ? 0 : 1);
+    }
+
+    private static string BuildRepairSummary(
+        HomeLabAiInstallation before,
+        HomeLabAiInstallation after,
+        string actionLabel)
+    {
+        var changed = new List<string>();
+        if (!string.Equals(before.NetworkMode, after.NetworkMode, StringComparison.OrdinalIgnoreCase))
+        {
+            changed.Add($"network {before.NetworkMode} -> {after.NetworkMode}");
+        }
+
+        if (!string.Equals(FormatHomeLabPorts(before.Ports), FormatHomeLabPorts(after.Ports), StringComparison.Ordinal))
+        {
+            changed.Add($"ports {FormatHomeLabPorts(before.Ports)} -> {FormatHomeLabPorts(after.Ports)}");
+        }
+
+        if (!string.Equals(before.AccessUrl, after.AccessUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            changed.Add($"access URL {before.AccessUrl} -> {after.AccessUrl}");
+        }
+
+        if (!string.Equals(before.PortForwardingStatus, after.PortForwardingStatus, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(before.PortForwardingDetail, after.PortForwardingDetail, StringComparison.OrdinalIgnoreCase))
+        {
+            changed.Add($"port forwarding {FormatHomeLabForwarding(after)}");
+        }
+
+        if (before.IsSecured != after.IsSecured)
+        {
+            changed.Add($"VPN secured {before.IsSecured} -> {after.IsSecured}");
+        }
+
+        return changed.Count == 0
+            ? $"Changed: {actionLabel}; the saved container settings were reapplied and verified. No displayed network or endpoint value changed."
+            : $"Changed: {actionLabel}; {string.Join("; ", changed)}.";
     }
 
     private async Task<AiToolExecutionResult> ExecuteInspectHomeLabApplicationConfigAsync(

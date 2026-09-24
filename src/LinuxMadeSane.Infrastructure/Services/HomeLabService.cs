@@ -1341,23 +1341,6 @@ public sealed class HomeLabService(
             var isRecreate = action == HomeLabLifecycleAction.Recreate;
             var reuseExistingImage = isRepair || isRecreate;
             var operationName = isRepair ? "Repair" : isRecreate ? "Recreate" : "Replace";
-            if (isRepair && !app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
-            {
-                await RefreshHealthInternalAsync(installation, cancellationToken);
-                if (ToHealth(installation.HealthState) is not (
-                    HomeLabHealthState.Degraded or
-                    HomeLabHealthState.Failed or
-                    HomeLabHealthState.Blocked))
-                {
-                    await dbContext.SaveChangesAsync(cancellationToken);
-                    return Success(
-                        "Home Lab repair not needed.",
-                        $"{app.Name} is {ToHealth(installation.HealthState).ToString().ToLowerInvariant()}.",
-                        output,
-                        ToHealth(installation.HealthState));
-                }
-            }
-
             if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             {
                 return await RecreateVpnGatewayAsync(installation, output, !reuseExistingImage, cancellationToken);
