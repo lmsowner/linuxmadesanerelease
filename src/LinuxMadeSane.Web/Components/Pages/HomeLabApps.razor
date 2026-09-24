@@ -422,13 +422,13 @@
                                                         {
                                                             <div class="home-lab-config-grid">
                                                                 <div class="home-lab-config-field">
-                                                                    <label for="home-lab-external-hostname">External hostname</label>
+                                                                    <label for="home-lab-external-hostname">@(selectedInstallation.IsRecipeInstallation ? "Shared recipe hostname" : "External hostname")</label>
                                                                     <input id="home-lab-external-hostname"
                                                                            class="ui-control-input"
                                                                            value="@externalHostnameDraft"
                                                                            disabled="@(externalRoute is { Enabled: true })"
                                                                            @oninput="eventArgs => externalHostnameDraft = eventArgs.Value?.ToString() ?? string.Empty" />
-                                                                    <span class="meta-text">@(externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : "Use a new hostname inside the selected Cloudflare zone.")</span>
+                                                                    <span class="meta-text">@(externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : selectedInstallation.IsRecipeInstallation ? "All externally published services in this recipe share this hostname; each Docker listener is exposed under its host port path." : "Use a new hostname inside the selected Cloudflare zone.")</span>
                                                                 </div>
                                                                 <div class="home-lab-config-field">
                                                                     <label for="home-lab-external-domain">Cloudflare zone</label>
@@ -461,7 +461,7 @@
                                                                 <code>@BuildExternalPreview()</code>
                                                                 @if (selectedInstallation.IsRecipeInstallation)
                                                                 {
-                                                                    <p class="meta-text">LMS keeps internal Docker URLs private. Services that declare no safe base-path support use a dedicated hostname automatically.</p>
+                                                                    <p class="meta-text">LMS keeps internal Docker URLs private. Recipe services share this hostname and are addressed as <code>/&lt;Docker host port&gt;</code>, for example <code>/39001</code>.</p>
                                                                 }
                                                             </div>
                                                             <div class="home-lab-action-row">
@@ -2474,9 +2474,18 @@
 
         var domain = AvailableExternalDomains.FirstOrDefault();
         externalDomainDraft = domain?.DomainName ?? string.Empty;
-        externalHostnameDraft = string.IsNullOrWhiteSpace(externalDomainDraft)
-            ? installation.AppId
-            : $"{BuildAvailableExternalSubdomain(installation)}.{externalDomainDraft}";
+        var existingRecipeRoute = FindPublishedRecipeRoute(installation);
+        if (existingRecipeRoute is not null)
+        {
+            externalHostnameDraft = existingRecipeRoute.Hostname;
+            externalDomainDraft = existingRecipeRoute.DomainName;
+        }
+        else
+        {
+            externalHostnameDraft = string.IsNullOrWhiteSpace(externalDomainDraft)
+                ? BuildAvailableExternalSubdomain(installation)
+                : $"{BuildAvailableExternalSubdomain(installation)}.{externalDomainDraft}";
+        }
         externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
     }
 
@@ -2495,12 +2504,79 @@
 
     private string BuildAvailableExternalSubdomain(HomeLabAppInstallation installation)
     {
-        var candidate = installation.AppId.Trim().ToLowerInvariant();
+        var candidate = BuildExternalSubdomainCandidate(installation);
         var hostname = $"{candidate}.{externalDomainDraft}";
         var isUsed = edgeGatewayRoutes.Any(route =>
             route.Id != installation.EdgeGatewayRouteId &&
             route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)) == true;
-        return isUsed ? $"{candidate}-{installation.ContainerName[^Math.Min(8, installation.ContainerName.Length)..]}" : candidate;
+        return isUsed && !installation.IsRecipeInstallation
+            ? $"{candidate}-{installation.ContainerName[^Math.Min(8, installation.ContainerName.Length)..]}"
+            : candidate;
+    }
+
+    private string BuildExternalSubdomainCandidate(HomeLabAppInstallation installation)
+    {
+        var recipeName = ResolveRecipeExternalName(installation);
+        var source = installation.IsRecipeInstallation && !string.IsNullOrWhiteSpace(recipeName)
+            ? recipeName
+            : installation.AppId;
+        var builder = new System.Text.StringBuilder();
+        foreach (var character in source.Trim().ToLowerInvariant())
+        {
+            if (character is >= 'a' and <= 'z' or >= '0' and <= '9')
+            {
+                builder.Append(character);
+            }
+            else if (builder.Length > 0 && builder[^1] != '-')
+            {
+                builder.Append('-');
+            }
+        }
+
+        var candidate = builder.ToString().Trim('-');
+        if (candidate.Length == 0)
+        {
+            candidate = installation.AppId.Trim().ToLowerInvariant();
+        }
+
+        return candidate.Length <= 63 ? candidate : candidate[..63].TrimEnd('-');
+    }
+
+    private string? ResolveRecipeExternalName(HomeLabAppInstallation installation)
+    {
+        var deployment = workspace?.Deployments.FirstOrDefault(item => item.Id == installation.DeploymentId);
+        if (deployment is null)
+        {
+            return null;
+        }
+
+        var recipeId = deployment.PromptRecipeId ?? deployment.RecipeId;
+        return promptRecipes.FirstOrDefault(item => item.Id.Equals(recipeId, StringComparison.OrdinalIgnoreCase))?.Name
+               ?? workspace?.Recipes.FirstOrDefault(item => item.Id.Equals(recipeId, StringComparison.OrdinalIgnoreCase))?.Name
+               ?? deployment.Name;
+    }
+
+    private EdgeGatewayRouteListItem? FindPublishedRecipeRoute(HomeLabAppInstallation installation)
+    {
+        if (!installation.IsRecipeInstallation || workspace is null)
+        {
+            return null;
+        }
+
+        var deployment = workspace.Deployments.FirstOrDefault(item => item.Id == installation.DeploymentId);
+        var peerDeploymentIds = deployment?.RecipeRunId is Guid recipeRunId
+            ? workspace.Deployments.Where(item => item.RecipeRunId == recipeRunId).Select(item => item.Id).ToHashSet()
+            : new HashSet<Guid> { installation.DeploymentId };
+        var routeIds = workspace.Installations
+            .Where(item => peerDeploymentIds.Contains(item.DeploymentId))
+            .SelectMany(item => (item.ServiceEndpoints ?? [])
+                .Where(endpoint => endpoint.Scope == HomeLabEndpointScope.Public && endpoint.EdgeGatewayRouteId.HasValue)
+                .Select(endpoint => endpoint.EdgeGatewayRouteId!.Value)
+                .Append(item.EdgeGatewayRouteId ?? Guid.Empty))
+            .Where(routeId => routeId != Guid.Empty)
+            .ToHashSet();
+
+        return edgeGatewayRoutes.FirstOrDefault(route => routeIds.Contains(route.Id));
     }
 
     private void ChangeExternalDomain(ChangeEventArgs eventArgs)

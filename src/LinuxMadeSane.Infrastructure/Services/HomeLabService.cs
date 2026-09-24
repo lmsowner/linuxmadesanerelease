@@ -1892,11 +1892,13 @@ public sealed class HomeLabService(
                     }
 
                     var useRecipePortPath = useSharedRecipeOrigin &&
-                                            access.Routing is not HomeLabClientRoutingStrategy.Subdomain &&
                                             (access.ReverseProxy?.BasePathSupport ?? HomeLabBasePathSupportMode.None) != HomeLabBasePathSupportMode.None;
                     var preferredPath = useRecipePortPath
                         ? HomeLabEndpointPlanner.BuildRecipePortPath(binding.HostPort)
                         : access.PreferredPath;
+                    var routing = useRecipePortPath
+                        ? HomeLabClientRoutingStrategy.Subpath
+                        : access.Routing;
                     
                     var existing = item.Installation.ServiceEndpoints.FirstOrDefault(endpoint =>
                         endpoint.PortName.Equals(access.PortName, StringComparison.OrdinalIgnoreCase) &&
@@ -1915,7 +1917,7 @@ public sealed class HomeLabService(
                             "127.0.0.1",
                             targetPort.Value,
                             isPrimarySingleServiceRoute ? "/" : preferredPath,
-                            isPrimarySingleServiceRoute ? HomeLabClientRoutingStrategy.Subpath : access.Routing,
+                            isPrimarySingleServiceRoute ? HomeLabClientRoutingStrategy.Subpath : routing,
                             isPrimarySingleServiceRoute ? HomeLabBasePathSupportMode.Transparent : proxy.BasePathSupport,
                             proxy.StripPathPrefix,
                             proxy.ForwardPathPrefix,
