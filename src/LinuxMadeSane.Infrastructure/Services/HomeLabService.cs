@@ -4017,7 +4017,7 @@ public sealed class HomeLabService(
             // pointing at another app's old host port.
             var currentBindings = ParsePortBindings(gateway, app, true);
             if (currentBindings.Count == app.Ports.Count &&
-                currentBindings.Any(binding => binding.HostPort > 0))
+                currentBindings.All(binding => binding.HostPort > 0))
             {
                 var savedBindings = DeserializePortBindings(installation.PortMappingsJson);
                 if (!PortBindingsMatch(savedBindings, currentBindings))
