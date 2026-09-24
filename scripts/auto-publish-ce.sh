@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright (c) Linux Made Sane.
+# Copyright (c) Richard D. Kiernan.
 # Licensed under the Business Source License 1.1. See LICENSE for details.
 
 set -euo pipefail

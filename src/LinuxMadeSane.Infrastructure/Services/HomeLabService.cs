@@ -1,4 +1,4 @@
-// Copyright (c) Linux Made Sane.
+// Copyright (c) Richard D. Kiernan.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text.Json;
@@ -1371,8 +1371,8 @@ public sealed class HomeLabService(
             }
 
             var remove = await RunDockerAsync(
-                ["rm", "--force", installation.ContainerName],
-                $"Remove Home Lab container {installation.ContainerName}",
+                ["rm", "--force", "--volumes", installation.ContainerName],
+                $"Remove Home Lab container and anonymous volumes {installation.ContainerName}",
                 cancellationToken);
             AppendOutput(output, remove);
             if (remove.ExitCode != 0 && !ContainsNoSuchContainer(remove))
@@ -1404,37 +1404,58 @@ public sealed class HomeLabService(
                 .ToArray();
             var caddyRouteId = installation.CaddyRouteId;
             var secretReferences = DeserializeDictionary(installation.SecretConfigurationJson).Values.ToArray();
+            try
+            {
+                foreach (var routeId in routeIds)
+                {
+                    // This must remove the published route as well as LMS's
+                    // local record. A local-only fallback would leave DNS,
+                    // tunnel, or Caddy state behind while reporting success.
+                    await edgeGatewayRouteRegistrationService.UnregisterClientRouteAsync(routeId, cancellationToken);
+                }
+
+                if (caddyRouteId.HasValue)
+                {
+                    await caddyIntegrationService.DeleteRouteAsync(caddyRouteId.Value, cancellationToken);
+                }
+
+                foreach (var secretReference in secretReferences)
+                {
+                    await secretStore.DeleteSecretAsync(secretReference, cancellationToken);
+                }
+
+                if (isLast)
+                {
+                    var network = await RunDockerAsync(
+                        ["network", "rm", deployment.NetworkName],
+                        $"Remove Home Lab network {deployment.NetworkName}",
+                        cancellationToken);
+                    AppendOutput(output, network);
+                    if (network.ExitCode != 0 && !ContainsNoSuchNetwork(network))
+                    {
+                        return Failure(
+                            "Home Lab app removal is incomplete.",
+                            NormalizeFailure(network),
+                            output,
+                            HomeLabHealthState.Failed);
+                    }
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                return Failure(
+                    "Home Lab app removal is incomplete.",
+                    $"The container and managed configuration were removed, but one or more external resources could not be cleaned up: {exception.Message} Retry removal to finish cleanup.",
+                    output,
+                    HomeLabHealthState.Failed);
+            }
+
             dbContext.HomeLabInstallations.Remove(installation);
             if (isLast)
             {
-                var network = await RunDockerAsync(
-                    ["network", "rm", deployment.NetworkName],
-                    $"Remove Home Lab network {deployment.NetworkName}",
-                    cancellationToken);
-                AppendOutput(output, network);
                 dbContext.HomeLabDeployments.Remove(deployment);
             }
-
             await dbContext.SaveChangesAsync(cancellationToken);
-            foreach (var routeId in routeIds)
-            {
-                try
-                {
-                    await edgeGatewayRouteRegistrationService.UnregisterClientRouteAsync(routeId, cancellationToken);
-                }
-                catch (InvalidOperationException)
-                {
-                    await edgeGatewayService.DeleteRouteAsync(routeId, cancellationToken);
-                }
-            }
-            if (caddyRouteId.HasValue)
-            {
-                await caddyIntegrationService.DeleteRouteAsync(caddyRouteId.Value, cancellationToken);
-            }
-            foreach (var secretReference in secretReferences)
-            {
-                await secretStore.DeleteSecretAsync(secretReference, cancellationToken);
-            }
 
             return Success(
                 "Home Lab app removed.",
@@ -3502,6 +3523,18 @@ public sealed class HomeLabService(
             "--label", $"com.linuxmadesane.homelab.app={app.Id}",
             "--label", $"com.linuxmadesane.homelab.deployment={installation.DeploymentId}"
         };
+        if (!installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            var networkGateway = await ResolveNetworkGatewayAsync(installation.NetworkName, cancellationToken);
+            if (networkGateway is not null)
+            {
+                // Home Lab apps use the host name in generated browser and
+                // integration URLs. From a VPN namespace, the host's normal
+                // DNS entry can resolve to loopback, so make it resolve to
+                // the Docker bridge gateway inside the namespace.
+                args.AddRange(["--add-host", $"{Dns.GetHostName()}:{networkGateway}"]);
+            }
+        }
         if (installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase))
         {
             args.AddRange(["--network", installation.NetworkName, "--network-alias", app.Id]);
@@ -3925,6 +3958,24 @@ public sealed class HomeLabService(
         return create.ExitCode == 0
             ? Success("Home Lab network created.", $"Created {networkName}.", [create.StandardOutput], HomeLabHealthState.Healthy)
             : Failure("Home Lab network setup failed.", NormalizeFailure(create), [create.StandardError], HomeLabHealthState.Failed);
+    }
+
+    private async Task<string?> ResolveNetworkGatewayAsync(
+        string networkName,
+        CancellationToken cancellationToken)
+    {
+        var inspect = await RunDockerAsync(
+            ["network", "inspect", "--format", "{{(index .IPAM.Config 0).Gateway}}", networkName],
+            $"Resolve Home Lab network gateway {networkName}",
+            cancellationToken);
+        if (inspect.ExitCode != 0)
+        {
+            logger.LogWarning("Could not resolve Docker network gateway for {NetworkName}: {Failure}.", networkName, NormalizeFailure(inspect));
+            return null;
+        }
+
+        var gateway = inspect.StandardOutput.Trim();
+        return IPAddress.TryParse(gateway, out _) ? gateway : null;
     }
 
     private async Task RefreshHealthInternalAsync(HomeLabInstallationEntity installation, CancellationToken cancellationToken)
@@ -5190,6 +5241,11 @@ public sealed class HomeLabService(
 
     private static bool ContainsNoSuchContainer(LinuxCommandResult result) =>
         result.StandardError.Contains("No such container", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ContainsNoSuchNetwork(LinuxCommandResult result) =>
+        result.StandardError.Contains("No such network", StringComparison.OrdinalIgnoreCase) ||
+        (result.StandardError.Contains("network", StringComparison.OrdinalIgnoreCase) &&
+         result.StandardError.Contains("not found", StringComparison.OrdinalIgnoreCase));
 
     private static string NormalizeFailure(LinuxCommandResult result) =>
         FirstNonEmpty(result.StandardError, result.StandardOutput, $"Docker exited with code {result.ExitCode}.");
