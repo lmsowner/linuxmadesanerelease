@@ -1248,6 +1248,20 @@ public sealed class HomeLabService(
 
         if (action == HomeLabLifecycleAction.Remove)
         {
+            IReadOnlyList<string> configurationPaths;
+            try
+            {
+                configurationPaths = await ResolveConfigurationPathsToRemoveAsync(installation, app, cancellationToken);
+            }
+            catch (InvalidOperationException exception)
+            {
+                return Failure(
+                    "Home Lab app removal was blocked.",
+                    exception.Message,
+                    output,
+                    HomeLabHealthState.Failed);
+            }
+
             var remove = await RunDockerAsync(
                 ["rm", "--force", installation.ContainerName],
                 $"Remove Home Lab container {installation.ContainerName}",
@@ -1256,6 +1270,16 @@ public sealed class HomeLabService(
             if (remove.ExitCode != 0 && !ContainsNoSuchContainer(remove))
             {
                 return Failure("Home Lab app removal failed.", NormalizeFailure(remove), output, HomeLabHealthState.Failed);
+            }
+
+            var configurationRemoval = await RemoveConfigurationPathsAsync(
+                installation,
+                configurationPaths,
+                output,
+                cancellationToken);
+            if (configurationRemoval is not null)
+            {
+                return configurationRemoval;
             }
 
             var deployment = await dbContext.HomeLabDeployments
@@ -1306,7 +1330,7 @@ public sealed class HomeLabService(
 
             return Success(
                 "Home Lab app removed.",
-                $"{app.Name} was removed. Persistent host data was left in place.",
+                $"{app.Name} was removed, including its LMS-managed configuration. Shared host data was left in place.",
                 output,
                 HomeLabHealthState.Stopped);
         }
@@ -1512,6 +1536,103 @@ public sealed class HomeLabService(
             installation.HealthDetail,
             output,
             ToHealth(installation.HealthState));
+    }
+
+    private async Task<IReadOnlyList<string>> ResolveConfigurationPathsToRemoveAsync(
+        HomeLabInstallationEntity installation,
+        HomeLabAppManifest app,
+        CancellationToken cancellationToken)
+    {
+        var configurationContainerPaths = app.Volumes
+            .Where(volume => volume.Kind == HomeLabStorageKind.Configuration)
+            .Select(volume => volume.ContainerPath)
+            .ToHashSet(StringComparer.Ordinal);
+        if (configurationContainerPaths.Count == 0)
+        {
+            return [];
+        }
+
+        var bindings = DeserializeBindings(installation.VolumeMappingsJson);
+        var configurationPaths = bindings
+            .Where(binding => configurationContainerPaths.Contains(binding.ContainerPath))
+            .Select(binding => NormalizeHostPath(binding.HostPath))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (configurationPaths.Length == 0)
+        {
+            return [];
+        }
+
+        var sharedStoragePaths = await dbContext.HomeLabStorageRoles
+            .AsNoTracking()
+            .Select(item => item.HostPath)
+            .ToListAsync(cancellationToken);
+        foreach (var configurationPath in configurationPaths)
+        {
+            if (sharedStoragePaths
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Select(NormalizeHostPath)
+                .Any(sharedPath => IsPathEqualOrDescendant(configurationPath, sharedPath)))
+            {
+                throw new InvalidOperationException(
+                    $"The configuration path '{configurationPath}' is also a Home Lab storage root. Remove the shared storage mapping before deleting this app.");
+            }
+        }
+
+        var otherInstallationBindings = await dbContext.HomeLabInstallations
+            .AsNoTracking()
+            .Where(item => item.Id != installation.Id)
+            .Select(item => item.VolumeMappingsJson)
+            .ToListAsync(cancellationToken);
+        var otherPaths = otherInstallationBindings
+            .SelectMany(DeserializeBindings)
+            .Where(binding => !IsStandardStorageBinding(binding))
+            .Select(binding => NormalizeHostPath(binding.HostPath))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        foreach (var configurationPath in configurationPaths)
+        {
+            if (otherPaths.Any(otherPath => IsPathEqualOrDescendant(configurationPath, otherPath)))
+            {
+                throw new InvalidOperationException(
+                    $"The configuration path '{configurationPath}' is also used by another Home Lab installation and was not removed.");
+            }
+        }
+
+        return configurationPaths;
+    }
+
+    private async Task<HomeLabOperationResult?> RemoveConfigurationPathsAsync(
+        HomeLabInstallationEntity installation,
+        IReadOnlyList<string> configurationPaths,
+        List<string> output,
+        CancellationToken cancellationToken)
+    {
+        if (configurationPaths.Count == 0)
+        {
+            return null;
+        }
+
+        var remove = await RunAsync(
+            new LinuxCommandRequest(
+                "rm",
+                ["--force", "--recursive", "--", ..configurationPaths],
+                true,
+                DockerCommandTimeout,
+                $"Remove LMS-managed configuration for {installation.ContainerName}"),
+            cancellationToken);
+        AppendOutput(output, remove);
+        if (remove.ExitCode != 0)
+        {
+            return Failure(
+                "Home Lab configuration removal failed.",
+                NormalizeFailure(remove),
+                output,
+                HomeLabHealthState.Failed);
+        }
+
+        output.Add($"Removed LMS-managed configuration: {string.Join(", ", configurationPaths)}");
+        return null;
     }
 
     private async Task<HomeLabOperationResult> RecreateVpnGatewayAsync(
@@ -4589,6 +4710,15 @@ public sealed class HomeLabService(
             throw new InvalidOperationException("Use a child directory for Home Lab storage.");
         }
         return normalized;
+    }
+
+    private static bool IsPathEqualOrDescendant(string parentPath, string candidatePath)
+    {
+        var normalizedParent = parentPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return candidatePath.Equals(parentPath, StringComparison.Ordinal) ||
+               candidatePath.StartsWith(
+                   normalizedParent + Path.DirectorySeparatorChar,
+                   StringComparison.Ordinal);
     }
 
     private static string NormalizeContainerImage(string image)
