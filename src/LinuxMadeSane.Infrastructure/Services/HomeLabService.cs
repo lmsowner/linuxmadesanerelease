@@ -60,6 +60,7 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
+        await RemoveLegacyRecipePortRoutesAsync(installationEntities, cancellationToken);
         var deploymentEntities = await dbContext.HomeLabDeployments
             .AsNoTracking()
             .OrderBy(item => item.Name)
@@ -167,6 +168,8 @@ public sealed class HomeLabService(
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
 
+        await RemoveLegacyRecipePortRoutesAsync(entities, cancellationToken);
+
         try
         {
             await EnsureBrowsableVolumeLayoutAsync(entities, cancellationToken);
@@ -238,6 +241,113 @@ public sealed class HomeLabService(
         var storageRoles = BuildStorageRoles(storageRoleEntities);
 
         return new HomeLabWorkspace(HomeLabCatalog.VisibleApps, HomeLabCatalog.Recipes, storageRoles, deployments, installations);
+    }
+
+    private async Task RemoveLegacyRecipePortRoutesAsync(
+        IReadOnlyList<HomeLabInstallationEntity> installations,
+        CancellationToken cancellationToken)
+    {
+        if (installations.Count == 0)
+        {
+            return;
+        }
+
+        var routes = await edgeGatewayService.ListRoutesAsync(cancellationToken);
+        var referencedRouteIds = installations
+            .SelectMany(installation => installation.ServiceEndpoints
+                .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public && endpoint.EdgeGatewayRouteId.HasValue)
+                .Select(endpoint => endpoint.EdgeGatewayRouteId!.Value)
+                .Append(installation.EdgeGatewayRouteId ?? Guid.Empty))
+            .Where(routeId => routeId != Guid.Empty)
+            .ToHashSet();
+        var legacyRoutes = routes
+            .Where(route => IsLegacyRecipePortPath(route.TargetPathPrefix))
+            .Where(route => referencedRouteIds.Contains(route.Id) || installations.Any(installation =>
+                installation.ServiceEndpoints.Any(endpoint =>
+                    endpoint.Scope == (int)HomeLabEndpointScope.Public &&
+                    endpoint.Host.Equals(route.Hostname, StringComparison.OrdinalIgnoreCase) &&
+                    IsLegacyRecipePortPath(endpoint.PathBase) &&
+                    NormalizeEndpointPath(endpoint.PathBase).Equals(
+                        NormalizeEndpointPath(route.TargetPathPrefix),
+                        StringComparison.OrdinalIgnoreCase))))
+            .ToArray();
+
+        var removedRouteIds = new HashSet<Guid>();
+        foreach (var route in legacyRoutes)
+        {
+            try
+            {
+                await edgeGatewayRouteRegistrationService.UnregisterClientRouteAsync(route.Id, cancellationToken);
+                removedRouteIds.Add(route.Id);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Could not remove legacy Home Lab Edge Gateway route {RouteId} at {Path}.",
+                    route.Id,
+                    route.TargetPathPrefix);
+            }
+        }
+
+        // A route can already have been removed outside the Home Lab page while
+        // its endpoint metadata remains. Those references are safe to clear too.
+        var knownRouteIds = routes.Select(route => route.Id).ToHashSet();
+        removedRouteIds.UnionWith(referencedRouteIds.Where(routeId => !knownRouteIds.Contains(routeId)));
+        var changed = false;
+        foreach (var installation in installations)
+        {
+            var stalePublicEndpoints = installation.ServiceEndpoints
+                .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public &&
+                    (IsLegacyRecipePortPath(endpoint.PathBase) &&
+                     (!endpoint.EdgeGatewayRouteId.HasValue || removedRouteIds.Contains(endpoint.EdgeGatewayRouteId.Value))))
+                .ToArray();
+            if (stalePublicEndpoints.Length > 0)
+            {
+                dbContext.HomeLabServiceEndpoints.RemoveRange(stalePublicEndpoints);
+                changed = true;
+            }
+
+            foreach (var clientEndpoint in installation.ServiceEndpoints.Where(endpoint =>
+                         endpoint.Scope == (int)HomeLabEndpointScope.Client &&
+                         endpoint.EdgeGatewayRouteId.HasValue &&
+                         removedRouteIds.Contains(endpoint.EdgeGatewayRouteId.Value)))
+            {
+                clientEndpoint.EdgeGatewayRouteId = null;
+                changed = true;
+            }
+
+            if (installation.EdgeGatewayRouteId is Guid routeId && removedRouteIds.Contains(routeId))
+            {
+                installation.EdgeGatewayRouteId = null;
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            logger.LogInformation("Removed {Count} legacy Home Lab numeric public endpoint route(s).", removedRouteIds.Count);
+        }
+    }
+
+    internal static bool IsLegacyRecipePortPath(string? path)
+    {
+        var normalized = NormalizeEndpointPath(path);
+        return normalized.Length > 1 &&
+               normalized.Length <= 6 &&
+               normalized[1..].All(character => character is >= '0' and <= '9');
+    }
+
+    private static string NormalizeEndpointPath(string? path)
+    {
+        var normalized = path?.Trim() ?? string.Empty;
+        if (normalized.Length == 0 || normalized == "/")
+        {
+            return string.Empty;
+        }
+
+        return normalized.StartsWith("/", StringComparison.Ordinal) ? normalized.TrimEnd('/') : $"/{normalized.TrimEnd('/')}";
     }
 
     public async Task<IReadOnlyList<HomeLabRuntimeHealth>> RefreshRuntimeHealthAsync(
