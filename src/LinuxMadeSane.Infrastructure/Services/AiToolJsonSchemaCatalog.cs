@@ -244,7 +244,6 @@ public static class AiToolJsonSchemaCatalog
               "properties": {
                 "url": {
                   "type": "string",
-                  "format": "uri",
                   "description": "The public HTTP(S) URL returned by search_web or supplied as a relevant primary source."
                 },
                 "maxCharacters": {
