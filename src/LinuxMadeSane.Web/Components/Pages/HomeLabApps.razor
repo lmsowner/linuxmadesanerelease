@@ -420,22 +420,23 @@
                                                         }
                                                         else
                                                         {
+                                                            var needsSharedRecipeHostnameMigration = RecipeNeedsSharedHostnameMigration(selectedInstallation);
                                                             <div class="home-lab-config-grid">
                                                                 <div class="home-lab-config-field">
                                                                     <label for="home-lab-external-hostname">@(selectedInstallation.IsRecipeInstallation ? "Shared recipe hostname" : "External hostname")</label>
                                                                     <input id="home-lab-external-hostname"
                                                                            class="ui-control-input"
                                                                            value="@externalHostnameDraft"
-                                                                           disabled="@(externalRoute is { Enabled: true })"
+                                                                           disabled="@(externalRoute is { Enabled: true } && !needsSharedRecipeHostnameMigration)"
                                                                            @oninput="eventArgs => externalHostnameDraft = eventArgs.Value?.ToString() ?? string.Empty" />
-                                                                    <span class="meta-text">@(externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : selectedInstallation.IsRecipeInstallation ? "All externally published services in this recipe share this hostname; each Docker listener is exposed under its host port path." : "Use a new hostname inside the selected Cloudflare zone.")</span>
+                                                                    <span class="meta-text">@(needsSharedRecipeHostnameMigration ? "These recipe services currently use different hostnames. Save once to move them onto this shared hostname." : externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : selectedInstallation.IsRecipeInstallation ? "All externally published services in this recipe share this hostname; each Docker listener is exposed under its host port path." : "Use a new hostname inside the selected Cloudflare zone.")</span>
                                                                 </div>
                                                                 <div class="home-lab-config-field">
                                                                     <label for="home-lab-external-domain">Cloudflare zone</label>
                                                                     <select id="home-lab-external-domain"
                                                                             class="ui-control-input"
                                                                             value="@externalDomainDraft"
-                                                                            disabled="@(externalRoute is { Enabled: true })"
+                                                                            disabled="@(externalRoute is { Enabled: true } && !needsSharedRecipeHostnameMigration)"
                                                                             @onchange="ChangeExternalDomain">
                                                                         @foreach (var domain in AvailableExternalDomains)
                                                                         {
@@ -465,7 +466,7 @@
                                                                 }
                                                             </div>
                                                             <div class="home-lab-action-row">
-                                                                <UiCommandButton Label="@(externalRoute is null ? "Publish externally" : "Save external access")"
+                                                                <UiCommandButton Label="@(needsSharedRecipeHostnameMigration ? "Use shared recipe hostname" : externalRoute is null ? "Publish externally" : "Save external access")"
                                                                                  Glyph="UiIconGlyph.Website"
                                                                                  Variant="UiButtonVariant.Primary"
                                                                                  Disabled="@(busy || !CanSaveExternalAccess)"
@@ -2460,10 +2461,11 @@
     private async Task LoadExternalAccessDraftAsync(HomeLabAppInstallation installation)
     {
         confirmExternalUnpublish = false;
+        var needsSharedRecipeHostnameMigration = RecipeNeedsSharedHostnameMigration(installation);
         if (installation.EdgeGatewayRouteId is Guid routeId)
         {
             var editor = await EdgeGatewayService.GetEditorAsync(routeId);
-            if (editor.Id.HasValue)
+            if (editor.Id.HasValue && !needsSharedRecipeHostnameMigration)
             {
                 externalHostnameDraft = editor.Hostname;
                 externalDomainDraft = editor.DomainName;
@@ -2474,7 +2476,16 @@
 
         var domain = AvailableExternalDomains.FirstOrDefault();
         externalDomainDraft = domain?.DomainName ?? string.Empty;
-        var existingRecipeRoute = FindPublishedRecipeRoute(installation);
+        var existingEditor = installation.EdgeGatewayRouteId is Guid existingRouteId
+            ? await EdgeGatewayService.GetEditorAsync(existingRouteId)
+            : null;
+        if (needsSharedRecipeHostnameMigration && existingEditor?.Id is not null &&
+            AvailableExternalDomains.Any(item => item.DomainName.Equals(existingEditor.DomainName, StringComparison.OrdinalIgnoreCase)))
+        {
+            externalDomainDraft = existingEditor.DomainName;
+        }
+
+        var existingRecipeRoute = needsSharedRecipeHostnameMigration ? null : FindPublishedRecipeRoute(installation);
         if (existingRecipeRoute is not null)
         {
             externalHostnameDraft = existingRecipeRoute.Hostname;
@@ -2486,7 +2497,9 @@
                 ? BuildAvailableExternalSubdomain(installation)
                 : $"{BuildAvailableExternalSubdomain(installation)}.{externalDomainDraft}";
         }
-        externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+        externalAuthModeDraft = existingEditor?.Id is not null
+            ? existingEditor.AuthMode
+            : EdgeGatewayAuthMode.RequireMfa;
     }
 
     private async Task RefreshEdgeGatewayStateAsync()
@@ -2558,9 +2571,20 @@
 
     private EdgeGatewayRouteListItem? FindPublishedRecipeRoute(HomeLabAppInstallation installation)
     {
+        return FindPublishedRecipeRoutes(installation).FirstOrDefault();
+    }
+
+    private bool RecipeNeedsSharedHostnameMigration(HomeLabAppInstallation installation) =>
+        FindPublishedRecipeRoutes(installation)
+            .Select(route => route.Hostname.Trim().TrimEnd('.'))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count() > 1;
+
+    private IReadOnlyList<EdgeGatewayRouteListItem> FindPublishedRecipeRoutes(HomeLabAppInstallation installation)
+    {
         if (!installation.IsRecipeInstallation || workspace is null)
         {
-            return null;
+            return [];
         }
 
         var deployment = workspace.Deployments.FirstOrDefault(item => item.Id == installation.DeploymentId);
@@ -2576,7 +2600,7 @@
             .Where(routeId => routeId != Guid.Empty)
             .ToHashSet();
 
-        return edgeGatewayRoutes.FirstOrDefault(route => routeIds.Contains(route.Id));
+        return edgeGatewayRoutes.Where(route => routeIds.Contains(route.Id)).ToArray();
     }
 
     private void ChangeExternalDomain(ChangeEventArgs eventArgs)
