@@ -3,6 +3,7 @@
 
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models.RdpOptimizer;
@@ -216,7 +217,7 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
 
     private static ProcessStartInfo BuildStartInfo(LinuxCommandRequest request)
     {
-        var requiresSudo = request.RequiresSudo && !string.Equals(Environment.UserName, "root", StringComparison.OrdinalIgnoreCase);
+        var requiresSudo = request.RequiresSudo && !IsCurrentProcessRoot();
         var startInfo = new ProcessStartInfo
         {
             FileName = requiresSudo ? "sudo" : request.FileName,
@@ -269,7 +270,7 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
     private static string RenderCommand(LinuxCommandRequest request)
     {
         var builder = new StringBuilder();
-        if (request.RequiresSudo && !string.Equals(Environment.UserName, "root", StringComparison.OrdinalIgnoreCase))
+        if (request.RequiresSudo && !IsCurrentProcessRoot())
         {
             builder.Append("sudo -n ");
         }
@@ -285,6 +286,19 @@ public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILi
 
         return builder.ToString();
     }
+
+    internal static bool IsCurrentProcessRoot()
+    {
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+        {
+            return GetEffectiveUserId() == 0;
+        }
+
+        return string.Equals(Environment.UserName, "root", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
 
     private static string Quote(string value)
     {
