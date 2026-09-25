@@ -121,7 +121,7 @@ public sealed class LinuxMadeSaneAiToolRegistry : IAiToolRegistry
             supportsRememberDecision: false),
         CreateDefinition<RepairHomeLabInstallationToolRequest, RepairHomeLabInstallationToolResponse>(
             AiToolNames.RepairHomeLabInstallation,
-            "Repair and verify one LMS-managed Home Lab installation by ID. An explicit repair may recreate an apparently healthy app when its health check does not cover the reported symptom. A VPN-routed app is repaired alone unless security checks prove the shared gateway is faulty. Can restore saved pre-edit container settings. Never exposes stored secrets or raw logs.",
+            "Repair and verify one LMS-managed Home Lab installation by ID. The repair reconciles the app with its catalog and saved LMS state, reapplying generic runtime requirements such as shared-network host resolution, managed environment, routes, port bindings, volumes, and health checks. An explicit repair may recreate an apparently healthy app when its health check does not cover the reported symptom. A VPN-routed app is repaired alone unless security checks prove the shared gateway is faulty. Can restore saved pre-edit container settings. Never exposes stored secrets or raw logs.",
             AiActionRiskLevel.HighRiskMutation,
             AiApprovalRequirement.UserConfirmation,
             false,

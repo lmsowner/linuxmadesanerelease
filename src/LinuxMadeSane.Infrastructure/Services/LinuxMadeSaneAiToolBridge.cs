@@ -1022,6 +1022,18 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         CancellationToken cancellationToken)
     {
         var app = HomeLabCatalog.GetApp(installation.AppId);
+        HomeLabEffectiveContainer? effectiveContainer = null;
+        try
+        {
+            var effectiveConfiguration = await service.GetEffectiveConfigurationAsync(installation.DeploymentId, cancellationToken);
+            effectiveContainer = effectiveConfiguration?.Containers.FirstOrDefault(item =>
+                item.ContainerName.Equals(installation.ContainerName, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            // The rest of the installation inspection remains useful if an
+            // external route cannot be read while building effective config.
+        }
         var isVpnRouted = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
         var isSecured = false;
         HomeLabNetworkSecurity? security = null;
@@ -1069,7 +1081,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             security?.PortForwardingStatus ?? string.Empty,
             security?.ForwardedPort,
             security?.PortForwardingDetail ?? string.Empty,
-            endpoints);
+            endpoints,
+            effectiveContainer?.Environment ?? []);
     }
 
     private IHomeLabService RequireHomeLabService() =>
@@ -1100,7 +1113,12 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     }
 
     private static string FormatHomeLabInstallation(HomeLabAiInstallation item) =>
-        $"- {item.Name} ({item.AppId}) | installation={item.InstallationId} | container={item.ContainerName} | image={item.Image} | network={item.NetworkMode} | ports={FormatHomeLabPorts(item.Ports)} | dependencies={string.Join(",", item.Dependencies)} | endpoints={FormatHomeLabEndpoints(item.Endpoints)} | {item.HealthState}: {item.HealthDetail} | VPN routed={item.IsVpnRouted} | secured={item.IsSecured} | forwarding={FormatHomeLabForwarding(item)} | access={item.AccessUrl}";
+        $"- {item.Name} ({item.AppId}) | installation={item.InstallationId} | container={item.ContainerName} | image={item.Image} | network={item.NetworkMode} | ports={FormatHomeLabPorts(item.Ports)} | dependencies={string.Join(",", item.Dependencies)} | endpoints={FormatHomeLabEndpoints(item.Endpoints)} | environment={FormatHomeLabEnvironment(item.Environment)} | {item.HealthState}: {item.HealthDetail} | VPN routed={item.IsVpnRouted} | secured={item.IsSecured} | forwarding={FormatHomeLabForwarding(item)} | access={item.AccessUrl}";
+
+    private static string FormatHomeLabEnvironment(IReadOnlyList<string>? environment) =>
+        environment is not { Count: > 0 }
+            ? "none"
+            : string.Join(",", environment);
 
     private static string FormatHomeLabEndpoints(IReadOnlyList<HomeLabAiEndpoint>? endpoints) =>
         endpoints is not { Count: > 0 }

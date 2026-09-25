@@ -304,7 +304,7 @@ public static class AiToolJsonSchemaCatalog
                 },
                 "restoreContainerSettings": {
                   "type": "boolean",
-                  "description": "Set true only when manual image, environment, or volume edits caused the fault and the user wants the saved pre-edit settings restored."
+                  "description": "Set true only when manual image, environment, or volume edits caused the fault and the user wants the saved pre-edit settings restored. Otherwise repair reapplies the app catalog and LMS-managed runtime state, including shared-network host resolution, environment, routes, ports, volumes, and health checks."
                 }
               },
               "required": [ "installationId" ]

@@ -237,7 +237,8 @@ public sealed record HomeLabAiInstallation(
     string PortForwardingStatus,
     int? ForwardedPort,
     string PortForwardingDetail,
-    IReadOnlyList<HomeLabAiEndpoint>? Endpoints = null);
+    IReadOnlyList<HomeLabAiEndpoint>? Endpoints = null,
+    IReadOnlyList<string>? Environment = null);
 
 public sealed record HomeLabAiEndpoint(
     string ServiceId,
