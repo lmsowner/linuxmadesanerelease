@@ -579,7 +579,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                     recipe.AppIds,
                     recipe.RequiresPlanning,
                     recipe.RequiresVpnGateway,
-                    recipe.VpnRoutedAppIds))
+                    recipe.VpnRoutedAppIds,
+                    recipe.TechnicalGuidance))
                 .ToArray());
         var output = BuildHomeLabInspectionOutput(response);
 
@@ -783,12 +784,25 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     {
         var request = DeserializeRequest<ApplyHomeLabPromptRecipeToolRequest>(context.Invocation.ArgumentsJson);
         var recipe = await GetPromptRecipeAsync(request.PromptRecipeId, cancellationToken);
+        var networkSelectionError = ValidateRecipeNetworkSelection(recipe, request);
+        if (networkSelectionError is not null)
+        {
+            return CreateHomeLabApplyResult(
+                definition,
+                context.Invocation,
+                recipe,
+                request,
+                false,
+                [],
+                [networkSelectionError]);
+        }
         if (recipe.RequiresPlanning)
         {
             return CreateHomeLabApplyResult(
                 definition,
                 context.Invocation,
                 recipe,
+                request,
                 false,
                 [],
                 ["This HomeLab Recipe needs the choices described in its starting prompt before LMS can safely deploy it. Review those choices in the AI conversation; LMS will not apply an incomplete or misleading partial stack."]);
@@ -818,13 +832,15 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 definition,
                 context.Invocation,
                 recipe,
+                request,
                 false,
                 [],
                 [$"Before installation, choose a host path for shared storage role(s) {roles} in Home Lab > Storage."],
                 missingStorageRoles);
         }
 
-        if (recipe.RequiresVpnGateway)
+        var useVpnGateway = request.OutboundRoute.Equals("vpn", StringComparison.OrdinalIgnoreCase);
+        if (useVpnGateway)
         {
             var gateways = workspace.Installations
                 .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
@@ -853,6 +869,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                     definition,
                     context.Invocation,
                     recipe,
+                    request,
                     false,
                     [],
                     [reason],
@@ -869,13 +886,22 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 var repair = await service.ExecuteAsync(gateway.Id, HomeLabLifecycleAction.Repair, cancellationToken);
                 details.Add($"VPN Gateway: {repair.Summary} {repair.Detail}");
             }
+
+            var gatewayListener = await service.SetListenAddressAsync(gateway.Id, request.ListenAddress, cancellationToken);
+            details.Add($"VPN Gateway: {gatewayListener.Summary} {gatewayListener.Detail}");
+            if (!gatewayListener.Succeeded)
+            {
+                return CreateHomeLabApplyResult(
+                    definition, context.Invocation, recipe, request, false, [], details);
+            }
         }
 
         var targetInstallations = new List<HomeLabAiInstallation>();
         var succeeded = true;
         foreach (var appId in recipe.AppIds)
         {
-            var routeThroughVpn = recipe.RoutesAppThroughVpn(appId);
+            var routeThroughVpn = useVpnGateway &&
+                                  (recipe.RequiresVpnGateway ? recipe.RoutesAppThroughVpn(appId) : true);
             workspace = await service.GetWorkspaceAsync(cancellationToken);
             var installation = workspace.Installations
                 .Where(item => item.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase))
@@ -884,13 +910,15 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
 
             if (installation is null)
             {
-                var configuration = routeThroughVpn
-                    ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                    {
-                        ["network-route"] = "VPN Gateway (Gluetun)",
-                        ["vpn-gateway"] = gateway!.Id.ToString()
-                    }
-                    : null;
+                var configuration = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["listen-address"] = request.ListenAddress,
+                    ["network-route"] = routeThroughVpn ? "VPN Gateway (Gluetun)" : "Direct (no VPN)"
+                };
+                if (routeThroughVpn)
+                {
+                    configuration["vpn-gateway"] = gateway!.Id.ToString();
+                }
                 var install = await service.InstallAppAsync(
                     new HomeLabInstallRequest(appId, Configuration: configuration),
                     cancellationToken);
@@ -925,6 +953,16 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 details.Add($"{installation.DisplayName}: {route.Summary} {route.Detail}");
                 succeeded &= route.Succeeded;
             }
+            else if (HomeLabCatalog.GetApp(appId).SupportsVpnGateway)
+            {
+                var route = await service.SetNetworkRouteAsync(installation.Id, false, cancellationToken: cancellationToken);
+                details.Add($"{installation.DisplayName}: {route.Summary} {route.Detail}");
+                succeeded &= route.Succeeded;
+            }
+
+            var listener = await service.SetListenAddressAsync(installation.Id, request.ListenAddress, cancellationToken);
+            details.Add($"{installation.DisplayName}: {listener.Summary} {listener.Detail}");
+            succeeded &= listener.Succeeded;
 
             if (installation.HealthState is HomeLabHealthState.Degraded or HomeLabHealthState.Failed or HomeLabHealthState.Blocked)
             {
@@ -956,6 +994,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             definition,
             context.Invocation,
             recipe,
+            request,
             succeeded && targetInstallations.Count == recipe.AppIds.Count,
             targetInstallations,
             details);
@@ -965,19 +1004,28 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         AiToolDefinition definition,
         AiToolInvocation invocation,
         HomeLabPromptRecipe recipe,
+        ApplyHomeLabPromptRecipeToolRequest request,
         bool succeeded,
         IReadOnlyList<HomeLabAiInstallation> installations,
         IReadOnlyList<string> details,
         IReadOnlyList<string>? requiredStorageRoles = null,
         IReadOnlyList<HomeLabAiGateway>? requiredVpnGateways = null)
     {
+        var reportedDetails = details.Concat([
+            $"Client listener: {request.ListenAddress}",
+            $"Outbound network: {(request.OutboundRoute == "vpn" ? "selected VPN Gateway" : "direct server route")}",
+            $"How to use it: {recipe.TechnicalGuidance}"
+        ]).ToArray();
         var response = new ApplyHomeLabPromptRecipeToolResponse(
             recipe.Id,
             recipe.Name,
             succeeded,
             installations,
-            details,
+            reportedDetails,
             DateTimeOffset.UtcNow,
+            request.ListenAddress,
+            request.OutboundRoute,
+            recipe.TechnicalGuidance,
             requiredStorageRoles,
             requiredVpnGateways);
         return CreateExecutionResult(
@@ -988,9 +1036,39 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             succeeded
                 ? $"Applied and verified HomeLab Recipe {recipe.Name}."
                 : $"HomeLab Recipe {recipe.Name} needs attention.",
-            string.Join(Environment.NewLine, details.Concat(installations.Select(FormatHomeLabInstallation))),
+            string.Join(Environment.NewLine, reportedDetails.Concat(installations.Select(item =>
+                FormatHomeLabInstallation(item).Replace("<LMS host>", request.ListenAddress, StringComparison.Ordinal)))),
             succeeded ? string.Empty : "One or more requested apps did not reach a secured, usable LMS state.",
             succeeded ? 0 : 1);
+    }
+
+    private static string? ValidateRecipeNetworkSelection(
+        HomeLabPromptRecipe recipe,
+        ApplyHomeLabPromptRecipeToolRequest request)
+    {
+        if (!OnDemandAppSourceBinding.GetSources().Any(source =>
+                source.Address.Equals(request.ListenAddress, StringComparison.OrdinalIgnoreCase)))
+        {
+            return "The selected listen address is not a current, active LMS IPv4 interface. Return to Home Lab Recipes and choose an available interface.";
+        }
+
+        if (request.OutboundRoute is not ("direct" or "vpn"))
+        {
+            return "Choose the outbound network explicitly: direct or vpn.";
+        }
+
+        if (recipe.RequiresVpnGateway && request.OutboundRoute == "direct")
+        {
+            return "This recipe requires a VPN Gateway and cannot use the direct outbound route.";
+        }
+
+        if (request.OutboundRoute == "vpn" && !recipe.RequiresPlanning &&
+            recipe.AppIds.Any(appId => !recipe.RequiresVpnGateway && !HomeLabCatalog.GetApp(appId).SupportsVpnGateway))
+        {
+            return "One or more apps in this recipe do not support VPN Gateway routing. Choose the direct outbound route.";
+        }
+
+        return null;
     }
 
     private static async Task<HomeLabAppInstallation> WaitForHomeLabInstallationAsync(

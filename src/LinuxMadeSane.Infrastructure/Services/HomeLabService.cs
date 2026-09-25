@@ -1024,6 +1024,91 @@ public sealed class HomeLabService(
             ToHealth(installation.HealthState));
     }
 
+    public async Task<HomeLabOperationResult> SetListenAddressAsync(
+        Guid installationId,
+        string listenAddress,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedAddress = ValidateListenAddress(listenAddress);
+        var installation = await dbContext.HomeLabInstallations
+            .Include(item => item.ServiceEndpoints)
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        if (configuration.TryGetValue("listen-address", out var currentAddress) &&
+            currentAddress.Equals(normalizedAddress, StringComparison.OrdinalIgnoreCase))
+        {
+            await EnsureCaddyAccessAsync(installation, cancellationToken);
+            return Success("Listen interface already configured.",
+                $"{app.Name} accepts client connections on {normalizedAddress}.", [], ToHealth(installation.HealthState));
+        }
+
+        var previousConfiguration = installation.ConfigurationJson;
+        configuration["listen-address"] = normalizedAddress;
+        installation.ConfigurationJson = JsonSerializer.Serialize(configuration, JsonOptions);
+        var output = new List<string>();
+        if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            var gatewayResult = await RecreateVpnGatewayAsync(installation, output, false, cancellationToken);
+            if (!gatewayResult.Succeeded)
+            {
+                installation.ConfigurationJson = previousConfiguration;
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return gatewayResult;
+            }
+
+            return gatewayResult with
+            {
+                Summary = "VPN listener updated.",
+                Detail = $"{installation.DisplayName} and its routed apps now accept client connections on {normalizedAddress}."
+            };
+        }
+
+        var publishesSelectedAddressDirectly = installation.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase) &&
+                                               app.Ports.Any(port => port.HostBindingAddress is "0.0.0.0" or "::");
+        if (!publishesSelectedAddressDirectly)
+        {
+            await UpdateCaddyAccessAsync(installation, app, DeserializePortBindings(installation.PortMappingsJson), cancellationToken);
+            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return Success("Listen interface updated.",
+                $"{app.Name} now accepts client connections on {normalizedAddress}.", output, ToHealth(installation.HealthState));
+        }
+
+        var remove = await RunDockerAsync(["rm", "--force", installation.ContainerName],
+            $"Recreate {app.Name} on the selected listen interface", cancellationToken);
+        AppendOutput(output, remove);
+        if (remove.ExitCode != 0 && !ContainsNoSuchContainer(remove))
+        {
+            installation.ConfigurationJson = previousConfiguration;
+            return Failure("Listen interface change failed.", NormalizeFailure(remove), output, HomeLabHealthState.Failed);
+        }
+
+        var run = await RunContainerAsync(installation, app,
+            DeserializeBindings(installation.VolumeMappingsJson), configuration,
+            DeserializeDictionary(installation.SecretConfigurationJson), output, cancellationToken);
+        if (!run.Succeeded)
+        {
+            installation.ConfigurationJson = previousConfiguration;
+            var rollback = await RunContainerAsync(installation, app,
+                DeserializeBindings(installation.VolumeMappingsJson), DeserializeDictionary(previousConfiguration),
+                DeserializeDictionary(installation.SecretConfigurationJson), output, cancellationToken);
+            return Failure("Listen interface change failed.",
+                $"{run.Result?.Detail ?? "The container could not be recreated."}" +
+                (rollback.Succeeded ? " The previous listener was restored." : " The previous listener could not be restored."),
+                output, HomeLabHealthState.Failed);
+        }
+
+        installation.PortMappingsJson = JsonSerializer.Serialize(run.PortBindings, JsonOptions);
+        await UpdateCaddyAccessAsync(installation, app, run.PortBindings, cancellationToken);
+        installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await RefreshHealthInternalAsync(installation, cancellationToken);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Success("Listen interface updated.",
+            $"{app.Name} now accepts client connections on {normalizedAddress}.", output, ToHealth(installation.HealthState));
+    }
+
     public async Task<HomeLabNetworkSecurity> GetNetworkSecurityAsync(
         Guid installationId,
         CancellationToken cancellationToken = default)
@@ -2915,7 +3000,7 @@ public sealed class HomeLabService(
                     ? installation.CaddySourcePort is int caddyPort
                         ? $"LMS Caddy UI: http://<LMS host>:{caddyPort}"
                         : $"Server-only UI: http://127.0.0.1:{port.HostPort}"
-                    : $"Host port: {ResolveHostBindingAddress(manifest)}:{port.HostPort}");
+                    : $"Host port: {ResolveHostBindingAddress(manifest, configuration)}:{port.HostPort}");
             }
         }
 
@@ -3026,6 +3111,7 @@ public sealed class HomeLabService(
         }
 
         var routeName = BuildCaddyRouteName(installation, app);
+        var listenAddress = ResolveConfiguredListenAddress(installation);
         var rewriteSecureCookiesForHttp = HomeLabEndpointPlanner.ResolveClientAccess(app)?
             .ReverseProxy?.RewriteSecureCookiesForHttp == true;
         if (installation.CaddyRouteId is Guid routeId)
@@ -3033,10 +3119,12 @@ public sealed class HomeLabService(
             var existing = await caddyIntegrationService.GetEditorAsync(routeId, cancellationToken);
             if (existing.Id == routeId)
             {
-                if (existing.DestinationIp != "127.0.0.1" ||
+                if (existing.SourceIp != listenAddress ||
+                    existing.DestinationIp != "127.0.0.1" ||
                     existing.DestinationPort != primaryPort.HostPort ||
                     existing.RewriteSecureCookiesForHttp != rewriteSecureCookiesForHttp)
                 {
+                    existing.SourceIp = listenAddress;
                     existing.DestinationIp = "127.0.0.1";
                     existing.DestinationPort = primaryPort.HostPort;
                     existing.RewriteSecureCookiesForHttp = rewriteSecureCookiesForHttp;
@@ -3059,6 +3147,7 @@ public sealed class HomeLabService(
             var existing = await caddyIntegrationService.GetEditorAsync(savedRoute.Id, cancellationToken);
             if (existing.Id == savedRoute.Id)
             {
+                existing.SourceIp = listenAddress;
                 existing.DestinationIp = "127.0.0.1";
                 existing.DestinationPort = primaryPort.HostPort;
                 existing.RewriteSecureCookiesForHttp = rewriteSecureCookiesForHttp;
@@ -3076,7 +3165,7 @@ public sealed class HomeLabService(
             Kind = CaddyProxyRouteKind.PortForward,
             Name = routeName,
             Description = $"Home Lab browser access for {app.Name}. Managed by LMS.",
-            SourceIp = "0.0.0.0",
+            SourceIp = listenAddress,
             SourcePort = sourcePort,
             DestinationIp = "127.0.0.1",
             DestinationPort = primaryPort.HostPort,
@@ -3124,6 +3213,7 @@ public sealed class HomeLabService(
         }
 
         editor.DestinationIp = "127.0.0.1";
+        editor.SourceIp = ResolveConfiguredListenAddress(installation);
         editor.DestinationPort = primaryPort.HostPort;
         editor.RewriteSecureCookiesForHttp = HomeLabEndpointPlanner.ResolveClientAccess(app)?
             .ReverseProxy?.RewriteSecureCookiesForHttp == true;
@@ -3618,7 +3708,7 @@ public sealed class HomeLabService(
                 var manifest = app.Ports.FirstOrDefault(candidate =>
                     candidate.ContainerPort == port.Item2 &&
                     candidate.Protocol.Equals(port.Item1, StringComparison.OrdinalIgnoreCase));
-                args.AddRange(["--publish", $"{ResolveHostBindingAddress(manifest)}::{port.Item2}/{port.Item1}"]);
+                args.AddRange(["--publish", $"{ResolveHostBindingAddress(manifest, configuration)}::{port.Item2}/{port.Item1}"]);
             }
         }
 
@@ -4311,10 +4401,37 @@ public sealed class HomeLabService(
     private static HomeLabPortManifest? ResolvePrimaryPort(HomeLabAppManifest app) =>
         app.Ports.FirstOrDefault(port => port.Primary) ?? app.Ports.FirstOrDefault();
 
-    private static string ResolveHostBindingAddress(HomeLabPortManifest? port) =>
-        port?.HostBindingAddress?.Trim() is "0.0.0.0" or "::"
-            ? port.HostBindingAddress.Trim()
+    private static string ResolveHostBindingAddress(
+        HomeLabPortManifest? port,
+        IReadOnlyDictionary<string, string>? configuration = null)
+    {
+        var selectedAddress = configuration?.GetValueOrDefault("listen-address");
+        if (port is null && !string.IsNullOrWhiteSpace(selectedAddress))
+        {
+            return selectedAddress;
+        }
+
+        return port?.HostBindingAddress?.Trim() is "0.0.0.0" or "::"
+            ? selectedAddress ?? port.HostBindingAddress.Trim()
             : "127.0.0.1";
+    }
+
+    private static string ResolveConfiguredListenAddress(HomeLabInstallationEntity installation) =>
+        DeserializeDictionary(installation.ConfigurationJson).GetValueOrDefault("listen-address") ?? "0.0.0.0";
+
+    private static string ValidateListenAddress(string listenAddress)
+    {
+        var normalized = listenAddress?.Trim() ?? string.Empty;
+        if (!IPAddress.TryParse(normalized, out var parsed) ||
+            parsed.AddressFamily != AddressFamily.InterNetwork ||
+            IPAddress.IsLoopback(parsed) ||
+            !OnDemandAppSourceBinding.GetSources().Any(source => source.Address == normalized))
+        {
+            throw new InvalidOperationException("Choose a current, active non-loopback IPv4 address for client connections.");
+        }
+
+        return normalized;
+    }
 
     private static string ResolveApplicationScheme(HomeLabPortManifest port) =>
         !string.IsNullOrWhiteSpace(port.ApplicationProtocol)
@@ -4679,6 +4796,10 @@ public sealed class HomeLabService(
         }
         else
         {
+            if (supplied.TryGetValue("listen-address", out var listenAddress))
+            {
+                values["listen-address"] = ValidateListenAddress(listenAddress);
+            }
             if (app.SupportsVpnGateway && (requireStandaloneNetworkRoute || supplied.ContainsKey("network-route")))
             {
                 var route = RequiredValue(
@@ -5034,6 +5155,7 @@ public sealed class HomeLabService(
     private static bool IsInternalConfigurationKey(string key) =>
         key.Equals("network-route", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals("listen-address", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase) ||
         key.StartsWith("lms-container-backup-", StringComparison.OrdinalIgnoreCase);
 

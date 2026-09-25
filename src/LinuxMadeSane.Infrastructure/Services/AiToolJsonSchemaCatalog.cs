@@ -322,13 +322,24 @@ public static class AiToolJsonSchemaCatalog
                   "maxLength": 80,
                   "description": "The exact deployable LMS HomeLab Recipe ID returned by inspect_home_lab. Recipes marked as requiring planning cannot be applied until LMS supports the requested components."
                 },
+                "listenAddress": {
+                  "type": "string",
+                  "minLength": 7,
+                  "maxLength": 45,
+                  "description": "The exact current LMS host IPv4 address selected by the user for inbound client connections. Never substitute 0.0.0.0."
+                },
+                "outboundRoute": {
+                  "type": "string",
+                  "enum": [ "direct", "vpn" ],
+                  "description": "The outbound network selected by the user: direct for the regular server route, or vpn for the selected VPN Gateway."
+                },
                 "vpnGatewayInstallationId": {
                   "type": [ "string", "null" ],
                   "format": "uuid",
                   "description": "The existing LMS VPN Gateway installation to reuse. Required when the HomeLab Recipe needs VPN and more than one usable gateway exists."
                 }
               },
-              "required": [ "promptRecipeId" ]
+              "required": [ "promptRecipeId", "listenAddress", "outboundRoute" ]
             }
             """,
         AiToolNames.DesktopSetKeyboardLayout =>

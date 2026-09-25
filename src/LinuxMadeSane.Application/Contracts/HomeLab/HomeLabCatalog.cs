@@ -142,6 +142,7 @@ public static class HomeLabCatalog
             [],
             new HomeLabHealthCheckManifest(DockerCommand: "test -s /run/squid.pid && kill -0 \"$(cat /run/squid.pid)\"", StartPeriodSeconds: 30),
             [],
+            SupportsVpnGateway: true,
             EdgeGatewaySupported: false,
             Exposure: new HomeLabServiceExposureManifest(
                 [HomeLabEndpointScope.Internal, HomeLabEndpointScope.Lan, HomeLabEndpointScope.Client],

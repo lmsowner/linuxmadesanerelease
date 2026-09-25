@@ -201,6 +201,8 @@ public sealed record RepairHomeLabInstallationToolResponse(
 
 public sealed record ApplyHomeLabPromptRecipeToolRequest(
     string PromptRecipeId,
+    string ListenAddress,
+    string OutboundRoute,
     Guid? VpnGatewayInstallationId = null) : IAiToolRequest;
 
 public sealed record ApplyHomeLabPromptRecipeToolResponse(
@@ -210,6 +212,9 @@ public sealed record ApplyHomeLabPromptRecipeToolResponse(
     IReadOnlyList<HomeLabAiInstallation> Installations,
     IReadOnlyList<string> Details,
     DateTimeOffset CompletedAtUtc,
+    string ListenAddress,
+    string OutboundRoute,
+    string UsageGuidance,
     IReadOnlyList<string>? RequiredStorageRoles = null,
     IReadOnlyList<HomeLabAiGateway>? RequiredVpnGateways = null) : IAiToolResponse;
 
@@ -263,7 +268,8 @@ public sealed record HomeLabAiPromptRecipe(
     IReadOnlyList<string> AppIds,
     bool RequiresPlanning,
     bool RequiresVpnGateway,
-    IReadOnlyList<string> VpnRoutedAppIds);
+    IReadOnlyList<string> VpnRoutedAppIds,
+    string TechnicalGuidance);
 
 public sealed record RollbackSafeChangeToolRequest(
     Guid OriginalActionId) : IAiToolRequest;

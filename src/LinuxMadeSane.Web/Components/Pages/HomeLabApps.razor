@@ -11,6 +11,9 @@
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models.HomeLab
 @using Microsoft.Extensions.DependencyInjection
+@using System.Net
+@using System.Net.NetworkInformation
+@using System.Net.Sockets
 @inject IHomeLabService HomeLabService
 @inject IEdgeGatewayService EdgeGatewayService
 @inject IHomeLabPromptRecipeProvider PromptRecipeProvider
@@ -780,11 +783,14 @@
                                     </div>
                                     <div>
                                         <dt>Network</dt>
-                                        <dd>@(selectedRecipe.RequiresVpnGateway
-                                            ? "Reuse an existing VPN Gateway and route only the apps defined by this recipe."
-                                            : "Use LMS-managed local access unless you add different requirements below.")</dd>
+                                        <dd>Choose exactly where clients connect and which network carries outbound traffic.</dd>
                                     </div>
                                 </dl>
+                            </div>
+                            <div class="home-lab-recipe-guidance">
+                                <strong>How to use this recipe</strong>
+                                <p>@selectedRecipe.TechnicalGuidance</p>
+                                <p>After deployment, LMS reports the client URL or host and port. Use that address from devices on the selected network.</p>
                             </div>
                             <strong class="home-lab-recipe-field-label">@(selectedRecipe.RequiresPlanning ? "Recipe components" : "Apps being deployed")</strong>
                             <div class="home-lab-recipe-apps" aria-label="Recipe components">
@@ -797,27 +803,43 @@
                                     <span>Existing VPN Gateway</span>
                                 }
                             </div>
-                            @if (selectedRecipe.RequiresVpnGateway)
-                            {
+                            <div class="home-lab-recipe-network-grid">
+                                <div class="home-lab-recipe-choice">
+                                    <label for="home-lab-recipe-listener">Listen interface</label>
+                                    <select id="home-lab-recipe-listener"
+                                            class="ui-control-input"
+                                            value="@selectedPromptListenAddress"
+                                            @onchange="SelectPromptListenAddress">
+                                        <option value="">Choose an interface...</option>
+                                        @foreach (var option in RecipeListenInterfaces)
+                                        {
+                                            <option value="@option.Address">@option.InterfaceName — @option.Address</option>
+                                        }
+                                    </select>
+                                    <span class="meta-text">Only clients able to reach this address can use the deployed services.</span>
+                                </div>
                                 <div class="home-lab-recipe-choice home-lab-recipe-vpn-choice">
-                                    <label for="home-lab-recipe-vpn-gateway">VPN Gateway</label>
-                                    @if (InstalledVpnGateways.Any())
-                                    {
-                                        <select id="home-lab-recipe-vpn-gateway"
-                                                class="ui-control-input"
-                                                value="@selectedPromptVpnGatewayId"
-                                                @onchange="SelectPromptVpnGateway">
-                                            <option value="">Choose a VPN Gateway...</option>
+                                    <label for="home-lab-recipe-outbound-route">Outbound network</label>
+                                    <select id="home-lab-recipe-outbound-route"
+                                            class="ui-control-input"
+                                            value="@selectedPromptOutboundRoute"
+                                            @onchange="SelectPromptOutboundRoute">
+                                        <option value="">Choose outbound traffic...</option>
+                                        @if (!selectedRecipe.RequiresVpnGateway)
+                                        {
+                                            <option value="direct">Direct — regular LAN/Internet route</option>
+                                        }
+                                        @if (CanRouteRecipeThroughVpn(selectedRecipe))
+                                        {
                                             @foreach (var gateway in InstalledVpnGateways)
                                             {
-                                                <option value="@gateway.Id">@gateway.DisplayName (@gateway.HealthState)</option>
+                                                <option value="vpn:@gateway.Id">VPN — @gateway.DisplayName (@gateway.HealthState)</option>
                                             }
-                                        </select>
-                                        <span class="meta-text">Choose the existing gateway that should carry this recipe's VPN-routed apps.</span>
-                                    }
-                                    else
+                                        }
+                                    </select>
+                                    <span class="meta-text">Direct uses the server's normal route. VPN keeps outbound app traffic behind the selected gateway.</span>
+                                    @if ((selectedRecipe.RequiresVpnGateway || CanRouteRecipeThroughVpn(selectedRecipe)) && !InstalledVpnGateways.Any())
                                     {
-                                        <span class="meta-text">Add a VPN Gateway in the Docker tab before starting this recipe.</span>
                                         <UiCommandButton Label="Add VPN Gateway"
                                                          Glyph="UiIconGlyph.Plus"
                                                          Variant="UiButtonVariant.ActionSubtle"
@@ -825,7 +847,7 @@
                                                          OnClick='() => InstallAsync(GetApp("vpn-gateway"))' />
                                     }
                                 </div>
-                            }
+                            </div>
                             @if (selectedRecipe.RequiresPlanning)
                             {
                                 <p class="meta-text">This recipe needs choices from you before LMS can safely deploy it. The AI will identify supported parts and will not install a misleading partial stack.</p>
@@ -845,7 +867,7 @@
                                 <UiCommandButton Label="Go"
                                                  Glyph="UiIconGlyph.Ai"
                                                  Variant="UiButtonVariant.PrimaryMuted"
-                                                 Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft) || (selectedRecipe.RequiresVpnGateway && selectedPromptVpnGatewayId is null))"
+                                                 Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft) || string.IsNullOrWhiteSpace(selectedPromptListenAddress) || string.IsNullOrWhiteSpace(selectedPromptOutboundRoute))"
                                                  OnClick="StartPromptRecipeAsync" />
                             </div>
                         </div>
@@ -957,6 +979,9 @@
     private HomeLabPromptRecipe? customizingPromptRecipe;
     private string recipePromptDraft = string.Empty;
     private Guid? selectedPromptVpnGatewayId;
+    private string selectedPromptListenAddress = string.Empty;
+    private string selectedPromptOutboundRoute = string.Empty;
+    private IReadOnlyList<RecipeListenInterface> RecipeListenInterfaces { get; } = LoadRecipeListenInterfaces();
     private IEnumerable<string> RecipeCategories => promptRecipes
         .Select(recipe => recipe.Category)
         .Distinct(StringComparer.OrdinalIgnoreCase);
@@ -1157,6 +1182,34 @@
         string Detail,
         IReadOnlyList<HomeLabAppInstallation> Installations,
         DateTimeOffset SortDate);
+
+    private sealed record RecipeListenInterface(string InterfaceName, string Address);
+
+    private static IReadOnlyList<RecipeListenInterface> LoadRecipeListenInterfaces()
+    {
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .Where(item => item.OperationalStatus == OperationalStatus.Up)
+                .SelectMany(item => item.GetIPProperties().UnicastAddresses
+                    .Where(address => address.Address.AddressFamily == AddressFamily.InterNetwork &&
+                                      !IPAddress.IsLoopback(address.Address))
+                    .Select(address => new RecipeListenInterface(item.Name, address.Address.ToString())))
+                .Distinct()
+                .OrderBy(item => item.InterfaceName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(item => item.Address, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static bool CanRouteRecipeThroughVpn(HomeLabPromptRecipe recipe) =>
+        recipe.RequiresPlanning ||
+        recipe.RequiresVpnGateway ||
+        recipe.AppIds.Count > 0 && recipe.AppIds.All(appId => HomeLabCatalog.GetApp(appId).SupportsVpnGateway);
 
     protected override async Task OnInitializedAsync()
     {
@@ -1532,12 +1585,17 @@
             : string.Empty;
         customizingPromptRecipe = null;
         recipePromptDraft = string.Empty;
+        selectedPromptVpnGatewayId = null;
+        selectedPromptListenAddress = string.Empty;
+        selectedPromptOutboundRoute = string.Empty;
     }
 
     private void SelectPromptRecipe(ChangeEventArgs eventArgs)
     {
         selectedPromptRecipeId = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
         selectedPromptVpnGatewayId = null;
+        selectedPromptListenAddress = string.Empty;
+        selectedPromptOutboundRoute = string.Empty;
         if (selectedPromptRecipeId.Equals("custom", StringComparison.OrdinalIgnoreCase))
         {
             customizingPromptRecipe = null;
@@ -1552,9 +1610,16 @@
         selectedPromptVpnGatewayId = null;
     }
 
-    private void SelectPromptVpnGateway(ChangeEventArgs eventArgs)
+    private void SelectPromptListenAddress(ChangeEventArgs eventArgs)
     {
-        selectedPromptVpnGatewayId = Guid.TryParse(eventArgs.Value?.ToString(), out var gatewayId)
+        selectedPromptListenAddress = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+    }
+
+    private void SelectPromptOutboundRoute(ChangeEventArgs eventArgs)
+    {
+        selectedPromptOutboundRoute = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+        selectedPromptVpnGatewayId = selectedPromptOutboundRoute.StartsWith("vpn:", StringComparison.OrdinalIgnoreCase) &&
+                                     Guid.TryParse(selectedPromptOutboundRoute[4..], out var gatewayId)
             ? gatewayId
             : null;
     }
@@ -1574,9 +1639,9 @@
             return;
         }
 
-        if (promptRecipe.RequiresVpnGateway && selectedPromptVpnGatewayId is null)
+        if (string.IsNullOrWhiteSpace(selectedPromptListenAddress) || string.IsNullOrWhiteSpace(selectedPromptOutboundRoute))
         {
-            SetMessage("Choose a VPN Gateway before starting this recipe.", true);
+            SetMessage("Choose a listen interface and outbound network before starting this recipe.", true);
             return;
         }
 
@@ -1590,6 +1655,9 @@
             HomeLabPromptRecipeCatalog.BuildRecipePrompt(
                 promptRecipe,
                 recipePromptDraft,
+                RecipeListenInterfaces.First(item => item.Address == selectedPromptListenAddress).InterfaceName,
+                selectedPromptListenAddress,
+                selectedPromptOutboundRoute.StartsWith("vpn:", StringComparison.OrdinalIgnoreCase) ? "vpn" : "direct",
                 selectedPromptVpnGatewayId,
                 selectedGatewayName));
     }

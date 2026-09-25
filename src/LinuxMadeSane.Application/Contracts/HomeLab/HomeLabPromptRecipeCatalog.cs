@@ -298,7 +298,7 @@ public static class HomeLabPromptRecipeCatalog
             ["Squid"],
             ["squid-proxy"], false,
             "Set up a private forward proxy for devices on networks I control.",
-            "Do not expose it through Edge Gateway or configure an open public proxy."),
+            "Choose the LAN or private interface whose clients may use Squid, then choose the outbound route. Direct uses the server's regular LAN/Internet route; VPN sends proxy traffic through the selected VPN Gateway. Configure each client with the reported proxy IP and port. Do not expose it through Edge Gateway or any public route because that would create an open proxy."),
 
         Plan("Gaming", "retro-gaming-library", "Retro Gaming Library",
             "Plan a RomM library with browser emulation.",
@@ -440,6 +440,9 @@ public static class HomeLabPromptRecipeCatalog
     public static string BuildRecipePrompt(
         HomeLabPromptRecipe recipe,
         string request,
+        string listenInterface,
+        string listenAddress,
+        string outboundRoute,
         Guid? vpnGatewayInstallationId = null,
         string? vpnGatewayName = null)
     {
@@ -450,7 +453,16 @@ public static class HomeLabPromptRecipeCatalog
             throw new InvalidOperationException("Describe what you want from this HomeLab Recipe.");
         }
 
-        var vpnGatewaySelection = recipe.RequiresVpnGateway && vpnGatewayInstallationId is { } gatewayId
+        if (string.IsNullOrWhiteSpace(listenInterface) || string.IsNullOrWhiteSpace(listenAddress))
+        {
+            throw new InvalidOperationException("Choose the network interface that should accept connections.");
+        }
+        if (outboundRoute is not ("direct" or "vpn"))
+        {
+            throw new InvalidOperationException("Choose direct Internet or a VPN Gateway for outbound traffic.");
+        }
+
+        var vpnGatewaySelection = outboundRoute == "vpn" && vpnGatewayInstallationId is { } gatewayId
             ? $"""
             The user selected the existing VPN Gateway{(string.IsNullOrWhiteSpace(vpnGatewayName) ? string.Empty : $" '{vpnGatewayName}'")} for this recipe.
             Use this exact VPN Gateway installation ID when calling apply_home_lab_prompt_recipe: {gatewayId}
@@ -462,6 +474,11 @@ public static class HomeLabPromptRecipeCatalog
             {recipe.Prompt}
 
             {vpnGatewaySelection}
+
+            Required network choices already made by the user:
+            - Listen on {listenInterface} at {listenAddress}. Pass this exact address as listenAddress.
+            - Send outbound traffic through {(outboundRoute == "vpn" ? "the selected VPN Gateway" : "the server's normal direct/LAN route")}. Pass "{outboundRoute}" as outboundRoute.
+            Do not ask for these network choices again unless the selected interface or gateway is no longer available.
 
             User-edited requirements for this recipe:
             {normalized}
