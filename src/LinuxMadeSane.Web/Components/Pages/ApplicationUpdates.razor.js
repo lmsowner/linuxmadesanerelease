@@ -2,6 +2,26 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 let countdownTimer;
+const restartProbeIntervalMilliseconds = 1000;
+
+async function reloadWhenAvailable() {
+    while (true) {
+        try {
+            const response = await window.fetch(window.location.href, {
+                cache: "no-store",
+                credentials: "same-origin"
+            });
+            if (response.ok) {
+                window.location.reload();
+                return;
+            }
+        } catch {
+            // LMS is still restarting. Keep the current update screen visible.
+        }
+
+        await new Promise(resolve => window.setTimeout(resolve, restartProbeIntervalMilliseconds));
+    }
+}
 
 export function startCountdown(seconds) {
     window.clearInterval(countdownTimer);
@@ -20,7 +40,7 @@ export function startCountdown(seconds) {
         render();
         if (remaining <= 0) {
             window.clearInterval(countdownTimer);
-            window.location.reload();
+            void reloadWhenAvailable();
         }
     }, 1000);
 }
