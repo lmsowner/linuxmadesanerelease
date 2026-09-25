@@ -17,6 +17,8 @@ public sealed class RemoteShareMountEditor
     [Required]
     public string ShareName { get; set; } = string.Empty;
 
+    public string RemotePath { get; set; } = string.Empty;
+
     [Required]
     public string LocalMountPath { get; set; } = string.Empty;
 

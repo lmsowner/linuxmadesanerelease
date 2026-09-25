@@ -460,6 +460,118 @@ internal sealed class SambaNetworkDiscoveryService(
         }
     }
 
+    public async Task<RemoteShareFolderBrowseResult> BrowseRemoteShareFoldersAsync(
+        RemoteShareFolderBrowseRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var target = request.Target.Trim();
+        var shareName = request.ShareName.Trim();
+        var remotePath = NormalizeRemotePath(request.RemotePath);
+        var useAuthentication = !string.IsNullOrWhiteSpace(request.UserName) ||
+                                !string.IsNullOrWhiteSpace(request.Password) ||
+                                !string.IsNullOrWhiteSpace(request.Domain);
+        var authFilePath = useAuthentication
+            ? await WriteTemporaryCredentialsFileAsync(request.UserName, request.Password, request.Domain, cancellationToken)
+            : null;
+
+        try
+        {
+            var arguments = new List<string> { $"//{target}/{shareName}", "-E" };
+            if (!string.IsNullOrWhiteSpace(authFilePath))
+            {
+                arguments.AddRange(["-A", authFilePath]);
+            }
+            else
+            {
+                arguments.Add("-N");
+            }
+
+            if (remotePath.Length > 0)
+            {
+                arguments.AddRange(["-D", remotePath]);
+            }
+
+            arguments.AddRange(["-c", "ls"]);
+            var result = await RunCommandAsync(
+                "smbclient",
+                arguments,
+                $"Browse {shareName}/{remotePath}",
+                cancellationToken);
+            var output = CombineSmbClientBrowseOutput(result);
+            var folders = ParseRemoteFolderOutput(output, remotePath);
+            if (result.ExitCode == 0)
+            {
+                return new RemoteShareFolderBrowseResult(
+                    target,
+                    shareName,
+                    remotePath,
+                    useAuthentication,
+                    folders.Count == 0
+                        ? "This folder has no subfolders."
+                        : $"Loaded {folders.Count} folder(s).",
+                    folders,
+                    []);
+            }
+
+            return new RemoteShareFolderBrowseResult(
+                target,
+                shareName,
+                remotePath,
+                useAuthentication,
+                ExtractFailureMessage(result),
+                folders,
+                ["The share was found, but this folder could not be listed with the supplied connection."]);
+        }
+        finally
+        {
+            DeleteIfPresent(authFilePath);
+        }
+    }
+
+    private static IReadOnlyList<RemoteSambaFolder> ParseRemoteFolderOutput(string output, string parentPath)
+    {
+        var folders = new Dictionary<string, RemoteSambaFolder>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var directoryMarker = line.IndexOf(" D ", StringComparison.Ordinal);
+            if (directoryMarker <= 0)
+            {
+                continue;
+            }
+
+            var name = line[..directoryMarker].Trim();
+            if (name is "." or ".." || name.StartsWith("NT_STATUS", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var path = string.IsNullOrWhiteSpace(parentPath)
+                ? name
+                : $"{parentPath.TrimEnd('/')}/{name}";
+            folders.TryAdd(name, new RemoteSambaFolder(name, path));
+        }
+
+        return folders.Values.OrderBy(folder => folder.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static string NormalizeRemotePath(string? value)
+    {
+        var path = value?.Trim().Replace('\\', '/') ?? string.Empty;
+        path = path.Trim('/');
+        if (path.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Any(segment => segment is "." or ".." || segment.Contains('\0') || segment.Contains(',')))
+        {
+            throw new InvalidOperationException("The remote share folder path is invalid.");
+        }
+
+        return string.Join('/', segments);
+    }
+
     private static string CombineSmbClientBrowseOutput(LinuxCommandResult result)
     {
         if (string.IsNullOrWhiteSpace(result.StandardError))

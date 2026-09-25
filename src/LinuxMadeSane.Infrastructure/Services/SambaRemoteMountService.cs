@@ -67,7 +67,8 @@ internal sealed class SambaRemoteMountService(
                     entity.LastMountedAtUtc,
                     isMounted
                         ? "Mounted on this LMS server."
-                        : "Saved as a permanent LMS mount, but not currently mounted.");
+                        : "Saved as a permanent LMS mount, but not currently mounted.",
+                    entity.RemotePath);
             })
             .ToArray();
     }
@@ -103,6 +104,7 @@ internal sealed class SambaRemoteMountService(
 
         var remoteHost = request.RemoteHost.Trim();
         var shareName = request.ShareName.Trim();
+        var remotePath = NormalizeRemotePath(request.RemotePath);
         var localMountPath = request.LocalMountPath.Trim();
 
         if (remoteHost.Length == 0 || shareName.Length == 0)
@@ -193,6 +195,7 @@ internal sealed class SambaRemoteMountService(
                     RemoteHost = remoteHost,
                     RemoteAddress = NullIfWhiteSpace(request.RemoteAddress),
                     ShareName = shareName,
+                    RemotePath = remotePath,
                     LocalMountPath = localMountPath,
                     UserName = NullIfWhiteSpace(request.UserName),
                     Domain = NullIfWhiteSpace(request.Domain),
@@ -255,6 +258,7 @@ internal sealed class SambaRemoteMountService(
 
         var remoteHost = request.RemoteHost.Trim();
         var shareName = request.ShareName.Trim();
+        var remotePath = NormalizeRemotePath(request.RemotePath);
         var localMountPath = request.LocalMountPath.Trim();
 
         if (remoteHost.Length == 0 || shareName.Length == 0)
@@ -353,6 +357,7 @@ internal sealed class SambaRemoteMountService(
             entity.RemoteHost = remoteHost;
             entity.RemoteAddress = NullIfWhiteSpace(request.RemoteAddress);
             entity.ShareName = shareName;
+            entity.RemotePath = remotePath;
             entity.LocalMountPath = localMountPath;
             entity.UserName = NullIfWhiteSpace(request.UserName);
             entity.Domain = NullIfWhiteSpace(request.Domain);
@@ -402,7 +407,8 @@ internal sealed class SambaRemoteMountService(
                                     PersistOnServer: true,
                                     entity.LocalOwner,
                                     entity.FileMode,
-                                    entity.DirectoryMode)))
+                                    entity.DirectoryMode,
+                                    entity.RemotePath)))
                     ],
                     $"Restore {oldRemoteUncPath} on {entity.LocalMountPath}",
                     requiresSudo: true,
@@ -873,6 +879,12 @@ internal sealed class SambaRemoteMountService(
             options.Add("guest");
         }
 
+        var remotePath = NormalizeRemotePath(request.RemotePath);
+        if (remotePath.Length > 0)
+        {
+            options.Add($"prefixpath={remotePath}");
+        }
+
         var localOwner = NormalizeLocalOwner(request.LocalOwner);
         if (!string.IsNullOrWhiteSpace(localOwner))
         {
@@ -947,6 +959,24 @@ internal sealed class SambaRemoteMountService(
 
     private static string BuildRemoteUncPath(string remoteHost, string shareName) =>
         $"//{remoteHost.Trim()}/{shareName.Trim()}";
+
+    private static string NormalizeRemotePath(string? value)
+    {
+        var path = value?.Trim().Replace('\\', '/') ?? string.Empty;
+        path = path.Trim('/');
+        if (path.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Any(segment => segment is "." or ".." || segment.Contains('\0') || segment.Contains(',')))
+        {
+            throw new InvalidOperationException("The remote share folder path is invalid.");
+        }
+
+        return string.Join('/', segments);
+    }
 
     private string BuildPersistentCredentialFilePath(Guid mountId) =>
         Path.Combine(storageSettings.CredentialsDirectory, $"{mountId:N}.cred");

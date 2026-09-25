@@ -888,6 +888,11 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
     public Task DeleteManagedRemoteMountAsync(Guid id, CancellationToken cancellationToken = default) =>
         sambaRemoteMountService.DeleteManagedRemoteMountAsync(id, cancellationToken);
 
+    public Task<RemoteShareFolderBrowseResult> BrowseRemoteShareFoldersAsync(
+        RemoteShareFolderBrowseRequest request,
+        CancellationToken cancellationToken = default) =>
+        sambaNetworkDiscoveryService.BrowseRemoteShareFoldersAsync(request, cancellationToken);
+
     private async Task<SambaShareServiceCheck> InspectSambaConfigurationAsync(CancellationToken cancellationToken)
     {
         var result = await RunDiagnosticCommandAsync(

@@ -569,6 +569,7 @@ public sealed class SqliteDatabaseInitializer(
                 RemoteHost TEXT NOT NULL,
                 RemoteAddress TEXT NULL,
                 ShareName TEXT NOT NULL,
+                RemotePath TEXT NOT NULL DEFAULT '',
                 LocalMountPath TEXT NOT NULL,
                 UserName TEXT NULL,
                 Domain TEXT NULL,
@@ -2456,6 +2457,7 @@ public sealed class SqliteDatabaseInitializer(
 
     private async Task EnsureRemoteShareMountColumnsAsync(CancellationToken cancellationToken)
     {
+        await EnsureColumnExistsAsync("remote_share_mounts", "RemotePath", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync("remote_share_mounts", "LocalOwner", "TEXT NULL", cancellationToken);
         await EnsureColumnExistsAsync("remote_share_mounts", "FileMode", "TEXT NULL", cancellationToken);
         await EnsureColumnExistsAsync("remote_share_mounts", "DirectoryMode", "TEXT NULL", cancellationToken);

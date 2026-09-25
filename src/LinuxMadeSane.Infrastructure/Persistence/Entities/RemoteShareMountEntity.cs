@@ -9,6 +9,7 @@ public sealed class RemoteShareMountEntity
     public string RemoteHost { get; set; } = string.Empty;
     public string? RemoteAddress { get; set; }
     public string ShareName { get; set; } = string.Empty;
+    public string RemotePath { get; set; } = string.Empty;
     public string LocalMountPath { get; set; } = string.Empty;
     public string? UserName { get; set; }
     public string? Domain { get; set; }

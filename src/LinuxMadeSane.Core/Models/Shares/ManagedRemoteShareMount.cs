@@ -18,4 +18,5 @@ public sealed record ManagedRemoteShareMount(
     bool IsMounted,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? LastMountedAtUtc,
-    string StatusMessage);
+    string StatusMessage,
+    string RemotePath = "");

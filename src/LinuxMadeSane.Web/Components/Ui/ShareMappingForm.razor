@@ -22,7 +22,7 @@
         <section class="share-mapping-source">
             <div class="share-mapping-source-card">
                 <span class="share-mapping-source-label">@SourceLabel</span>
-                <strong>//@Editor.Target.Trim()/@Editor.ShareName.Trim()</strong>
+                <strong>//@Editor.Target.Trim()/@Editor.ShareName.Trim()@(string.IsNullOrWhiteSpace(Editor.RemotePath) ? string.Empty : $"/{Editor.RemotePath.Trim('/')}")</strong>
                 <span>@SourceHelper</span>
             </div>
             <details class="share-mapping-source-edit">
@@ -37,14 +37,23 @@
                                  Class="@RequiredFieldClass(Editor.Target)"
                                  Placeholder="freenas.local" />
 
-                    <UiTextField Label="Share"
-                                 Helper="Required. SMB share name."
-                                 Value="@Editor.ShareName"
-                                 ValueChanged="SetShareNameAsync"
-                                 ValueExpression="@(() => Editor.ShareName)"
-                                 Compact="true"
-                                 Class="@ShareFieldClass"
-                                 Placeholder="media" />
+                    <div class="share-mapping-share-entry">
+                        <UiTextField Label="Share"
+                                     Helper="Required. SMB share name."
+                                     Value="@Editor.ShareName"
+                                     ValueChanged="SetShareNameAsync"
+                                     ValueExpression="@(() => Editor.ShareName)"
+                                     Compact="true"
+                                     Class="@ShareFieldClass"
+                                     Placeholder="media" />
+                        @if (EnableRemoteShareDiscovery)
+                        {
+                            <UiCommandButton Label="@(isBrowsingRemoteShares ? "Loading shares..." : "Find shares")"
+                                             Glyph="UiIconGlyph.Search"
+                                             Disabled="@(!CanBrowseRemoteShares)"
+                                             OnClick="BrowseRemoteSharesAsync" />
+                        }
+                    </div>
                 </div>
             </details>
         </section>
@@ -61,15 +70,83 @@
                          Class="@RequiredFieldClass(Editor.Target)"
                          Placeholder="freenas.local" />
 
-            <UiTextField Label="Share"
-                         Helper="Required. SMB share name."
-                         Value="@Editor.ShareName"
-                         ValueChanged="SetShareNameAsync"
-                         ValueExpression="@(() => Editor.ShareName)"
-                         Compact="true"
-                         Class="@ShareFieldClass"
-                         Placeholder="media" />
+            <div class="share-mapping-share-entry">
+                <UiTextField Label="Share"
+                             Helper="Required. SMB share name."
+                             Value="@Editor.ShareName"
+                             ValueChanged="SetShareNameAsync"
+                             ValueExpression="@(() => Editor.ShareName)"
+                             Compact="true"
+                             Class="@ShareFieldClass"
+                             Placeholder="media" />
+                @if (EnableRemoteShareDiscovery)
+                {
+                    <UiCommandButton Label="@(isBrowsingRemoteShares ? "Loading shares..." : "Find shares")"
+                                     Glyph="UiIconGlyph.Search"
+                                     Disabled="@(!CanBrowseRemoteShares)"
+                                     OnClick="BrowseRemoteSharesAsync" />
+                }
+            </div>
         </div>
+    }
+
+    @if (EnableRemoteShareDiscovery && RemoteShares.Count > 0)
+    {
+        <section class="share-mapping-remote-picker">
+            <label for="share-mapping-remote-share">Available shares</label>
+            <select id="share-mapping-remote-share"
+                    class="ui-control-input"
+                    value="@Editor.ShareName"
+                    @onchange="SelectRemoteShareByNameAsync">
+                <option value="">Choose a share...</option>
+                @foreach (var share in RemoteShares)
+                {
+                    <option value="@share.Name">@share.Name@(string.IsNullOrWhiteSpace(share.Comment) ? string.Empty : $" — {share.Comment}")</option>
+                }
+            </select>
+        </section>
+    }
+
+    @if (EnableRemoteShareDiscovery && !string.IsNullOrWhiteSpace(remoteShareBrowseError))
+    {
+        <p class="callout error share-mapping-share-error">@remoteShareBrowseError</p>
+    }
+
+    @if (EnableRemoteShareDiscovery && remoteShareBrowseResult is not null && !string.IsNullOrWhiteSpace(Editor.ShareName))
+    {
+        <section class="share-mapping-remote-browser">
+            <div class="share-mapping-section-header">
+                <div>
+                    <strong>Remote folder</strong>
+                    <span>//@Editor.Target.Trim()/@Editor.ShareName.Trim()@(string.IsNullOrWhiteSpace(Editor.RemotePath) ? "/" : $"/{Editor.RemotePath.Trim('/')}")</span>
+                </div>
+                <div class="share-mapping-remote-browser-actions">
+                    @if (!string.IsNullOrWhiteSpace(Editor.RemotePath))
+                    {
+                        <UiCommandButton Label="Up"
+                                         Glyph="UiIconGlyph.FolderOpen"
+                                         Variant="UiButtonVariant.Ghost"
+                                         OnClick="NavigateRemoteParentAsync" />
+                    }
+                </div>
+            </div>
+            @if (RemoteFolders.Count == 0)
+            {
+                <span class="meta-text">@remoteFolderBrowseResult?.StatusMessage</span>
+            }
+            else
+            {
+                <div class="share-mapping-remote-folder-list" aria-label="Folders in selected SMB share">
+                    @foreach (var folder in RemoteFolders)
+                    {
+                        <button class="share-mapping-remote-folder" type="button" @onclick="@(() => NavigateRemoteFolderAsync(folder))">
+                            <UiGlyphIcon Glyph="UiIconGlyph.FolderOpen" />
+                            <span>@folder.Name</span>
+                        </button>
+                    }
+                </div>
+            }
+        </section>
     }
 
     <div class="share-mapping-grid">
@@ -92,49 +169,6 @@
                      Placeholder="@(Editor.HasSavedPassword && Editor.KeepSavedPassword ? "Saved password kept" : "optional")"
                      Autocomplete="current-password" />
     </div>
-
-    @if (EnableRemoteShareDiscovery)
-    {
-        <section class="share-mapping-discovery">
-            <div class="share-mapping-section-header">
-                <div>
-                    <strong>Find server shares</strong>
-                    <span>Check the hostname and credentials, then choose an SMB share from the server.</span>
-                </div>
-                <UiCommandButton Label="@(isBrowsingRemoteShares ? "Loading shares..." : "Find shares")"
-                                 Glyph="UiIconGlyph.Search"
-                                 Disabled="@(!CanBrowseRemoteShares)"
-                                 OnClick="BrowseRemoteSharesAsync" />
-            </div>
-
-            @if (RemoteShares.Count > 0)
-            {
-                <div class="share-mapping-remote-share-list" aria-label="Available SMB shares">
-                    @foreach (var share in RemoteShares)
-                    {
-                        <button class="share-mapping-remote-share @(IsSelectedRemoteShare(share) ? "selected" : null)"
-                                type="button"
-                                @onclick="@(() => SelectRemoteShareAsync(share))">
-                            <strong>@share.Name</strong>
-                            @if (!string.IsNullOrWhiteSpace(share.Comment))
-                            {
-                                <span>@share.Comment</span>
-                            }
-                        </button>
-                    }
-                </div>
-            }
-
-            @if (!string.IsNullOrWhiteSpace(remoteShareBrowseError))
-            {
-                <p class="callout error share-mapping-share-error">@remoteShareBrowseError</p>
-            }
-            else if (remoteShareBrowseResult is not null && !string.IsNullOrWhiteSpace(remoteShareBrowseResult.StatusMessage))
-            {
-                <p class="callout info share-mapping-share-status">@remoteShareBrowseResult.StatusMessage</p>
-            }
-        </section>
-    }
 
     @if (ShowSavedPasswordToggle && Editor.HasSavedPassword)
     {
@@ -208,21 +242,6 @@
             </div>
         }
 
-        <div class="share-mapping-suggestions">
-            <span class="share-mapping-suggestions-label">Suggested mount points</span>
-            <div class="share-mapping-suggestion-list">
-                @foreach (var suggestion in MountPathSuggestions)
-                {
-                    <button class="share-mapping-suggestion @(IsCurrentMountPath(suggestion.Path) ? "selected" : null)"
-                            type="button"
-                            title="@suggestion.Help"
-                            @onclick="@(() => ApplySuggestedMountPathAsync(suggestion))">
-                        <strong>@suggestion.Label</strong>
-                        <span>@suggestion.Path</span>
-                    </button>
-                }
-            </div>
-        </div>
     </section>
 
     <section class="share-mapping-location">
@@ -261,17 +280,6 @@
                          Placeholder="0777" />
         </div>
     </section>
-
-    <details class="share-mapping-guidance">
-        <summary>Best practice guidance</summary>
-        <div class="share-mapping-guidance-grid">
-            <InfoPill Eyebrow="Default" Text="Use /mnt/lms for LMS-managed network maps. It keeps external mounts grouped and avoids polluting the filesystem root." />
-            <InfoPill Eyebrow="Temporary" Text="Use temporary mounts for inspection or one-off file work. LMS tracks these and releases them when the browser is closed or the app restarts." />
-            <InfoPill Eyebrow="Permanent" Text="Use permanent mounts only when users, services, jobs, or media libraries need the share after reboot. LMS saves network-safe options: _netdev, nofail, and systemd automount." />
-            <InfoPill Eyebrow="Home path" Text="Use a home-folder mount only when the mapping is clearly for one Linux user. Make sure the user can traverse the parent folders." />
-            <InfoPill Eyebrow="Permissions" Text="SMB usually controls access on the server. Linux ownership and modes can be client-side presentation, so use the remote share ACLs as the source of truth." />
-        </div>
-    </details>
 
     @if (!string.IsNullOrWhiteSpace(StatusMessage))
     {
@@ -331,6 +339,7 @@
     private bool isBrowsingRemoteShares;
     private bool targetFolderBrowserOpen;
     private RemoteShareBrowseResult? remoteShareBrowseResult;
+    private RemoteShareFolderBrowseResult? remoteFolderBrowseResult;
     private string? remoteShareBrowseError;
     private bool HasRemoteSource => !string.IsNullOrWhiteSpace(Editor.Target) &&
                                     !string.IsNullOrWhiteSpace(Editor.ShareName);
@@ -342,6 +351,8 @@
     private IReadOnlyList<RemoteSambaShare> RemoteShares => remoteShareBrowseResult?.Shares
         .Where(share => share.IsMountable)
         .ToArray() ?? Array.Empty<RemoteSambaShare>();
+    private IReadOnlyList<RemoteSambaFolder> RemoteFolders => remoteFolderBrowseResult?.Folders
+        ?? Array.Empty<RemoteSambaFolder>();
     private string ShareFieldClass =>
         $"{RequiredFieldClass(Editor.ShareName)}{(string.IsNullOrWhiteSpace(remoteShareBrowseError) ? string.Empty : " share-mapping-share-invalid")}";
     private string TargetFolderBrowserInitialPath =>
@@ -349,12 +360,10 @@
             ? PreferredMountPath.Trim()
             : "/";
     private string MountPathFieldClass => $"share-mapping-mount-path {RequiredFieldClass(Editor.LocalMountPath)}";
-    private IReadOnlyList<ShareMappingMountPathSuggestion> MountPathSuggestions => BuildMountPathSuggestions();
-
     private string RemoteSummary =>
         string.IsNullOrWhiteSpace(Editor.Target) || string.IsNullOrWhiteSpace(Editor.ShareName)
             ? "Map an SMB/CIFS share onto this LMS server"
-            : $"//{Editor.Target.Trim()}/{Editor.ShareName.Trim()}";
+            : $"//{Editor.Target.Trim()}/{Editor.ShareName.Trim()}{(string.IsNullOrWhiteSpace(Editor.RemotePath) ? string.Empty : $"/{Editor.RemotePath.Trim('/')}")}";
 
     private string LocalSummary =>
         string.IsNullOrWhiteSpace(Editor.LocalMountPath)
@@ -395,7 +404,6 @@
         !IsBusy &&
         !string.IsNullOrWhiteSpace(Editor.Target) &&
         !string.IsNullOrWhiteSpace(Editor.ShareName) &&
-        (!EnableRemoteShareDiscovery || RemoteShares.Any(IsSelectedRemoteShare)) &&
         !string.IsNullOrWhiteSpace(Editor.LocalMountPath) &&
         IsValidCifsMode(Editor.FileMode) &&
         IsValidCifsMode(Editor.DirectoryMode) &&
@@ -515,6 +523,11 @@
             {
                 remoteShareBrowseError = "Hostname and/or credentials incorrect.";
             }
+
+            if (RemoteShares.FirstOrDefault(IsSelectedRemoteShare) is { } selectedShare)
+            {
+                await SelectRemoteShareAsync(selectedShare);
+            }
         }
         catch
         {
@@ -526,12 +539,74 @@
         }
     }
 
-    private Task SelectRemoteShareAsync(RemoteSambaShare share)
+    private async Task SelectRemoteShareAsync(RemoteSambaShare share)
     {
         Editor.ShareName = share.Name;
+        Editor.RemotePath = string.Empty;
         remoteShareBrowseError = null;
         ApplySelectedMountPathIfAutomatic();
-        return Task.CompletedTask;
+        await BrowseRemoteShareFoldersAsync();
+    }
+
+    private async Task SelectRemoteShareByNameAsync(ChangeEventArgs args)
+    {
+        var shareName = args.Value?.ToString()?.Trim() ?? string.Empty;
+        if (RemoteShares.FirstOrDefault(share => share.Name.Equals(shareName, StringComparison.OrdinalIgnoreCase)) is { } share)
+        {
+            await SelectRemoteShareAsync(share);
+            return;
+        }
+
+        Editor.ShareName = shareName;
+        Editor.RemotePath = string.Empty;
+        remoteFolderBrowseResult = null;
+        ApplySelectedMountPathIfAutomatic();
+    }
+
+    private async Task BrowseRemoteShareFoldersAsync()
+    {
+        if (!EnableRemoteShareDiscovery ||
+            string.IsNullOrWhiteSpace(Editor.Target) ||
+            string.IsNullOrWhiteSpace(Editor.ShareName))
+        {
+            return;
+        }
+
+        try
+        {
+            remoteFolderBrowseResult = await ShareService.BrowseRemoteShareFoldersAsync(
+                new RemoteShareFolderBrowseRequest(
+                    Editor.Target.Trim(),
+                    Editor.ShareName.Trim(),
+                    Editor.RemotePath.Trim(),
+                    Editor.UserName.Trim(),
+                    Editor.Password,
+                    Editor.Domain.Trim()));
+            remoteShareBrowseError = null;
+        }
+        catch
+        {
+            remoteFolderBrowseResult = null;
+            remoteShareBrowseError = "Unable to browse folders in this share.";
+        }
+    }
+
+    private Task NavigateRemoteFolderAsync(RemoteSambaFolder folder)
+    {
+        Editor.RemotePath = folder.Path;
+        return BrowseRemoteShareFoldersAsync();
+    }
+
+    private Task NavigateRemoteParentAsync()
+    {
+        var segments = Editor.RemotePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries).ToList();
+        if (segments.Count > 0)
+        {
+            segments.RemoveAt(segments.Count - 1);
+        }
+
+        Editor.RemotePath = string.Join('/', segments);
+        return BrowseRemoteShareFoldersAsync();
     }
 
     private bool IsSelectedRemoteShare(RemoteSambaShare share) =>
@@ -540,7 +615,9 @@
     private void ResetRemoteShareBrowseState()
     {
         remoteShareBrowseResult = null;
+        remoteFolderBrowseResult = null;
         remoteShareBrowseError = null;
+        Editor.RemotePath = string.Empty;
     }
 
     private void OpenTargetFolderBrowser()
@@ -621,14 +698,6 @@
         return Task.CompletedTask;
     }
 
-    private Task ApplySuggestedMountPathAsync(ShareMappingMountPathSuggestion suggestion)
-    {
-        selectedLocation = suggestion.Location;
-        Editor.LocalMountPath = suggestion.Path;
-        mountPathEdited = suggestion.Location == ShareMappingMountLocation.Custom;
-        return Task.CompletedTask;
-    }
-
     private Task SetPersistenceAsync(bool value)
     {
         Editor.PersistOnServer = value;
@@ -694,47 +763,6 @@
 
         return ShareMappingMountLocation.Custom;
     }
-
-    private IReadOnlyList<ShareMappingMountPathSuggestion> BuildMountPathSuggestions()
-    {
-        var suggestions = new List<ShareMappingMountPathSuggestion>
-        {
-            new(
-                "LMS default",
-                ShareMountPathSuggestions.BuildLmsDefaultMountPath(Editor.Target, Editor.ShareName),
-                "Recommended LMS-managed network mount location.",
-                ShareMappingMountLocation.LmsDefault),
-            new(
-                "Standard /mnt",
-                ShareMountPathSuggestions.BuildMntMountPath(Editor.Target, Editor.ShareName),
-                "Standard Linux mount area for temporary or admin-created mounts.",
-                ShareMappingMountLocation.MntFolder),
-            new(
-                "User home",
-                ShareMountPathSuggestions.BuildHomeMountPath(localUserName, Editor.Target, Editor.ShareName),
-                "Convenience mount under a specific user's home directory.",
-                ShareMappingMountLocation.HomeFolder)
-        };
-
-        if (!string.IsNullOrWhiteSpace(PreferredMountPath))
-        {
-            suggestions.Insert(
-                1,
-                new ShareMappingMountPathSuggestion(
-                    "Selected folder",
-                    PreferredMountPath.Trim(),
-                    "Use the folder you right-clicked as the mount point.",
-                    ShareMappingMountLocation.SelectedFolder));
-        }
-
-        return suggestions
-            .GroupBy(suggestion => suggestion.Path, StringComparer.Ordinal)
-            .Select(group => group.First())
-            .ToArray();
-    }
-
-    private bool IsCurrentMountPath(string path) =>
-        Editor.LocalMountPath.Trim().Equals(path, StringComparison.Ordinal);
 
     private static string RequiredFieldClass(string value) =>
         string.IsNullOrWhiteSpace(value)

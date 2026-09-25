@@ -1,0 +1,6 @@
+// Copyright (c) Linux Made Sane.
+// Licensed under the Business Source License 1.1. See LICENSE for details.
+
+namespace LinuxMadeSane.Core.Models.Shares;
+
+public sealed record RemoteSambaFolder(string Name, string Path);

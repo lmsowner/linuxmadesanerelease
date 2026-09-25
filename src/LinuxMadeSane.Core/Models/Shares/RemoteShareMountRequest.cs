@@ -14,4 +14,5 @@ public sealed record RemoteShareMountRequest(
     bool PersistOnServer,
     string? LocalOwner = null,
     string? FileMode = null,
-    string? DirectoryMode = null);
+    string? DirectoryMode = null,
+    string? RemotePath = null);

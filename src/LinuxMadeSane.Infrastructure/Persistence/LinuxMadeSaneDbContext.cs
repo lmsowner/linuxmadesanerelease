@@ -682,6 +682,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.Property(mount => mount.RemoteHost).HasMaxLength(255);
             entity.Property(mount => mount.RemoteAddress).HasMaxLength(128);
             entity.Property(mount => mount.ShareName).HasMaxLength(128);
+            entity.Property(mount => mount.RemotePath).HasMaxLength(512);
             entity.Property(mount => mount.LocalMountPath).HasMaxLength(512);
             entity.Property(mount => mount.UserName).HasMaxLength(128);
             entity.Property(mount => mount.Domain).HasMaxLength(128);

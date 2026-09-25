@@ -74,6 +74,11 @@ public interface ILinuxShareModuleDataService
         string? domain,
         CancellationToken cancellationToken = default);
 
+    Task<RemoteShareFolderBrowseResult> BrowseRemoteShareFoldersAsync(
+        RemoteShareFolderBrowseRequest request,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException<RemoteShareFolderBrowseResult>(new NotSupportedException("Remote share folder browsing is unavailable."));
+
     Task<IReadOnlyList<ManagedRemoteShareMount>> ListManagedRemoteMountsAsync(
         CancellationToken cancellationToken = default);
 

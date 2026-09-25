@@ -452,6 +452,26 @@ public sealed class ShareManagementService(
             cancellationToken);
     }
 
+    public async Task<RemoteShareFolderBrowseResult> BrowseRemoteShareFoldersAsync(
+        RemoteShareFolderBrowseRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var tooling = await GetShareToolingStatusAsync(cancellationToken);
+        if (!tooling.CanBrowseRemoteShares)
+        {
+            return new RemoteShareFolderBrowseResult(
+                request.Target.Trim(),
+                request.ShareName.Trim(),
+                request.RemotePath.Trim(),
+                !string.IsNullOrWhiteSpace(request.UserName) || !string.IsNullOrWhiteSpace(request.Password),
+                "Remote folder browsing is unavailable until the Ubuntu `smbclient` package is installed on this LMS host.",
+                [],
+                [tooling.InstallCommand]);
+        }
+
+        return await shareDataService.BrowseRemoteShareFoldersAsync(request, cancellationToken);
+    }
+
     public async Task<RemoteShareMountResult> CreateRemoteShareMountAsync(
         RemoteShareMountEditor editor,
         CancellationToken cancellationToken = default)
@@ -475,7 +495,8 @@ public sealed class ShareManagementService(
                 editor.PersistOnServer,
                 NullIfWhiteSpace(editor.LocalOwner),
                 NormalizeCifsMode(editor.FileMode),
-                NormalizeCifsMode(editor.DirectoryMode)),
+                NormalizeCifsMode(editor.DirectoryMode),
+                NullIfWhiteSpace(editor.RemotePath)),
             cancellationToken);
     }
 
@@ -504,7 +525,8 @@ public sealed class ShareManagementService(
                 PersistOnServer: true,
                 NullIfWhiteSpace(editor.LocalOwner),
                 NormalizeCifsMode(editor.FileMode),
-                NormalizeCifsMode(editor.DirectoryMode)),
+                NormalizeCifsMode(editor.DirectoryMode),
+                NullIfWhiteSpace(editor.RemotePath)),
             editor.KeepSavedPassword,
             cancellationToken);
     }
