@@ -8,7 +8,7 @@ namespace LinuxMadeSane.Application.Contracts.HomeLab;
 
 public static class HomeLabCatalog
 {
-    public static IReadOnlyList<HomeLabAppManifest> Apps { get; } =
+    private static IReadOnlyList<HomeLabAppManifest> BuiltInApps { get; } =
     [
         new(
             "vpn-gateway",
@@ -414,7 +414,7 @@ public static class HomeLabCatalog
             SupportsVpnGateway: true)
     ];
 
-    public static IReadOnlyList<HomeLabRecipeManifest> Recipes { get; } =
+    private static IReadOnlyList<HomeLabRecipeManifest> BuiltInRecipes { get; } =
     [
         new(
             "secure-streaming",
@@ -500,6 +500,17 @@ public static class HomeLabCatalog
             ],
             RequiresVpnGateway: true)
     ];
+
+    public static void Configure(string userCatalogRoot, string defaultCatalogRoot) =>
+        HomeLabCatalogFileStore.Configure(userCatalogRoot, defaultCatalogRoot);
+
+    public static bool IsConfigured => HomeLabCatalogFileStore.IsConfigured;
+
+    public static IReadOnlyList<HomeLabAppManifest> Apps =>
+        HomeLabCatalogFileStore.LoadApps(BuiltInApps);
+
+    public static IReadOnlyList<HomeLabRecipeManifest> Recipes =>
+        HomeLabCatalogFileStore.LoadRecipes(BuiltInRecipes);
 
     public static HomeLabAppManifest GetApp(string id) =>
         Apps.FirstOrDefault(app => app.Id.Equals(id?.Trim(), StringComparison.OrdinalIgnoreCase))

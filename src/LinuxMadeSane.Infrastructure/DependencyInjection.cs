@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using LinuxMadeSane.Application.Interfaces;
+using LinuxMadeSane.Application.Contracts.HomeLab;
 using LinuxMadeSane.Application.Contracts.EdgeGateway;
 using LinuxMadeSane.Application.Services.EdgeGateway;
 using LinuxMadeSane.Core.Abstractions;
@@ -40,6 +41,9 @@ public static class DependencyInjection
             configuration.GetConnectionString("LinuxMadeSane") ?? "Data Source=data/linuxmadesane.db",
             contentRootPath);
         var databaseDirectory = Path.GetDirectoryName(new SqliteConnectionStringBuilder(connectionString).DataSource) ?? contentRootPath;
+        HomeLabCatalog.Configure(
+            Path.Combine(databaseDirectory, "home-lab-catalog"),
+            Path.Combine(contentRootPath, "catalog", "home-lab"));
         services.AddDataProtection()
             .SetApplicationName("LinuxMadeSane")
             .PersistKeysToFileSystem(dataProtectionDirectory);

@@ -1,0 +1,1568 @@
+{
+  "schemaVersion": 1,
+  "apps": [
+    {
+      "id": "vpn-gateway",
+      "name": "VPN Gateway",
+      "description": "Reusable VPN gateway for apps that need protected internet access.",
+      "category": "infrastructure",
+      "icon": "vpn",
+      "website": "https://github.com/qdm12/gluetun",
+      "documentation": "https://github.com/qdm12/gluetun-wiki",
+      "imageRepository": "qmcgaw/gluetun",
+      "imageTag": "latest",
+      "definitionVersion": "6",
+      "ports": [],
+      "volumes": [
+        {
+          "id": "config",
+          "containerPath": "/gluetun",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {},
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": null,
+        "port": null,
+        "dockerCommand": "wget -qO- http://127.0.0.1:9999/ \u003E/dev/null || exit 1",
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [
+        {
+          "id": "gateway-name",
+          "label": "Gateway name",
+          "type": "text",
+          "required": false,
+          "secret": false,
+          "options": null,
+          "help": "A label such as ProtonVPN, Mullvad, or NordVPN so apps can select the right gateway."
+        },
+        {
+          "id": "configuration-mode",
+          "label": "Configuration method",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "Paste provider config",
+            "Guided"
+          ],
+          "help": "Pasting the configuration file downloaded from your VPN provider is recommended. Guided setup remains available for providers that supply separate credentials."
+        },
+        {
+          "id": "provider",
+          "label": "Provider",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "ProtonVPN",
+            "NordVPN",
+            "Mullvad",
+            "Surfshark",
+            "Private Internet Access",
+            "Custom WireGuard"
+          ],
+          "help": "These provider names are Gluetun provider profiles; LMS does not implement the VPN protocol."
+        },
+        {
+          "id": "protocol",
+          "label": "Protocol",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "WireGuard",
+            "OpenVPN"
+          ],
+          "help": "Choose the protocol supported by your provider credentials."
+        },
+        {
+          "id": "vpn-config",
+          "label": "Paste VPN configuration file",
+          "type": "secret-textarea",
+          "required": true,
+          "secret": true,
+          "options": null,
+          "help": "Paste the complete .ovpn file or WireGuard INI downloaded from your VPN provider. LMS keeps the provider profile as a secret and resolves WireGuard endpoint hostnames each time the gateway starts, because Gluetun requires a literal IP address. When editing an installed gateway, leave this empty to keep its current configuration."
+        },
+        {
+          "id": "port-forwarding",
+          "label": "Incoming P2P port",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "Required for qBittorrent/P2P",
+            "Off (P2P still works)"
+          ],
+          "help": "An inbound port improves qBittorrent peer reachability. Proton requires a paid P2P server profile with NAT-PMP enabled; PIA also supports automatic forwarding. Other providers can allow P2P traffic without offering an inbound port."
+        },
+        {
+          "id": "server-countries",
+          "label": "Server countries",
+          "type": "text",
+          "required": false,
+          "secret": false,
+          "options": null,
+          "help": "Optional comma-separated Gluetun server country filter, for example Netherlands, Switzerland."
+        },
+        {
+          "id": "wireguard-private-key",
+          "label": "WireGuard private key",
+          "type": "secret",
+          "required": true,
+          "secret": true,
+          "options": null,
+          "help": "Required for WireGuard. Stored in the LMS secret store."
+        },
+        {
+          "id": "wireguard-addresses",
+          "label": "WireGuard addresses",
+          "type": "text",
+          "required": true,
+          "secret": false,
+          "options": null,
+          "help": "The tunnel address from your provider, for example 10.2.0.2/32."
+        },
+        {
+          "id": "wireguard-public-key",
+          "label": "WireGuard server public key",
+          "type": "text",
+          "required": false,
+          "secret": false,
+          "options": null,
+          "help": "Required for custom WireGuard when your provider does not supply a server profile."
+        },
+        {
+          "id": "wireguard-endpoint-ip",
+          "label": "WireGuard endpoint IP",
+          "type": "text",
+          "required": false,
+          "secret": false,
+          "options": null,
+          "help": "Optional custom WireGuard endpoint IP."
+        },
+        {
+          "id": "wireguard-endpoint-port",
+          "label": "WireGuard endpoint port",
+          "type": "text",
+          "required": false,
+          "secret": false,
+          "options": null,
+          "help": "Optional custom WireGuard endpoint port."
+        },
+        {
+          "id": "wireguard-preshared-key",
+          "label": "WireGuard preshared key",
+          "type": "secret",
+          "required": false,
+          "secret": true,
+          "options": null,
+          "help": null
+        },
+        {
+          "id": "openvpn-username",
+          "label": "OpenVPN username",
+          "type": "secret",
+          "required": true,
+          "secret": true,
+          "options": null,
+          "help": "Required for provider OpenVPN profiles."
+        },
+        {
+          "id": "openvpn-password",
+          "label": "OpenVPN password",
+          "type": "secret",
+          "required": true,
+          "secret": true,
+          "options": null,
+          "help": "Stored in the LMS secret store and never shown again."
+        }
+      ],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": false,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": [
+        "NET_ADMIN"
+      ],
+      "dockerDevices": [
+        "/dev/net/tun:/dev/net/tun"
+      ],
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    },
+    {
+      "id": "qbittorrent",
+      "name": "qBittorrent",
+      "description": "Open-source BitTorrent client with a web interface.",
+      "category": "download",
+      "icon": "download",
+      "website": "https://www.qbittorrent.org/",
+      "documentation": "https://docs.linuxserver.io/images/docker-qbittorrent/",
+      "imageRepository": "lscr.io/linuxserver/qbittorrent",
+      "imageTag": "latest",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 8080,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": 18082,
+          "vpnEnvironmentVariable": "WEBUI_PORT",
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "config",
+          "containerPath": "/config",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        },
+        {
+          "id": "downloads",
+          "containerPath": "/downloads",
+          "kind": "userData",
+          "sharedRole": "downloads",
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "puid": "1000",
+        "pgid": "1000",
+        "tz": "UTC"
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": "/",
+        "port": 8080,
+        "dockerCommand": null,
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [
+        {
+          "id": "network-route",
+          "label": "Internet route",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "VPN Gateway (Gluetun)",
+            "Direct (no VPN)"
+          ],
+          "help": "Direct exposes qBittorrent through the deployment network. VPN Gateway routes its traffic through the selected Gluetun gateway."
+        },
+        {
+          "id": "vpn-gateway",
+          "label": "VPN gateway",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": null,
+          "help": "Choose which installed Gluetun gateway carries qBittorrent traffic."
+        }
+      ],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": true,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": {
+        "scopes": [
+          "internal",
+          "lan",
+          "client",
+          "public"
+        ],
+        "clientAccess": {
+          "enabled": true,
+          "portName": "web",
+          "routing": "subdomain",
+          "preferredPath": "",
+          "reverseProxy": {
+            "basePathSupport": "transparent",
+            "stripPathPrefix": true,
+            "usePublicHostHeader": true,
+            "forwardPathPrefix": true,
+            "rewriteSecureCookiesForHttp": false,
+            "configuration": null
+          },
+          "capabilities": {
+            "webSockets": false,
+            "serverSentEvents": false,
+            "streaming": false,
+            "rangeRequests": false,
+            "uploads": true,
+            "longLivedRequests": false,
+            "webSocketProbePath": null,
+            "serverSentEventsProbePath": null,
+            "rangeRequestProbePath": null
+          },
+          "publicUrlEnvironmentVariable": null
+        },
+        "additionalClientAccess": null
+      }
+    },
+    {
+      "id": "wordpress",
+      "name": "WordPress",
+      "description": "Website and publishing platform with an LMS-managed private database.",
+      "category": "utilities",
+      "icon": "web",
+      "website": "https://wordpress.org/",
+      "documentation": "https://hub.docker.com/_/wordpress",
+      "imageRepository": "wordpress",
+      "imageTag": "latest",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 80,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "site",
+          "containerPath": "/var/www/html",
+          "kind": "userData",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "wordpresS_DB_HOST": "${endpoint:wordpress-database:internal:host}:${endpoint:wordpress-database:internal:port}",
+        "wordpresS_DB_USER": "lms_wordpress",
+        "wordpresS_DB_PASSWORD": "lms-wordpress-internal",
+        "wordpresS_DB_NAME": "lms_wordpress"
+      },
+      "dependencies": [
+        "wordpress-database"
+      ],
+      "healthCheck": {
+        "httpPath": "/wp-admin/install.php",
+        "port": 80,
+        "dockerCommand": null,
+        "startPeriodSeconds": 60,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": false,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    },
+    {
+      "id": "wordpress-database",
+      "name": "WordPress Database",
+      "description": "Private MariaDB dependency managed with the WordPress deployment.",
+      "category": "infrastructure",
+      "icon": "database",
+      "website": "https://mariadb.org/",
+      "documentation": "https://hub.docker.com/_/mariadb",
+      "imageRepository": "mariadb",
+      "imageTag": "11",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "database",
+          "containerPort": 3306,
+          "protocol": "tcp",
+          "primary": false,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "database",
+          "containerPath": "/var/lib/mysql",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "mariadB_DATABASE": "lms_wordpress",
+        "mariadB_USER": "lms_wordpress",
+        "mariadB_PASSWORD": "lms-wordpress-internal",
+        "mariadB_ROOT_PASSWORD": "lms-wordpress-root-internal"
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": null,
+        "port": null,
+        "dockerCommand": "healthcheck.sh --connect --innodb_initialized",
+        "startPeriodSeconds": 45,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": false,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": true,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    },
+    {
+      "id": "squid-proxy",
+      "name": "Squid Forward Proxy",
+      "description": "Private caching forward proxy for devices on networks you control.",
+      "category": "infrastructure",
+      "icon": "network",
+      "website": "https://www.squid-cache.org/",
+      "documentation": "https://hub.docker.com/r/ubuntu/squid",
+      "imageRepository": "ubuntu/squid",
+      "imageTag": "latest",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "proxy",
+          "containerPort": 3128,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [],
+      "environment": {},
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": null,
+        "port": null,
+        "dockerCommand": "squidclient -h 127.0.0.1 -p 3128 mgr:info \u003E/dev/null",
+        "startPeriodSeconds": 30,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": false,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": false,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    },
+    {
+      "id": "jellyfin",
+      "name": "Jellyfin",
+      "description": "Free media server for movies, television, music, and live media.",
+      "category": "media",
+      "icon": "film",
+      "website": "https://jellyfin.org/",
+      "documentation": "https://jellyfin.org/docs/general/installation/container/",
+      "imageRepository": "jellyfin/jellyfin",
+      "imageTag": "latest",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 8096,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "config",
+          "containerPath": "/config",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        },
+        {
+          "id": "cache",
+          "containerPath": "/cache",
+          "kind": "cache",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        },
+        {
+          "id": "movies",
+          "containerPath": "/movies",
+          "kind": "userData",
+          "sharedRole": "movies",
+          "readOnly": true,
+          "hostOwner": null
+        },
+        {
+          "id": "tv",
+          "containerPath": "/tv",
+          "kind": "userData",
+          "sharedRole": "tv",
+          "readOnly": true,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "jellyfiN_PublishedServerUrl": ""
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": "/health",
+        "port": 8096,
+        "dockerCommand": null,
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": false,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    },
+    {
+      "id": "stremio-server",
+      "name": "Stremio Server",
+      "description": "Self-hosted Stremio web player and streaming server.",
+      "category": "media",
+      "icon": "play",
+      "website": "https://www.stremio.com/",
+      "documentation": "https://github.com/tsaridas/stremio-docker",
+      "imageRepository": "tsaridas/stremio-docker",
+      "imageTag": "latest",
+      "definitionVersion": "4",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 8080,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": 18081,
+          "vpnEnvironmentVariable": "WEBUI_INTERNAL_PORT",
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        },
+        {
+          "name": "stream",
+          "containerPort": 11470,
+          "protocol": "tcp",
+          "primary": false,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "config",
+          "containerPath": "/root/.stremio-server",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "nO_CORS": "1",
+        "autO_SERVER_URL": "1",
+        "castinG_DISABLED": "1"
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": "/settings",
+        "port": 8080,
+        "dockerCommand": null,
+        "startPeriodSeconds": 60,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [
+        {
+          "id": "network-route",
+          "label": "Internet route",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "VPN Gateway (Gluetun)"
+          ],
+          "help": "Stremio must use VPN Gateway routing. LMS blocks direct Stremio installations."
+        },
+        {
+          "id": "vpn-gateway",
+          "label": "VPN gateway",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": null,
+          "help": "Choose which installed Gluetun gateway carries Stremio traffic."
+        }
+      ],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": true,
+      "requiresVpnGateway": true,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": {
+        "scopes": [
+          "internal",
+          "lan",
+          "client",
+          "public"
+        ],
+        "clientAccess": {
+          "enabled": true,
+          "portName": "web",
+          "routing": "subdomain",
+          "preferredPath": "",
+          "reverseProxy": {
+            "basePathSupport": "none",
+            "stripPathPrefix": true,
+            "usePublicHostHeader": true,
+            "forwardPathPrefix": true,
+            "rewriteSecureCookiesForHttp": false,
+            "configuration": null
+          },
+          "capabilities": {
+            "webSockets": true,
+            "serverSentEvents": false,
+            "streaming": true,
+            "rangeRequests": true,
+            "uploads": true,
+            "longLivedRequests": true,
+            "webSocketProbePath": null,
+            "serverSentEventsProbePath": null,
+            "rangeRequestProbePath": null
+          },
+          "publicUrlEnvironmentVariable": null
+        },
+        "additionalClientAccess": [
+          {
+            "enabled": true,
+            "portName": "stream",
+            "routing": "subdomain",
+            "preferredPath": "",
+            "reverseProxy": {
+              "basePathSupport": "transparent",
+              "stripPathPrefix": true,
+              "usePublicHostHeader": true,
+              "forwardPathPrefix": false,
+              "rewriteSecureCookiesForHttp": false,
+              "configuration": null
+            },
+            "capabilities": {
+              "webSockets": true,
+              "serverSentEvents": false,
+              "streaming": true,
+              "rangeRequests": true,
+              "uploads": true,
+              "longLivedRequests": true,
+              "webSocketProbePath": null,
+              "serverSentEventsProbePath": null,
+              "rangeRequestProbePath": null
+            },
+            "publicUrlEnvironmentVariable": "SERVER_URL"
+          }
+        ]
+      }
+    },
+    {
+      "id": "immich",
+      "name": "Immich",
+      "description": "Self-hosted photo and video management.",
+      "category": "photos",
+      "icon": "photo",
+      "website": "https://immich.app/",
+      "documentation": "https://immich.app/docs/overview/introduction",
+      "imageRepository": "ghcr.io/immich-app/immich-server",
+      "imageTag": "release",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 2283,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "library",
+          "containerPath": "/data",
+          "kind": "userData",
+          "sharedRole": "photos",
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "dB_HOSTNAME": "${endpoint:immich-database:internal:host}",
+        "dB_USERNAME": "postgres",
+        "dB_PASSWORD": "postgres",
+        "dB_DATABASE_NAME": "immich",
+        "rediS_HOSTNAME": "${endpoint:immich-redis:internal:host}",
+        "immicH_MACHINE_LEARNING_URL": "${endpoint:immich-machine-learning:internal}"
+      },
+      "dependencies": [
+        "immich-database",
+        "immich-redis",
+        "immich-machine-learning"
+      ],
+      "healthCheck": {
+        "httpPath": "/api/server/ping",
+        "port": 2283,
+        "dockerCommand": null,
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": false,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    },
+    {
+      "id": "immich-database",
+      "name": "Immich Database",
+      "description": "PostgreSQL and VectorChord database used by Immich.",
+      "category": "infrastructure",
+      "icon": "database",
+      "website": "https://immich.app/",
+      "documentation": "https://docs.immich.app/install/docker-compose",
+      "imageRepository": "ghcr.io/immich-app/postgres",
+      "imageTag": "14-vectorchord0.4.3-pgvectors0.2.0",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "database",
+          "containerPort": 5432,
+          "protocol": "tcp",
+          "primary": false,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "database",
+          "containerPath": "/var/lib/postgresql/data",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "postgreS_PASSWORD": "postgres",
+        "postgreS_USER": "postgres",
+        "postgreS_DB": "immich",
+        "postgreS_INITDB_ARGS": "--data-checksums"
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": null,
+        "port": null,
+        "dockerCommand": "pg_isready -U postgres -d immich",
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": false,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": true,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    },
+    {
+      "id": "immich-redis",
+      "name": "Immich Redis",
+      "description": "Valkey cache service used by Immich.",
+      "category": "infrastructure",
+      "icon": "database",
+      "website": "https://immich.app/",
+      "documentation": "https://docs.immich.app/install/docker-compose",
+      "imageRepository": "docker.io/valkey/valkey",
+      "imageTag": "9",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "redis",
+          "containerPort": 6379,
+          "protocol": "tcp",
+          "primary": false,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [],
+      "environment": {},
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": null,
+        "port": null,
+        "dockerCommand": "valkey-cli ping | grep -q PONG",
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": false,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": true,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    },
+    {
+      "id": "immich-machine-learning",
+      "name": "Immich Machine Learning",
+      "description": "Machine-learning service used by Immich for search and facial recognition.",
+      "category": "infrastructure",
+      "icon": "cpu",
+      "website": "https://immich.app/",
+      "documentation": "https://docs.immich.app/install/docker-compose",
+      "imageRepository": "ghcr.io/immich-app/immich-machine-learning",
+      "imageTag": "release",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "api",
+          "containerPort": 3003,
+          "protocol": "tcp",
+          "primary": false,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": "http"
+        }
+      ],
+      "volumes": [
+        {
+          "id": "cache",
+          "containerPath": "/cache",
+          "kind": "cache",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {},
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": null,
+        "port": null,
+        "dockerCommand": "wget --no-verbose --tries=1 --spider http://127.0.0.1:3003/ping",
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": false,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": true,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    },
+    {
+      "id": "webtor",
+      "name": "Webtor",
+      "description": "Browser-based torrent streaming service.",
+      "category": "utilities",
+      "icon": "play",
+      "website": "https://webtor.io/",
+      "documentation": "https://github.com/webtor-io/self-hosted",
+      "imageRepository": "ghcr.io/webtor-io/self-hosted",
+      "imageTag": "latest",
+      "definitionVersion": "4",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 8080,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": 18080,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": {
+            "path": "/etc/webtor/common.template.env",
+            "setting": "WEB_PORT",
+            "originalEntrypoint": "/init"
+          },
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "data",
+          "containerPath": "/data",
+          "kind": "userData",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        },
+        {
+          "id": "database",
+          "containerPath": "/pgdata",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "domain": "${endpoint:self:client}",
+        "disablE_VIDEO_TRANSCODING": "false"
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": "/",
+        "port": 8080,
+        "dockerCommand": "set -a; . /etc/webtor/common.env; PGPASSWORD=\u0022$PG_PASSWORD\u0022 psql -U \u0022$PG_USER\u0022 -d \u0022$PG_DATABASE\u0022 -Atqc \u0027select 1\u0027 | grep -qx 1",
+        "startPeriodSeconds": 45,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [
+        {
+          "id": "network-route",
+          "label": "Internet route",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "VPN Gateway (Gluetun)"
+          ],
+          "help": "Webtor must use VPN Gateway routing. LMS blocks direct Webtor installations."
+        },
+        {
+          "id": "vpn-gateway",
+          "label": "VPN gateway",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": null,
+          "help": "Choose which installed Gluetun gateway carries Webtor traffic."
+        }
+      ],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": true,
+      "requiresVpnGateway": true,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": {
+        "scopes": [
+          "internal",
+          "lan",
+          "client",
+          "public"
+        ],
+        "clientAccess": {
+          "enabled": true,
+          "portName": "web",
+          "routing": "subdomain",
+          "preferredPath": "",
+          "reverseProxy": {
+            "basePathSupport": "native",
+            "stripPathPrefix": true,
+            "usePublicHostHeader": true,
+            "forwardPathPrefix": true,
+            "rewriteSecureCookiesForHttp": true,
+            "configuration": null
+          },
+          "capabilities": {
+            "webSockets": true,
+            "serverSentEvents": false,
+            "streaming": true,
+            "rangeRequests": true,
+            "uploads": true,
+            "longLivedRequests": true,
+            "webSocketProbePath": null,
+            "serverSentEventsProbePath": null,
+            "rangeRequestProbePath": null
+          },
+          "publicUrlEnvironmentVariable": null
+        },
+        "additionalClientAccess": null
+      }
+    },
+    {
+      "id": "prowlarr",
+      "name": "Prowlarr",
+      "description": "Indexer manager for the media automation stack.",
+      "category": "automation",
+      "icon": "search",
+      "website": "https://prowlarr.com/",
+      "documentation": "https://wiki.servarr.com/prowlarr",
+      "imageRepository": "lscr.io/linuxserver/prowlarr",
+      "imageTag": "latest",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 9696,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "config",
+          "containerPath": "/config",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "puid": "1000",
+        "pgid": "1000",
+        "tz": "UTC"
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": "/",
+        "port": 9696,
+        "dockerCommand": null,
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [
+        {
+          "id": "network-route",
+          "label": "Internet route",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "VPN Gateway (Gluetun)",
+            "Direct (no VPN)"
+          ],
+          "help": "Choose direct access or an installed VPN Gateway."
+        },
+        {
+          "id": "vpn-gateway",
+          "label": "VPN gateway",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": null,
+          "help": "Choose which installed gateway carries Prowlarr traffic."
+        }
+      ],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": true,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": {
+        "scopes": [
+          "internal",
+          "lan",
+          "client",
+          "public"
+        ],
+        "clientAccess": {
+          "enabled": true,
+          "portName": "web",
+          "routing": "subdomain",
+          "preferredPath": "",
+          "reverseProxy": {
+            "basePathSupport": "native",
+            "stripPathPrefix": false,
+            "usePublicHostHeader": true,
+            "forwardPathPrefix": true,
+            "rewriteSecureCookiesForHttp": false,
+            "configuration": {
+              "environmentVariable": null,
+              "filePath": "/config/config.xml",
+              "xmlElement": "UrlBase",
+              "valueTemplate": "${endpoint:self:client:path}"
+            }
+          },
+          "capabilities": {
+            "webSockets": true,
+            "serverSentEvents": false,
+            "streaming": false,
+            "rangeRequests": false,
+            "uploads": true,
+            "longLivedRequests": false,
+            "webSocketProbePath": null,
+            "serverSentEventsProbePath": null,
+            "rangeRequestProbePath": null
+          },
+          "publicUrlEnvironmentVariable": null
+        },
+        "additionalClientAccess": null
+      }
+    },
+    {
+      "id": "sonarr",
+      "name": "Sonarr",
+      "description": "Series management for an automated media library.",
+      "category": "automation",
+      "icon": "film",
+      "website": "https://sonarr.tv/",
+      "documentation": "https://wiki.servarr.com/sonarr",
+      "imageRepository": "lscr.io/linuxserver/sonarr",
+      "imageTag": "latest",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 8989,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "config",
+          "containerPath": "/config",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        },
+        {
+          "id": "downloads",
+          "containerPath": "/downloads",
+          "kind": "userData",
+          "sharedRole": "downloads",
+          "readOnly": false,
+          "hostOwner": null
+        },
+        {
+          "id": "tv",
+          "containerPath": "/tv",
+          "kind": "userData",
+          "sharedRole": "tv",
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "puid": "1000",
+        "pgid": "1000",
+        "tz": "UTC"
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": "/",
+        "port": 8989,
+        "dockerCommand": null,
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [
+        {
+          "id": "network-route",
+          "label": "Internet route",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "VPN Gateway (Gluetun)",
+            "Direct (no VPN)"
+          ],
+          "help": "Choose direct access or an installed VPN Gateway."
+        },
+        {
+          "id": "vpn-gateway",
+          "label": "VPN gateway",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": null,
+          "help": "Choose which installed gateway carries Sonarr traffic."
+        }
+      ],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": true,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": {
+        "scopes": [
+          "internal",
+          "lan",
+          "client",
+          "public"
+        ],
+        "clientAccess": {
+          "enabled": true,
+          "portName": "web",
+          "routing": "subdomain",
+          "preferredPath": "",
+          "reverseProxy": {
+            "basePathSupport": "native",
+            "stripPathPrefix": false,
+            "usePublicHostHeader": true,
+            "forwardPathPrefix": true,
+            "rewriteSecureCookiesForHttp": false,
+            "configuration": {
+              "environmentVariable": null,
+              "filePath": "/config/config.xml",
+              "xmlElement": "UrlBase",
+              "valueTemplate": "${endpoint:self:client:path}"
+            }
+          },
+          "capabilities": {
+            "webSockets": true,
+            "serverSentEvents": false,
+            "streaming": false,
+            "rangeRequests": false,
+            "uploads": true,
+            "longLivedRequests": false,
+            "webSocketProbePath": null,
+            "serverSentEventsProbePath": null,
+            "rangeRequestProbePath": null
+          },
+          "publicUrlEnvironmentVariable": null
+        },
+        "additionalClientAccess": null
+      }
+    },
+    {
+      "id": "radarr",
+      "name": "Radarr",
+      "description": "Movie management for an automated media library.",
+      "category": "automation",
+      "icon": "film",
+      "website": "https://radarr.video/",
+      "documentation": "https://wiki.servarr.com/radarr",
+      "imageRepository": "lscr.io/linuxserver/radarr",
+      "imageTag": "latest",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 7878,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "config",
+          "containerPath": "/config",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": null
+        },
+        {
+          "id": "downloads",
+          "containerPath": "/downloads",
+          "kind": "userData",
+          "sharedRole": "downloads",
+          "readOnly": false,
+          "hostOwner": null
+        },
+        {
+          "id": "movies",
+          "containerPath": "/movies",
+          "kind": "userData",
+          "sharedRole": "movies",
+          "readOnly": false,
+          "hostOwner": null
+        }
+      ],
+      "environment": {
+        "puid": "1000",
+        "pgid": "1000",
+        "tz": "UTC"
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": "/",
+        "port": 7878,
+        "dockerCommand": null,
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [
+        {
+          "id": "network-route",
+          "label": "Internet route",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "VPN Gateway (Gluetun)",
+            "Direct (no VPN)"
+          ],
+          "help": "Choose direct access or an installed VPN Gateway."
+        },
+        {
+          "id": "vpn-gateway",
+          "label": "VPN gateway",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": null,
+          "help": "Choose which installed gateway carries Radarr traffic."
+        }
+      ],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": true,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": {
+        "scopes": [
+          "internal",
+          "lan",
+          "client",
+          "public"
+        ],
+        "clientAccess": {
+          "enabled": true,
+          "portName": "web",
+          "routing": "subdomain",
+          "preferredPath": "",
+          "reverseProxy": {
+            "basePathSupport": "native",
+            "stripPathPrefix": false,
+            "usePublicHostHeader": true,
+            "forwardPathPrefix": true,
+            "rewriteSecureCookiesForHttp": false,
+            "configuration": {
+              "environmentVariable": null,
+              "filePath": "/config/config.xml",
+              "xmlElement": "UrlBase",
+              "valueTemplate": "${endpoint:self:client:path}"
+            }
+          },
+          "capabilities": {
+            "webSockets": true,
+            "serverSentEvents": false,
+            "streaming": false,
+            "rangeRequests": false,
+            "uploads": true,
+            "longLivedRequests": false,
+            "webSocketProbePath": null,
+            "serverSentEventsProbePath": null,
+            "rangeRequestProbePath": null
+          },
+          "publicUrlEnvironmentVariable": null
+        },
+        "additionalClientAccess": null
+      }
+    },
+    {
+      "id": "seerr",
+      "name": "Seerr (Overseerr successor)",
+      "description": "Request management UI for Sonarr and Radarr, succeeding Overseerr and Jellyseerr.",
+      "category": "automation",
+      "icon": "list",
+      "website": "https://seerr.dev/",
+      "documentation": "https://docs.seerr.dev/",
+      "imageRepository": "ghcr.io/seerr-team/seerr",
+      "imageTag": "latest",
+      "definitionVersion": "1",
+      "ports": [
+        {
+          "name": "web",
+          "containerPort": 5055,
+          "protocol": "tcp",
+          "primary": true,
+          "vpnContainerPort": null,
+          "vpnEnvironmentVariable": null,
+          "vpnFileOverride": null,
+          "applicationProtocol": ""
+        }
+      ],
+      "volumes": [
+        {
+          "id": "config",
+          "containerPath": "/app/config",
+          "kind": "configuration",
+          "sharedRole": null,
+          "readOnly": false,
+          "hostOwner": "1000:1000"
+        }
+      ],
+      "environment": {
+        "port": "5055",
+        "tz": "UTC"
+      },
+      "dependencies": [],
+      "healthCheck": {
+        "httpPath": "/api/v1/settings/public",
+        "port": 5055,
+        "dockerCommand": null,
+        "startPeriodSeconds": 20,
+        "intervalSeconds": 30,
+        "timeoutSeconds": 5,
+        "retries": 3
+      },
+      "configurationSchema": [
+        {
+          "id": "network-route",
+          "label": "Internet route",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": [
+            "VPN Gateway (Gluetun)",
+            "Direct (no VPN)"
+          ],
+          "help": "Choose direct access or an installed VPN Gateway."
+        },
+        {
+          "id": "vpn-gateway",
+          "label": "VPN gateway",
+          "type": "select",
+          "required": true,
+          "secret": false,
+          "options": null,
+          "help": "Choose which installed gateway carries Seerr traffic."
+        }
+      ],
+      "supportsDirectNetwork": true,
+      "supportsVpnGateway": true,
+      "requiresVpnGateway": false,
+      "edgeGatewaySupported": true,
+      "isInstallable": true,
+      "dockerCapabilities": null,
+      "dockerDevices": null,
+      "isSystemDependency": false,
+      "publicUrlEnvironmentVariable": null,
+      "exposure": null
+    }
+  ]
+}

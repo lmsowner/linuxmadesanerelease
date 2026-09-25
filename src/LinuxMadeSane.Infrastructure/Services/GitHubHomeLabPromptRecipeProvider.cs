@@ -38,13 +38,16 @@ public sealed class GitHubHomeLabPromptRecipeProvider(HttpClient httpClient) : I
                 {
                     throw new InvalidOperationException("The public HomeLab Recipe catalog uses an unsupported schema version.");
                 }
-                var recipes = (catalog?.Recipes ?? [])
+                var remoteRecipes = (catalog?.Recipes ?? [])
                     .Take(100)
                     .Select(TryCreateRecipe)
                     .OfType<HomeLabPromptRecipe>()
                     .GroupBy(recipe => recipe.Id, StringComparer.OrdinalIgnoreCase)
                     .Select(group => group.First())
                     .ToArray();
+                var recipes = HomeLabCatalog.IsConfigured
+                    ? MergeLocalRecipes(HomeLabPromptRecipeCatalog.All, remoteRecipes)
+                    : remoteRecipes;
                 if (recipes.Length == 0)
                 {
                     throw new InvalidOperationException("The public HomeLab Recipe catalog did not contain any compatible recipes.");
@@ -85,5 +88,22 @@ public sealed class GitHubHomeLabPromptRecipeProvider(HttpClient httpClient) : I
         {
             return null;
         }
+    }
+
+    private static HomeLabPromptRecipe[] MergeLocalRecipes(
+        IReadOnlyList<HomeLabPromptRecipe> localRecipes,
+        IReadOnlyList<HomeLabPromptRecipe> remoteRecipes)
+    {
+        var merged = new List<HomeLabPromptRecipe>(localRecipes.Count + remoteRecipes.Count);
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var recipe in localRecipes.Concat(remoteRecipes))
+        {
+            if (ids.Add(recipe.Id))
+            {
+                merged.Add(recipe);
+            }
+        }
+
+        return merged.ToArray();
     }
 }

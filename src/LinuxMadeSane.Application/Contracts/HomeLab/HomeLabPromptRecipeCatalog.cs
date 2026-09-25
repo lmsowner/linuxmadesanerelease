@@ -70,7 +70,7 @@ public static class HomeLabPromptRecipeCatalog
         LMS must remain the source of truth for container state, storage, local access routes, health checks, and network routing. Reuse healthy installed infrastructure where the selected recipe requires it. If the user reports a web or playback symptom, an HTTP health check is not proof that the app works: inspect the actual local evidence, including effective non-secret environment and endpoint data, research current primary documentation only when that evidence is insufficient, then use the minimum repair and retest the reported path or capability. For a managed runtime, network, endpoint, environment, listener, or health-check fault, repair_home_lab_installation is the generic reconciliation path for any catalog app; it reapplies the catalog and saved LMS state, including shared-network host resolution and generated routes. Use it even when the container is reported healthy if the health check does not cover the failed capability. If the user asks what could fix the issue, explain the evidence and proposed LMS action before requesting approval. If required infrastructure is missing, direct me to the appropriate LMS form so credentials remain in protected fields. Inspect the result after changes and do not claim success unless the requested app is present, the reported path is verified, and the tool output says what changed or why no fix was possible.
         """;
 
-    public static IReadOnlyList<HomeLabPromptRecipe> All { get; } =
+    private static IReadOnlyList<HomeLabPromptRecipe> BuiltInAll { get; } =
     [
         Plan("AI / Development", "local-ai-server", "Local AI Server",
             "Plan a private Ollama and Open WebUI server with hardware-aware acceleration.",
@@ -347,6 +347,9 @@ public static class HomeLabPromptRecipeCatalog
             "Do not deploy every game template. Produce a port plan first and reject duplicate host or shared-namespace listeners.")
     ];
 
+    public static IReadOnlyList<HomeLabPromptRecipe> All =>
+        HomeLabCatalogFileStore.LoadPromptRecipes(BuiltInAll, TryCreatePublished);
+
     public static HomeLabPromptRecipe Get(string id) =>
         All.FirstOrDefault(recipe => recipe.Id.Equals(id?.Trim(), StringComparison.OrdinalIgnoreCase))
         ?? throw new InvalidOperationException($"HomeLab Recipe '{id}' is not available.");
@@ -397,6 +400,18 @@ public static class HomeLabPromptRecipeCatalog
 
         ValidatePublishedConnectivity(id, appIds, definition.Connectivity);
         return Create(category, id, name, description, components, appIds, definition.RequiresPlanning, definition.RequiresVpnGateway, basePrompt, technicalGuidance, vpnRoutedAppIds, definition.Connectivity);
+    }
+
+    private static HomeLabPromptRecipe? TryCreatePublished(PublishedHomeLabPromptRecipe definition)
+    {
+        try
+        {
+            return CreatePublished(definition);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     public static string BuildCustomPrompt(string request)
