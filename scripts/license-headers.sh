@@ -81,6 +81,19 @@ has_header() {
     head -n 12 "$file" | grep -Fq 'Licensed under the Business Source License 1.1.'
 }
 
+copy_mode() {
+  local source_file="$1"
+  local target_file="$2"
+  local mode
+
+  if chmod --reference="$source_file" "$target_file" 2>/dev/null; then
+    return
+  fi
+
+  mode="$(stat -f '%Lp' "$source_file" 2>/dev/null || stat -c '%a' "$source_file")"
+  chmod "$mode" "$target_file"
+}
+
 normalize_owned_credit() {
   local file="$1"
   local temp_file
@@ -88,7 +101,7 @@ normalize_owned_credit() {
   temp_file="$(mktemp)"
   # Canonicalize only an existing LMS header; never rewrite upstream notices.
   sed -E '1,12s/^((\/\/|\/\*|@\*|#) Copyright \(c\) ).*\.$/\1Linux Made Sane./' "$file" > "$temp_file"
-  chmod --reference="$file" "$temp_file"
+  copy_mode "$file" "$temp_file"
   mv "$temp_file" "$file"
 }
 
@@ -102,7 +115,7 @@ remove_utf8_bom() {
 
   temp_file="$(mktemp)"
   LC_ALL=C sed $'s/\xEF\xBB\xBF//g' "$file" > "$temp_file"
-  chmod --reference="$file" "$temp_file"
+  copy_mode "$file" "$temp_file"
   mv "$temp_file" "$file"
 }
 
@@ -121,7 +134,7 @@ apply_header() {
     cat "$file" >> "$temp_file"
   fi
 
-  chmod --reference="$file" "$temp_file"
+  copy_mode "$file" "$temp_file"
   mv "$temp_file" "$file"
 }
 

@@ -19,14 +19,6 @@
                          OnClick="LoadAsync" />
     </div>
 
-    <div class="port-forward-explainer" aria-label="How port forwarding works">
-        <div><span>1</span><strong>Listen</strong><small>Choose this server's interface, protocol and source port.</small></div>
-        <div class="port-forward-arrow" aria-hidden="true">→</div>
-        <div><span>2</span><strong>Relay</strong><small>socat passes traffic without changing the application behind it.</small></div>
-        <div class="port-forward-arrow" aria-hidden="true">→</div>
-        <div><span>3</span><strong>Destination</strong><small>Enter the IP address and port that should receive the traffic.</small></div>
-    </div>
-
     @if (!string.IsNullOrWhiteSpace(message))
     {
         <p class="callout @(messageIsError ? "error" : "success")" role="status">@message</p>
@@ -92,73 +84,55 @@
                     }
                 </div>
 
+                <div class="port-forward-field-grid">
+                    <UiSelectField TValue="string"
+                                   @bind-Value="editor.ListenAddress"
+                                   @bind-Value:after="ClearPortCheck"
+                                   Label="Source NIC">
+                        @foreach (var option in overview.Interfaces)
+                        {
+                            <option value="@option.Address">@option.Label</option>
+                        }
+                    </UiSelectField>
+                    <UiSelectField TValue="PortForwardProtocol"
+                                   @bind-Value="editor.Protocol"
+                                   @bind-Value:after="ClearPortCheck"
+                                   Label="Protocol">
+                        <option value="@PortForwardProtocol.Tcp">TCP</option>
+                        <option value="@PortForwardProtocol.Udp">UDP</option>
+                    </UiSelectField>
+                    <UiNumberField TValue="int"
+                                   @bind-Value="editor.SourcePort"
+                                   @bind-Value:after="ClearPortCheck"
+                                   Label="Listen port"
+                                   min="1"
+                                   max="65535" />
+                    <UiTextField @bind-Value="editor.DestinationAddress"
+                                 Label="Destination IP"
+                                 Placeholder="192.168.1.50" />
+                    <UiNumberField TValue="int"
+                                   @bind-Value="editor.DestinationPort"
+                                   Label="Destination port"
+                                   min="1"
+                                   max="65535" />
+                </div>
+
                 <UiTextField @bind-Value="editor.Name"
-                             Label="Name"
+                             Label="Description"
                              Placeholder="Media server relay"
                              Helper="A short label that explains what this forward is for." />
 
-                <div class="port-forward-form-section">
-                    <div class="port-forward-form-section-heading">
-                        <span class="port-forward-step">1</span>
-                        <div><strong>Listen on this server</strong><small>Pick one address to limit exposure, or all interfaces when every network should reach it.</small></div>
-                    </div>
-                    <div class="port-forward-field-grid">
-                        <UiSelectField TValue="string"
-                                       @bind-Value="editor.ListenAddress"
-                                       @bind-Value:after="ClearPortCheck"
-                                       Label="Interface and address"
-                                       Helper="Local address socat binds to.">
-                            @foreach (var option in overview.Interfaces)
-                            {
-                                <option value="@option.Address">@option.Label</option>
-                            }
-                        </UiSelectField>
-                        <UiSelectField TValue="PortForwardProtocol"
-                                       @bind-Value="editor.Protocol"
-                                       @bind-Value:after="ClearPortCheck"
-                                       Label="Protocol">
-                            <option value="@PortForwardProtocol.Tcp">TCP</option>
-                            <option value="@PortForwardProtocol.Udp">UDP</option>
-                        </UiSelectField>
-                        <UiNumberField TValue="int"
-                                       @bind-Value="editor.SourcePort"
-                                       @bind-Value:after="ClearPortCheck"
-                                       Label="Source port"
-                                       Helper="Port clients connect to."
-                                       min="1"
-                                       max="65535" />
-                    </div>
-                    <div class="port-forward-port-check-row">
-                        <UiCommandButton Label="@(isCheckingPort ? "Checking..." : "Check source port")"
-                                         Glyph="UiIconGlyph.Search"
-                                         Variant="UiButtonVariant.Action"
-                                         Disabled="@(isBusy || isCheckingPort || editor.SourcePort is < 1 or > 65535)"
-                                         OnClick="CheckPortAsync" />
-                        @if (portCheck is not null)
-                        {
-                            <span class="status-pill @(portCheck.IsAvailable ? "success" : "warning")">@(portCheck.IsAvailable ? "Available" : "In use")</span>
-                            <span class="meta-text">@portCheck.Summary</span>
-                        }
-                    </div>
-                </div>
-
-                <div class="port-forward-form-section">
-                    <div class="port-forward-form-section-heading">
-                        <span class="port-forward-step">2</span>
-                        <div><strong>Send traffic here</strong><small>Use the address that this server can reach, such as a LAN device, container host or VPN peer.</small></div>
-                    </div>
-                    <div class="port-forward-field-grid destination-grid">
-                        <UiTextField @bind-Value="editor.DestinationAddress"
-                                     Label="Destination IP"
-                                     Placeholder="192.168.1.50"
-                                     Helper="IPv4 or IPv6 address." />
-                        <UiNumberField TValue="int"
-                                       @bind-Value="editor.DestinationPort"
-                                       Label="Destination port"
-                                       Helper="Port used by the destination."
-                                       min="1"
-                                       max="65535" />
-                    </div>
+                <div class="port-forward-port-check-row">
+                    <UiCommandButton Label="@(isCheckingPort ? "Checking..." : "Check listen port")"
+                                     Glyph="UiIconGlyph.Search"
+                                     Variant="UiButtonVariant.Action"
+                                     Disabled="@(isBusy || isCheckingPort || editor.SourcePort is < 1 or > 65535)"
+                                     OnClick="CheckPortAsync" />
+                    @if (portCheck is not null)
+                    {
+                        <span class="status-pill @(portCheck.IsAvailable ? "success" : "warning")">@(portCheck.IsAvailable ? "Available" : "In use")</span>
+                        <span class="meta-text">@portCheck.Summary</span>
+                    }
                 </div>
 
                 <div class="port-forward-preview">
