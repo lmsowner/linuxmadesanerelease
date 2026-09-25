@@ -63,7 +63,12 @@ public sealed record PublishedHomeLabRecipeDependency(
 
 public static class HomeLabPromptRecipeCatalog
 {
-    private const string OperatingContract =
+    private const string AiProviderRequirement =
+        """
+        Home Lab AI requires a capable, enabled AI provider. Use a hosted provider or a properly resourced self-hosted model server with reliable tool calling, long-context handling, and multi-step reasoning. A configured endpoint alone is not evidence that it is suitable. Small models running on Raspberry Pi-class or similarly resource-constrained hardware are not suitable for reliable Home Lab setup, deployment, repair, or troubleshooting. If the configured provider cannot reliably follow the LMS tools, retain context, or complete multi-step work, say that the provider is inadequate and ask the user to configure a more capable provider before continuing; do not pretend the task succeeded.
+        """;
+
+    private const string OperatingContract = AiProviderRequirement + "\n\n" +
         """
         Treat this as a guided Linux Made Sane Home Lab task. Use inspect_home_lab before proposing changes. Use apply_home_lab_prompt_recipe for supported deployments and repairs; do not replace the LMS-managed deployment with raw docker, docker compose, or shell commands. Never request or repeat passwords, API keys, VPN profiles, or other secrets in chat.
 
@@ -470,6 +475,8 @@ public static class HomeLabPromptRecipeCatalog
         ArgumentNullException.ThrowIfNull(installation);
 
         return $"""
+            {AiProviderRequirement}
+
             Treat this as a focused troubleshooting session for one existing Linux Made Sane Home Lab Docker container.
 
             Target installation ID: {installation.Id}
