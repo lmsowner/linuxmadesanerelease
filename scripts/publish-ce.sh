@@ -93,7 +93,8 @@ install -m 0755 \
   "$REPO_ROOT/scripts/linux-made-sane-desktop-helper-launcher.sh" \
   "$TOOLS_OUTPUT_DIR/linux-made-sane-desktop-helper-launcher"
 install -m 0755 "$REPO_ROOT/scripts/linux-made-sane-caddy-setup.sh" "$TOOLS_OUTPUT_DIR/linux-made-sane-caddy-setup"
-install -D -m 0644 "$REPO_ROOT/scripts/lib/deploy-common.sh" "$TOOLS_OUTPUT_DIR/lib/deploy-common.sh"
+mkdir -p "$TOOLS_OUTPUT_DIR/lib"
+install -m 0644 "$REPO_ROOT/scripts/lib/deploy-common.sh" "$TOOLS_OUTPUT_DIR/lib/deploy-common.sh"
 
 printf 'ce\n' > "$PACKAGE_ROOT/edition.txt"
 printf 'ce\n' > "$PACKAGE_ROOT/app/edition.txt"
