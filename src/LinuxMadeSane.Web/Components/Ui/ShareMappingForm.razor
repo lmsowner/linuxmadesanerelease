@@ -118,34 +118,22 @@
             <div class="share-mapping-section-header">
                 <div>
                     <strong>Remote folder</strong>
-                    <span>//@Editor.Target.Trim()/@Editor.ShareName.Trim()@(string.IsNullOrWhiteSpace(Editor.RemotePath) ? "/" : $"/{Editor.RemotePath.Trim('/')}")</span>
-                </div>
-                <div class="share-mapping-remote-browser-actions">
-                    @if (!string.IsNullOrWhiteSpace(Editor.RemotePath))
-                    {
-                        <UiCommandButton Label="Up"
-                                         Glyph="UiIconGlyph.FolderOpen"
-                                         Variant="UiButtonVariant.Ghost"
-                                         OnClick="NavigateRemoteParentAsync" />
-                    }
+                    <span>Select a folder inside the share using the same path selector as the file browser.</span>
                 </div>
             </div>
-            @if (RemoteFolders.Count == 0)
-            {
-                <span class="meta-text">@remoteFolderBrowseResult?.StatusMessage</span>
-            }
-            else
-            {
-                <div class="share-mapping-remote-folder-list" aria-label="Folders in selected SMB share">
-                    @foreach (var folder in RemoteFolders)
-                    {
-                        <button class="share-mapping-remote-folder" type="button" @onclick="@(() => NavigateRemoteFolderAsync(folder))">
-                            <UiGlyphIcon Glyph="UiIconGlyph.FolderOpen" />
-                            <span>@folder.Name</span>
-                        </button>
-                    }
-                </div>
-            }
+            <UiPathCombobox Value="@RemotePathInput"
+                            ValueChanged="SetRemotePathInputAsync"
+                            CommitRequested="CommitRemotePathInputAsync"
+                            SuggestionSelected="SelectRemotePathSuggestionAsync"
+                            Suggestions="@RemotePathSuggestions"
+                            Placeholder="Enter a folder path"
+                            AriaLabel="Remote share folder path"
+                            Title="Path inside the selected SMB share"
+                            PrefixText="@RemoteSharePrefix"
+                            PrefixTitle="Selected SMB share"
+                            IsLoadingSuggestions="@isBrowsingRemoteFolders"
+                            EscapeValue="@RemotePathInput" />
+            <span class="meta-text">@remoteFolderBrowseResult?.StatusMessage</span>
         </section>
     }
 
@@ -337,7 +325,9 @@
     private bool mountPathEdited;
     private bool localOwnerEdited;
     private bool isBrowsingRemoteShares;
+    private bool isBrowsingRemoteFolders;
     private bool targetFolderBrowserOpen;
+    private string remotePathInput = "/";
     private RemoteShareBrowseResult? remoteShareBrowseResult;
     private RemoteShareFolderBrowseResult? remoteFolderBrowseResult;
     private string? remoteShareBrowseError;
@@ -353,6 +343,12 @@
         .ToArray() ?? Array.Empty<RemoteSambaShare>();
     private IReadOnlyList<RemoteSambaFolder> RemoteFolders => remoteFolderBrowseResult?.Folders
         ?? Array.Empty<RemoteSambaFolder>();
+    private string RemotePathInput => string.IsNullOrWhiteSpace(remotePathInput) ? "/" : remotePathInput;
+    private IReadOnlyList<string> RemotePathSuggestions => RemoteFolders
+        .Select(folder => $"/{folder.Path.Trim('/')}")
+        .Where(path => path != "/")
+        .ToArray();
+    private string RemoteSharePrefix => $"//{Editor.Target.Trim()}/{Editor.ShareName.Trim()}";
     private string ShareFieldClass =>
         $"{RequiredFieldClass(Editor.ShareName)}{(string.IsNullOrWhiteSpace(remoteShareBrowseError) ? string.Empty : " share-mapping-share-invalid")}";
     private string TargetFolderBrowserInitialPath =>
@@ -426,6 +422,7 @@
                               !string.IsNullOrWhiteSpace(Editor.LocalMountPath);
             localOwnerEdited = !string.IsNullOrWhiteSpace(Editor.LocalOwner) &&
                                !Editor.LocalOwner.Trim().Equals(localUserName, StringComparison.Ordinal);
+            remotePathInput = NormalizeRemotePathInput(Editor.RemotePath);
         }
 
         if (string.IsNullOrWhiteSpace(Editor.LocalMountPath) && !mountPathEdited)
@@ -547,6 +544,7 @@
     {
         Editor.ShareName = share.Name;
         Editor.RemotePath = string.Empty;
+        remotePathInput = "/";
         remoteShareBrowseError = null;
         ApplySelectedMountPathIfAutomatic();
         await BrowseRemoteShareFoldersAsync();
@@ -563,6 +561,7 @@
 
         Editor.ShareName = shareName;
         Editor.RemotePath = string.Empty;
+        remotePathInput = "/";
         remoteFolderBrowseResult = null;
         ApplySelectedMountPathIfAutomatic();
     }
@@ -576,6 +575,7 @@
             return;
         }
 
+        isBrowsingRemoteFolders = true;
         try
         {
             remoteFolderBrowseResult = await ShareService.BrowseRemoteShareFoldersAsync(
@@ -593,23 +593,32 @@
             remoteFolderBrowseResult = null;
             remoteShareBrowseError = "Unable to browse folders in this share.";
         }
-    }
-
-    private Task NavigateRemoteFolderAsync(RemoteSambaFolder folder)
-    {
-        Editor.RemotePath = folder.Path;
-        return BrowseRemoteShareFoldersAsync();
-    }
-
-    private Task NavigateRemoteParentAsync()
-    {
-        var segments = Editor.RemotePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries).ToList();
-        if (segments.Count > 0)
+        finally
         {
-            segments.RemoveAt(segments.Count - 1);
+            isBrowsingRemoteFolders = false;
         }
+    }
 
-        Editor.RemotePath = string.Join('/', segments);
+    private Task SetRemotePathInputAsync(string? value)
+    {
+        remotePathInput = NormalizeRemotePathInput(value);
+        return Task.CompletedTask;
+    }
+
+    private Task CommitRemotePathInputAsync(string? value)
+    {
+        return NavigateRemotePathAsync(value);
+    }
+
+    private Task SelectRemotePathSuggestionAsync(string path)
+    {
+        return NavigateRemotePathAsync(path);
+    }
+
+    private Task NavigateRemotePathAsync(string? value)
+    {
+        remotePathInput = NormalizeRemotePathInput(value);
+        Editor.RemotePath = remotePathInput == "/" ? string.Empty : remotePathInput.Trim('/');
         return BrowseRemoteShareFoldersAsync();
     }
 
@@ -621,7 +630,25 @@
         remoteShareBrowseResult = null;
         remoteFolderBrowseResult = null;
         remoteShareBrowseError = null;
+        remotePathInput = "/";
         Editor.RemotePath = string.Empty;
+    }
+
+    private static string NormalizeRemotePathInput(string? value)
+    {
+        var normalized = (value ?? string.Empty).Trim().Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return "/";
+        }
+
+        normalized = "/" + normalized.Trim('/');
+        while (normalized.Contains("//", StringComparison.Ordinal))
+        {
+            normalized = normalized.Replace("//", "/", StringComparison.Ordinal);
+        }
+
+        return normalized;
     }
 
     private void OpenTargetFolderBrowser()
