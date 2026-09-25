@@ -135,7 +135,7 @@ public static class HomeLabCatalog
             "https://hub.docker.com/r/ubuntu/squid",
             "ubuntu/squid",
             "latest",
-            "1",
+            "3",
             [new("proxy", 3128, Primary: true, HostBindingAddress: "0.0.0.0")],
             [],
             new Dictionary<string, string>(),

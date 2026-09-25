@@ -177,10 +177,11 @@ internal static class HomeLabCatalogFileStore
         };
 
         // Existing user catalogs were seeded before the Squid manifest had a
-        // valid image health check or a LAN listener. Migrate that shipped
-        // definition in memory while preserving every other user edit.
+        // valid image health check, a LAN listener, or VPN routing enabled.
+        // Migrate that shipped definition in memory while preserving every
+        // other user edit.
         if (!normalized.Id.Equals("squid-proxy", StringComparison.OrdinalIgnoreCase) ||
-            !normalized.DefinitionVersion.Equals("1", StringComparison.OrdinalIgnoreCase))
+            normalized.DefinitionVersion is not ("1" or "2"))
         {
             return normalized;
         }
@@ -196,12 +197,13 @@ internal static class HomeLabCatalogFileStore
 
         return normalized with
         {
-            DefinitionVersion = "2",
+            DefinitionVersion = "3",
             Ports = ports,
             HealthCheck = new HomeLabHealthCheckManifest(
                 DockerCommand: "test -s /run/squid.pid && kill -0 \"$(cat /run/squid.pid)\"",
                 StartPeriodSeconds: 30),
-            Exposure = exposure
+            Exposure = exposure,
+            SupportsVpnGateway = true
         };
     }
 
