@@ -3,6 +3,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.HomeLab;
 
 namespace LinuxMadeSane.Application.Contracts.HomeLab;
@@ -47,16 +48,7 @@ internal static class HomeLabCatalogFileStore
                 AppsFileName,
                 document => document.Apps,
                 static app => app.Id,
-                static app => app with
-                {
-                    Ports = app.Ports ?? [],
-                    Volumes = app.Volumes ?? [],
-                    Environment = app.Environment ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
-                    Dependencies = app.Dependencies ?? [],
-                    ConfigurationSchema = app.ConfigurationSchema ?? [],
-                    DockerCapabilities = app.DockerCapabilities ?? [],
-                    DockerDevices = app.DockerDevices ?? []
-                },
+                NormalizeApp,
                 ref appsCache);
 
             return MergeById(builtIns, custom, static app => app.Id);
@@ -169,6 +161,48 @@ internal static class HomeLabCatalogFileStore
         }
 
         return merged;
+    }
+
+    private static HomeLabAppManifest NormalizeApp(HomeLabAppManifest app)
+    {
+        var normalized = app with
+        {
+            Ports = app.Ports ?? [],
+            Volumes = app.Volumes ?? [],
+            Environment = app.Environment ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            Dependencies = app.Dependencies ?? [],
+            ConfigurationSchema = app.ConfigurationSchema ?? [],
+            DockerCapabilities = app.DockerCapabilities ?? [],
+            DockerDevices = app.DockerDevices ?? []
+        };
+
+        // Existing user catalogs were seeded before the Squid manifest had a
+        // valid image health check or a LAN listener. Migrate that shipped
+        // definition in memory while preserving every other user edit.
+        if (!normalized.Id.Equals("squid-proxy", StringComparison.OrdinalIgnoreCase) ||
+            !normalized.DefinitionVersion.Equals("1", StringComparison.OrdinalIgnoreCase))
+        {
+            return normalized;
+        }
+
+        var ports = normalized.Ports
+            .Select(port => port.Name.Equals("proxy", StringComparison.OrdinalIgnoreCase)
+                ? port with { HostBindingAddress = "0.0.0.0" }
+                : port)
+            .ToArray();
+        var exposure = normalized.Exposure ?? new HomeLabServiceExposureManifest(
+            [HomeLabEndpointScope.Internal, HomeLabEndpointScope.Lan, HomeLabEndpointScope.Client],
+            new HomeLabClientAccessManifest(true, "proxy"));
+
+        return normalized with
+        {
+            DefinitionVersion = "2",
+            Ports = ports,
+            HealthCheck = new HomeLabHealthCheckManifest(
+                DockerCommand: "test -s /run/squid.pid && kill -0 \"$(cat /run/squid.pid)\"",
+                StartPeriodSeconds: 30),
+            Exposure = exposure
+        };
     }
 
     private static void SeedMissingDefaults()

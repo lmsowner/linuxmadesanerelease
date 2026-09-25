@@ -13,7 +13,8 @@ public sealed record HomeLabPortManifest(
     int? VpnContainerPort = null,
     string? VpnEnvironmentVariable = null,
     HomeLabVpnPortFileOverride? VpnFileOverride = null,
-    string ApplicationProtocol = "");
+    string ApplicationProtocol = "",
+    string HostBindingAddress = "127.0.0.1");
 
 public sealed record HomeLabVpnPortFileOverride(
     string Path,

@@ -128,7 +128,7 @@ public sealed class HomeLabService(
             var binding = bindings.FirstOrDefault(port =>
                 port.Name.Equals(access.PortName, StringComparison.OrdinalIgnoreCase));
             var localPort = access.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase)
-                ? installation.CaddySourcePort
+                ? installation.CaddySourcePort ?? binding?.HostPort
                 : binding?.HostPort;
             if (binding is null || localPort is not > 0)
             {
@@ -2741,7 +2741,7 @@ public sealed class HomeLabService(
             var clientPort = bindings.FirstOrDefault(port =>
                 port.Name.Equals(clientAccess.PortName, StringComparison.OrdinalIgnoreCase));
             var localPort = clientAccess.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase)
-                ? installation.CaddySourcePort
+                ? installation.CaddySourcePort ?? clientPort?.HostPort
                 : clientPort?.HostPort;
             if (clientPort is null || localPort is not > 0)
             {
@@ -2915,7 +2915,7 @@ public sealed class HomeLabService(
                     ? installation.CaddySourcePort is int caddyPort
                         ? $"LMS Caddy UI: http://<LMS host>:{caddyPort}"
                         : $"Server-only UI: http://127.0.0.1:{port.HostPort}"
-                    : $"Host port: 127.0.0.1:{port.HostPort}");
+                    : $"Host port: {ResolveHostBindingAddress(manifest)}:{port.HostPort}");
             }
         }
 
@@ -3615,7 +3615,10 @@ public sealed class HomeLabService(
                     : [];
             foreach (var port in publishedPorts.Distinct())
             {
-                args.AddRange(["--publish", $"127.0.0.1::{port.Item2}/{port.Item1}"]);
+                var manifest = app.Ports.FirstOrDefault(candidate =>
+                    candidate.ContainerPort == port.Item2 &&
+                    candidate.Protocol.Equals(port.Item1, StringComparison.OrdinalIgnoreCase));
+                args.AddRange(["--publish", $"{ResolveHostBindingAddress(manifest)}::{port.Item2}/{port.Item1}"]);
             }
         }
 
@@ -4307,6 +4310,11 @@ public sealed class HomeLabService(
 
     private static HomeLabPortManifest? ResolvePrimaryPort(HomeLabAppManifest app) =>
         app.Ports.FirstOrDefault(port => port.Primary) ?? app.Ports.FirstOrDefault();
+
+    private static string ResolveHostBindingAddress(HomeLabPortManifest? port) =>
+        port?.HostBindingAddress?.Trim() is "0.0.0.0" or "::"
+            ? port.HostBindingAddress.Trim()
+            : "127.0.0.1";
 
     private static string ResolveApplicationScheme(HomeLabPortManifest port) =>
         !string.IsNullOrWhiteSpace(port.ApplicationProtocol)
