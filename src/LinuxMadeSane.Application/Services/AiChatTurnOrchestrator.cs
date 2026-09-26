@@ -89,6 +89,21 @@ public sealed class AiChatTurnOrchestrator(
     private async Task SupersedeRunAsync(AiChatRun run, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
+        var thread = await conversationStore.GetThreadAsync(run.ThreadId, cancellationToken);
+
+        if (thread is not null &&
+            (!string.IsNullOrWhiteSpace(thread.ProviderStateReference) ||
+             !string.IsNullOrWhiteSpace(thread.ProviderConversationReference)))
+        {
+            await conversationStore.SaveThreadAsync(
+                thread with
+                {
+                    ProviderStateReference = string.Empty,
+                    ProviderConversationReference = string.Empty,
+                    UpdatedAtUtc = now
+                },
+                cancellationToken);
+        }
 
         if (run.ExecutionPlanId.HasValue)
         {
@@ -281,6 +296,7 @@ public sealed class AiChatTurnOrchestrator(
     {
         var thread = await conversationStore.GetThreadAsync(run.ThreadId, cancellationToken)
             ?? throw new InvalidOperationException("That AI chat thread could not be found.");
+        thread = await ResetProviderStateAfterCancelledRunAsync(run, thread, cancellationToken);
         var userMessage = await conversationStore.GetMessageAsync(run.MessageId, cancellationToken)
             ?? throw new InvalidOperationException("The AI turn is missing its originating user message.");
 
@@ -635,6 +651,37 @@ public sealed class AiChatTurnOrchestrator(
         return run;
     }
 
+    private async Task<AiChatThread> ResetProviderStateAfterCancelledRunAsync(
+        AiChatRun run,
+        AiChatThread thread,
+        CancellationToken cancellationToken)
+    {
+        if (run.ProviderAttemptCount != 0 ||
+            (string.IsNullOrWhiteSpace(thread.ProviderStateReference) &&
+             string.IsNullOrWhiteSpace(thread.ProviderConversationReference)))
+        {
+            return thread;
+        }
+
+        var previousRun = (await conversationStore.ListChatRunsAsync(run.ThreadId, cancellationToken))
+            .Where(candidate => candidate.Id != run.Id && candidate.CreatedAtUtc <= run.CreatedAtUtc)
+            .OrderByDescending(candidate => candidate.CreatedAtUtc)
+            .FirstOrDefault();
+        if (previousRun?.Status != AiChatRunStatus.Cancelled)
+        {
+            return thread;
+        }
+
+        var resetThread = thread with
+        {
+            ProviderStateReference = string.Empty,
+            ProviderConversationReference = string.Empty,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        await conversationStore.SaveThreadAsync(resetThread, cancellationToken);
+        return resetThread;
+    }
+
     private async Task<AiChatRun> ProcessExecutionPlanAsync(AiChatRun run, CancellationToken cancellationToken)
     {
         if (!run.ExecutionPlanId.HasValue)
@@ -756,6 +803,7 @@ public sealed class AiChatTurnOrchestrator(
 
             AiToolResult persistedResult;
             AiInvocationStatus invocationStatus;
+            var persistenceCancellationToken = cancellationToken;
 
             try
             {
@@ -765,10 +813,14 @@ public sealed class AiChatTurnOrchestrator(
                     Id = CreateDeterministicGuid($"{invocation.Id}:result")
                 };
                 invocationStatus = MapInvocationStatus(persistedResult.Outcome);
-                await conversationStore.SaveToolResultAsync(persistedResult, cancellationToken);
+                persistenceCancellationToken = cancellationToken.IsCancellationRequested
+                    ? CancellationToken.None
+                    : cancellationToken;
+                await conversationStore.SaveToolResultAsync(persistedResult, persistenceCancellationToken);
             }
             catch (OperationCanceledException)
             {
+                persistenceCancellationToken = CancellationToken.None;
                 persistedResult = new AiToolResult(
                     CreateDeterministicGuid($"{invocation.Id}:result"),
                     invocation.Id,
@@ -780,10 +832,13 @@ public sealed class AiChatTurnOrchestrator(
                     null,
                     DateTimeOffset.UtcNow);
                 invocationStatus = AiInvocationStatus.Cancelled;
-                await conversationStore.SaveToolResultAsync(persistedResult, cancellationToken);
+                await conversationStore.SaveToolResultAsync(persistedResult, persistenceCancellationToken);
             }
             catch (Exception exception)
             {
+                persistenceCancellationToken = cancellationToken.IsCancellationRequested
+                    ? CancellationToken.None
+                    : cancellationToken;
                 persistedResult = new AiToolResult(
                     CreateDeterministicGuid($"{invocation.Id}:result"),
                     invocation.Id,
@@ -795,7 +850,7 @@ public sealed class AiChatTurnOrchestrator(
                     null,
                     DateTimeOffset.UtcNow);
                 invocationStatus = AiInvocationStatus.Failed;
-                await conversationStore.SaveToolResultAsync(persistedResult, cancellationToken);
+                await conversationStore.SaveToolResultAsync(persistedResult, persistenceCancellationToken);
             }
 
             var completedInvocation = invocation with
@@ -805,7 +860,12 @@ public sealed class AiChatTurnOrchestrator(
                 Result = persistedResult
             };
 
-            await conversationStore.SaveToolInvocationAsync(completedInvocation, cancellationToken);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                persistenceCancellationToken = CancellationToken.None;
+            }
+
+            await conversationStore.SaveToolInvocationAsync(completedInvocation, persistenceCancellationToken);
 
             updatedActions[action.Id] = action with
             {
@@ -831,11 +891,22 @@ public sealed class AiChatTurnOrchestrator(
                 $"{action.ToolName} | {persistedResult.Summary}",
                 persistedResult.Outcome,
                 persistedResult.CompletedAtUtc,
-                cancellationToken);
+                persistenceCancellationToken);
 
-            thread = await EnsureToolMessagePersistedAsync(run, thread, action, persistedResult, messageHistory, cancellationToken);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                thread = await conversationStore.GetThreadAsync(thread.Id, persistenceCancellationToken) ?? thread;
+            }
 
-            if (persistedResult.Outcome == AiExecutionOutcome.Cancelled)
+            thread = await EnsureToolMessagePersistedAsync(
+                run,
+                thread,
+                action,
+                persistedResult,
+                messageHistory,
+                persistenceCancellationToken);
+
+            if (persistedResult.Outcome == AiExecutionOutcome.Cancelled || cancellationToken.IsCancellationRequested)
             {
                 var cancelledPlan = executionPlan with
                 {
@@ -846,8 +917,11 @@ public sealed class AiChatTurnOrchestrator(
                         .ToArray()
                 };
 
-                await conversationStore.SaveExecutionPlanAsync(cancelledPlan, cancellationToken);
-                return await MarkRunCancelledAsync(run, "The AI turn was cancelled while Linux Made Sane was executing a tool.", cancellationToken);
+                await conversationStore.SaveExecutionPlanAsync(cancelledPlan, persistenceCancellationToken);
+                return await MarkRunCancelledAsync(
+                    run,
+                    "The AI turn was superseded while Linux Made Sane was executing a tool. Its final tool result was saved for the next turn.",
+                    persistenceCancellationToken);
             }
         }
 
