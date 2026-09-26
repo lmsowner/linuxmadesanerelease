@@ -2021,10 +2021,31 @@ public sealed class HomeLabService(
             return null;
         }
 
+        var removablePaths = new List<string>();
+        foreach (var configurationPath in configurationPaths)
+        {
+            if (await IsSafeManagedConfigurationPathAsync(configurationPath, cancellationToken))
+            {
+                removablePaths.Add(configurationPath);
+            }
+            else
+            {
+                output.Add($"Preserved linked or mounted configuration path: {configurationPath}");
+                logger.LogWarning(
+                    "Preserving Home Lab configuration path {ConfigurationPath} because it is linked, mounted, or could not be verified as LMS-owned.",
+                    configurationPath);
+            }
+        }
+
+        if (removablePaths.Count == 0)
+        {
+            return null;
+        }
+
         var remove = await RunAsync(
             new LinuxCommandRequest(
                 "rm",
-                ["--force", "--recursive", "--", ..configurationPaths],
+                ["--force", "--recursive", "--", ..removablePaths],
                 true,
                 DockerCommandTimeout,
                 $"Remove LMS-managed configuration for {installation.ContainerName}"),
@@ -2039,8 +2060,26 @@ public sealed class HomeLabService(
                 HomeLabHealthState.Failed);
         }
 
-        output.Add($"Removed LMS-managed configuration: {string.Join(", ", configurationPaths)}");
+        output.Add($"Removed LMS-managed configuration: {string.Join(", ", removablePaths)}");
         return null;
+    }
+
+    private async Task<bool> IsSafeManagedConfigurationPathAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        // Never recursively remove a symlink, a path containing symlinked
+        // components, or a mount point. These can point outside LMS-managed
+        // storage (for example, a linked media library).
+        var linkCheck = await RunAsync(
+            new LinuxCommandRequest(
+                "sh",
+                ["-c", "set -eu; target=$1; test -e \"$target\" || exit 0; test ! -L \"$target\"; ! mountpoint -q \"$target\"; test -z \"$(find -P \"$target\" -xdev -type l -print -quit)\"" , "lms-path-check", path],
+                true,
+                TimeSpan.FromSeconds(30),
+                $"Verify LMS-managed configuration path {path}"),
+            cancellationToken);
+        return linkCheck.ExitCode == 0;
     }
 
     private async Task<HomeLabOperationResult> RecreateVpnGatewayAsync(
