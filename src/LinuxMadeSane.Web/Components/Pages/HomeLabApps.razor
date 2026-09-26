@@ -111,6 +111,25 @@
             </UiModal>
         }
 
+        @if (pendingGroupRemoval is { } groupToRemove)
+        {
+            <UiModal IsOpen="true"
+                     Title="@($"Delete {groupToRemove.Name}?")"
+                     Subtitle="This removes every container in the group, its LMS-managed configuration, routes, secrets, and deployment network. Shared downloads and media data are protected."
+                     Class="home-lab-confirm-modal"
+                     OnClose="CancelGroupRemoval">
+                <ChildContent>
+                    <section class="home-lab-confirm-panel">
+                        <p>This permanently removes <strong>@groupToRemove.Installations.Count containers</strong> from <strong>@groupToRemove.Name</strong>.</p>
+                        <div class="home-lab-confirm-actions">
+                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelGroupRemoval" />
+                            <UiCommandButton Label="Delete entire group" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="ConfirmGroupRemovalAsync" />
+                        </div>
+                    </section>
+                </ChildContent>
+            </UiModal>
+        }
+
         <TabControl ActiveValue="@activeTab"
                     ActiveValueChanged="HandleTabChangedAsync"
                     Class="home-lab-tabs"
@@ -635,9 +654,17 @@
                                 </span>
                                 <span class="home-lab-installation-group-count">@FormatContainerCount(group.Installations.Count)</span>
                             </button>
-                            @if (hasRepairCandidates)
+                            @if (hasRepairCandidates || group.Installations.Count > 0)
                             {
                                 <div class="home-lab-installation-group-actions">
+                                    <UiCommandButton Label="Delete group"
+                                                     Title="Remove every container and managed resource in this group"
+                                                     Glyph="UiIconGlyph.Delete"
+                                                     Variant="UiButtonVariant.Danger"
+                                                     Disabled="@busy"
+                                                     OnClick="() => BeginGroupRemoval(group)" />
+                                    @if (hasRepairCandidates)
+                                    {
                                     <UiCommandButton Label="Repair group"
                                                      Title="Repair every degraded, failed, or blocked installation in this group"
                                                      Glyph="UiIconGlyph.Refresh"
@@ -650,6 +677,7 @@
                                                      Variant="UiButtonVariant.PrimaryMuted"
                                                      Disabled="@(busy || startingPromptRecipeId is not null)"
                                                      OnClick="() => StartGroupRepairHelpAsync(group)" />
+                                    }
                                 </div>
                             }
                         </div>
@@ -1011,6 +1039,7 @@
     private HomeLabAppInstallation? configuringInstallation;
     private HomeLabAppInstallation? renamingGateway;
     private HomeLabAppInstallation? pendingRemoval;
+    private HomeLabInstallationGroup? pendingGroupRemoval;
     private string gatewayRenameValue = string.Empty;
     private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
@@ -2566,6 +2595,56 @@
         {
             pendingRemoval = null;
         }
+    }
+
+    private void BeginGroupRemoval(HomeLabInstallationGroup group)
+    {
+        if (!busy && group.Installations.Count > 0)
+        {
+            pendingGroupRemoval = group;
+        }
+    }
+
+    private void CancelGroupRemoval()
+    {
+        if (!busy)
+        {
+            pendingGroupRemoval = null;
+        }
+    }
+
+    private async Task ConfirmGroupRemovalAsync()
+    {
+        if (pendingGroupRemoval is not { } group || busy)
+        {
+            return;
+        }
+
+        pendingGroupRemoval = null;
+        await RunUiOperationAsync(async () =>
+        {
+            var results = new List<HomeLabOperationResult>(group.Installations.Count);
+            foreach (var installation in group.Installations
+                         .OrderBy(item => IsVpnGateway(item) ? 1 : 0)
+                         .ThenBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    results.Add(await HomeLabService.ExecuteAsync(installation.Id, HomeLabLifecycleAction.Remove));
+                }
+                catch (Exception exception)
+                {
+                    results.Add(new HomeLabOperationResult(false, $"Could not remove {installation.DisplayName}.", exception.Message, [], HomeLabHealthState.Failed, DateTimeOffset.UtcNow));
+                }
+            }
+
+            var failed = results.Count(result => !result.Succeeded);
+            SetMessage(
+                failed == 0
+                    ? $"Deleted group {group.Name} ({results.Count} containers)."
+                    : $"Deleted {results.Count - failed} of {results.Count} containers in {group.Name}. {results.Last(result => !result.Succeeded).Detail}",
+                failed > 0);
+        });
     }
 
     private async Task ConfirmRemovalAsync()
