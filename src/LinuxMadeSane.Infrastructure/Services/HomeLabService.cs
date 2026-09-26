@@ -3331,12 +3331,12 @@ public sealed class HomeLabService(
             if (existing.Id == routeId)
             {
                 if (existing.SourceIp != listenAddress ||
-                    existing.DestinationIp != "127.0.0.1" ||
+                    existing.DestinationIp != ResolveContainerHostAddress(installation, primaryManifestPort) ||
                     existing.DestinationPort != primaryPort.HostPort ||
                     existing.RewriteSecureCookiesForHttp != rewriteSecureCookiesForHttp)
                 {
                     existing.SourceIp = listenAddress;
-                    existing.DestinationIp = "127.0.0.1";
+                    existing.DestinationIp = ResolveContainerHostAddress(installation, primaryManifestPort);
                     existing.DestinationPort = primaryPort.HostPort;
                     existing.RewriteSecureCookiesForHttp = rewriteSecureCookiesForHttp;
                     await caddyIntegrationService.SaveRouteAsync(existing, cancellationToken);
@@ -3359,7 +3359,7 @@ public sealed class HomeLabService(
             if (existing.Id == savedRoute.Id)
             {
                 existing.SourceIp = listenAddress;
-                existing.DestinationIp = "127.0.0.1";
+                existing.DestinationIp = ResolveContainerHostAddress(installation, primaryManifestPort);
                 existing.DestinationPort = primaryPort.HostPort;
                 existing.RewriteSecureCookiesForHttp = rewriteSecureCookiesForHttp;
                 installation.CaddyRouteId = savedRoute.Id;
@@ -3378,7 +3378,7 @@ public sealed class HomeLabService(
             Description = $"Home Lab browser access for {app.Name}. Managed by LMS.",
             SourceIp = listenAddress,
             SourcePort = sourcePort,
-            DestinationIp = "127.0.0.1",
+            DestinationIp = ResolveContainerHostAddress(installation, primaryManifestPort),
             DestinationPort = primaryPort.HostPort,
             DestinationScheme = CaddyProxyTargetScheme.Http,
             RewriteSecureCookiesForHttp = rewriteSecureCookiesForHttp
@@ -3423,7 +3423,7 @@ public sealed class HomeLabService(
             return;
         }
 
-        editor.DestinationIp = "127.0.0.1";
+        editor.DestinationIp = ResolveContainerHostAddress(installation, primaryManifestPort);
         editor.SourceIp = ResolveConfiguredListenAddress(installation);
         editor.DestinationPort = primaryPort.HostPort;
         editor.RewriteSecureCookiesForHttp = HomeLabEndpointPlanner.ResolveClientAccess(app)?
@@ -4406,7 +4406,7 @@ public sealed class HomeLabService(
             using var client = new HttpClient(handler);
             using var request = new HttpRequestMessage(
                 HttpMethod.Get,
-                $"http://127.0.0.1:{binding.HostPort}{path}");
+                $"http://{ResolveContainerHostAddress(installation, manifestPort!)}:{binding.HostPort}{path}");
             using var response = await client.SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
@@ -4625,6 +4625,21 @@ public sealed class HomeLabService(
         return port?.HostBindingAddress?.Trim() is "0.0.0.0" or "::"
             ? selectedAddress ?? port.HostBindingAddress.Trim()
             : "127.0.0.1";
+    }
+
+    private static string ResolveContainerHostAddress(
+        HomeLabInstallationEntity installation,
+        HomeLabPortManifest port)
+    {
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
+            configuration.TryGetValue("listen-address", out var selectedAddress) &&
+            !string.IsNullOrWhiteSpace(selectedAddress))
+        {
+            return selectedAddress;
+        }
+
+        return ResolveHostBindingAddress(port, configuration);
     }
 
     private static string ResolveConfiguredListenAddress(HomeLabInstallationEntity installation) =>
