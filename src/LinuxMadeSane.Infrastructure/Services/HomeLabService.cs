@@ -60,6 +60,7 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
+        installationEntities = (await ReconcileMissingInstallationsAsync(installationEntities, cancellationToken)).ToList();
         await RemoveHomeLabSubpathRoutesAsync(installationEntities, cancellationToken);
         var deploymentEntities = await dbContext.HomeLabDeployments
             .AsNoTracking()
@@ -167,6 +168,7 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
+        entities = (await ReconcileMissingInstallationsAsync(entities, cancellationToken)).ToList();
 
         await RemoveHomeLabSubpathRoutesAsync(entities, cancellationToken);
 
@@ -241,6 +243,208 @@ public sealed class HomeLabService(
         var storageRoles = BuildStorageRoles(storageRoleEntities);
 
         return new HomeLabWorkspace(HomeLabCatalog.VisibleApps, HomeLabCatalog.Recipes, storageRoles, deployments, installations);
+    }
+
+    private async Task<IReadOnlyList<HomeLabInstallationEntity>> ReconcileMissingInstallationsAsync(
+        IReadOnlyList<HomeLabInstallationEntity> installations,
+        CancellationToken cancellationToken)
+    {
+        if (installations.Count == 0)
+        {
+            return installations;
+        }
+
+        var missing = new List<HomeLabInstallationEntity>();
+        foreach (var installation in installations)
+        {
+            var presence = await InspectContainerPresenceAsync(installation.ContainerName, cancellationToken);
+            if (presence is null || presence.Value)
+            {
+                continue;
+            }
+
+            missing.Add(installation);
+            await CleanupMissingInstallationResourcesAsync(installation, cancellationToken);
+            logger.LogInformation(
+                "Removing stale Home Lab installation {InstallationId} for missing container {ContainerName}.",
+                installation.Id,
+                installation.ContainerName);
+        }
+
+        if (missing.Count == 0)
+        {
+            await RemoveOrphanedDeploymentsAsync(cancellationToken);
+            return installations;
+        }
+
+        var missingIds = missing.Select(item => item.Id).ToHashSet();
+        var deploymentIds = missing.Select(item => item.DeploymentId).Distinct().ToArray();
+        foreach (var installation in missing)
+        {
+            dbContext.HomeLabServiceEndpoints.RemoveRange(installation.ServiceEndpoints);
+            dbContext.HomeLabInstallations.Remove(installation);
+        }
+
+        var deployments = await dbContext.HomeLabDeployments
+            .Where(item => deploymentIds.Contains(item.Id))
+            .ToListAsync(cancellationToken);
+        foreach (var deployment in deployments)
+        {
+            var hasRemainingInstallation = await dbContext.HomeLabInstallations
+                .AnyAsync(item => item.DeploymentId == deployment.Id && !missingIds.Contains(item.Id), cancellationToken);
+            if (hasRemainingInstallation)
+            {
+                continue;
+            }
+
+            dbContext.HomeLabDeployments.Remove(deployment);
+            if (!string.IsNullOrWhiteSpace(deployment.NetworkName))
+            {
+                var network = await RunDockerAsync(
+                    ["network", "rm", deployment.NetworkName],
+                    $"Remove stale Home Lab network {deployment.NetworkName}",
+                    cancellationToken);
+                if (network.ExitCode != 0 && !ContainsNoSuchNetwork(network))
+                {
+                    logger.LogWarning(
+                        "Could not remove stale Home Lab network {NetworkName}: {Failure}.",
+                        deployment.NetworkName,
+                        NormalizeFailure(network));
+                }
+            }
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await RemoveOrphanedDeploymentsAsync(cancellationToken);
+
+        return installations.Where(item => !missingIds.Contains(item.Id)).ToArray();
+    }
+
+    private async Task RemoveOrphanedDeploymentsAsync(CancellationToken cancellationToken)
+    {
+        var orphanedDeployments = await dbContext.HomeLabDeployments
+            .Where(deployment => !dbContext.HomeLabInstallations.Any(installation => installation.DeploymentId == deployment.Id))
+            .ToListAsync(cancellationToken);
+        foreach (var deployment in orphanedDeployments)
+        {
+            dbContext.HomeLabDeployments.Remove(deployment);
+            if (string.IsNullOrWhiteSpace(deployment.NetworkName))
+            {
+                continue;
+            }
+
+            var network = await RunDockerAsync(
+                ["network", "rm", deployment.NetworkName],
+                $"Remove orphaned Home Lab network {deployment.NetworkName}",
+                cancellationToken);
+            if (network.ExitCode != 0 && !ContainsNoSuchNetwork(network))
+            {
+                logger.LogWarning(
+                    "Could not remove orphaned Home Lab network {NetworkName}: {Failure}.",
+                    deployment.NetworkName,
+                    NormalizeFailure(network));
+            }
+        }
+
+        if (orphanedDeployments.Count > 0)
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    private async Task CleanupMissingInstallationResourcesAsync(
+        HomeLabInstallationEntity installation,
+        CancellationToken cancellationToken)
+    {
+        var app = HomeLabCatalog.GetApp(installation.AppId);
+        try
+        {
+            var configurationPaths = await ResolveConfigurationPathsToRemoveAsync(installation, app, cancellationToken);
+            var output = new List<string>();
+            var result = await RemoveConfigurationPathsAsync(installation, configurationPaths, output, cancellationToken);
+            if (result is not null)
+            {
+                logger.LogWarning(
+                    "Could not remove stale Home Lab configuration for {ContainerName}: {Detail}.",
+                    installation.ContainerName,
+                    result.Detail);
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                exception,
+                "Could not remove stale Home Lab configuration for {ContainerName}; shared data was preserved.",
+                installation.ContainerName);
+        }
+
+        foreach (var routeId in installation.ServiceEndpoints
+                     .Select(endpoint => endpoint.EdgeGatewayRouteId)
+                     .Append(installation.EdgeGatewayRouteId)
+                     .Where(id => id.HasValue)
+                     .Select(id => id!.Value)
+                     .Distinct())
+        {
+            try
+            {
+                await edgeGatewayRouteRegistrationService.UnregisterClientRouteAsync(routeId, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Could not remove stale Home Lab edge route {RouteId}.", routeId);
+            }
+        }
+
+        if (installation.CaddyRouteId is Guid caddyRouteId)
+        {
+            try
+            {
+                await caddyIntegrationService.DeleteRouteAsync(caddyRouteId, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Could not remove stale Home Lab Caddy route {RouteId}.", caddyRouteId);
+            }
+        }
+
+        foreach (var secretReference in DeserializeDictionary(installation.SecretConfigurationJson).Values)
+        {
+            try
+            {
+                await secretStore.DeleteSecretAsync(secretReference, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Could not remove stale Home Lab secret reference.");
+            }
+        }
+    }
+
+    private async Task<bool?> InspectContainerPresenceAsync(
+        string containerName,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunDockerAsync(
+            ["inspect", "--format", "{{json .Id}}", containerName],
+            $"Check whether Home Lab container {containerName} still exists",
+            cancellationToken);
+        if (result.ExitCode == 0 && !string.IsNullOrWhiteSpace(result.StandardOutput))
+        {
+            return true;
+        }
+
+        if (ContainsNoSuchContainer(result) ||
+            result.StandardError.Contains("No such object", StringComparison.OrdinalIgnoreCase) ||
+            result.StandardError.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        logger.LogWarning(
+            "Could not determine whether Home Lab container {ContainerName} exists: {Failure}.",
+            containerName,
+            NormalizeFailure(result));
+        return null;
     }
 
     private async Task RemoveHomeLabSubpathRoutesAsync(
