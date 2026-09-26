@@ -2074,7 +2074,7 @@ public sealed class HomeLabService(
         var linkCheck = await RunAsync(
             new LinuxCommandRequest(
                 "sh",
-                ["-c", "set -eu; target=$1; test -e \"$target\" || exit 0; test ! -L \"$target\"; ! mountpoint -q \"$target\"; test -z \"$(find -P \"$target\" -xdev -type l -print -quit)\"" , "lms-path-check", path],
+                ["-c", "set -eu; target=$1; test -e \"$target\" || exit 0; canonical=$(realpath -e -- \"$target\"); test \"$canonical\" = \"$target\"; test ! -L \"$target\"; ! mountpoint -q \"$target\"; test -z \"$(find -P \"$target\" -xdev -type l -print -quit)\"" , "lms-path-check", path],
                 true,
                 TimeSpan.FromSeconds(30),
                 $"Verify LMS-managed configuration path {path}"),
