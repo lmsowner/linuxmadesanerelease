@@ -8,6 +8,7 @@ using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Ai;
 using LinuxMadeSane.Core.Models.LocalAi;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace LinuxMadeSane.Application.Services;
 
@@ -77,6 +78,13 @@ public sealed class AiApprovalService(
         var actions = new List<AiProposedAction>(proposal.Actions.Count);
         var approvals = new List<AiApprovalRequest>();
         var providerCapability = await GetProviderCapabilityAsync(thread, cancellationToken);
+        var originatingMessage = proposal.MessageId.HasValue
+            ? await conversationStore.GetMessageAsync(proposal.MessageId.Value, cancellationToken)
+            : null;
+        var hasExplicitRepairAuthorization = originatingMessage is
+            {
+                Role: AiChatMessageRole.User
+            } && ExplicitlyAuthorizesHomeLabRepair(originatingMessage.Content);
 
         for (var index = 0; index < proposal.Actions.Count; index++)
         {
@@ -108,6 +116,10 @@ public sealed class AiApprovalService(
                 provisionalAction,
                 actor.AdminOverrideExists);
             evaluation = ApplyProviderCapabilityGuardrails(evaluation, provisionalAction, providerCapability);
+            evaluation = ApplyExplicitHomeLabRepairAuthorization(
+                evaluation,
+                provisionalAction,
+                hasExplicitRepairAuthorization);
 
             var action = provisionalAction with
             {
@@ -528,6 +540,52 @@ public sealed class AiApprovalService(
             AppendReason(
                 evaluation.Reason,
                 $"Provider {providerCapability.ProviderLabel} / {providerCapability.ModelId} is capability-limited for mutating Deep Fix work. {providerCapability.Report.Warning}"));
+    }
+
+    private static AiApprovalEvaluation ApplyExplicitHomeLabRepairAuthorization(
+        AiApprovalEvaluation evaluation,
+        AiProposedAction action,
+        bool hasExplicitRepairAuthorization)
+    {
+        if (!hasExplicitRepairAuthorization ||
+            evaluation.Requirement == AiApprovalRequirement.Blocked ||
+            action.ToolName is not (AiToolNames.RepairHomeLabInstallation or AiToolNames.RepairHomeLabApplicationConfig))
+        {
+            return evaluation;
+        }
+
+        return new AiApprovalEvaluation(
+            AiApprovalRequirement.AutoRun,
+            AiUserTrustLevel.Standard,
+            "The user's message explicitly authorizes this LMS-managed Home Lab repair.");
+    }
+
+    private static bool ExplicitlyAuthorizesHomeLabRepair(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        if (content.Contains("invoked group AI Repair and authorizes", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var normalized = Regex.Replace(content.ToLowerInvariant(), "[^a-z0-9]+", " ").Trim();
+        if (Regex.IsMatch(normalized, @"^(what|which|how|why)\s+(would|could|should|can)\b") ||
+            Regex.IsMatch(normalized, @"^(explain|describe|show me|tell me)\b"))
+        {
+            return false;
+        }
+
+        return Regex.IsMatch(
+            normalized,
+            @"\b(fix|repair)\s+(it|this|that|them|all|everything|the\s+(issue|problem|group|container|containers|app|apps|installation|installations))\b") ||
+            Regex.IsMatch(normalized, @"\b(go ahead and|go and|please|so)\s+(fix|repair)\b") ||
+            Regex.IsMatch(normalized, @"\b(can|could|will|would)\s+you\s+(please\s+)?(fix|repair)\b") ||
+            Regex.IsMatch(normalized, @"\b(apply|make|perform|run)\s+(the\s+)?(fix|repair|repairs)\b") ||
+            Regex.IsMatch(normalized, @"\bdo\s+it\b");
     }
 
     private static AiUserTrustLevel MaxTrustLevel(AiUserTrustLevel left, AiUserTrustLevel right) =>

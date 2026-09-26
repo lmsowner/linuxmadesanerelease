@@ -390,9 +390,7 @@
     private AiChatRun? ActiveRun =>
         workspace?.ChatRuns
             .OrderByDescending(run => run.UpdatedAtUtc)
-            .FirstOrDefault(run =>
-                !run.IsTerminal &&
-                (run.Status != AiChatRunStatus.AwaitingApproval || PendingApprovalRequests.Count > 0));
+            .FirstOrDefault(run => !run.IsTerminal);
 
     private AiChatRun? LatestRun =>
         workspace?.ChatRuns
@@ -856,6 +854,13 @@
                             Waiting for your input
                         </span>
                     }
+                    else if (HasActiveRun)
+                    {
+                        <span class="ai-input-needed" role="status" aria-live="polite">
+                            <span class="ai-input-needed-dot" aria-hidden="true"></span>
+                            Working · you can add context
+                        </span>
+                    }
                 </div>
 
                 <EditForm Model="@messageComposer"
@@ -871,15 +876,15 @@
                     <label>
                         <span>@(IsResponseNeeded ? "Your response" : "What do you need?")</span>
                         <InputTextArea @bind-Value="messageComposer.Content"
-                                       placeholder="@(IsResponseNeeded ? "Answer the highlighted question..." : "Ask a question or describe what needs fixing.")" />
+                                       placeholder="@(IsResponseNeeded ? "Answer the highlighted question..." : HasActiveRun ? "Add context or tell LMS what to do next..." : "Ask a question or describe what needs fixing.")" />
                         <ValidationMessage For="@(() => messageComposer.Content)" />
                     </label>
 
                     <div class="hero-actions">
-                        <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Working..." : IsResponseNeeded ? "Send response" : "Send")"
+                        <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Add instruction" : IsResponseNeeded ? "Send response" : "Send")"
                                          Glyph="UiIconGlyph.Send"
                                          Type="submit"
-                                         Disabled="@(isSendingMessage || HasActiveRun)" />
+                                         Disabled="@isSendingMessage" />
                         @if (CanCancelRun)
                         {
                             <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Interrupt" Variant="UiButtonVariant.Danger" OnClick="RequestRunCancellationAsync" />

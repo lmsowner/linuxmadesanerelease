@@ -50,7 +50,7 @@ public sealed class AiChatTurnOrchestrator(
         var activeRun = existingRuns.FirstOrDefault(run => !run.IsTerminal);
         if (activeRun is not null)
         {
-            throw new InvalidOperationException("This chat already has an active AI turn. Wait for it to complete or cancel it before sending another message.");
+            await SupersedeRunAsync(activeRun, cancellationToken);
         }
 
         var now = DateTimeOffset.UtcNow;
@@ -84,6 +84,61 @@ public sealed class AiChatTurnOrchestrator(
             cancellationToken);
 
         await runQueue.EnqueueAsync(run.Id, cancellationToken);
+    }
+
+    private async Task SupersedeRunAsync(AiChatRun run, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        if (run.ExecutionPlanId.HasValue)
+        {
+            var pendingApprovals = (await conversationStore.ListApprovalRequestsAsync(run.ThreadId, cancellationToken))
+                .Where(request =>
+                    request.ExecutionPlanId == run.ExecutionPlanId &&
+                    request.State == AiApprovalState.Pending)
+                .ToArray();
+
+            foreach (var request in pendingApprovals)
+            {
+                await conversationStore.SaveApprovalRequestAsync(
+                    request with
+                    {
+                        State = AiApprovalState.Denied,
+                        Decision = new AiApprovalDecision(
+                            AiApprovalState.Denied,
+                            AiApprovalDecisionType.Deny,
+                            "Newer user instruction",
+                            AiUserTrustLevel.Standard,
+                            false,
+                            false,
+                            "Superseded by a newer user message in the same conversation.",
+                            now)
+                    },
+                    cancellationToken);
+            }
+        }
+
+        var cancelledRun = run with
+        {
+            Status = AiChatRunStatus.Cancelled,
+            Step = AiChatRunStep.Cancelled,
+            StatusSummary = "Superseded by a newer user message.",
+            CancellationRequested = true,
+            UpdatedAtUtc = now,
+            CompletedAtUtc = now
+        };
+
+        await conversationStore.SaveChatRunAsync(cancelledRun, cancellationToken);
+        await RecordAuditAsync(
+            cancelledRun,
+            "superseded",
+            "orchestration.superseded",
+            "AI turn superseded",
+            "A newer user message replaced this active AI turn and retained the conversation history for the next turn.",
+            AiExecutionOutcome.Cancelled,
+            now,
+            cancellationToken);
+        runQueue.Cancel(run.Id);
     }
 
     public async Task RequestCancellationAsync(Guid runId, CancellationToken cancellationToken = default)
