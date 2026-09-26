@@ -264,7 +264,6 @@ public sealed class HomeLabService(
             }
 
             missing.Add(installation);
-            await CleanupMissingInstallationResourcesAsync(installation, cancellationToken);
             logger.LogInformation(
                 "Removing stale Home Lab installation {InstallationId} for missing container {ContainerName}.",
                 installation.Id,
@@ -278,6 +277,11 @@ public sealed class HomeLabService(
         }
 
         var missingIds = missing.Select(item => item.Id).ToHashSet();
+        foreach (var installation in missing)
+        {
+            await CleanupMissingInstallationResourcesAsync(installation, missingIds, cancellationToken);
+        }
+
         var deploymentIds = missing.Select(item => item.DeploymentId).Distinct().ToArray();
         foreach (var installation in missing)
         {
@@ -354,12 +358,17 @@ public sealed class HomeLabService(
 
     private async Task CleanupMissingInstallationResourcesAsync(
         HomeLabInstallationEntity installation,
+        IReadOnlySet<Guid> missingInstallationIds,
         CancellationToken cancellationToken)
     {
         var app = HomeLabCatalog.GetApp(installation.AppId);
         try
         {
-            var configurationPaths = await ResolveConfigurationPathsToRemoveAsync(installation, app, cancellationToken);
+            var configurationPaths = await ResolveConfigurationPathsToRemoveAsync(
+                installation,
+                app,
+                missingInstallationIds,
+                cancellationToken);
             var output = new List<string>();
             var result = await RemoveConfigurationPathsAsync(installation, configurationPaths, output, cancellationToken);
             if (result is not null)
@@ -374,7 +383,7 @@ public sealed class HomeLabService(
         {
             logger.LogWarning(
                 exception,
-                "Could not remove stale Home Lab configuration for {ContainerName}; shared data was preserved.",
+                "Could not remove stale Home Lab configuration for {ContainerName}; protected or unavailable data was preserved.",
                 installation.ContainerName);
         }
 
@@ -1648,7 +1657,7 @@ public sealed class HomeLabService(
             IReadOnlyList<string> configurationPaths;
             try
             {
-                configurationPaths = await ResolveConfigurationPathsToRemoveAsync(installation, app, cancellationToken);
+                configurationPaths = await ResolveConfigurationPathsToRemoveAsync(installation, app, null, cancellationToken);
             }
             catch (InvalidOperationException exception)
             {
@@ -1942,6 +1951,7 @@ public sealed class HomeLabService(
     private async Task<IReadOnlyList<string>> ResolveConfigurationPathsToRemoveAsync(
         HomeLabInstallationEntity installation,
         HomeLabAppManifest app,
+        IReadOnlySet<Guid>? ignoredInstallationIds,
         CancellationToken cancellationToken)
     {
         var configurationContainerPaths = app.Volumes
@@ -1968,21 +1978,18 @@ public sealed class HomeLabService(
             .AsNoTracking()
             .Select(item => item.HostPath)
             .ToListAsync(cancellationToken);
-        foreach (var configurationPath in configurationPaths)
-        {
-            if (sharedStoragePaths
-                .Where(path => !string.IsNullOrWhiteSpace(path))
-                .Select(NormalizeHostPath)
-                .Any(sharedPath => IsPathEqualOrDescendant(configurationPath, sharedPath)))
-            {
-                throw new InvalidOperationException(
-                    $"The configuration path '{configurationPath}' is also a Home Lab storage root. Remove the shared storage mapping before deleting this app.");
-            }
-        }
+        var protectedPaths = sharedStoragePaths
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(NormalizeHostPath)
+            .ToArray();
+        var removablePaths = configurationPaths
+            .Where(configurationPath => !protectedPaths.Any(sharedPath => IsPathEqualOrDescendant(configurationPath, sharedPath)))
+            .ToArray();
 
         var otherInstallationBindings = await dbContext.HomeLabInstallations
             .AsNoTracking()
-            .Where(item => item.Id != installation.Id)
+            .Where(item => item.Id != installation.Id &&
+                           (ignoredInstallationIds == null || !ignoredInstallationIds.Contains(item.Id)))
             .Select(item => item.VolumeMappingsJson)
             .ToListAsync(cancellationToken);
         var otherPaths = otherInstallationBindings
@@ -1991,7 +1998,7 @@ public sealed class HomeLabService(
             .Select(binding => NormalizeHostPath(binding.HostPath))
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        foreach (var configurationPath in configurationPaths)
+        foreach (var configurationPath in removablePaths)
         {
             if (otherPaths.Any(otherPath => IsPathEqualOrDescendant(configurationPath, otherPath)))
             {
@@ -2000,7 +2007,7 @@ public sealed class HomeLabService(
             }
         }
 
-        return configurationPaths;
+        return removablePaths;
     }
 
     private async Task<HomeLabOperationResult?> RemoveConfigurationPathsAsync(
