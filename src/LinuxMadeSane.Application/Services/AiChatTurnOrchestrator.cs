@@ -40,6 +40,7 @@ public sealed class AiChatTurnOrchestrator(
         }
 
         var existingRuns = await conversationStore.ListChatRunsAsync(thread.Id, cancellationToken);
+        await FinalizeOrphanedToolInvocationsAsync(thread.Id, existingRuns, cancellationToken);
         var existingRun = existingRuns.FirstOrDefault(run => run.MessageId == userMessage.Id);
         if (existingRun is not null)
         {
@@ -296,7 +297,7 @@ public sealed class AiChatTurnOrchestrator(
     {
         var thread = await conversationStore.GetThreadAsync(run.ThreadId, cancellationToken)
             ?? throw new InvalidOperationException("That AI chat thread could not be found.");
-        thread = await ResetProviderStateAfterCancelledRunAsync(run, thread, cancellationToken);
+        thread = await ResetProviderStateAfterInterruptedRunAsync(run, thread, cancellationToken);
         var userMessage = await conversationStore.GetMessageAsync(run.MessageId, cancellationToken)
             ?? throw new InvalidOperationException("The AI turn is missing its originating user message.");
 
@@ -651,7 +652,7 @@ public sealed class AiChatTurnOrchestrator(
         return run;
     }
 
-    private async Task<AiChatThread> ResetProviderStateAfterCancelledRunAsync(
+    private async Task<AiChatThread> ResetProviderStateAfterInterruptedRunAsync(
         AiChatRun run,
         AiChatThread thread,
         CancellationToken cancellationToken)
@@ -667,7 +668,7 @@ public sealed class AiChatTurnOrchestrator(
             .Where(candidate => candidate.Id != run.Id && candidate.CreatedAtUtc <= run.CreatedAtUtc)
             .OrderByDescending(candidate => candidate.CreatedAtUtc)
             .FirstOrDefault();
-        if (previousRun?.Status != AiChatRunStatus.Cancelled)
+        if (previousRun?.Status is not (AiChatRunStatus.Cancelled or AiChatRunStatus.Failed))
         {
             return thread;
         }
@@ -680,6 +681,65 @@ public sealed class AiChatTurnOrchestrator(
         };
         await conversationStore.SaveThreadAsync(resetThread, cancellationToken);
         return resetThread;
+    }
+
+    private async Task FinalizeOrphanedToolInvocationsAsync(
+        Guid threadId,
+        IReadOnlyList<AiChatRun> runs,
+        CancellationToken cancellationToken)
+    {
+        var terminalRunsByPlanId = runs
+            .Where(run => run.IsTerminal && run.ExecutionPlanId.HasValue)
+            .GroupBy(run => run.ExecutionPlanId!.Value)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(run => run.UpdatedAtUtc).First());
+        var orphanedInvocations = (await conversationStore.ListToolInvocationsAsync(threadId, cancellationToken))
+            .Where(invocation =>
+                invocation.Status == AiInvocationStatus.Running &&
+                invocation.ExecutionPlanId.HasValue &&
+                terminalRunsByPlanId.ContainsKey(invocation.ExecutionPlanId.Value))
+            .ToArray();
+
+        foreach (var invocation in orphanedInvocations)
+        {
+            var terminalRun = terminalRunsByPlanId[invocation.ExecutionPlanId!.Value];
+            var outcome = terminalRun.Status == AiChatRunStatus.Cancelled
+                ? AiExecutionOutcome.Cancelled
+                : AiExecutionOutcome.Failed;
+            var now = DateTimeOffset.UtcNow;
+            var result = new AiToolResult(
+                CreateDeterministicGuid($"{invocation.Id}:result"),
+                invocation.Id,
+                outcome,
+                $"{invocation.ToolName} ended when its AI turn was {terminalRun.Status.ToString().ToLowerInvariant()}.",
+                string.Empty,
+                terminalRun.LastError,
+                string.Empty,
+                null,
+                now);
+
+            await conversationStore.SaveToolResultAsync(result, cancellationToken);
+            await conversationStore.SaveToolInvocationAsync(
+                invocation with
+                {
+                    Status = outcome == AiExecutionOutcome.Cancelled
+                        ? AiInvocationStatus.Cancelled
+                        : AiInvocationStatus.Failed,
+                    CompletedAtUtc = now,
+                    Result = result
+                },
+                cancellationToken);
+            await RecordAuditAsync(
+                terminalRun,
+                $"tool-orphan-finalized:{invocation.Id}",
+                outcome == AiExecutionOutcome.Cancelled
+                    ? "tool.invocation.cancelled"
+                    : "tool.invocation.failed",
+                "Orphaned tool invocation finalized",
+                $"{invocation.ToolName} was still marked running after its AI turn ended.",
+                outcome,
+                now,
+                cancellationToken);
+        }
     }
 
     private async Task<AiChatRun> ProcessExecutionPlanAsync(AiChatRun run, CancellationToken cancellationToken)
