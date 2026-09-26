@@ -509,6 +509,36 @@ public static class HomeLabPromptRecipeCatalog
             """;
     }
 
+    public static string BuildGroupTroubleshootingPrompt(
+        string groupName,
+        IReadOnlyList<HomeLabAppInstallation> installations)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
+        ArgumentNullException.ThrowIfNull(installations);
+        if (installations.Count == 0)
+        {
+            throw new InvalidOperationException("The Home Lab group does not contain any installations.");
+        }
+
+        var targets = string.Join("\n", installations.Select(installation =>
+            $"- {installation.DisplayName}: installation {installation.Id}; app {installation.AppId}; container {installation.ContainerName}; health {installation.HealthState}; detail {installation.HealthDetail}"));
+
+        return $"""
+            {AiProviderRequirement}
+
+            Treat this as one troubleshooting and repair session for the Linux Made Sane Home Lab group '{groupName}'. Diagnose the group as a connected system rather than opening separate conversations for each container.
+
+            Group installations:
+            {targets}
+
+            Call inspect_home_lab first and match every exact installation ID. Identify all degraded, failed, or blocked members and check for a shared root cause across dependencies, Docker networks, LMS local Caddy routes, VPN namespaces, gateway health, generated endpoints, and effective non-secret configuration. Use inspect_home_lab_app_config when an application is running but its URL or behaviour is broken.
+
+            Keep LMS as the source of truth. Do not replace LMS-managed configuration with raw docker, docker compose, or shell commands. Repair every affected group member that the evidence supports. Use repair_home_lab_installation for managed container, network, endpoint, environment, listener, shared-network host resolution, VPN routing, or generated configuration faults. Use repair_home_lab_app_config only for a confirmed non-secret application file setting fault. If a shared VPN gateway or dependency outside this group is the proven cause, repair that exact LMS-managed installation as part of the same session. Never request or expose secrets.
+
+            Inspect the group again after repairs, retest the affected URLs or capabilities, and report the result for every installation that was unhealthy at the start. Do not claim the group is repaired while any affected member remains degraded, failed, or blocked; explain the remaining evidence and next action instead.
+            """;
+    }
+
     private static HomeLabPromptRecipe Deploy(
         string category,
         string id,

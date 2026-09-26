@@ -621,18 +621,38 @@
                     @foreach (var group in BuildInstallationGroups())
                     {
                         var expanded = !collapsedInstallationGroups.Contains(group.Key);
-                        <button type="button"
-                                class="home-lab-installation-group-heading"
-                                aria-expanded="@expanded"
-                                aria-controls="@($"home-lab-installation-group-{group.Key}")"
-                                @onclick="() => ToggleInstallationGroup(group.Key)">
-                            <span class="home-lab-installation-group-toggle" aria-hidden="true">@(expanded ? "−" : "+")</span>
-                            <span class="home-lab-installation-group-name">
-                                <strong>@group.Name</strong>
-                                <span>@group.Detail</span>
-                            </span>
-                            <span class="home-lab-installation-group-count">@FormatContainerCount(group.Installations.Count)</span>
-                        </button>
+                        var hasRepairCandidates = GroupRepairCandidates(group).Count > 0;
+                        <div class="home-lab-installation-group-heading">
+                            <button type="button"
+                                    class="home-lab-installation-group-toggle-button"
+                                    aria-expanded="@expanded"
+                                    aria-controls="@($"home-lab-installation-group-{group.Key}")"
+                                    @onclick="() => ToggleInstallationGroup(group.Key)">
+                                <span class="home-lab-installation-group-toggle" aria-hidden="true">@(expanded ? "−" : "+")</span>
+                                <span class="home-lab-installation-group-name">
+                                    <strong>@group.Name</strong>
+                                    <span>@group.Detail</span>
+                                </span>
+                                <span class="home-lab-installation-group-count">@FormatContainerCount(group.Installations.Count)</span>
+                            </button>
+                            @if (hasRepairCandidates)
+                            {
+                                <div class="home-lab-installation-group-actions">
+                                    <UiCommandButton Label="Repair group"
+                                                     Title="Repair every degraded, failed, or blocked installation in this group"
+                                                     Glyph="UiIconGlyph.Refresh"
+                                                     Variant="UiButtonVariant.ActionSubtle"
+                                                     Disabled="@busy"
+                                                     OnClick="() => RepairGroupAsync(group)" />
+                                    <UiCommandButton Label="AI Repair"
+                                                     Title="Open one AI troubleshooting conversation for the whole group"
+                                                     Glyph="UiIconGlyph.Ai"
+                                                     Variant="UiButtonVariant.PrimaryMuted"
+                                                     Disabled="@(busy || startingPromptRecipeId is not null)"
+                                                     OnClick="() => StartGroupRepairHelpAsync(group)" />
+                                </div>
+                            }
+                        </div>
                         @if (expanded)
                         {
                             <div id="@($"home-lab-installation-group-{group.Key}")" class="home-lab-installation-group-rows">
@@ -1680,6 +1700,14 @@
             HomeLabPromptRecipeCatalog.BuildTroubleshootingPrompt(installation));
     }
 
+    private async Task StartGroupRepairHelpAsync(HomeLabInstallationGroup group)
+    {
+        await StartAiPromptAsync(
+            $"repair-group-{group.Key}",
+            $"Repair {group.Name}",
+            HomeLabPromptRecipeCatalog.BuildGroupTroubleshootingPrompt(group.Name, group.Installations));
+    }
+
     private async Task StartAiPromptAsync(string promptId, string title, string prompt)
     {
         if (startingPromptRecipeId is not null)
@@ -2472,6 +2500,34 @@
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
         });
     }
+
+    private async Task RepairGroupAsync(HomeLabInstallationGroup group)
+    {
+        var candidates = GroupRepairCandidates(group);
+        if (candidates.Count == 0)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var results = new List<HomeLabOperationResult>(candidates.Count);
+            foreach (var installation in candidates.OrderByDescending(IsVpnGateway))
+            {
+                results.Add(await HomeLabService.ExecuteAsync(installation.Id, HomeLabLifecycleAction.Repair));
+            }
+
+            var failed = results.Count(result => !result.Succeeded);
+            SetMessage(
+                failed == 0
+                    ? $"Repaired {results.Count} installation{(results.Count == 1 ? string.Empty : "s")} in {group.Name}."
+                    : $"Repaired {results.Count - failed} of {results.Count} installations in {group.Name}. Review the remaining degraded items or use AI Repair.",
+                failed > 0);
+        });
+    }
+
+    private IReadOnlyList<HomeLabAppInstallation> GroupRepairCandidates(HomeLabInstallationGroup group) =>
+        group.Installations.Where(CanRepair).ToArray();
 
     private async Task HandleContainerActionAsync(HomeLabAppInstallation installation, string? selection)
     {
