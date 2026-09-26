@@ -359,6 +359,29 @@ public static class HomeLabCatalog
             SupportsVpnGateway: true,
             Exposure: ArrClientExposure()),
         new(
+            "flaresolverr",
+            "FlareSolverr",
+            "Cloudflare challenge solver for indexers that require browser verification.",
+            HomeLabAppCategory.Utilities,
+            "shield",
+            "https://github.com/FlareSolverr/FlareSolverr",
+            "https://github.com/FlareSolverr/FlareSolverr#readme",
+            "ghcr.io/flaresolverr/flaresolverr",
+            "latest",
+            "1",
+            [new("web", 8191, Primary: true)],
+            [],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["LOG_LEVEL"] = "info",
+                ["TZ"] = "UTC"
+            },
+            [],
+            new HomeLabHealthCheckManifest(HttpPath: "/health", Port: 8191),
+            [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries FlareSolverr traffic.")],
+            SupportsVpnGateway: true,
+            Exposure: ClientExposure(HomeLabBasePathSupportMode.None)),
+        new(
             "sonarr",
             "Sonarr",
             "Series management for an automated media library.",
@@ -467,8 +490,8 @@ public static class HomeLabCatalog
         new(
             "media-automation",
             "Media Automation Stack",
-            "qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr on one private network.",
-            ["qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"],
+            "qBittorrent, Prowlarr, FlareSolverr, Sonarr, Radarr, and Seerr on one private network.",
+            ["qbittorrent", "prowlarr", "flaresolverr", "sonarr", "radarr", "seerr"],
             ["downloads", "movies", "tv"],
             [
                 new("sonarr", DownloadClient: "qbittorrent", IndexerManager: "prowlarr"),
@@ -480,6 +503,7 @@ public static class HomeLabCatalog
             [
                 new("sonarr", "qbittorrent", HomeLabDependencyAccessFrom.Service, "Download client"),
                 new("sonarr", "prowlarr", HomeLabDependencyAccessFrom.Service, "Indexer manager"),
+                new("prowlarr", "flaresolverr", HomeLabDependencyAccessFrom.Service, "Cloudflare challenge solver"),
                 new("radarr", "qbittorrent", HomeLabDependencyAccessFrom.Service, "Download client"),
                 new("radarr", "prowlarr", HomeLabDependencyAccessFrom.Service, "Indexer manager"),
                 new("seerr", "sonarr", HomeLabDependencyAccessFrom.Service, "TV manager"),
