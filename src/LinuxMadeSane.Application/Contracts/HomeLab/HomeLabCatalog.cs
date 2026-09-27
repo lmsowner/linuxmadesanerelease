@@ -359,6 +359,53 @@ public static class HomeLabCatalog
             SupportsVpnGateway: true,
             Exposure: ArrClientExposure()),
         new(
+            "bitmagnet-database",
+            "Bitmagnet Database",
+            "Private PostgreSQL database used by Bitmagnet.",
+            HomeLabAppCategory.Infrastructure,
+            "database",
+            "https://www.postgresql.org/",
+            "https://www.postgresql.org/docs/",
+            "postgres",
+            "16",
+            "1",
+            [new("database", 5432)],
+            [new("database", "/var/lib/postgresql/data", HomeLabStorageKind.Configuration)],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["POSTGRES_USER"] = "bitmagnet",
+                ["POSTGRES_PASSWORD"] = "bitmagnet-internal",
+                ["POSTGRES_DB"] = "bitmagnet"
+            },
+            [],
+            new HomeLabHealthCheckManifest(DockerCommand: "pg_isready -U bitmagnet -d bitmagnet"),
+            [],
+            IsSystemDependency: true),
+        new(
+            "bitmagnet",
+            "Bitmagnet",
+            "Self-hosted torrent indexer and DHT crawler with a web interface.",
+            HomeLabAppCategory.Media,
+            "magnet",
+            "https://bitmagnet.io/",
+            "https://bitmagnet.io/setup/installation.html",
+            "ghcr.io/bitmagnet-io/bitmagnet",
+            "latest",
+            "1",
+            [new("web", 3333, Primary: true), new("torrent-tcp", 3334), new("torrent-udp", 3334, Protocol: "udp")],
+            [new("config", "/root/.config/bitmagnet", HomeLabStorageKind.Configuration), new("data", "/root/.local/share/bitmagnet", HomeLabStorageKind.UserData)],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["POSTGRES_HOST"] = "${endpoint:bitmagnet-database:internal:host}",
+                ["POSTGRES_USER"] = "bitmagnet",
+                ["POSTGRES_PASSWORD"] = "bitmagnet-internal",
+                ["POSTGRES_DB"] = "bitmagnet"
+            },
+            ["bitmagnet-database"],
+            new HomeLabHealthCheckManifest(HttpPath: "/", Port: 3333, StartPeriodSeconds: 45),
+            [],
+            Exposure: ClientExposure(HomeLabBasePathSupportMode.None)),
+        new(
             "flaresolverr",
             "FlareSolverr",
             "Cloudflare challenge solver for indexers that require browser verification.",
@@ -490,8 +537,8 @@ public static class HomeLabCatalog
         new(
             "media-automation",
             "Media Automation Stack",
-            "qBittorrent, Prowlarr, FlareSolverr, Sonarr, Radarr, and Seerr on one private network.",
-            ["qbittorrent", "prowlarr", "flaresolverr", "sonarr", "radarr", "seerr"],
+            "qBittorrent, Bitmagnet, Prowlarr, FlareSolverr, Sonarr, Radarr, and Seerr on one private network.",
+            ["qbittorrent", "bitmagnet", "prowlarr", "flaresolverr", "sonarr", "radarr", "seerr"],
             ["downloads", "movies", "tv"],
             [
                 new("sonarr", DownloadClient: "qbittorrent", IndexerManager: "prowlarr"),
