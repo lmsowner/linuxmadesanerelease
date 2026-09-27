@@ -275,7 +275,7 @@
                                                     <ul class="home-lab-detail-list">
                                                         @foreach (var item in selectedDetails.Access)
                                                         {
-                                                            <li><code>@item</code></li>
+                                                            <li>@RenderAccessItem(item)</li>
                                                         }
                                                     </ul>
                                                 </div>
@@ -1201,7 +1201,10 @@
                     recipe.Name,
                     FormatRecipeRunDetail(createdAt),
                     installations,
-                    createdAt));
+                    createdAt,
+                    recipe.Id,
+                    Guid.NewGuid(),
+                    recipe.Id));
             }
         }
 
@@ -1665,6 +1668,46 @@
     private static string BuildHomeLabFilesPopupName(HomeLabAppInstallation? installation = null) =>
         installation is null ? "lms-homelab-files" : $"lms-homelab-files-{installation.Id:N}";
 
+    private RenderFragment RenderAccessItem(string item) => builder =>
+    {
+        var resolved = ResolveAccessUrl(item);
+        var urlIndex = item.IndexOf("http", StringComparison.OrdinalIgnoreCase);
+        if (resolved is null || urlIndex < 0)
+        {
+            builder.OpenElement(0, "code");
+            builder.AddContent(1, item);
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(2, "span");
+        builder.AddContent(3, item[..urlIndex]);
+        builder.OpenElement(4, "a");
+        builder.AddAttribute(5, "href", resolved);
+        builder.AddAttribute(6, "target", "_blank");
+        builder.AddAttribute(7, "rel", "noopener");
+        builder.AddContent(8, resolved);
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+
+    private string? ResolveAccessUrl(string item)
+    {
+        var urlIndex = item.IndexOf("http", StringComparison.OrdinalIgnoreCase);
+        if (urlIndex < 0)
+        {
+            return null;
+        }
+
+        var candidate = item[urlIndex..].Trim();
+        var host = Navigation.ToAbsoluteUri(Navigation.BaseUri).Host;
+        candidate = candidate.Replace("<LMS host>", host, StringComparison.OrdinalIgnoreCase);
+        return Uri.TryCreate(candidate, UriKind.Absolute, out var uri) &&
+               (uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase) || uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))
+            ? uri.ToString()
+            : null;
+    }
+
     private static string BuildHomeLabFilesPopupPrepareScript(
         HomeLabAppInstallation? installation = null,
         int width = 1180,
@@ -1961,7 +2004,7 @@
                             recipeId,
                             targetGroup.Name,
                             recipeRunId,
-                            [addedInstallation.Id]));
+                            targetGroup.Installations.Select(item => item.Id).Append(addedInstallation.Id).ToArray()));
                     }
                 }
             }

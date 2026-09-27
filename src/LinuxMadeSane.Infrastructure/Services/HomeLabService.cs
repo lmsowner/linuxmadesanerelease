@@ -3241,16 +3241,17 @@ public sealed class HomeLabService(
         {
             var manifest = app.Ports.FirstOrDefault(candidate => candidate.Name.Equals(port.Name, StringComparison.OrdinalIgnoreCase));
             var isWeb = manifest?.Name.Equals("web", StringComparison.OrdinalIgnoreCase) == true;
-            access.Add(isWeb
-                ? $"Docker UI: http://{app.Id}:{port.ContainerPort}"
-                : $"Docker port: {app.Id}:{port.ContainerPort}/{manifest?.Protocol ?? "tcp"}");
             if (port.HostPort > 0)
             {
                 access.Add(isWeb
                     ? installation.CaddySourcePort is int caddyPort
-                        ? $"LMS Caddy UI: http://<LMS host>:{caddyPort}"
-                        : $"Server-only UI: http://127.0.0.1:{port.HostPort}"
-                    : $"Host port: {ResolveHostBindingAddress(manifest, configuration)}:{port.HostPort}");
+                        ? $"LMS UI: http://<LMS host>:{caddyPort}"
+                        : $"LMS UI: http://<LMS host>:{port.HostPort}"
+                    : $"LMS port: http://<LMS host>:{port.HostPort}/{manifest?.Protocol ?? "tcp"}");
+            }
+            else if (!isWeb)
+            {
+                access.Add($"Internal Docker port: {app.Name} {port.ContainerPort}/{manifest?.Protocol ?? "tcp"}");
             }
         }
 
