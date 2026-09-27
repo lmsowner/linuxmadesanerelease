@@ -990,28 +990,39 @@ public sealed class HomeLabService(
         }
 
         var deploymentIds = installations.Select(item => item.DeploymentId).Distinct().ToArray();
-        var deployments = await dbContext.HomeLabDeployments
+        var deploymentCount = await dbContext.HomeLabDeployments
             .Where(item => deploymentIds.Contains(item.Id))
-            .ToListAsync(cancellationToken);
+            .CountAsync(cancellationToken);
+        if (deploymentCount != deploymentIds.Length)
+        {
+            throw new InvalidOperationException("One or more Home Lab deployments for this group no longer exist.");
+        }
+
+        var connectivityJson = assignment.Connectivity is null
+            ? string.Empty
+            : JsonSerializer.Serialize(assignment.Connectivity, JsonOptions);
         var now = DateTimeOffset.UtcNow;
-        foreach (var deployment in deployments)
-        {
-            deployment.RecipeRunId = assignment.RecipeRunId;
-            deployment.PromptRecipeId = recipeId;
-            deployment.ConnectivityJson = assignment.Connectivity is null
-                ? string.Empty
-                : JsonSerializer.Serialize(assignment.Connectivity, JsonOptions);
-            deployment.Name = recipeName;
-            deployment.UpdatedAtUtc = now;
-        }
 
-        foreach (var installation in installations)
-        {
-            installation.IsRecipeInstallation = true;
-            installation.UpdatedAtUtc = now;
-        }
+        // Set-based updates avoid saving a mixed graph of legacy deployments
+        // that may already be tracked by workspace reconciliation. Keep both
+        // updates atomic so a stale group cannot be half-attached.
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await dbContext.HomeLabDeployments
+            .Where(item => deploymentIds.Contains(item.Id))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.RecipeRunId, assignment.RecipeRunId)
+                .SetProperty(item => item.PromptRecipeId, recipeId)
+                .SetProperty(item => item.ConnectivityJson, connectivityJson)
+                .SetProperty(item => item.Name, recipeName)
+                .SetProperty(item => item.UpdatedAtUtc, now), cancellationToken);
 
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await dbContext.HomeLabInstallations
+            .Where(item => installationIds.Contains(item.Id))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.IsRecipeInstallation, true)
+                .SetProperty(item => item.UpdatedAtUtc, now), cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        dbContext.ChangeTracker.Clear();
     }
 
     public async Task<HomeLabOperationResult> ReconfigureVpnGatewayAsync(
