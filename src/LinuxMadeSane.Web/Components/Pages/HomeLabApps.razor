@@ -130,6 +130,36 @@
             </UiModal>
         }
 
+        @if (appAddTargetGroup is { } addTargetGroup)
+        {
+            <UiModal IsOpen="true"
+                     Title="Add an app to this group"
+                     Subtitle="Install a new LMS-managed app and attach it to the existing recipe group. Existing containers are not recreated."
+                     Class="home-lab-confirm-modal"
+                     OnClose="CancelAddAppToGroup">
+                <ChildContent>
+                    <section class="home-lab-confirm-panel">
+                        <p>Add a service to <strong>@addTargetGroup.Name</strong>.</p>
+                        <label for="home-lab-add-group-app">App</label>
+                        <select id="home-lab-add-group-app"
+                                class="ui-control-input"
+                                value="@appAddSelection"
+                                @onchange="SelectAppToAddToGroup">
+                            <option value="">Choose an app...</option>
+                            @foreach (var app in AppsAvailableForGroup(addTargetGroup))
+                            {
+                                <option value="@app.Id">@app.Name</option>
+                            }
+                        </select>
+                        <div class="home-lab-confirm-actions">
+                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelAddAppToGroup" />
+                            <UiCommandButton Label="Configure app" Glyph="UiIconGlyph.Plus" Variant="UiButtonVariant.PrimaryMuted" Disabled="@(busy || string.IsNullOrWhiteSpace(appAddSelection))" OnClick="ConfigureAppForGroup" />
+                        </div>
+                    </section>
+                </ChildContent>
+            </UiModal>
+        }
+
         <TabControl ActiveValue="@activeTab"
                     ActiveValueChanged="HandleTabChangedAsync"
                     Class="home-lab-tabs"
@@ -657,6 +687,15 @@
                             @if (hasRepairCandidates || group.Installations.Count > 0)
                             {
                                 <div class="home-lab-installation-group-actions">
+                                    @if (group.RecipeRunId.HasValue)
+                                    {
+                                        <UiCommandButton Label="Add app"
+                                                         Title="Add another app to this existing recipe group"
+                                                         Glyph="UiIconGlyph.Plus"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         Disabled="@busy"
+                                                         OnClick="() => BeginAddAppToGroup(group)" />
+                                    }
                                     <UiCommandButton Label="Delete group"
                                                      Title="Remove every container and managed resource in this group"
                                                      Glyph="UiIconGlyph.Delete"
@@ -1037,6 +1076,9 @@
         .Where(recipe => recipe.Category.Equals(selectedRecipeCategory, StringComparison.OrdinalIgnoreCase));
     private HomeLabAppManifest? configuringApp;
     private HomeLabAppInstallation? configuringInstallation;
+    private HomeLabInstallationGroup? appAddTargetGroup;
+    private HomeLabInstallationGroup? configuringTargetGroup;
+    private string appAddSelection = string.Empty;
     private HomeLabAppInstallation? renamingGateway;
     private HomeLabAppInstallation? pendingRemoval;
     private HomeLabInstallationGroup? pendingGroupRemoval;
@@ -1136,7 +1178,10 @@
                 ResolveRecipeName(deployment),
                 FormatRecipeRunDetail(runDate),
                 installations,
-                runDate));
+                runDate,
+                deployment.RecipeId,
+                deployment.RecipeRunId,
+                deployment.PromptRecipeId));
         }
 
         // HomeLab Recipes originally installed each app as a standalone deployment. Match those
@@ -1230,7 +1275,10 @@
         string Name,
         string Detail,
         IReadOnlyList<HomeLabAppInstallation> Installations,
-        DateTimeOffset SortDate);
+        DateTimeOffset SortDate,
+        string? RecipeId = null,
+        Guid? RecipeRunId = null,
+        string? PromptRecipeId = null);
 
     private sealed record RecipeListenInterface(string InterfaceName, string Address);
 
@@ -1659,6 +1707,66 @@
         selectedPromptVpnGatewayId = null;
     }
 
+    private IReadOnlyList<HomeLabAppManifest> AppsAvailableForGroup(HomeLabInstallationGroup group) =>
+        HomeLabCatalog.VisibleApps
+            .Where(app => !group.Installations.Any(installation => installation.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(app => app.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private void BeginAddAppToGroup(HomeLabInstallationGroup group)
+    {
+        if (busy || !group.RecipeRunId.HasValue)
+        {
+            return;
+        }
+
+        appAddTargetGroup = group;
+        appAddSelection = string.Empty;
+    }
+
+    private void SelectAppToAddToGroup(ChangeEventArgs eventArgs) =>
+        appAddSelection = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+
+    private void ConfigureAppForGroup()
+    {
+        if (appAddTargetGroup is not { } group || string.IsNullOrWhiteSpace(appAddSelection))
+        {
+            return;
+        }
+
+        var app = AppsAvailableForGroup(group).FirstOrDefault(item => item.Id.Equals(appAddSelection, StringComparison.OrdinalIgnoreCase));
+        if (app is null)
+        {
+            return;
+        }
+
+        configuringTargetGroup = group;
+        appAddTargetGroup = null;
+        configuringApp = app;
+        configuringInstallation = null;
+        configurationValues.Clear();
+        secretConfigurationValues.Clear();
+        if (app.SupportsVpnGateway)
+        {
+            configurationValues["network-route"] = "VPN Gateway (Gluetun)";
+            var gateways = InstalledVpnGateways.ToArray();
+            if (gateways.Length == 1)
+            {
+                configurationValues["vpn-gateway"] = gateways[0].Id.ToString();
+            }
+        }
+        appAddSelection = string.Empty;
+    }
+
+    private void CancelAddAppToGroup()
+    {
+        if (!busy)
+        {
+            appAddTargetGroup = null;
+            appAddSelection = string.Empty;
+        }
+    }
+
     private void SelectPromptListenAddress(ChangeEventArgs eventArgs)
     {
         selectedPromptListenAddress = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
@@ -1775,6 +1883,7 @@
 
     private async Task InstallAsync(HomeLabAppManifest app)
     {
+        configuringTargetGroup = null;
         if (app.ConfigurationSchema.Count > 0 || app.SupportsVpnGateway)
         {
             configuringApp = app;
@@ -1821,6 +1930,8 @@
 
         await RunUiOperationAsync(async () =>
         {
+            var targetGroup = configuringTargetGroup;
+            var existingInstallationIds = workspace?.Installations.Select(item => item.Id).ToHashSet() ?? [];
             var paths = storagePaths
                 .Where(item => app.Volumes.Any(volume => volume.SharedRole?.Equals(item.Key, StringComparison.OrdinalIgnoreCase) == true))
                 .ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
@@ -1834,11 +1945,32 @@
                     StoragePaths: paths,
                     Configuration: configurationValues,
                     SecretConfiguration: secretConfigurationValues));
+            if (result.Succeeded && targetGroup?.RecipeRunId is Guid recipeRunId)
+            {
+                var updatedWorkspace = await HomeLabService.GetWorkspaceAsync();
+                var addedInstallation = updatedWorkspace.Installations
+                    .Where(item => !existingInstallationIds.Contains(item.Id) && item.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(item => item.CreatedAtUtc)
+                    .FirstOrDefault();
+                if (addedInstallation is not null)
+                {
+                    var recipeId = targetGroup.PromptRecipeId ?? targetGroup.RecipeId;
+                    if (!string.IsNullOrWhiteSpace(recipeId))
+                    {
+                        await HomeLabService.AssignRecipeRunAsync(new HomeLabRecipeRunAssignment(
+                            recipeId,
+                            targetGroup.Name,
+                            recipeRunId,
+                            [addedInstallation.Id]));
+                    }
+                }
+            }
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
             if (result.Succeeded)
             {
                 configuringApp = null;
                 configuringInstallation = null;
+                configuringTargetGroup = null;
                 configurationValues.Clear();
                 secretConfigurationValues.Clear();
             }
@@ -2273,6 +2405,7 @@
     {
         configuringApp = null;
         configuringInstallation = null;
+        configuringTargetGroup = null;
         configurationValues.Clear();
         secretConfigurationValues.Clear();
     }
