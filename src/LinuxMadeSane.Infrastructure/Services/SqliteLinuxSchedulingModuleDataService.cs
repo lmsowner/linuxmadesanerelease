@@ -43,6 +43,7 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         if (task.IsEnabled)
         {
             await EnsureLogDirectoryAsync(cancellationToken);
+            await EnsureTaskLogAccessAsync(task, cancellationToken);
             await InstallCronFileAsync(task, cancellationToken);
         }
         else
@@ -232,6 +233,33 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
             "mkdir",
             ["-p", ScheduledTaskPaths.LogDirectoryPath],
             $"Prepare scheduled task log directory {ScheduledTaskPaths.LogDirectoryPath}",
+            requiresSudo: true,
+            cancellationToken);
+    }
+
+    private async Task EnsureTaskLogAccessAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
+    {
+        if (RequiresRootExecution(task.RunAsUser))
+        {
+            return;
+        }
+
+        await RunRequiredCommandAsync(
+            "chown",
+            [task.RunAsUser.Trim(), ScheduledTaskPaths.LogDirectoryPath],
+            $"Allow scheduled task user {task.RunAsUser.Trim()} to write task logs",
+            requiresSudo: true,
+            cancellationToken);
+        await RunRequiredCommandAsync(
+            "touch",
+            [ScheduledTaskPaths.GetLogFilePath(task.Id)],
+            $"Create scheduled task log for {task.Name}",
+            requiresSudo: true,
+            cancellationToken);
+        await RunRequiredCommandAsync(
+            "chown",
+            [$"{task.RunAsUser.Trim()}:{task.RunAsUser.Trim()}", ScheduledTaskPaths.GetLogFilePath(task.Id)],
+            $"Set scheduled task log owner for {task.Name}",
             requiresSudo: true,
             cancellationToken);
     }
