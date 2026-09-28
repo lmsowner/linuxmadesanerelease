@@ -3776,7 +3776,7 @@ public sealed class HomeLabService(
                 try { await secretStore.DeleteSecretAsync(secretReference, cancellationToken); }
                 catch (Exception cleanupException) { logger.LogDebug(cleanupException, "Could not remove Home Lab secret reference."); }
             }
-            return Failure("Home Lab installation failed.", exception.Message, output, HomeLabHealthState.Failed);
+            return Failure("Home Lab installation failed.", DescribeException(exception), output, HomeLabHealthState.Failed);
         }
     }
 
@@ -5698,6 +5698,20 @@ public sealed class HomeLabService(
 
     private static string FirstNonEmpty(params string[] values) =>
         values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? "The Docker command failed.";
+
+    private static string DescribeException(Exception exception)
+    {
+        var messages = new List<string>();
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (!string.IsNullOrWhiteSpace(current.Message) && !messages.Contains(current.Message, StringComparer.Ordinal))
+            {
+                messages.Add(current.Message.Trim());
+            }
+        }
+
+        return string.Join(" -> ", messages);
+    }
 
     private static string QbittorrentRestartLoginNote(HomeLabAppManifest app) =>
         app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase)
