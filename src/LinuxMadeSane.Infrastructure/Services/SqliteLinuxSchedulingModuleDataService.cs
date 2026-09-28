@@ -419,9 +419,10 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         builder.AppendLine("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         builder.AppendLine("MAILTO=\"\"");
         var quotedLogPath = Quote(ScheduledTaskPaths.GetLogFilePath(task.Id));
+        var quotedSchedulerLogPath = Quote(ScheduledTaskPaths.SchedulerLogPath);
         var trigger = EscapeCronCommand(BuildCronTriggerCommand(task));
         var label = SanitizeLogLabel(task.Name);
-        var cronCommand = $"printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> {quotedLogPath}; {trigger} >> {quotedLogPath} 2>&1; lms_cron_rc=$?; printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> {quotedLogPath}; exit \"$lms_cron_rc\"";
+        var cronCommand = $"printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> {quotedLogPath}; printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> {quotedSchedulerLogPath}; {trigger} 2>&1 | tee -a {quotedLogPath} {quotedSchedulerLogPath} >/dev/null; lms_cron_rc=${{PIPESTATUS[0]}}; printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> {quotedLogPath}; printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> {quotedSchedulerLogPath}; exit \"$lms_cron_rc\"";
         builder.Append(task.CronExpression);
         builder.Append(' ');
         builder.Append(task.RunAsUser);
