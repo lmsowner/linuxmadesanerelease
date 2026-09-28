@@ -326,30 +326,52 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
     private async Task InstallCronFileAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
     {
         var tempPath = Path.Combine(Path.GetTempPath(), $"linuxmadesane-schedule-{task.Id:N}.cron");
+        var wrapperTempPath = Path.Combine(Path.GetTempPath(), $"linuxmadesane-schedule-{task.Id:N}.sh");
         var marker = $"# BEGIN LINUX MADE SANE TASK {task.Id:N}";
         var endMarker = $"# END LINUX MADE SANE TASK {task.Id:N}";
         try
         {
             await File.WriteAllTextAsync(tempPath, BuildUserCrontabBlock(task, marker, endMarker), cancellationToken);
+            await File.WriteAllTextAsync(wrapperTempPath, BuildWrapperContents(task), cancellationToken);
             var user = Quote(task.RunAsUser.Trim());
             var block = Quote(tempPath);
-            var script = $"existing=$(mktemp); filtered=$(mktemp); crontab -u {user} -l 2>/dev/null > $existing || true; awk -v start={Quote(marker)} -v end={Quote(endMarker)} '$0 == start {{skip=1; next}} $0 == end {{skip=0; next}} !skip {{print}}' $existing > $filtered; cat $filtered {block} | crontab -u {user} -; rm -f $existing $filtered; rm -f {Quote(ScheduledTaskPaths.GetCronFilePath(task.Id))}";
+            var wrapper = Quote(wrapperTempPath);
+            var installedWrapper = Quote(ScheduledTaskPaths.GetWrapperPath(task.Id));
+            var script = $"mkdir -p {Quote(ScheduledTaskPaths.WrapperDirectoryPath)}; install -m 0755 {wrapper} {installedWrapper}; existing=$(mktemp); filtered=$(mktemp); crontab -u {user} -l 2>/dev/null > $existing || true; awk -v start={Quote(marker)} -v end={Quote(endMarker)} '$0 == start {{skip=1; next}} $0 == end {{skip=0; next}} !skip {{print}}' $existing > $filtered; cat $filtered {block} | crontab -u {user} -; rm -f $existing $filtered; rm -f {Quote(ScheduledTaskPaths.GetCronFilePath(task.Id))}";
             await RunRequiredCommandAsync("bash", ["-lc", script], $"Install user crontab entry for {task.Name}", true, cancellationToken);
         }
         finally
         {
             if (File.Exists(tempPath)) File.Delete(tempPath);
+            if (File.Exists(wrapperTempPath)) File.Delete(wrapperTempPath);
         }
     }
 
     private string BuildUserCrontabBlock(ScheduledTaskDefinition task, string marker, string endMarker)
     {
-        var systemFile = BuildCronFileContents(task);
-        var entryPrefix = $"{task.CronExpression} {task.RunAsUser} ";
-        var entry = systemFile.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Last(line => line.StartsWith(entryPrefix, StringComparison.Ordinal))
-            .Replace(entryPrefix, $"{task.CronExpression} ", StringComparison.Ordinal);
-        return $"{marker}\nSHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n{entry}\n{endMarker}\n";
+        return $"{marker}\n# Task: {SanitizeComment(task.Name)}\n{task.CronExpression} {ScheduledTaskPaths.GetWrapperPath(task.Id)}\n{endMarker}\n";
+    }
+
+    private string BuildWrapperContents(ScheduledTaskDefinition task)
+    {
+        var logPath = Quote(ScheduledTaskPaths.GetLogFilePath(task.Id));
+        var schedulerLogPath = Quote(ScheduledTaskPaths.SchedulerLogPath);
+        var trigger = BuildCronTriggerCommand(task);
+        var label = SanitizeLogLabel(task.Name);
+        return $"""
+#!/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+set -o pipefail
+task_log={logPath}
+scheduler_log={schedulerLogPath}
+printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> \"$task_log\"
+printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> \"$scheduler_log\"
+{trigger} 2>&1 | tee -a \"$task_log\" \"$scheduler_log\" >/dev/null
+lms_cron_rc=$?
+printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> \"$task_log\"
+printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> \"$scheduler_log\"
+exit \"$lms_cron_rc\"
+""";
     }
 
     private async Task VerifyCronFileAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
@@ -374,6 +396,13 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
             var script = $"existing=$(mktemp); filtered=$(mktemp); crontab -u {user} -l 2>/dev/null > $existing || true; awk -v start={start} -v end={end} '$0 == start {{skip=1; next}} $0 == end {{skip=0; next}} !skip {{print}}' $existing > $filtered; crontab -u {user} $filtered; rm -f $existing $filtered";
             await RunRequiredCommandAsync("bash", ["-lc", script], $"Remove user crontab schedule {taskId:N}", true, cancellationToken);
         }
+
+        await RunRequiredCommandAsync(
+            "rm",
+            ["-f", ScheduledTaskPaths.GetWrapperPath(taskId)],
+            $"Remove scheduler wrapper {taskId:N}",
+            true,
+            cancellationToken);
 
         await RunRequiredCommandAsync(
             "rm",
