@@ -24,14 +24,23 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
     private const int TaskLogLineLimit = 400;
     private readonly string schedulerCallbackBaseUrl = ResolveSchedulerCallbackBaseUrl(configuration);
 
-    public async Task<IReadOnlyList<ScheduledTaskDefinition>> ListTasksAsync(CancellationToken cancellationToken = default) =>
-        (await dbContext.ScheduledTasks
+    public async Task<IReadOnlyList<ScheduledTaskDefinition>> ListTasksAsync(CancellationToken cancellationToken = default)
+    {
+        var tasks = (await dbContext.ScheduledTasks
                 .AsNoTracking()
                 .Select(task => Map(task))
                 .ToArrayAsync(cancellationToken))
             .OrderByDescending(task => task.UpdatedAtUtc)
             .ThenBy(task => task.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+
+        foreach (var task in tasks.Where(item => item.IsEnabled))
+        {
+            await ReconcileInstalledTaskAsync(task, cancellationToken);
+        }
+
+        return tasks;
+    }
 
     public async Task<ScheduledTaskDefinition?> GetTaskAsync(Guid id, CancellationToken cancellationToken = default) =>
         Map(await dbContext.ScheduledTasks
@@ -45,6 +54,7 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
             await EnsureLogDirectoryAsync(cancellationToken);
             await EnsureTaskLogAccessAsync(task, cancellationToken);
             await InstallCronFileAsync(task, cancellationToken);
+            await EnsureCronServiceAsync(cancellationToken);
             await VerifyCronFileAsync(task, cancellationToken);
         }
         else
@@ -234,6 +244,36 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
             "mkdir",
             ["-p", ScheduledTaskPaths.LogDirectoryPath],
             $"Prepare scheduled task log directory {ScheduledTaskPaths.LogDirectoryPath}",
+            requiresSudo: true,
+            cancellationToken);
+    }
+
+    private async Task ReconcileInstalledTaskAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await EnsureTaskLogAccessAsync(task, cancellationToken);
+            await VerifyCronFileAsync(task, cancellationToken);
+        }
+        catch
+        {
+            // Repair entries created by an older LMS build, then verify the
+            // exact file that cron will read.
+            await EnsureLogDirectoryAsync(cancellationToken);
+            await EnsureTaskLogAccessAsync(task, cancellationToken);
+            await InstallCronFileAsync(task, cancellationToken);
+            await EnsureCronServiceAsync(cancellationToken);
+            await VerifyCronFileAsync(task, cancellationToken);
+        }
+    }
+
+    private async Task EnsureCronServiceAsync(CancellationToken cancellationToken)
+    {
+        const string script = "if command -v systemctl >/dev/null 2>&1; then if systemctl list-unit-files cron.service >/dev/null 2>&1; then systemctl enable --now cron; elif systemctl list-unit-files crond.service >/dev/null 2>&1; then systemctl enable --now crond; fi; fi";
+        await RunRequiredCommandAsync(
+            "bash",
+            ["-lc", script],
+            "Start the system cron service",
             requiresSudo: true,
             cancellationToken);
     }
