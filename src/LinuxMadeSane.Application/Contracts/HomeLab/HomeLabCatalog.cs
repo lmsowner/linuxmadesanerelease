@@ -392,7 +392,7 @@ public static class HomeLabCatalog
             "ghcr.io/bitmagnet-io/bitmagnet",
             "latest",
             "1",
-            [new("web", 3333, Primary: true), new("torrent-tcp", 3334), new("torrent-udp", 3334, Protocol: "udp")],
+            [new("web", 3333, Primary: true, VpnContainerPort: 3333), new("torrent-tcp", 3334, VpnContainerPort: 3334), new("torrent-udp", 3334, Protocol: "udp", VpnContainerPort: 3334)],
             [new("config", "/root/.config/bitmagnet", HomeLabStorageKind.Configuration), new("data", "/root/.local/share/bitmagnet", HomeLabStorageKind.UserData)],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -403,7 +403,13 @@ public static class HomeLabCatalog
             },
             ["bitmagnet-database"],
             new HomeLabHealthCheckManifest(HttpPath: "/", Port: 3333, StartPeriodSeconds: 45),
-            [],
+            [
+                new("network-route", "Internet route", "select", true, Help: "Bitmagnet should use VPN Gateway routing to keep DHT and tracker traffic on the VPN path.", Options: ["VPN Gateway (Gluetun)"]),
+                new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed Gluetun gateway carries Bitmagnet traffic.")
+            ],
+            SupportsDirectNetwork: false,
+            SupportsVpnGateway: true,
+            RequiresVpnGateway: true,
             Exposure: ClientExposure(HomeLabBasePathSupportMode.None),
             Command: ["worker", "run", "--all"]),
         new(

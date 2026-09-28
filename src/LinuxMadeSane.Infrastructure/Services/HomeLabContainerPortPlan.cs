@@ -26,7 +26,7 @@ internal static partial class HomeLabContainerPortPlan
                 Resolve(port, true))))
             .ToArray();
         var collision = assignments
-            .GroupBy(assignment => assignment.Port)
+            .GroupBy(assignment => (assignment.Protocol, assignment.Port))
             .FirstOrDefault(group => group.Count() > 1);
         if (collision is not null)
         {
