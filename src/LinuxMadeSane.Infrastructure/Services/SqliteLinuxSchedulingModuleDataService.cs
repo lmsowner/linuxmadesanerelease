@@ -265,6 +265,9 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
             await EnsureCronServiceAsync(cancellationToken);
             await VerifyCronFileAsync(task, cancellationToken);
         }
+
+        // Also repair a stopped daemon when the cron file itself is valid.
+        await EnsureCronServiceAsync(cancellationToken);
     }
 
     private async Task EnsureCronServiceAsync(CancellationToken cancellationToken)
