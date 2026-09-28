@@ -59,7 +59,7 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         }
         else
         {
-            await RemoveCronFileAsync(task.Id, cancellationToken);
+            await RemoveCronFileAsync(task.Id, task.RunAsUser, cancellationToken);
         }
 
         var entity = await dbContext.ScheduledTasks.SingleOrDefaultAsync(item => item.Id == task.Id, cancellationToken);
@@ -77,9 +77,10 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
 
     public async Task DeleteTaskAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        await RemoveCronFileAsync(id, cancellationToken);
-
         var entity = await dbContext.ScheduledTasks.SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
+        await RemoveCronFileAsync(id, entity?.RunAsUser, cancellationToken);
+
+        entity = await dbContext.ScheduledTasks.SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
         if (entity is null)
         {
             return;
@@ -126,6 +127,7 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         }
 
         var logPath = ScheduledTaskPaths.GetLogFilePath(task.Id);
+        await AppendSchedulerLogAsync($"Starting {task.Name} ({task.Id:N}) via LMS scheduler.", cancellationToken);
         var result = await commandRunner.RunAsync(
             new LinuxCommandRequest(
                 "bash",
@@ -136,6 +138,14 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
             dryRun: false,
             cancellationToken);
 
+        var detail = FirstNonEmptyLine(result.StandardError, result.StandardOutput)
+            ?? $"exit code {result.ExitCode}";
+        await AppendSchedulerLogAsync(
+            result.ExitCode == 0
+                ? $"Completed {task.Name} ({task.Id:N}) via LMS scheduler (rc=0)."
+                : $"Failed {task.Name} ({task.Id:N}) via LMS scheduler (rc={result.ExitCode}): {detail}",
+            cancellationToken);
+
         if (result.ExitCode == 0)
         {
             return new ScheduledTaskRunResult(
@@ -143,8 +153,6 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
                 $"Ran '{task.Name}'. Output was appended to {logPath}.");
         }
 
-        var detail = FirstNonEmptyLine(result.StandardError, result.StandardOutput)
-            ?? $"exit code {result.ExitCode}";
         return new ScheduledTaskRunResult(
             false,
             $"Run now failed for '{task.Name}': {detail}");
@@ -152,20 +160,20 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
 
     public async Task<ScheduledTaskLogSnapshot> GetTaskLogAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        var task = await GetTaskAsync(id, cancellationToken);
-        if (task is null)
+        var task = id == Guid.Empty ? null : await GetTaskAsync(id, cancellationToken);
+        if (id != Guid.Empty && task is null)
         {
             throw new InvalidOperationException("Scheduled task not found.");
         }
 
-        var logPath = ScheduledTaskPaths.GetLogFilePath(task.Id);
+        var logPath = id == Guid.Empty ? ScheduledTaskPaths.SchedulerLogPath : ScheduledTaskPaths.GetLogFilePath(task!.Id);
         var result = await commandRunner.RunAsync(
             new LinuxCommandRequest(
                 "bash",
                 ["-lc", BuildTaskLogInspectionScript(logPath, TaskLogLineLimit)],
                 RequiresSudo: true,
                 Timeout: TimeSpan.FromSeconds(12),
-                Description: $"Read scheduled task log for '{task.Name}'"),
+                Description: $"Read scheduled task log for '{task?.Name ?? "LMS scheduler"}'"),
             dryRun: false,
             cancellationToken);
 
@@ -173,7 +181,7 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         {
             var detail = FirstNonEmptyLine(result.StandardError, result.StandardOutput)
                 ?? $"exit code {result.ExitCode}";
-            throw new InvalidOperationException($"Reading scheduled task log for '{task.Name}' failed: {detail}");
+            throw new InvalidOperationException($"Reading scheduled task log for '{task?.Name ?? "LMS scheduler"}' failed: {detail}");
         }
 
         var (metadata, content) = ParseTaskLogOutput(result.StandardOutput);
@@ -190,8 +198,9 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
                 : null;
 
         return new ScheduledTaskLogSnapshot(
-            task.Id,
-            task.Name,
+            id,
+            task?.Name ?? "LMS scheduler",
+
             logPath,
             exists,
             content,
@@ -236,6 +245,17 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
             serviceName,
             serviceState,
             summary);
+    }
+
+    private async Task AppendSchedulerLogAsync(string message, CancellationToken cancellationToken)
+    {
+        var escaped = message.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+        await RunRequiredCommandAsync(
+            "bash",
+            ["-lc", $"printf '%s [%s]\n' '{escaped}' \"$(date -Is)\" >> '{ScheduledTaskPaths.SchedulerLogPath}'"],
+            "Write LMS scheduler log",
+            true,
+            cancellationToken);
     }
 
     private async Task EnsureLogDirectoryAsync(CancellationToken cancellationToken)
@@ -311,45 +331,60 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
     private async Task InstallCronFileAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
     {
         var tempPath = Path.Combine(Path.GetTempPath(), $"linuxmadesane-schedule-{task.Id:N}.cron");
-
+        var marker = $"# BEGIN LINUX MADE SANE TASK {task.Id:N}";
+        var endMarker = $"# END LINUX MADE SANE TASK {task.Id:N}";
         try
         {
-            await File.WriteAllTextAsync(tempPath, BuildCronFileContents(task), cancellationToken);
-            await RunRequiredCommandAsync(
-                "install",
-                ["-m", "0600", tempPath, ScheduledTaskPaths.GetCronFilePath(task.Id)],
-                $"Install cron schedule for {task.Name}",
-                requiresSudo: true,
-                cancellationToken);
+            await File.WriteAllTextAsync(tempPath, BuildUserCrontabBlock(task, marker, endMarker), cancellationToken);
+            var user = Quote(task.RunAsUser.Trim());
+            var block = Quote(tempPath);
+            var script = $"existing=$(mktemp); filtered=$(mktemp); crontab -u {user} -l 2>/dev/null > $existing || true; awk -v start={Quote(marker)} -v end={Quote(endMarker)} '$0 == start {{skip=1; next}} $0 == end {{skip=0; next}} !skip {{print}}' $existing > $filtered; cat $filtered {block} | crontab -u {user} -; rm -f $existing $filtered; rm -f {Quote(ScheduledTaskPaths.GetCronFilePath(task.Id))}";
+            await RunRequiredCommandAsync("bash", ["-lc", script], $"Install user crontab entry for {task.Name}", true, cancellationToken);
         }
         finally
         {
-            if (File.Exists(tempPath))
-            {
-                File.Delete(tempPath);
-            }
+            if (File.Exists(tempPath)) File.Delete(tempPath);
         }
+    }
+
+    private string BuildUserCrontabBlock(ScheduledTaskDefinition task, string marker, string endMarker)
+    {
+        var systemFile = BuildCronFileContents(task);
+        var entryPrefix = $"{task.CronExpression} {task.RunAsUser} ";
+        var entry = systemFile.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Last(line => line.StartsWith(entryPrefix, StringComparison.Ordinal))
+            .Replace(entryPrefix, $"{task.CronExpression} ", StringComparison.Ordinal);
+        return $"{marker}\nSHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n{entry}\n{endMarker}\n";
     }
 
     private async Task VerifyCronFileAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
     {
-        var path = Quote(ScheduledTaskPaths.GetCronFilePath(task.Id));
-        var marker = Quote($"# Task ID: {task.Id:N}");
+        var user = Quote(task.RunAsUser.Trim());
+        var marker = Quote($"# BEGIN LINUX MADE SANE TASK {task.Id:N}");
         await RunRequiredCommandAsync(
             "bash",
-            ["-lc", $"test -s {path} && grep -F -- {marker} {path} >/dev/null && stat -c '%U %a %n' {path}"],
-            $"Verify installed cron schedule for {task.Name}",
-            requiresSudo: true,
+            ["-lc", $"crontab -u {user} -l 2>/dev/null | grep -F -- {marker} >/dev/null"],
+            $"Verify user crontab entry for {task.Name}",
+            true,
             cancellationToken);
     }
 
-    private async Task RemoveCronFileAsync(Guid taskId, CancellationToken cancellationToken)
+    private async Task RemoveCronFileAsync(Guid taskId, string? runAsUser, CancellationToken cancellationToken)
     {
+        if (!string.IsNullOrWhiteSpace(runAsUser))
+        {
+            var user = Quote(runAsUser.Trim());
+            var start = Quote($"# BEGIN LINUX MADE SANE TASK {taskId:N}");
+            var end = Quote($"# END LINUX MADE SANE TASK {taskId:N}");
+            var script = $"existing=$(mktemp); filtered=$(mktemp); crontab -u {user} -l 2>/dev/null > $existing || true; awk -v start={start} -v end={end} '$0 == start {{skip=1; next}} $0 == end {{skip=0; next}} !skip {{print}}' $existing > $filtered; crontab -u {user} $filtered; rm -f $existing $filtered";
+            await RunRequiredCommandAsync("bash", ["-lc", script], $"Remove user crontab schedule {taskId:N}", true, cancellationToken);
+        }
+
         await RunRequiredCommandAsync(
             "rm",
             ["-f", ScheduledTaskPaths.GetCronFilePath(taskId)],
-            $"Remove cron schedule {taskId:N}",
-            requiresSudo: true,
+            $"Remove legacy cron schedule {taskId:N}",
+            true,
             cancellationToken);
     }
 

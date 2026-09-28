@@ -7,6 +7,7 @@ public static class ScheduledTaskPaths
 {
     public const string CronDirectoryPath = "/etc/cron.d";
     public const string LogDirectoryPath = "/var/log/linuxmadesane/scheduled-tasks";
+    public const string SchedulerLogPath = "/var/log/linuxmadesane/scheduled-tasks/scheduler.log";
 
     public static string GetCronFilePath(Guid taskId) =>
         Path.Combine(CronDirectoryPath, $"linuxmadesane-schedule-{taskId:N}");
