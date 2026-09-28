@@ -3624,6 +3624,8 @@ public sealed class HomeLabService(
             CreatedAtUtc = now,
             UpdatedAtUtc = now
         };
+        // Track the deployment before its endpoint dependents are created.
+        dbContext.HomeLabDeployments.Add(deployment);
         var output = new List<string>();
         var createdContainers = new List<string>();
         var createdRoutes = new List<Guid>();
@@ -3739,10 +3741,8 @@ public sealed class HomeLabService(
                     createdCaddyRoutes.Add(installation.CaddyRouteId.Value);
                 }
 
-                deployment.Installations.Add(installation);
             }
 
-            dbContext.HomeLabDeployments.Add(deployment);
             await dbContext.SaveChangesAsync(cancellationToken);
             return Success(
                 "Home Lab deployment installed.",
