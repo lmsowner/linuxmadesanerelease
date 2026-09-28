@@ -4004,6 +4004,10 @@ public sealed class HomeLabService(
         }
 
         args.Add(installation.Image);
+        if (app.Command is { Count: > 0 })
+        {
+            args.AddRange(app.Command);
+        }
         if (vpnFileOverrideCommand is not null)
         {
             args.AddRange(["-c", vpnFileOverrideCommand]);

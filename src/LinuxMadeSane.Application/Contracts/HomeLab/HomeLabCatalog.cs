@@ -404,7 +404,8 @@ public static class HomeLabCatalog
             ["bitmagnet-database"],
             new HomeLabHealthCheckManifest(HttpPath: "/", Port: 3333, StartPeriodSeconds: 45),
             [],
-            Exposure: ClientExposure(HomeLabBasePathSupportMode.None)),
+            Exposure: ClientExposure(HomeLabBasePathSupportMode.None),
+            Command: ["worker", "run", "--all"]),
         new(
             "flaresolverr",
             "FlareSolverr",

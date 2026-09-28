@@ -119,7 +119,8 @@ public sealed record HomeLabAppManifest(
     IReadOnlyList<string>? DockerDevices = null,
     bool IsSystemDependency = false,
     string? PublicUrlEnvironmentVariable = null,
-    HomeLabServiceExposureManifest? Exposure = null);
+    HomeLabServiceExposureManifest? Exposure = null,
+    IReadOnlyList<string>? Command = null);
 
 public sealed record HomeLabRecipeRelationship(
     string AppId,
