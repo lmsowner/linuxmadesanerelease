@@ -3155,9 +3155,8 @@ public sealed class HomeLabService(
                 HealthState = (int)HomeLabEndpointHealthState.NotChecked
             };
             installation.ServiceEndpoints.Add(endpoint);
-            // Existing installations are already tracked with a permanent key. A new
-            // dependent that also has a permanent key can otherwise be inferred as
-            // Modified, producing an UPDATE that affects zero rows instead of INSERT.
+            // Explicitly mark the dependent as Added. The parent installation is
+            // tracked before this method is called, so the FK is valid.
             dbContext.HomeLabServiceEndpoints.Add(endpoint);
         }
 
@@ -3667,6 +3666,9 @@ public sealed class HomeLabService(
                         reusableVpnGateway?.ContainerName),
                     recipeId is not null,
                     now);
+                // Track the installation before creating service endpoints so
+                // their InstallationId foreign key has a known parent.
+                dbContext.HomeLabInstallations.Add(installation);
                 await ReserveCaddyAccessPortAsync(installation, app, cancellationToken);
                 if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
                     reusableVpnGateway is not null)
