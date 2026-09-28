@@ -165,6 +165,7 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         }
 
         var (metadata, content) = ParseTaskLogOutput(result.StandardOutput);
+        content = SelectLatestRun(content);
         var exists = metadata.TryGetValue("exists", out var existsText) &&
             existsText.Equals("true", StringComparison.OrdinalIgnoreCase);
         var lineCount = metadata.TryGetValue("line_count", out var lineCountText) &&
@@ -297,14 +298,16 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         builder.AppendLine("SHELL=/bin/bash");
         builder.AppendLine("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         builder.AppendLine("MAILTO=\"\"");
+        var quotedLogPath = Quote(ScheduledTaskPaths.GetLogFilePath(task.Id));
+        var trigger = EscapeCronCommand(BuildCronTriggerCommand(task));
+        var label = SanitizeLogLabel(task.Name);
+        var cronCommand = $"printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> {quotedLogPath}; {trigger} >> {quotedLogPath} 2>&1; lms_cron_rc=$?; printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> {quotedLogPath}; exit \"$lms_cron_rc\"";
         builder.Append(task.CronExpression);
         builder.Append(' ');
         builder.Append(task.RunAsUser);
         builder.Append(' ');
-        builder.Append(EscapeCronCommand(BuildCronTriggerCommand(task)));
-        builder.Append(" >> ");
-        builder.Append(Quote(ScheduledTaskPaths.GetLogFilePath(task.Id)));
-        builder.AppendLine(" 2>&1");
+        builder.Append(cronCommand);
+        builder.AppendLine();
 
         return builder.ToString();
     }
@@ -436,6 +439,16 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         }
 
         return values;
+    }
+
+    private static string SelectLatestRun(string content)
+    {
+        const string cronMarker = "=== [LMS cron trigger start]";
+        const string taskMarker = "=== [LMS task start]";
+        var cronIndex = content.LastIndexOf(cronMarker, StringComparison.Ordinal);
+        var taskIndex = content.LastIndexOf(taskMarker, StringComparison.Ordinal);
+        var start = Math.Max(cronIndex, taskIndex);
+        return start >= 0 ? content[start..].TrimStart('\n') : content;
     }
 
     private static (Dictionary<string, string> Metadata, string Content) ParseTaskLogOutput(string output)
