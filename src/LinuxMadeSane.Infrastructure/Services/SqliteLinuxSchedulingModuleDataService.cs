@@ -45,6 +45,7 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
             await EnsureLogDirectoryAsync(cancellationToken);
             await EnsureTaskLogAccessAsync(task, cancellationToken);
             await InstallCronFileAsync(task, cancellationToken);
+            await VerifyCronFileAsync(task, cancellationToken);
         }
         else
         {
@@ -287,6 +288,18 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         }
     }
 
+    private async Task VerifyCronFileAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
+    {
+        var path = Quote(ScheduledTaskPaths.GetCronFilePath(task.Id));
+        var marker = Quote($"# Task ID: {task.Id:N}");
+        await RunRequiredCommandAsync(
+            "bash",
+            ["-lc", $"test -s {path} && grep -F -- {marker} {path} >/dev/null && stat -c '%U %a %n' {path}"],
+            $"Verify installed cron schedule for {task.Name}",
+            requiresSudo: true,
+            cancellationToken);
+    }
+
     private async Task RemoveCronFileAsync(Guid taskId, CancellationToken cancellationToken)
     {
         await RunRequiredCommandAsync(
@@ -317,6 +330,7 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
     {
         var builder = new StringBuilder();
         builder.AppendLine("# Managed by Linux Made Sane");
+        builder.AppendLine($"# Task ID: {task.Id:N}");
         builder.AppendLine($"# Task: {SanitizeComment(task.Name)}");
         if (!string.IsNullOrWhiteSpace(task.Description))
         {
