@@ -24,6 +24,7 @@ export function bindNavOrder(list, dotNet) {
     const reset = () => {
         clearTimeout(pressTimer);
         clearMarker();
+        if (source?.hasPointerCapture(pointerId)) source.releasePointerCapture(pointerId);
         source?.classList.remove("nav-dragging", "nav-pressing");
         list.classList.remove("nav-reordering");
         source = null;
@@ -58,8 +59,9 @@ export function bindNavOrder(list, dotNet) {
             source.classList.remove("nav-pressing");
             source.classList.add("nav-dragging");
             list.classList.add("nav-reordering");
+            source.setPointerCapture(pointerId);
             suppressClick = true;
-        }, 3000);
+        }, 2000);
     };
 
     const onPointerMove = event => {

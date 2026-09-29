@@ -465,6 +465,15 @@ window.lmsTerminal = (() => {
         state.lastRevision = -1;
     }
 
+    function resetForNewSession(id) {
+        const state = getState(id);
+        if (!state) return;
+
+        state.terminal.reset();
+        state.lastOutput = "";
+        state.lastRevision = -1;
+    }
+
     function registerAiPromptShortcut(element, dotNetRef) {
         if (!element || !dotNetRef) {
             return;
@@ -573,6 +582,7 @@ window.lmsTerminal = (() => {
         getSelection,
         readClipboard,
         clear,
+        resetForNewSession,
         registerAiPromptShortcut,
         disposeTerminal,
         getContextMenuPosition,

@@ -52,6 +52,10 @@
 
                 <div class="terminal-popup-actions">
                     <UiPill Tone="@GetSessionTone(tab)" Class="terminal-status-pill">@GetSessionLabel(tab)</UiPill>
+                    @if (tab.IsSessionActive && !string.IsNullOrWhiteSpace(tab.ConnectedUsername))
+                    {
+                        <UiPill Tone="UiPillTone.Neutral" Class="terminal-status-pill">@tab.ConnectedUsername</UiPill>
+                    }
                     @if (tab.SessionId.HasValue)
                     {
                         <UiPill Tone="UiPillTone.Neutral" Class="terminal-status-pill">@tab.Snapshot?.LastActivityUtc.ToLocalTime().ToString("HH:mm:ss")</UiPill>
@@ -768,9 +772,18 @@
         }
 
         // The connection core replaces the old session under the gate.
+        if (terminalInitialized)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.resetForNewSession", terminalClientId);
+        }
+
         tab.RequestConnection();
         await ReconnectAsync();
-        if (!tab.IsSessionActive)
+        if (tab is { IsSessionActive: true, SessionId: Guid sessionId })
+        {
+            await TerminalSessionService.SendInputAsync(sessionId, "\r");
+        }
+        else
         {
             await OpenConnectionPanelAsync();
         }
