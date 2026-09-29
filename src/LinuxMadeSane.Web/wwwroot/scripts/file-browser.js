@@ -184,7 +184,6 @@ window.lmsFileBrowser = (() => {
 
         const submenus = menu.querySelectorAll(".host-file-context-submenu");
         for (const submenu of submenus) {
-            if (submenu.classList.contains("host-file-connect-as-submenu")) continue;
             setupContextSubmenu(submenu);
             positionContextSubmenu(submenu);
         }

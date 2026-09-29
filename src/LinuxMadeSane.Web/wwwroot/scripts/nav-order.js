@@ -42,7 +42,7 @@ export function bindNavOrder(list, dotNet) {
     };
 
     const onPointerDown = event => {
-        if (event.button !== 0 || !event.target.closest(".ui-nav-button-icon")) return;
+        if (event.button !== 0 || event.target.closest("button, input, select, textarea")) return;
         const item = event.target.closest(".nav-reorder-item");
         if (!item || !list.contains(item)) return;
         suppressClick = false;
