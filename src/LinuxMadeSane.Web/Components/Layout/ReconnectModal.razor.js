@@ -96,7 +96,7 @@ function recoverWhenAvailable() {
 
     const current = new URL(window.location.href);
     const reconnectElement = document.getElementById(reconnectElementId);
-    const availability = new URL(reconnectElement?.dataset.availabilityUrl || "/LMSMFAAuth/availability", current.origin);
+    const availability = new URL(reconnectElement?.dataset.availabilityUrl || "/healthz", current.origin);
     if (availability.origin !== current.origin) return;
     recovery = { availability: availability.href };
     void checkAvailability();

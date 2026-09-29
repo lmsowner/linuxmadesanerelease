@@ -170,7 +170,14 @@ public sealed class UserManagedHostCredentialProfileService(
             return string.Empty;
         }
 
-        return await secretStore.ResolveSecretAsync(secretReference, cancellationToken) ?? string.Empty;
+        var secret = await secretStore.ResolveSecretAsync(secretReference, cancellationToken);
+        if (string.IsNullOrEmpty(secret))
+        {
+            throw new InvalidOperationException(
+                "A saved connection credential is missing. Check that the LMS database and protection keys were preserved during the update.");
+        }
+
+        return secret;
     }
 
     private async Task DeleteSecretIfPresentAsync(

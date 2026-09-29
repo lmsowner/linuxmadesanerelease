@@ -592,7 +592,7 @@ public sealed class TerminalTabState
             !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
         tab.ConnectionProfileKey = ConnectionProfileSelectionKeys.HostDefault;
         tab.ConnectionProfileName = host.Username;
-        tab.ConnectionOptionsOpen = true;
+        tab.ConnectionOptionsOpen = false;
         return tab;
     }
 

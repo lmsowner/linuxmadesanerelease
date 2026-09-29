@@ -47,6 +47,7 @@ public sealed class SshTerminalSessionService(
         var credentialsResolved = Stopwatch.GetTimestamp();
 
         var client = sshConnectionFactory.CreateSshClient(host, credentials, ConnectTimeout, KeepAliveInterval);
+        var setupStage = "SSH handshake";
         Task? connectTask = null;
         Task<ShellStream>? createStreamTask = null;
         Guid? registeredSessionId = null;
@@ -56,8 +57,10 @@ public sealed class SshTerminalSessionService(
             connectTask = Task.Run(client.Connect, CancellationToken.None);
             await connectTask.WaitAsync(setupToken);
             var sshConnected = Stopwatch.GetTimestamp();
+            setupStage = "working directory lookup";
             var workingDirectory = await ResolveInitialWorkingDirectoryAsync(client, host, request, credentials.Username, setupToken);
             var workingDirectoryResolved = Stopwatch.GetTimestamp();
+            setupStage = "shell creation";
             createStreamTask = Task.Run(
                 () => client.CreateShellStream("xterm-256color", (uint)request.Columns, (uint)request.Rows, 0, 0, 4096),
                 CancellationToken.None);
@@ -96,12 +99,41 @@ public sealed class SshTerminalSessionService(
 
             return session;
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && setupCancellation.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && setupCancellation.IsCancellationRequested)
         {
-            throw new TimeoutException($"The terminal session did not finish opening within {SessionSetupTimeout.TotalSeconds:0} seconds.");
+            logger.LogWarning(
+                "SSH terminal setup timed out for host {HostId} during {Stage} after {ElapsedMs} ms",
+                host.Id,
+                setupStage,
+                Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds);
+            if (registeredSessionId.HasValue)
+            {
+                sessions.TryRemove(registeredSessionId.Value, out _);
+            }
+
+            client.Dispose();
+            if (connectTask is not null)
+            {
+                ObserveBackgroundFailure(connectTask);
+            }
+
+            if (createStreamTask is not null)
+            {
+                ObserveBackgroundFailure(createStreamTask);
+            }
+
+            throw new TimeoutException(
+                $"The terminal session did not finish opening during {setupStage} within {SessionSetupTimeout.TotalSeconds:0} seconds.",
+                exception);
         }
-        catch
+        catch (Exception exception)
         {
+            logger.LogWarning(
+                exception,
+                "SSH terminal setup failed for host {HostId} during {Stage} after {ElapsedMs} ms",
+                host.Id,
+                setupStage,
+                Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds);
             if (registeredSessionId.HasValue)
             {
                 sessions.TryRemove(registeredSessionId.Value, out _);
