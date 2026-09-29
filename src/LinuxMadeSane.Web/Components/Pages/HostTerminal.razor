@@ -156,7 +156,7 @@
                                                 </div>
                                             </div>
                                         }
-                                        else if (tab.ConnectionOptionsOpen)
+                                        @if (!tab.IsDetached && tab.ConnectionOptionsOpen && terminalInitialized && renderedTabId == tab.Id)
                                         {
                                             <UiModal IsOpen="true"
                                                      Title="@($"Connection to {tab.HostName}")"
@@ -316,6 +316,14 @@
                                                                  style="@($"left:{contextMenuX}px;top:{contextMenuY}px;")"
                                                                  @onclick="IgnoreClick"
                                                                  @onclick:stopPropagation="true">
+                                                                <TerminalConnectAsMenu HostDefaultLabel="@BuildHostDefaultProfileLabel(tab)"
+                                                                                       ShowLinkedLinuxUser="@ShouldShowLinkedLinuxUserOption(tab)"
+                                                                                       LinkedLinuxUserLabel="@BuildLinkedLinuxUserProfileLabel()"
+                                                                                       SavedUsers="@GetCredentialProfiles(tab.HostId)"
+                                                                                       Disabled="@tab.IsBusy"
+                                                                                       ConnectionRequested="@((string value) => ConnectAsProfileAsync(tab, value))"
+                                                                                       AddUserRequested="@(() => AddConnectionUserAsync(tab))"
+                                                                                       ManageUsersRequested="@(() => OpenConnectionPanelAsync(tab))" />
                                                                 <UiContextMenuButton Label="Copy selection" Glyph="UiIconGlyph.Copy" OnClick="CopySelectionAsync" />
                                                                 <UiContextMenuButton Label="Paste" Glyph="UiIconGlyph.Paste" OnClick="PasteClipboardAsync" />
                                                                 <UiContextMenuButton Label="Ask AI" Glyph="UiIconGlyph.Ai" OnClick="@(() => AskAiAsync(tab))" />
@@ -327,14 +335,6 @@
                                                                                       PasteCommand="@((string commandText) => RunCommandAsync(tab, commandText))" />
                                                                 <UiContextMenuButton Label="Send Ctrl+C" Glyph="UiIconGlyph.Interrupt" OnClick="@(() => SendInterruptAsync(tab))" />
                                                                 <UiContextMenuButton Label="Clear local view" Glyph="UiIconGlyph.Clear" OnClick="ClearTerminalAsync" />
-                                                                <TerminalConnectAsMenu HostDefaultLabel="@BuildHostDefaultProfileLabel(tab)"
-                                                                                       ShowLinkedLinuxUser="@ShouldShowLinkedLinuxUserOption(tab)"
-                                                                                       LinkedLinuxUserLabel="@BuildLinkedLinuxUserProfileLabel()"
-                                                                                       SavedUsers="@GetCredentialProfiles(tab.HostId)"
-                                                                                       Disabled="@tab.IsBusy"
-                                                                                       ConnectionRequested="@((string value) => ConnectAsProfileAsync(tab, value))"
-                                                                                       AddUserRequested="@(() => AddConnectionUserAsync(tab))"
-                                                                                       ManageUsersRequested="@(() => OpenConnectionPanelAsync(tab))" />
                                                                 <UiContextMenuButton Label="Disconnect" Glyph="UiIconGlyph.Disconnect" OnClick="@(() => DisconnectTabAsync(tab))" />
                                                                 <UiContextMenuButton Label="Pop out" Glyph="UiIconGlyph.PopOut" OnClick="@(() => DetachTabAsync(tab))" />
                                                             </div>
@@ -397,6 +397,7 @@
     private Guid? renderedTabId;
     private Guid newTabHostId;
     private bool terminalInitialized;
+    private Guid? autoConnectIssuedTabId;
     private bool showMissingHostState;
     private bool contextMenuOpen;
     private bool hasContextMenuSelection;
@@ -518,6 +519,16 @@
 
         await WriteRenderedSnapshotAsync();
 
+        if (terminalInitialized &&
+            hosts.Any(host => host.Id == HostId) &&
+            ActiveTab is { IsDetached: false, IsSessionActive: false, IsBusy: false } pendingTab &&
+            pendingTab.HostId == HostId &&
+            autoConnectIssuedTabId != pendingTab.Id)
+        {
+            autoConnectIssuedTabId = pendingTab.Id;
+            await ConnectTabAsync(pendingTab);
+        }
+
         if (pendingAiSelectionText is not null &&
             pendingAiSelectionTabId == ActiveTab?.Id &&
             terminalAiPanel is not null)
@@ -568,12 +579,6 @@
 
         await RefreshSnapshotsAsync();
 
-        if (requestedHost is not null &&
-            ActiveTab is { IsDetached: false, IsSessionActive: false, IsBusy: false } activeTab &&
-            activeTab.HostId == requestedHost.Id)
-        {
-            await ConnectTabAsync(activeTab);
-        }
     }
 
     private async Task OpenNewTabAsync()
@@ -717,6 +722,11 @@
 
     private async Task ConnectAsProfileAsync(TerminalTabState tab, string connectionProfileKey)
     {
+        if (tab.IsBusy)
+        {
+            return;
+        }
+
         await SelectConnectionProfileAsync(tab, connectionProfileKey);
         if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
         {
@@ -724,15 +734,9 @@
             return;
         }
 
-        // ConnectAsync intentionally ignores an already active session to prevent
-        // duplicate SSH sessions. Changing the identity must explicitly replace
-        // that session so the selected user is actually used.
-        if (tab.IsSessionActive || tab.ConnectionDesired)
-        {
-            await DisconnectTabAsync(tab);
-        }
-
-        await ConnectTabAsync(tab);
+        // The connection core replaces the old session under the gate.
+        tab.RequestConnection();
+        await ReconnectTabAsync(tab);
         if (!tab.IsSessionActive)
         {
             await OpenConnectionPanelAsync(tab);
@@ -868,7 +872,6 @@
             }
 
             tab.SessionId = session.Id;
-            await Task.Delay(200, cancellationToken);
             if (!tab.ConnectionDesired)
             {
                 await DisconnectTabCoreAsync(tab, CancellationToken.None);
@@ -1733,7 +1736,8 @@
         var privateKeyPassphrase = string.IsNullOrWhiteSpace(GetPrivateKeyPassphrase(tab)) ? null : GetPrivateKeyPassphrase(tab);
         var preferStoredCredentials = tab.PreferStoredCredentials;
 
-        if (ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId) && userId.HasValue)
+        if (!tab.SecretHandle.HasValue &&
+            ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId) && userId.HasValue)
         {
             var credentials = await CredentialProfileService.ResolveAsync(userId.Value, tab.HostId, profileId);
             if (credentials is not null)

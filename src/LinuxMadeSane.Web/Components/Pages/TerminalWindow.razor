@@ -66,7 +66,7 @@
                 </div>
             </div>
 
-            @if (tab.ConnectionOptionsOpen)
+            @if (tab.ConnectionOptionsOpen && terminalInitialized)
             {
                 <UiModal IsOpen="true"
                          Title="@($"Connection to {tab.HostName}")"
@@ -224,6 +224,14 @@
                                  style="@($"left:{contextMenuX}px;top:{contextMenuY}px;")"
                                  @onclick="IgnoreClick"
                                  @onclick:stopPropagation="true">
+                                <TerminalConnectAsMenu HostDefaultLabel="@BuildHostDefaultProfileLabel(tab)"
+                                                       ShowLinkedLinuxUser="@ShouldShowLinkedLinuxUserOption(tab)"
+                                                       LinkedLinuxUserLabel="@BuildLinkedLinuxUserProfileLabel()"
+                                                       SavedUsers="@credentialProfiles"
+                                                       Disabled="@tab.IsBusy"
+                                                       ConnectionRequested="ConnectAsProfileAsync"
+                                                       AddUserRequested="AddConnectionUserAsync"
+                                                       ManageUsersRequested="OpenConnectionPanelAsync" />
                                 <UiContextMenuButton Label="Copy selection" Glyph="UiIconGlyph.Copy" OnClick="CopySelectionAsync" />
                                 <UiContextMenuButton Label="Paste" Glyph="UiIconGlyph.Paste" OnClick="PasteClipboardAsync" />
                                 <UiContextMenuButton Label="Ask AI" Glyph="UiIconGlyph.Ai" OnClick="AskAiAsync" />
@@ -235,14 +243,6 @@
                                                       PasteCommand="RunCommandAsync" />
                                 <UiContextMenuButton Label="Send Ctrl+C" Glyph="UiIconGlyph.Interrupt" OnClick="SendInterruptAsync" />
                                 <UiContextMenuButton Label="Clear local view" Glyph="UiIconGlyph.Clear" OnClick="ClearTerminalAsync" />
-                                <TerminalConnectAsMenu HostDefaultLabel="@BuildHostDefaultProfileLabel(tab)"
-                                                       ShowLinkedLinuxUser="@ShouldShowLinkedLinuxUserOption(tab)"
-                                                       LinkedLinuxUserLabel="@BuildLinkedLinuxUserProfileLabel()"
-                                                       SavedUsers="@credentialProfiles"
-                                                       Disabled="@tab.IsBusy"
-                                                       ConnectionRequested="ConnectAsProfileAsync"
-                                                       AddUserRequested="AddConnectionUserAsync"
-                                                       ManageUsersRequested="OpenConnectionPanelAsync" />
                                 <UiContextMenuButton Label="Disconnect" Glyph="UiIconGlyph.Disconnect" OnClick="DisconnectAsync" />
                                 <UiContextMenuButton Label="Dock" Glyph="UiIconGlyph.Dock" OnClick="ReattachAsync" />
                             </div>
@@ -368,6 +368,10 @@
         {
             terminalInitialized = await JSRuntime.InvokeAsync<bool>("lmsTerminal.createTerminal", terminalClientId, terminalElementId, dotNetReference);
             renderedOutputRevisions[tab.Id] = -1;
+            if (terminalInitialized && tab.ConnectionOptionsOpen)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
         }
 
         if (terminalInitialized)
@@ -599,7 +603,6 @@
             }
 
             tab.SessionId = session.Id;
-            await Task.Delay(200, cancellationToken);
             if (!tab.ConnectionDesired)
             {
                 await DisconnectCoreAsync(CancellationToken.None);
@@ -752,7 +755,7 @@
 
     private async Task ConnectAsProfileAsync(string connectionProfileKey)
     {
-        if (tab is null)
+        if (tab is null || tab.IsBusy)
         {
             return;
         }
@@ -764,15 +767,9 @@
             return;
         }
 
-        // ConnectAsync intentionally ignores an already active session to prevent
-        // duplicate SSH sessions. Changing the identity must explicitly replace
-        // that session so the selected user is actually used.
-        if (tab.IsSessionActive || tab.ConnectionDesired)
-        {
-            await DisconnectAsync();
-        }
-
-        await ConnectAsync();
+        // The connection core replaces the old session under the gate.
+        tab.RequestConnection();
+        await ReconnectAsync();
         if (!tab.IsSessionActive)
         {
             await OpenConnectionPanelAsync();
@@ -1398,7 +1395,8 @@
             : GetPrivateKeyPassphrase(terminalTab);
         var preferStoredCredentials = terminalTab.PreferStoredCredentials;
 
-        if (ConnectionProfileSelectionKeys.TryParseSaved(terminalTab.ConnectionProfileKey, out var profileId) && userId.HasValue)
+        if (!terminalTab.SecretHandle.HasValue &&
+            ConnectionProfileSelectionKeys.TryParseSaved(terminalTab.ConnectionProfileKey, out var profileId) && userId.HasValue)
         {
             var credentials = await CredentialProfileService.ResolveAsync(userId.Value, terminalTab.HostId, profileId);
             if (credentials is not null)

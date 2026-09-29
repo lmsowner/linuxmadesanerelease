@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
@@ -30,6 +31,7 @@ public sealed class SshTerminalSessionService(
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var setupStarted = Stopwatch.GetTimestamp();
         using var setupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         setupCancellation.CancelAfter(SessionSetupTimeout);
         var setupToken = setupCancellation.Token;
@@ -42,6 +44,7 @@ public sealed class SshTerminalSessionService(
                 request.PrivateKeyPassphrase,
                 request.PreferStoredCredentials),
             setupToken);
+        var credentialsResolved = Stopwatch.GetTimestamp();
 
         var client = sshConnectionFactory.CreateSshClient(host, credentials, ConnectTimeout, KeepAliveInterval);
         Task? connectTask = null;
@@ -52,11 +55,14 @@ public sealed class SshTerminalSessionService(
         {
             connectTask = Task.Run(client.Connect, CancellationToken.None);
             await connectTask.WaitAsync(setupToken);
+            var sshConnected = Stopwatch.GetTimestamp();
             var workingDirectory = await ResolveInitialWorkingDirectoryAsync(client, host, request, credentials.Username, setupToken);
+            var workingDirectoryResolved = Stopwatch.GetTimestamp();
             createStreamTask = Task.Run(
                 () => client.CreateShellStream("xterm-256color", (uint)request.Columns, (uint)request.Rows, 0, 0, 4096),
                 CancellationToken.None);
             var stream = await createStreamTask.WaitAsync(setupToken);
+            var shellOpened = Stopwatch.GetTimestamp();
             var session = new TerminalSession(
                 Guid.NewGuid(),
                 host.Id,
@@ -80,6 +86,13 @@ public sealed class SshTerminalSessionService(
             }
 
             logger.LogInformation("Started SSH terminal session {SessionId} for host {HostId}", session.Id, host.Id);
+            logger.LogInformation(
+                "SSH terminal setup for host {HostId}: credentials {CredentialsMs} ms, SSH connect {ConnectMs} ms, working directory {DirectoryMs} ms, shell {ShellMs} ms",
+                host.Id,
+                Stopwatch.GetElapsedTime(setupStarted, credentialsResolved).TotalMilliseconds,
+                Stopwatch.GetElapsedTime(credentialsResolved, sshConnected).TotalMilliseconds,
+                Stopwatch.GetElapsedTime(sshConnected, workingDirectoryResolved).TotalMilliseconds,
+                Stopwatch.GetElapsedTime(workingDirectoryResolved, shellOpened).TotalMilliseconds);
 
             return session;
         }
