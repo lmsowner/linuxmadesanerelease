@@ -230,11 +230,13 @@ window.lmsTerminal = (() => {
         return true;
     }
 
-    function writeDelta(id, fullOutput) {
+    function writeDelta(id, fullOutput, outputRevision) {
         const state = getState(id);
         if (!state) {
             return;
         }
+
+        if (Number.isFinite(outputRevision) && outputRevision < state.lastRevision) return;
 
         const output = fullOutput ?? "";
         const previousOutput = state.lastOutput ?? "";
@@ -249,6 +251,7 @@ window.lmsTerminal = (() => {
         }
 
         state.lastOutput = output;
+        if (Number.isFinite(outputRevision)) state.lastRevision = outputRevision;
     }
 
     function appendChunk(id, chunk, outputRevision) {
@@ -262,6 +265,7 @@ window.lmsTerminal = (() => {
         }
 
         state.terminal.write(chunk);
+        state.lastOutput = (state.lastOutput ?? "") + chunk;
         state.lastRevision = outputRevision;
     }
 
@@ -465,13 +469,15 @@ window.lmsTerminal = (() => {
         state.lastRevision = -1;
     }
 
-    function resetForNewSession(id) {
+    function resetForNewSession(id, username) {
         const state = getState(id);
         if (!state) return;
 
         state.terminal.reset();
         state.lastOutput = "";
         state.lastRevision = -1;
+        const safeUsername = String(username ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 80);
+        if (safeUsername) state.terminal.write(`[Switching to ${safeUsername}]\r\n`);
     }
 
     function registerAiPromptShortcut(element, dotNetRef) {

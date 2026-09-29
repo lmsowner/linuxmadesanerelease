@@ -586,7 +586,15 @@
             return;
         }
 
+        var closeStarted = System.Diagnostics.Stopwatch.StartNew();
+        Logger.LogInformation("Terminal closing previous session for host {HostId}", tab.HostId);
         await DisconnectCoreAsync(cancellationToken);
+        Logger.LogInformation("Terminal previous session closed for host {HostId} after {ElapsedMs} ms",
+            tab.HostId, closeStarted.Elapsed.TotalMilliseconds);
+        if (terminalInitialized)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.resetForNewSession", terminalClientId, tab.Username);
+        }
         if (!tab.ConnectionDesired)
         {
             return;
@@ -780,17 +788,11 @@
             tab.HostId, tab.Username, switchStarted.Elapsed.TotalMilliseconds);
 
         // The connection core replaces the old session under the gate.
-        if (terminalInitialized)
-        {
-            await JSRuntime.InvokeVoidAsync("lmsTerminal.resetForNewSession", terminalClientId);
-        }
-
         tab.RequestConnection();
         Logger.LogInformation("Terminal replacing previous session for host {HostId} as {Username}", tab.HostId, tab.Username);
         await ReconnectAsync();
-        if (tab is { IsSessionActive: true, SessionId: Guid sessionId })
+        if (tab is { IsSessionActive: true, SessionId: Guid })
         {
-            await TerminalSessionService.SendInputAsync(sessionId, "\r");
             Logger.LogInformation("Terminal profile switch completed for host {HostId} as {Username} in {ElapsedMs} ms",
                 tab.HostId, tab.ConnectedUsername, switchStarted.Elapsed.TotalMilliseconds);
         }
@@ -836,19 +838,33 @@
     public async Task OnTerminalData(string data)
     {
         var targetTab = tab;
-        if (targetTab is not { ConnectionDesired: true, SessionId: not null, IsSessionActive: true } ||
+        if (targetTab is not { ConnectionDesired: true, SessionId: not null, IsSessionActive: true, IsBusy: false } ||
             string.IsNullOrEmpty(data))
         {
             return;
+        }
+
+        var isReturn = data.Contains('\r') || data.Contains('\n');
+        var inputStarted = isReturn ? System.Diagnostics.Stopwatch.StartNew() : null;
+        if (isReturn)
+        {
+            Logger.LogInformation("Terminal Return input started for host {HostId} session {SessionId}", targetTab.HostId, targetTab.SessionId);
         }
 
         try
         {
             await SendInputToTerminalAsync(targetTab, data, CancellationToken.None);
             targetTab.ErrorMessage = string.Empty;
+            if (isReturn)
+            {
+                Logger.LogInformation("Terminal Return input completed for host {HostId} session {SessionId} after {ElapsedMs} ms",
+                    targetTab.HostId, targetTab.SessionId, inputStarted!.Elapsed.TotalMilliseconds);
+            }
         }
         catch (Exception exception)
         {
+            Logger.LogWarning(exception, "Terminal input failed for host {HostId} session {SessionId} after {ElapsedMs} ms",
+                targetTab.HostId, targetTab.SessionId, inputStarted?.Elapsed.TotalMilliseconds);
             targetTab.ErrorMessage = exception.Message;
             await InvokeAsync(StateHasChanged);
         }
@@ -910,7 +926,7 @@
             return;
         }
 
-        await JSRuntime.InvokeVoidAsync("lmsTerminal.writeDelta", terminalClientId, output);
+        await JSRuntime.InvokeVoidAsync("lmsTerminal.writeDelta", terminalClientId, output, outputRevision);
         renderedOutputRevisions[tab.Id] = outputRevision;
     }
 

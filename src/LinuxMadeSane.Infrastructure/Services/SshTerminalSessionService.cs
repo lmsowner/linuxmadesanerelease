@@ -494,6 +494,10 @@ public sealed class SshTerminalSessionService(
             return;
         }
 
+        var closeStarted = Stopwatch.GetTimestamp();
+        logger.LogInformation("Closing SSH terminal session {SessionId} for host {HostId} as {Username}",
+            sessionId, state.Host.Id, state.Credentials.Username);
+
         state.LifetimeCancellation.Cancel();
         lock (state.SyncRoot)
         {
@@ -505,6 +509,8 @@ public sealed class SshTerminalSessionService(
         }
 
         AbortTransport(state);
+        logger.LogInformation("SSH terminal transport closed for session {SessionId} after {ElapsedMs} ms",
+            sessionId, Stopwatch.GetElapsedTime(closeStarted).TotalMilliseconds);
         try
         {
             if (state.ReaderTask is not null)
@@ -516,6 +522,9 @@ public sealed class SshTerminalSessionService(
         {
             logger.LogDebug(exception, "Terminal session {SessionId} closed with cleanup warnings", sessionId);
         }
+
+        logger.LogInformation("SSH terminal session {SessionId} close completed after {ElapsedMs} ms",
+            sessionId, Stopwatch.GetElapsedTime(closeStarted).TotalMilliseconds);
     }
 
     public async Task CloseOwnedSessionsAsync(Guid ownerId, CancellationToken cancellationToken = default)
@@ -545,6 +554,8 @@ public sealed class SshTerminalSessionService(
         var buffer = new byte[4096];
         var characterBuffer = new char[Encoding.UTF8.GetMaxCharCount(buffer.Length)];
         var decoder = Encoding.UTF8.GetDecoder();
+        var readerStarted = Stopwatch.GetTimestamp();
+        var firstOutputLogged = false;
 
         try
         {
@@ -563,6 +574,13 @@ public sealed class SshTerminalSessionService(
                 }
 
                 var chunk = new string(characterBuffer, 0, charactersRead);
+                if (!firstOutputLogged)
+                {
+                    firstOutputLogged = true;
+                    logger.LogInformation("SSH terminal first output for session {SessionId} host {HostId} as {Username} after {ElapsedMs} ms",
+                        state.Session.Id, state.Host.Id, state.Credentials.Username,
+                        Stopwatch.GetElapsedTime(readerStarted).TotalMilliseconds);
+                }
 
                 lock (state.SyncRoot)
                 {
