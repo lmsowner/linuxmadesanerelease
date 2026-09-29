@@ -152,6 +152,8 @@
                                             </div>
                                         </div>
 
+                                        <TerminalConnectionTrace Tab="tab" Expanded="@(tab.ConnectionTracePending || !string.IsNullOrWhiteSpace(tab.ErrorMessage))" />
+
                                         @if (tab.IsDetached)
                                         {
                                             <div class="terminal-detached-banner">
@@ -188,6 +190,7 @@
                                                     {
                                                         <p class="terminal-connection-feedback" role="status">Disconnected. Choose an identity and press Connect.</p>
                                                     }
+                                                    <TerminalConnectionTrace Tab="tab" Expanded="true" />
                                                     <p class="terminal-connection-help">Saved connections are login details kept by LMS. Removing one does not delete the Linux account on the host or end the current terminal session.</p>
                                                     @if (!string.IsNullOrWhiteSpace(connectionProfileNotice))
                                                     {
@@ -733,10 +736,14 @@
         }
 
         var switchStarted = System.Diagnostics.Stopwatch.StartNew();
+        var traceId = tab.BeginConnectionTrace("Loading selected connection profile");
+        await InvokeAsync(StateHasChanged);
         Logger.LogInformation("Terminal profile switch started for host {HostId} profile {ProfileKey}", tab.HostId, connectionProfileKey);
         await SelectConnectionProfileAsync(tab, connectionProfileKey);
         if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
         {
+            tab.AppendConnectionTrace(traceId, $"Profile lookup failed: {tab.ErrorMessage}");
+            tab.FinishConnectionTrace(traceId);
             Logger.LogWarning("Terminal profile switch failed while loading profile for host {HostId} after {ElapsedMs} ms: {Error}",
                 tab.HostId, switchStarted.Elapsed.TotalMilliseconds, tab.ErrorMessage);
             await OpenConnectionPanelAsync(tab);
@@ -745,6 +752,8 @@
 
         Logger.LogInformation("Terminal profile resolved for host {HostId} as {Username} after {ElapsedMs} ms",
             tab.HostId, tab.Username, switchStarted.Elapsed.TotalMilliseconds);
+        tab.AppendConnectionTrace(traceId, $"Selected profile for {tab.Username}");
+        await InvokeAsync(StateHasChanged);
 
         // The connection core replaces the old session under the gate.
         tab.RequestConnection();
@@ -867,20 +876,38 @@
         if (host is null)
         {
             tab.ErrorMessage = "Host not found.";
+            if (tab.ConnectionTracePending)
+            {
+                var missingHostTraceId = tab.ConnectionTraceId;
+                tab.AppendConnectionTrace(missingHostTraceId, tab.ErrorMessage);
+                tab.FinishConnectionTrace(missingHostTraceId);
+            }
             return;
         }
 
+        var traceId = tab.ConnectionTracePending
+            ? tab.ConnectionTraceId
+            : tab.BeginConnectionTrace($"Connecting as {tab.Username}");
+        tab.AppendConnectionTrace(traceId,
+            $"Configured SSH target: {host.Hostname.Trim()}:{host.Port}. The LMS server opens the socket; its OS chooses the route.");
+        tab.AppendConnectionTrace(traceId, "Closing previous SSH session");
+        tab.IsBusy = true;
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
         var closeStarted = System.Diagnostics.Stopwatch.StartNew();
         Logger.LogInformation("Terminal closing previous session for host {HostId}", tab.HostId);
         await DisconnectTabCoreAsync(tab, cancellationToken);
         Logger.LogInformation("Terminal previous session closed for host {HostId} after {ElapsedMs} ms",
             tab.HostId, closeStarted.Elapsed.TotalMilliseconds);
+        tab.AppendConnectionTrace(traceId, $"Previous session closed in {closeStarted.Elapsed.TotalMilliseconds:0} ms");
         if (terminalInitialized && renderedTabId == tab.Id)
         {
-            await JSRuntime.InvokeVoidAsync("lmsTerminal.resetForNewSession", terminalClientId, tab.Username);
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.resetForNewSession", terminalClientId, tab.Username, $"{host.Hostname.Trim()}:{host.Port}");
         }
         if (!tab.ConnectionDesired)
         {
+            tab.AppendConnectionTrace(traceId, "Connection was canceled");
+            tab.FinishConnectionTrace(traceId);
             return;
         }
 
@@ -890,7 +917,17 @@
 
         try
         {
-            var request = await BuildTerminalConnectionRequestAsync(tab);
+            tab.AppendConnectionTrace(traceId, "Preparing connection credentials");
+            var request = (await BuildTerminalConnectionRequestAsync(tab)) with
+            {
+                Progress = new Progress<string>(message =>
+                {
+                    if (tab.AppendConnectionTrace(traceId, message))
+                    {
+                        _ = InvokeAsync(StateHasChanged);
+                    }
+                })
+            };
             var session = await TerminalSessionService.StartSessionAsync(host, request, cancellationToken);
             if (!tab.ConnectionDesired)
             {
@@ -925,13 +962,18 @@
             await InvokeAsync(StateHasChanged);
             await WriteRenderedSnapshotAsync();
             await FocusTerminalAsync();
+            tab.AppendConnectionTrace(traceId, tab.Snapshot?.OutputRevision > 0
+                ? $"Connected as {tab.ConnectedUsername}; shell output received"
+                : $"Connected as {tab.ConnectedUsername}; waiting for shell output if no prompt is visible");
         }
         catch (Exception exception)
         {
             tab.ErrorMessage = exception.Message;
+            tab.AppendConnectionTrace(traceId, $"Connection failed: {exception.Message}");
         }
         finally
         {
+            tab.FinishConnectionTrace(traceId);
             tab.IsBusy = false;
             await InvokeAsync(StateHasChanged);
         }
@@ -1561,6 +1603,11 @@
 
         foreach (var tab in TerminalWorkspace.Tabs.Where(tab => tab.SessionId == update.SessionId))
         {
+            if (!tab.IsDetached && update.OutputRevision == 1 && update.Status == TerminalSessionStatus.Active && tab.ConnectionTraceId != Guid.Empty)
+            {
+                tab.AppendConnectionTrace(tab.ConnectionTraceId, "First shell output received");
+                await InvokeAsync(StateHasChanged);
+            }
             tab.Snapshot = MergeTerminalSnapshot(tab, tab.Snapshot, update);
             if (RenderedTab?.Id == tab.Id)
             {

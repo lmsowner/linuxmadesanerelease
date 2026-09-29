@@ -389,10 +389,17 @@ public sealed class TerminalWorkspaceState(ITerminalSessionService terminalSessi
     }
 }
 
+public sealed record TerminalConnectionTraceEntry(double ElapsedMilliseconds, string Message);
+
 public sealed class TerminalTabState
 {
     private readonly object aiOperationSync = new();
     private readonly object connectionOperationSync = new();
+    private readonly object connectionTraceSync = new();
+    private readonly List<TerminalConnectionTraceEntry> connectionTrace = [];
+    private DateTimeOffset connectionTraceStartedUtc;
+    private Guid connectionTraceId;
+    private bool connectionTracePending;
     private CancellationTokenSource? activeAiOperation;
     private CancellationTokenSource? activeConnectionOperation;
     private volatile bool connectionDesired;
@@ -485,6 +492,84 @@ public sealed class TerminalTabState
         : string.Empty;
 
     public string ErrorMessage { get; set; } = string.Empty;
+
+    public IReadOnlyList<TerminalConnectionTraceEntry> ConnectionTrace
+    {
+        get
+        {
+            lock (connectionTraceSync)
+            {
+                return connectionTrace.ToArray();
+            }
+        }
+    }
+
+    public Guid ConnectionTraceId
+    {
+        get
+        {
+            lock (connectionTraceSync)
+            {
+                return connectionTraceId;
+            }
+        }
+    }
+
+    public bool ConnectionTracePending
+    {
+        get
+        {
+            lock (connectionTraceSync)
+            {
+                return connectionTracePending;
+            }
+        }
+    }
+
+    public Guid BeginConnectionTrace(string message)
+    {
+        lock (connectionTraceSync)
+        {
+            connectionTraceId = Guid.NewGuid();
+            connectionTraceStartedUtc = DateTimeOffset.UtcNow;
+            connectionTracePending = true;
+            connectionTrace.Clear();
+            connectionTrace.Add(new TerminalConnectionTraceEntry(0, message));
+            return connectionTraceId;
+        }
+    }
+
+    public bool AppendConnectionTrace(Guid traceId, string message)
+    {
+        lock (connectionTraceSync)
+        {
+            if (traceId != connectionTraceId)
+            {
+                return false;
+            }
+
+            if (connectionTrace.Count == 24)
+            {
+                connectionTrace.RemoveAt(1);
+            }
+
+            connectionTrace.Add(new TerminalConnectionTraceEntry(
+                Math.Max(0, (DateTimeOffset.UtcNow - connectionTraceStartedUtc).TotalMilliseconds),
+                message));
+            return true;
+        }
+    }
+
+    public void FinishConnectionTrace(Guid traceId)
+    {
+        lock (connectionTraceSync)
+        {
+            if (traceId == connectionTraceId)
+            {
+                connectionTracePending = false;
+            }
+        }
+    }
 
     public bool IsBusy { get; set; }
 

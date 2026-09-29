@@ -469,7 +469,7 @@ window.lmsTerminal = (() => {
         state.lastRevision = -1;
     }
 
-    function resetForNewSession(id, username) {
+    function resetForNewSession(id, username, target) {
         const state = getState(id);
         if (!state) return;
 
@@ -477,7 +477,8 @@ window.lmsTerminal = (() => {
         state.lastOutput = "";
         state.lastRevision = -1;
         const safeUsername = String(username ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 80);
-        if (safeUsername) state.terminal.write(`[Switching to ${safeUsername}]\r\n`);
+        const safeTarget = String(target ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 160);
+        if (safeUsername) state.terminal.write(`[Switching to ${safeUsername} via SSH ${safeTarget}]\r\n`);
     }
 
     function registerAiPromptShortcut(element, dotNetRef) {

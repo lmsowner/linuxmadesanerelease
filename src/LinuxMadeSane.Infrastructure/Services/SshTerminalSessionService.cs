@@ -3,6 +3,8 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
@@ -35,7 +37,12 @@ public sealed class SshTerminalSessionService(
         using var setupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         setupCancellation.CancelAfter(SessionSetupTimeout);
         var setupToken = setupCancellation.Token;
-        logger.LogInformation("SSH terminal setup started for host {HostId} as {Username}", host.Id, request.Username);
+        void Report(string message) => request.Progress?.Report(message);
+        Report($"Configured SSH target: {host.Hostname.Trim()}:{host.Port} as {request.Username}. SSH.NET uses this host setting; the OS chooses the route.");
+        _ = ReportDnsCandidatesAsync(host.Hostname.Trim(), request.Progress, cancellationToken);
+        Report("Resolving SSH credentials");
+        logger.LogInformation("SSH terminal setup started for host {HostId} target {Hostname}:{Port} as {Username}",
+            host.Id, host.Hostname.Trim(), host.Port, request.Username);
         ManagedHostSshCredentials credentials;
         try
         {
@@ -51,12 +58,14 @@ public sealed class SshTerminalSessionService(
         }
         catch (Exception exception)
         {
+            Report($"Credential resolution failed: {exception.Message}");
             logger.LogWarning(exception,
                 "SSH terminal credential resolution failed for host {HostId} as {Username} after {ElapsedMs} ms",
                 host.Id, request.Username, Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds);
             throw;
         }
         var credentialsResolved = Stopwatch.GetTimestamp();
+        Report($"SSH credentials ready for {credentials.Username} ({Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds:0} ms)");
         logger.LogInformation("SSH terminal credentials resolved for host {HostId} as {Username} after {ElapsedMs} ms",
             host.Id, credentials.Username, Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds);
 
@@ -68,24 +77,30 @@ public sealed class SshTerminalSessionService(
 
         try
         {
+            Report("Opening SSH TCP connection and authenticating");
             logger.LogInformation("SSH terminal starting handshake for host {HostId} as {Username}", host.Id, credentials.Username);
             connectTask = Task.Run(client.Connect, CancellationToken.None);
             await connectTask.WaitAsync(setupToken);
             var sshConnected = Stopwatch.GetTimestamp();
+            Report($"SSH handshake and authentication complete ({Stopwatch.GetElapsedTime(credentialsResolved, sshConnected).TotalMilliseconds:0} ms)");
             logger.LogInformation("SSH terminal handshake completed for host {HostId} as {Username} after {ElapsedMs} ms",
                 host.Id, credentials.Username, Stopwatch.GetElapsedTime(credentialsResolved, sshConnected).TotalMilliseconds);
             setupStage = "working directory lookup";
+            Report("Resolving the connected user's working directory");
             var workingDirectory = await ResolveInitialWorkingDirectoryAsync(client, host, request, credentials.Username, setupToken);
             var workingDirectoryResolved = Stopwatch.GetTimestamp();
+            Report($"Working directory ready: {workingDirectory} ({Stopwatch.GetElapsedTime(sshConnected, workingDirectoryResolved).TotalMilliseconds:0} ms)");
             logger.LogInformation("SSH terminal working directory resolved for host {HostId} as {Username} after {ElapsedMs} ms",
                 host.Id, credentials.Username, Stopwatch.GetElapsedTime(sshConnected, workingDirectoryResolved).TotalMilliseconds);
             setupStage = "shell creation";
+            Report("Requesting interactive SSH shell and PTY");
             logger.LogInformation("SSH terminal opening shell for host {HostId} as {Username}", host.Id, credentials.Username);
             createStreamTask = Task.Run(
                 () => client.CreateShellStream("xterm-256color", (uint)request.Columns, (uint)request.Rows, 0, 0, 4096),
                 CancellationToken.None);
             var stream = await createStreamTask.WaitAsync(setupToken);
             var shellOpened = Stopwatch.GetTimestamp();
+            Report($"SSH shell opened ({Stopwatch.GetElapsedTime(workingDirectoryResolved, shellOpened).TotalMilliseconds:0} ms); waiting for shell output");
             logger.LogInformation("SSH terminal shell opened for host {HostId} as {Username} after {ElapsedMs} ms",
                 host.Id, credentials.Username, Stopwatch.GetElapsedTime(workingDirectoryResolved, shellOpened).TotalMilliseconds);
             var session = new TerminalSession(
@@ -123,6 +138,7 @@ public sealed class SshTerminalSessionService(
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && setupCancellation.IsCancellationRequested)
         {
+            Report($"Timed out during {setupStage} after {Stopwatch.GetElapsedTime(setupStarted).TotalSeconds:0.0} s");
             logger.LogWarning(
                 "SSH terminal setup timed out for host {HostId} as {Username} during {Stage} after {ElapsedMs} ms",
                 host.Id,
@@ -151,6 +167,7 @@ public sealed class SshTerminalSessionService(
         }
         catch (Exception exception)
         {
+            Report($"Failed during {setupStage}: {exception.Message}");
             logger.LogWarning(
                 exception,
                 "SSH terminal setup failed for host {HostId} as {Username} during {Stage} after {ElapsedMs} ms",
@@ -676,6 +693,47 @@ public sealed class SshTerminalSessionService(
 
     private static string QuoteShellArgument(string value) =>
         "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
+
+    private static async Task ReportDnsCandidatesAsync(
+        string hostname,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (progress is null)
+        {
+            return;
+        }
+
+        if (IPAddress.TryParse(hostname, out var literalAddress))
+        {
+            var family = literalAddress.AddressFamily == AddressFamily.InterNetworkV6 ? "IPv6" : "IPv4";
+            var loopback = IPAddress.IsLoopback(literalAddress) ? " loopback" : string.Empty;
+            progress.Report($"Configured target is a literal {family}{loopback} address: {literalAddress}");
+            return;
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        try
+        {
+            var addresses = await Dns.GetHostAddressesAsync(hostname, timeout.Token);
+            var candidates = addresses.Take(8).Select(address =>
+                $"{address} ({(address.AddressFamily == AddressFamily.InterNetworkV6 ? "IPv6" : "IPv4")}{(IPAddress.IsLoopback(address) ? ", loopback" : string.Empty)})");
+            var suffix = addresses.Length > 8 ? $" (+{addresses.Length - 8} more)" : string.Empty;
+            progress.Report($"DNS candidates for {hostname}: {string.Join(", ", candidates)}{suffix}. These are not the confirmed SSH peer address.");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            progress.Report($"DNS diagnostic lookup for {hostname} exceeded 2 seconds; SSH continues independently.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (exception is SocketException or ArgumentException)
+        {
+            progress.Report($"DNS diagnostic lookup for {hostname} failed: {exception.Message}. SSH continues independently.");
+        }
+    }
 
     internal static bool ShouldUseConnectedUserHome(ManagedHost host, TerminalConnectionRequest request, string username) =>
         !string.Equals(username, host.Username.Trim(), StringComparison.Ordinal) &&

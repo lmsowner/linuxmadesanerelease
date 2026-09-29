@@ -12,4 +12,7 @@ public sealed record TerminalConnectionRequest(
     int Columns,
     int Rows,
     string? WorkingDirectory = null,
-    Guid? OwnerId = null);
+    Guid? OwnerId = null)
+{
+    public IProgress<string>? Progress { get; init; }
+}
