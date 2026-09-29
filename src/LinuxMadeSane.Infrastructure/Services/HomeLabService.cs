@@ -3665,7 +3665,11 @@ public sealed class HomeLabService(
                         app,
                         relationships,
                         configuration,
-                        reusableVpnGateway?.ContainerName),
+                        reusableVpnGateway?.ContainerName,
+                        app.Id.Equals("bitmagnet-database", StringComparison.OrdinalIgnoreCase) &&
+                        apps.Any(candidate => candidate.Id.Equals("bitmagnet", StringComparison.OrdinalIgnoreCase) &&
+                            (standaloneUsesVpn || relationships.TryGetValue("bitmagnet", out var bitmagnetRelationship) &&
+                             !string.IsNullOrWhiteSpace(bitmagnetRelationship.RouteVia)))),
                     recipeId is not null,
                     now);
                 // Track the installation before creating service endpoints so
@@ -3673,6 +3677,7 @@ public sealed class HomeLabService(
                 dbContext.HomeLabInstallations.Add(installation);
                 await ReserveCaddyAccessPortAsync(installation, app, cancellationToken);
                 if (installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
+                    !app.IsSystemDependency &&
                     reusableVpnGateway is not null)
                 {
                     var gatewayPreparation = await EnsureVpnGatewayNamespacePortAsync(
@@ -4817,6 +4822,21 @@ public sealed class HomeLabService(
         var portName = scope == HomeLabEndpointScope.Internal
             ? (ResolvePrimaryPort(app)?.Name ?? string.Empty)
             : clientAccess?.PortName ?? string.Empty;
+        var now = DateTimeOffset.UtcNow;
+        var sharesNetworkNamespace = scope == HomeLabEndpointScope.Internal &&
+                                     current.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
+                                     installation.NetworkMode.Equals(current.NetworkMode, StringComparison.OrdinalIgnoreCase);
+        if (sharesNetworkNamespace && ResolvePrimaryPort(app) is { } sharedPort)
+        {
+            var sharedHost = "127.0.0.1";
+            var sharedPortNumber = HomeLabContainerPortPlan.Resolve(sharedPort, true);
+            var sharedScheme = ResolveApplicationScheme(sharedPort);
+            return new HomeLabServiceEndpoint(
+                Guid.Empty, installation.Id, installation.AppId, sharedPort.Name, scope,
+                $"{sharedScheme}://{sharedHost}:{sharedPortNumber}", sharedScheme, sharedHost, sharedPortNumber, string.Empty, null, null,
+                HomeLabEndpointHealthState.NotChecked, string.Empty, null, now, now);
+        }
+
         var persisted = installation.ServiceEndpoints.FirstOrDefault(endpoint =>
             endpoint.Scope == (int)scope &&
             (portName.Length == 0 || endpoint.PortName.Equals(portName, StringComparison.OrdinalIgnoreCase)));
@@ -4825,7 +4845,6 @@ public sealed class HomeLabService(
             return MapServiceEndpoint(persisted);
         }
 
-        var now = DateTimeOffset.UtcNow;
         if (scope == HomeLabEndpointScope.Internal && ResolvePrimaryPort(app) is { } internalPort)
         {
             var host = HomeLabEndpointPlanner.ResolveInternalHost(installation);
@@ -5400,9 +5419,12 @@ public sealed class HomeLabService(
         HomeLabAppManifest app,
         IReadOnlyDictionary<string, HomeLabRecipeRelationship> relationships,
         IReadOnlyDictionary<string, string>? configuration,
-        string? reusableVpnGatewayContainerName)
+        string? reusableVpnGatewayContainerName,
+        bool routeBitmagnetDatabaseThroughVpn = false)
     {
-        var routeVia = relationships.TryGetValue(app.Id, out var relationship)
+        var routeVia = routeBitmagnetDatabaseThroughVpn
+            ? "vpn-gateway"
+            : relationships.TryGetValue(app.Id, out var relationship)
             ? relationship.RouteVia
             : IsVpnRouteSelected(configuration)
                 ? "vpn-gateway"
