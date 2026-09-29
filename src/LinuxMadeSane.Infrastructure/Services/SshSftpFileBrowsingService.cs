@@ -9,6 +9,7 @@ using Renci.SshNet;
 using Renci.SshNet.Common;
 using Renci.SshNet.Sftp;
 using System.Globalization;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -34,8 +35,23 @@ public sealed class SshSftpFileBrowsingService(
     {
         cancellationToken.ThrowIfCancellationRequested();
         var normalizedPath = NormalizePath(path);
-        var credentials = await ResolveCredentialsAsync(host, username, password, privateKey, privateKeyPassphrase, preferStoredCredentials, cancellationToken);
-        logger.LogInformation("Listing SFTP items for host {HostId} path {Path}", host.Id, normalizedPath);
+        var listingStarted = Stopwatch.GetTimestamp();
+        logger.LogInformation("SFTP listing started for host {HostId} as {Username} path {Path}", host.Id, username, normalizedPath);
+        ManagedHostSshCredentials credentials;
+        try
+        {
+            credentials = await ResolveCredentialsAsync(host, username, password, privateKey, privateKeyPassphrase, preferStoredCredentials, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception,
+                "SFTP credential resolution failed for host {HostId} as {Username} path {Path} after {ElapsedMs} ms",
+                host.Id, username, normalizedPath, Stopwatch.GetElapsedTime(listingStarted).TotalMilliseconds);
+            throw;
+        }
+        logger.LogInformation("SFTP credentials resolved for host {HostId} as {Username} path {Path} after {ElapsedMs} ms",
+            host.Id, credentials.Username, normalizedPath, Stopwatch.GetElapsedTime(listingStarted).TotalMilliseconds);
+        var stage = "SFTP connection";
         ISftpFile[] sftpItems;
         try
         {
@@ -43,6 +59,7 @@ public sealed class SshSftpFileBrowsingService(
                 () =>
                 {
                     using var client = Connect(host, credentials);
+                    stage = "directory enumeration";
                     var items = client
                         .ListDirectory(normalizedPath)
                         .Where(item => item.Name is not "." and not "..")
@@ -52,6 +69,14 @@ public sealed class SshSftpFileBrowsingService(
                 },
                 cancellationToken);
         }
+        catch (Exception exception) when (exception is not SftpPathNotFoundException)
+        {
+            logger.LogWarning(exception,
+                "SFTP listing failed for host {HostId} as {Username} path {Path} during {Stage} after {ElapsedMs} ms",
+                host.Id, credentials.Username, normalizedPath, stage,
+                Stopwatch.GetElapsedTime(listingStarted).TotalMilliseconds);
+            throw;
+        }
         catch (SftpPathNotFoundException exception)
         {
             throw new FileAccessPathNotFoundException(
@@ -60,7 +85,13 @@ public sealed class SshSftpFileBrowsingService(
                 exception);
         }
 
+        logger.LogInformation("SFTP directory enumeration completed for host {HostId} as {Username} path {Path} after {ElapsedMs} ms; loading metadata",
+            host.Id, credentials.Username, normalizedPath,
+            Stopwatch.GetElapsedTime(listingStarted).TotalMilliseconds);
         var metadataByPath = await TryReadRemoteMetadataAsync(host, credentials, normalizedPath, cancellationToken);
+        logger.LogInformation("SFTP listing completed for host {HostId} as {Username} path {Path} after {ElapsedMs} ms",
+            host.Id, credentials.Username, normalizedPath,
+            Stopwatch.GetElapsedTime(listingStarted).TotalMilliseconds);
         var items = sftpItems
             .Select(item => MapItem(item, metadataByPath))
             .OrderByDescending(item => item.ItemType == SftpItemType.Folder)
@@ -1101,7 +1132,8 @@ public sealed class SshSftpFileBrowsingService(
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogDebug(exception, "Remote metadata lookup failed for host {HostId} path {Path}", host.Id, path);
+            logger.LogWarning(exception, "Remote metadata lookup failed for host {HostId} as {Username} path {Path}",
+                host.Id, credentials.Username, path);
             return new Dictionary<string, RemoteFileMetadata>(StringComparer.Ordinal);
         }
     }

@@ -35,16 +35,30 @@ public sealed class SshTerminalSessionService(
         using var setupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         setupCancellation.CancelAfter(SessionSetupTimeout);
         var setupToken = setupCancellation.Token;
-        var credentials = await sshConnectionFactory.ResolveCredentialsAsync(
-            host,
-            new ManagedHostSshCredentialRequest(
-                request.Username,
-                request.Password,
-                request.PrivateKey,
-                request.PrivateKeyPassphrase,
-                request.PreferStoredCredentials),
-            setupToken);
+        logger.LogInformation("SSH terminal setup started for host {HostId} as {Username}", host.Id, request.Username);
+        ManagedHostSshCredentials credentials;
+        try
+        {
+            credentials = await sshConnectionFactory.ResolveCredentialsAsync(
+                host,
+                new ManagedHostSshCredentialRequest(
+                    request.Username,
+                    request.Password,
+                    request.PrivateKey,
+                    request.PrivateKeyPassphrase,
+                    request.PreferStoredCredentials),
+                setupToken);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception,
+                "SSH terminal credential resolution failed for host {HostId} as {Username} after {ElapsedMs} ms",
+                host.Id, request.Username, Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds);
+            throw;
+        }
         var credentialsResolved = Stopwatch.GetTimestamp();
+        logger.LogInformation("SSH terminal credentials resolved for host {HostId} as {Username} after {ElapsedMs} ms",
+            host.Id, credentials.Username, Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds);
 
         var client = sshConnectionFactory.CreateSshClient(host, credentials, ConnectTimeout, KeepAliveInterval);
         var setupStage = "SSH handshake";
@@ -54,18 +68,26 @@ public sealed class SshTerminalSessionService(
 
         try
         {
+            logger.LogInformation("SSH terminal starting handshake for host {HostId} as {Username}", host.Id, credentials.Username);
             connectTask = Task.Run(client.Connect, CancellationToken.None);
             await connectTask.WaitAsync(setupToken);
             var sshConnected = Stopwatch.GetTimestamp();
+            logger.LogInformation("SSH terminal handshake completed for host {HostId} as {Username} after {ElapsedMs} ms",
+                host.Id, credentials.Username, Stopwatch.GetElapsedTime(credentialsResolved, sshConnected).TotalMilliseconds);
             setupStage = "working directory lookup";
             var workingDirectory = await ResolveInitialWorkingDirectoryAsync(client, host, request, credentials.Username, setupToken);
             var workingDirectoryResolved = Stopwatch.GetTimestamp();
+            logger.LogInformation("SSH terminal working directory resolved for host {HostId} as {Username} after {ElapsedMs} ms",
+                host.Id, credentials.Username, Stopwatch.GetElapsedTime(sshConnected, workingDirectoryResolved).TotalMilliseconds);
             setupStage = "shell creation";
+            logger.LogInformation("SSH terminal opening shell for host {HostId} as {Username}", host.Id, credentials.Username);
             createStreamTask = Task.Run(
                 () => client.CreateShellStream("xterm-256color", (uint)request.Columns, (uint)request.Rows, 0, 0, 4096),
                 CancellationToken.None);
             var stream = await createStreamTask.WaitAsync(setupToken);
             var shellOpened = Stopwatch.GetTimestamp();
+            logger.LogInformation("SSH terminal shell opened for host {HostId} as {Username} after {ElapsedMs} ms",
+                host.Id, credentials.Username, Stopwatch.GetElapsedTime(workingDirectoryResolved, shellOpened).TotalMilliseconds);
             var session = new TerminalSession(
                 Guid.NewGuid(),
                 host.Id,
@@ -102,8 +124,9 @@ public sealed class SshTerminalSessionService(
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && setupCancellation.IsCancellationRequested)
         {
             logger.LogWarning(
-                "SSH terminal setup timed out for host {HostId} during {Stage} after {ElapsedMs} ms",
+                "SSH terminal setup timed out for host {HostId} as {Username} during {Stage} after {ElapsedMs} ms",
                 host.Id,
+                credentials.Username,
                 setupStage,
                 Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds);
             if (registeredSessionId.HasValue)
@@ -130,8 +153,9 @@ public sealed class SshTerminalSessionService(
         {
             logger.LogWarning(
                 exception,
-                "SSH terminal setup failed for host {HostId} during {Stage} after {ElapsedMs} ms",
+                "SSH terminal setup failed for host {HostId} as {Username} during {Stage} after {ElapsedMs} ms",
                 host.Id,
+                credentials.Username,
                 setupStage,
                 Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds);
             if (registeredSessionId.HasValue)

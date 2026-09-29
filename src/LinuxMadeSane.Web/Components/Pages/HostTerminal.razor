@@ -20,6 +20,7 @@
 @inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
 @inject NavigationManager NavigationManager
 @inject IJSRuntime JSRuntime
+@inject ILogger<HostTerminal> Logger
 
 <PageTitle>@TerminalPageTitle</PageTitle>
 
@@ -731,12 +732,19 @@
             return;
         }
 
+        var switchStarted = System.Diagnostics.Stopwatch.StartNew();
+        Logger.LogInformation("Terminal profile switch started for host {HostId} profile {ProfileKey}", tab.HostId, connectionProfileKey);
         await SelectConnectionProfileAsync(tab, connectionProfileKey);
         if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
         {
+            Logger.LogWarning("Terminal profile switch failed while loading profile for host {HostId} after {ElapsedMs} ms: {Error}",
+                tab.HostId, switchStarted.Elapsed.TotalMilliseconds, tab.ErrorMessage);
             await OpenConnectionPanelAsync(tab);
             return;
         }
+
+        Logger.LogInformation("Terminal profile resolved for host {HostId} as {Username} after {ElapsedMs} ms",
+            tab.HostId, tab.Username, switchStarted.Elapsed.TotalMilliseconds);
 
         // The connection core replaces the old session under the gate.
         if (terminalInitialized && renderedTabId == tab.Id)
@@ -745,13 +753,18 @@
         }
 
         tab.RequestConnection();
+        Logger.LogInformation("Terminal replacing previous session for host {HostId} as {Username}", tab.HostId, tab.Username);
         await ReconnectTabAsync(tab);
         if (tab is { IsSessionActive: true, SessionId: Guid sessionId })
         {
             await TerminalSessionService.SendInputAsync(sessionId, "\r");
+            Logger.LogInformation("Terminal profile switch completed for host {HostId} as {Username} in {ElapsedMs} ms",
+                tab.HostId, tab.ConnectedUsername, switchStarted.Elapsed.TotalMilliseconds);
         }
         else
         {
+            Logger.LogWarning("Terminal profile switch failed for host {HostId} as {Username} after {ElapsedMs} ms: {Error}",
+                tab.HostId, tab.Username, switchStarted.Elapsed.TotalMilliseconds, tab.ErrorMessage);
             await OpenConnectionPanelAsync(tab);
         }
     }
