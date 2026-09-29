@@ -419,11 +419,11 @@
                                  OnClick="HandleCloseAsync" />
                 @if (Editor.Id.HasValue)
                 {
-                    <CompactUIButton Label="Delete"
+                    <CompactUIButton Label="@(isDeleteArmed ? "Click to Confirm!" : "Delete")"
                                      Glyph="UiIconGlyph.Delete"
-                                     Class="runbook-editor-action-danger"
+                                     Class="@(isDeleteArmed ? "runbook-editor-action-danger runbook-delete-armed" : "runbook-editor-action-danger")"
                                      Disabled="@IsBusy"
-                                     OnClick="OnDelete" />
+                                     OnClick="ConfirmOrDeleteAsync" />
                 }
                 <CompactUIButton Label="@(IsBusy ? "Saving..." : "Save runbook")"
                                  Glyph="UiIconGlyph.Save"
@@ -439,6 +439,7 @@
     private readonly string formId = $"runbook-editor-form-{Guid.NewGuid():N}";
     private const int MaxAiConversationTurns = 12;
     private RunbookEditor? trackedEditor;
+    private bool isDeleteArmed;
     private AiChatThreadEditorContextViewModel? aiThreadEditorContext;
     private readonly AiChatMessageComposer aiComposer = new();
     private readonly List<RunbookAiConversationTurn> aiConversationTurns = [];
@@ -512,9 +513,32 @@
         if (!ReferenceEquals(trackedEditor, Editor))
         {
             trackedEditor = Editor;
+            isDeleteArmed = false;
             EnsureEditorDefaults();
             ResetAiState();
         }
+
+        if (!IsOpen)
+        {
+            isDeleteArmed = false;
+        }
+    }
+
+    private async Task ConfirmOrDeleteAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        if (!isDeleteArmed)
+        {
+            isDeleteArmed = true;
+            return;
+        }
+
+        isDeleteArmed = false;
+        await OnDelete.InvokeAsync();
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)

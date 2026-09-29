@@ -10,7 +10,6 @@
 @using LinuxMadeSane.Core.Models.Ai
 @inject IManagedHostService HostService
 @inject IRunbookService RunbookService
-@inject IJSRuntime JSRuntime
 
 <PageTitle>Runbooks | Linux Made Sane</PageTitle>
 
@@ -153,10 +152,12 @@
                                                      Glyph="UiIconGlyph.Copy"
                                                      Variant="UiButtonVariant.Ghost"
                                                      OnClick="@(() => OpenDuplicateDialogAsync(command))" />
-                                    <UiCommandButton Label="Delete"
+                                    <UiCommandButton Label="@(armedDeleteRunbookId == command.Id ? "Click to Confirm!" : "Delete")"
                                                      Glyph="UiIconGlyph.Delete"
                                                      Variant="UiButtonVariant.Danger"
-                                                     OnClick="@(() => DeleteRunbookAsync(command))" />
+                                                     Class="@(armedDeleteRunbookId == command.Id ? "runbook-delete-armed" : null)"
+                                                     Disabled="@IsMutating"
+                                                     OnClick="@(() => ConfirmOrDeleteRunbookAsync(command))" />
                                 </div>
                             </div>
                         </div>
@@ -446,6 +447,7 @@
     private IReadOnlyList<CommandLibraryItem> commands = [];
     private IReadOnlyList<ManagedHost> hosts = [];
     private readonly HashSet<Guid> expandedRunbookIds = [];
+    private Guid? armedDeleteRunbookId;
     private RunbookEditor editor = new();
     private string filterText = string.Empty;
     private string statusMessage = string.Empty;
@@ -685,11 +687,6 @@
             return;
         }
 
-        if (!await ConfirmDeleteAsync(editor.Name))
-        {
-            return;
-        }
-
         isMutating = true;
         editorStatusMessage = string.Empty;
 
@@ -713,13 +710,20 @@
         }
     }
 
-    private async Task DeleteRunbookAsync(CommandLibraryItem command)
+    private async Task ConfirmOrDeleteRunbookAsync(CommandLibraryItem command)
     {
-        if (!await ConfirmDeleteAsync(command.Name))
+        if (IsMutating)
         {
             return;
         }
 
+        if (armedDeleteRunbookId != command.Id)
+        {
+            armedDeleteRunbookId = command.Id;
+            return;
+        }
+
+        armedDeleteRunbookId = null;
         isMutating = true;
         statusMessage = string.Empty;
 
@@ -925,9 +929,6 @@
             bulkAssignmentRunbookIds.Add(runbookId);
         }
     }
-
-    private Task<bool> ConfirmDeleteAsync(string name) =>
-        JSRuntime.InvokeAsync<bool>("confirm", $"Delete runbook '{name}'?").AsTask();
 
     private static RunbookEditor MapEditor(CommandLibraryItem command, bool duplicate) =>
         new()
