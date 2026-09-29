@@ -25,6 +25,7 @@ export function bindNavOrder(list, dotNet) {
         clearTimeout(pressTimer);
         clearMarker();
         source?.classList.remove("nav-dragging", "nav-pressing");
+        list.classList.remove("nav-reordering");
         source = null;
         pointerId = null;
         dragging = false;
@@ -41,7 +42,7 @@ export function bindNavOrder(list, dotNet) {
     };
 
     const onPointerDown = event => {
-        if (event.button !== 0 || event.target.closest("button, input, select, textarea")) return;
+        if (event.button !== 0 || !event.target.closest(".ui-nav-button-icon")) return;
         const item = event.target.closest(".nav-reorder-item");
         if (!item || !list.contains(item)) return;
         suppressClick = false;
@@ -56,7 +57,7 @@ export function bindNavOrder(list, dotNet) {
             dragging = true;
             source.classList.remove("nav-pressing");
             source.classList.add("nav-dragging");
-            try { source.setPointerCapture?.(pointerId); } catch { reset(); return; }
+            list.classList.add("nav-reordering");
             suppressClick = true;
         }, 3000);
     };
@@ -64,7 +65,8 @@ export function bindNavOrder(list, dotNet) {
     const onPointerMove = event => {
         if (event.pointerId !== pointerId || !source) return;
         if (!dragging) {
-            if (Math.hypot(event.clientX - startX, event.clientY - startY) > 8) reset();
+            if (event.pointerType === "touch" &&
+                Math.hypot(event.clientX - startX, event.clientY - startY) > 18) reset();
             return;
         }
         event.preventDefault();
@@ -103,23 +105,35 @@ export function bindNavOrder(list, dotNet) {
         if (to) dotNet.invokeMethodAsync("MoveNavigationItemAsync", from, to, before);
     };
 
+    const onDragStart = event => {
+        if (source) event.preventDefault();
+    };
+
+    const onContextMenu = event => {
+        if (source) event.preventDefault();
+    };
+
     list.addEventListener("pointerdown", onPointerDown);
-    list.addEventListener("pointermove", onPointerMove);
-    list.addEventListener("pointerup", onPointerUp);
-    list.addEventListener("pointercancel", reset);
+    list.addEventListener("dragstart", onDragStart);
+    list.addEventListener("contextmenu", onContextMenu);
+    window.addEventListener("pointermove", onPointerMove, { passive: false });
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", reset);
     list.addEventListener("click", onClick, true);
-    list.addEventListener("touchmove", onTouchMove, { passive: false });
-    list.addEventListener("touchend", onTouchEnd);
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("touchend", onTouchEnd);
 
     controllers.set(list, () => {
         reset();
         list.removeEventListener("pointerdown", onPointerDown);
-        list.removeEventListener("pointermove", onPointerMove);
-        list.removeEventListener("pointerup", onPointerUp);
-        list.removeEventListener("pointercancel", reset);
+        list.removeEventListener("dragstart", onDragStart);
+        list.removeEventListener("contextmenu", onContextMenu);
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+        window.removeEventListener("pointercancel", reset);
         list.removeEventListener("click", onClick, true);
-        list.removeEventListener("touchmove", onTouchMove);
-        list.removeEventListener("touchend", onTouchEnd);
+        window.removeEventListener("touchmove", onTouchMove);
+        window.removeEventListener("touchend", onTouchEnd);
     });
 }
 

@@ -800,7 +800,35 @@
 
                     <div class="edge-form-grid edge-route-main-grid">
                         <UiTextField @bind-Value="routeEditor.DisplayName" Label="Display name" Compact="true" />
-                        <UiTextField @bind-Value="routeEditor.Hostname" Label="Hostname / subdomain" Helper="Use nas or a full hostname inside the selected Edge Gateway namespace." Placeholder="nas" Compact="true" />
+                        <UiField Label="Hostname / subdomain" Compact="true">
+                            <ChildContent>
+                                <div class="edge-subdomain-field-content">
+                                    <div class="edge-subdomain-input">
+                                        <InputText @bind-Value="routeEditor.Hostname"
+                                                   class="ui-control-input"
+                                                   placeholder="nas" />
+                                        @if (!string.IsNullOrWhiteSpace(routeEditor.DomainName) &&
+                                             !routeEditor.Hostname.Contains('.', StringComparison.Ordinal))
+                                        {
+                                            <span class="edge-subdomain-suffix">.@routeEditor.DomainName</span>
+                                        }
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(routeEditor.Hostname))
+                                    {
+                                        <small class="edge-subdomain-preview">Public address: @ResolvePreviewHostname()</small>
+                                    }
+                                    @if (FindConflictingRoute() is { } conflictingRoute)
+                                    {
+                                        <small class="edge-subdomain-conflict" role="alert">
+                                            @ResolvePreviewHostname() is already used by @conflictingRoute.DisplayName on this URL path.
+                                        </small>
+                                    }
+                                </div>
+                            </ChildContent>
+                            <ValidationContent>
+                                <ValidationMessage For="@(() => routeEditor.Hostname)" />
+                            </ValidationContent>
+                        </UiField>
                         <UiSelectField TValue="EdgeGatewayAuthMode" @bind-Value="routeEditor.AuthMode" Label="Auth mode" Compact="true">
                             @foreach (var mode in AuthModeOptions)
                             {
@@ -864,7 +892,7 @@
                             <option value="@EdgeGatewayTargetScheme.Http">http</option>
                             <option value="@EdgeGatewayTargetScheme.Https">https</option>
                         </UiSelectField>
-                        <UiTextField @bind-Value="routeEditor.TargetHost" Label="Target host" Placeholder="192.168.1.20" Compact="true" />
+                        <UiTextField @bind-Value="routeEditor.TargetHost" Label="Target IP / host" Placeholder="192.168.1.20" Compact="true" />
                         <UiNumberField TValue="int" @bind-Value="routeEditor.TargetPort" Label="Port" Compact="true" />
                         <div class="edge-target-actions">
                             <UiCommandButton Label="@(isCheckingRouteTarget ? "Checking..." : "Check Target")"
@@ -1271,6 +1299,8 @@
     private string routeDeleteMessage = string.Empty;
     private string routeEditorMessage = string.Empty;
     private string routeTargetCheckMessage = string.Empty;
+    private string? lastSuggestedDisplayName;
+    private string? lastSuggestedSubdomain;
     private string routeModalTitle = "New route";
     private string cloudflareTokenInput = string.Empty;
     private string cloudflareTokenMessage = string.Empty;
@@ -1780,6 +1810,7 @@
     private async Task OpenNewRouteAsync()
     {
         routeEditor = await EdgeGatewayService.GetEditorAsync(null);
+        ResetRouteSuggestions();
         if (string.IsNullOrWhiteSpace(routeEditor.DomainName) && CloudflareDomains.Count > 0)
         {
             routeEditor.DomainName = SelectedCloudflareDomain?.DomainName ?? CloudflareDomains[0].DomainName;
@@ -1795,6 +1826,7 @@
     private async Task OpenLocalLmsRouteAsync()
     {
         routeEditor = await EdgeGatewayService.GetEditorAsync(null);
+        ResetRouteSuggestions();
         routeEditor.DisplayName = "Linux Made Sane";
         routeEditor.Hostname = "lms";
         routeEditor.TargetScheme = EdgeGatewayTargetScheme.Http;
@@ -1818,6 +1850,8 @@
     private async Task OpenEditRouteAsync(Guid routeId)
     {
         routeEditor = await EdgeGatewayService.GetEditorAsync(routeId);
+        ResetRouteSuggestions();
+        routeEditor.Hostname = StripSelectedDomainSuffix(routeEditor.Hostname, routeEditor.DomainName);
         routeModalTitle = "Edit route";
         routeEditorMessage = string.Empty;
         routeEditorIsError = false;
@@ -1828,6 +1862,7 @@
     private async Task UseCloudflareDomain(string domainName)
     {
         routeEditor = await EdgeGatewayService.GetEditorAsync(null);
+        ResetRouteSuggestions();
         routeEditor.DomainName = domainName;
         routeEditor.Hostname = "app";
         activeTab = PublishedAppsTabValue;
@@ -2022,15 +2057,49 @@
 
     private Task SelectHttpServiceAsync(LocalHttpServiceEndpoint service)
     {
+        var suggestion = EdgeGatewayRouteSuggestionFactory.FromDiscoveredService(service);
         routeEditor.TargetScheme = service.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
             ? EdgeGatewayTargetScheme.Https
             : EdgeGatewayTargetScheme.Http;
-        routeEditor.TargetHost = service.Host;
+        routeEditor.TargetHost = suggestion.TargetHost;
         routeEditor.TargetPort = service.Port;
+        if (!routeEditor.Id.HasValue)
+        {
+            if (string.IsNullOrWhiteSpace(routeEditor.DisplayName) ||
+                routeEditor.DisplayName.Equals(lastSuggestedDisplayName, StringComparison.Ordinal))
+            {
+                routeEditor.DisplayName = suggestion.DisplayName;
+            }
+
+            if (string.IsNullOrWhiteSpace(routeEditor.Hostname) ||
+                routeEditor.Hostname.Equals("app", StringComparison.OrdinalIgnoreCase) ||
+                routeEditor.Hostname.Equals(lastSuggestedSubdomain, StringComparison.Ordinal))
+            {
+                routeEditor.Hostname = suggestion.Subdomain;
+            }
+
+            lastSuggestedDisplayName = suggestion.DisplayName;
+            lastSuggestedSubdomain = suggestion.Subdomain;
+        }
+
         routeTargetCheckIsError = false;
-        routeTargetCheckMessage = $"Selected {service.Url}.";
+        routeTargetCheckMessage = $"Selected {service.Scheme}://{suggestion.TargetHost}:{service.Port} from {service.Url}.";
         isHttpServicePickerOpen = false;
         return Task.CompletedTask;
+    }
+
+    private void ResetRouteSuggestions()
+    {
+        lastSuggestedDisplayName = null;
+        lastSuggestedSubdomain = null;
+    }
+
+    private static string StripSelectedDomainSuffix(string hostname, string domainName)
+    {
+        var suffix = $".{domainName.Trim()}";
+        return hostname.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+            ? hostname[..^suffix.Length]
+            : hostname;
     }
 
     private async Task SaveRouteAsync()
@@ -2977,6 +3046,16 @@
         return host.Contains('.', StringComparison.Ordinal) || string.IsNullOrWhiteSpace(domain)
             ? host
             : $"{host}.{domain}";
+    }
+
+    private EdgeGatewayRouteListItem? FindConflictingRoute()
+    {
+        var hostname = ResolvePreviewHostname();
+        var path = NormalizeRoutePathPrefix(routeEditor.TargetPathPrefix);
+        return dashboard?.Routes.FirstOrDefault(route =>
+            route.Id != routeEditor.Id &&
+            route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase) &&
+            NormalizeRoutePathPrefix(route.TargetPathPrefix).Equals(path, StringComparison.OrdinalIgnoreCase));
     }
 
     private string ResolvePreviewExternalUrl()
