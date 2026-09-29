@@ -1,6 +1,7 @@
 // Copyright (c) Linux Made Sane.
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
+using System.Net;
 using System.Text.RegularExpressions;
 using LinuxMadeSane.Application.Contracts.HomeLab;
 using LinuxMadeSane.Core.Models.HomeLab;
@@ -9,6 +10,20 @@ namespace LinuxMadeSane.Infrastructure.Services;
 
 internal static partial class HomeLabContainerPortPlan
 {
+    public static string ResolvePublishedHost(string? hostIp, string fallback)
+    {
+        if (!IPAddress.TryParse(hostIp, out var address))
+        {
+            return fallback;
+        }
+
+        return address.Equals(IPAddress.Any)
+            ? IPAddress.Loopback.ToString()
+            : address.Equals(IPAddress.IPv6Any)
+                ? IPAddress.IPv6Loopback.ToString()
+                : address.ToString();
+    }
+
     public static int Resolve(HomeLabPortManifest port, bool useVpnNamespacePort) =>
         useVpnNamespacePort && port.VpnContainerPort is int vpnPort
             ? vpnPort
