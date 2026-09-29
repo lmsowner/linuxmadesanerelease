@@ -158,17 +158,36 @@
                                         }
                                         else if (tab.ConnectionOptionsOpen)
                                         {
-                                            <section class="terminal-inline-panel connection-user-editor">
-                                                <div class="connection-user-editor-heading">
-                                                    <strong>Connection users</strong>
-                                                    <button type="button"
-                                                            class="connection-user-editor-close"
-                                                            title="Close connection users"
-                                                            aria-label="Close connection users"
-                                                            @onclick="@(() => ToggleConnectionPanel(tab))">
-                                                        <UiGlyphIcon Glyph="UiIconGlyph.Clear" />
-                                                    </button>
-                                                </div>
+                                            <UiModal IsOpen="true"
+                                                     Title="@($"Connection to {tab.HostName}")"
+                                                     Subtitle="Choose a user, then connect. Connection errors stay here so you can correct the credentials and retry."
+                                                     Class="terminal-connection-modal"
+                                                     OnClose="@(() => ToggleConnectionPanel(tab))">
+                                                <ChildContent>
+                                                <div class="connection-user-editor">
+                                                    @if (tab.IsBusy)
+                                                    {
+                                                        <p class="terminal-connection-feedback" role="status">Connecting to @tab.HostName as @tab.Username…</p>
+                                                    }
+                                                    else if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
+                                                    {
+                                                        <div class="callout error terminal-connection-error" role="alert">
+                                                            <strong>Could not complete the action.</strong> @tab.ErrorMessage
+                                                        </div>
+                                                    }
+                                                    else if (tab.IsSessionActive)
+                                                    {
+                                                        <p class="terminal-connection-feedback" role="status">Connected as @tab.ConnectedUsername.</p>
+                                                    }
+                                                    else
+                                                    {
+                                                        <p class="terminal-connection-feedback" role="status">Disconnected. Choose an identity and press Connect.</p>
+                                                    }
+                                                    <p class="terminal-connection-help">Saved connections are login details kept by LMS. Removing one does not delete the Linux account on the host or end the current terminal session.</p>
+                                                    @if (!string.IsNullOrWhiteSpace(connectionProfileNotice))
+                                                    {
+                                                        <div class="callout @connectionProfileNoticeTone terminal-connection-notice" role="status">@connectionProfileNotice</div>
+                                                    }
 
                                                 <div class="terminal-inline-grid">
                                                     <UiSelectField TValue="string"
@@ -231,20 +250,20 @@
                                                     </details>
 
                                                     <div class="connection-user-editor-actions">
-                                                        <UiCommandButton Label="Delete"
+                                                        <UiCommandButton Label="@GetRemoveConnectionLabel(tab)"
                                                                          Glyph="UiIconGlyph.Delete"
                                                                          Variant="UiButtonVariant.Ghost"
                                                                          HideIcon="true"
-                                                                         Class="connection-user-editor-action"
+                                                                         Class="@GetRemoveConnectionClass(tab)"
                                                                          Disabled="@(!CanDeleteSelectedConnectionProfile(tab))"
-                                                                         OnClick="@(() => DeleteConnectionProfileAsync(tab))" />
+                                                                         OnClick="@(() => RequestRemoveConnectionProfileAsync(tab))" />
                                                         <UiCommandButton Label="@(tab.IsSessionActive ? "Reconnect" : "Connect")"
                                                                          Glyph="UiIconGlyph.Connect"
                                                                          Variant="UiButtonVariant.Ghost"
                                                                          HideIcon="true"
                                                                          Class="connection-user-editor-action"
                                                                          Disabled="@(tab != ActiveTab || tab.IsBusy)"
-                                                                         OnClick="@(() => ConnectTabAsync(tab))" />
+                                                                         OnClick="@(() => ConnectFromConnectionPanelAsync(tab))" />
                                                         <UiCommandButton Label="Save user"
                                                                          Glyph="UiIconGlyph.Save"
                                                                          Variant="UiButtonVariant.PrimaryMuted"
@@ -254,12 +273,21 @@
                                                                          OnClick="@(() => SaveConnectionProfileAsync(tab))" />
                                                     </div>
                                                 </div>
-                                            </section>
+                                                <p class="terminal-connection-help">Only saved connections can be removed here. Host default and My Linux user are not saved entries.</p>
+                                                </div>
+                                                </ChildContent>
+                                            </UiModal>
                                         }
 
                                         @if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
                                         {
-                                            <div class="callout error terminal-callout">@tab.ErrorMessage</div>
+                                            <div class="callout error terminal-callout terminal-connection-banner" role="alert">
+                                                <span>@tab.ErrorMessage</span>
+                                                <UiCommandButton Label="Connection settings"
+                                                                 Glyph="UiIconGlyph.Connection"
+                                                                 Variant="UiButtonVariant.Ghost"
+                                                                 OnClick="@(() => OpenConnectionPanelAsync(tab))" />
+                                            </div>
                                         }
 
                                         @if (!tab.IsDetached)
@@ -382,6 +410,9 @@
     private string? pendingAiSelectionText;
     private Guid? userId;
     private string currentLinuxUsername = string.Empty;
+    private Guid? pendingRemovalProfileId;
+    private string connectionProfileNotice = string.Empty;
+    private string connectionProfileNoticeTone = "success";
 
     private TerminalWorkspaceState? TerminalWorkspace => terminalWorkspace;
 
@@ -657,11 +688,39 @@
         await InvokeAsync(StateHasChanged);
     }
 
+    private async Task ConnectFromConnectionPanelAsync(TerminalTabState tab)
+    {
+        if (tab != ActiveTab || tab.IsBusy)
+        {
+            return;
+        }
+
+        tab.ErrorMessage = string.Empty;
+        await InvokeAsync(StateHasChanged);
+        if (tab.IsSessionActive)
+        {
+            await DisconnectTabAsync(tab);
+        }
+
+        await ConnectTabAsync(tab);
+        if (!tab.IsSessionActive)
+        {
+            tab.ConnectionOptionsOpen = true;
+            if (string.IsNullOrWhiteSpace(tab.ErrorMessage))
+            {
+                tab.ErrorMessage = "The connection did not start. Check the selected user and host, then try again.";
+            }
+
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
     private async Task ConnectAsProfileAsync(TerminalTabState tab, string connectionProfileKey)
     {
         await SelectConnectionProfileAsync(tab, connectionProfileKey);
         if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
         {
+            await OpenConnectionPanelAsync(tab);
             return;
         }
 
@@ -674,6 +733,10 @@
         }
 
         await ConnectTabAsync(tab);
+        if (!tab.IsSessionActive)
+        {
+            await OpenConnectionPanelAsync(tab);
+        }
     }
 
     private async Task AddConnectionUserAsync(TerminalTabState tab)
@@ -1013,7 +1076,8 @@
     public async Task OnTerminalData(string data)
     {
         var targetTab = RenderedTab;
-        if (targetTab is null || !targetTab.ConnectionDesired || string.IsNullOrEmpty(data))
+        if (targetTab is not { ConnectionDesired: true, SessionId: not null, IsSessionActive: true } ||
+            string.IsNullOrEmpty(data))
         {
             return;
         }
@@ -1609,6 +1673,8 @@
 
     private async Task SelectConnectionProfileAsync(TerminalTabState tab, string value)
     {
+        pendingRemovalProfileId = null;
+        connectionProfileNotice = string.Empty;
         tab.ConnectionProfileKey = value;
         tab.ErrorMessage = string.Empty;
 
@@ -1740,10 +1806,52 @@
             return;
         }
 
-        await CredentialProfileService.DeleteAsync(userId.Value, tab.HostId, profileId);
-        await LoadCredentialProfilesAsync();
-        await SelectConnectionProfileAsync(tab, ConnectionProfileSelectionKeys.HostDefault);
+        try
+        {
+            await CredentialProfileService.DeleteAsync(userId.Value, tab.HostId, profileId);
+            await LoadCredentialProfilesAsync();
+            await SelectConnectionProfileAsync(tab, ConnectionProfileSelectionKeys.HostDefault);
+            connectionProfileNotice = "Saved connection and its stored credentials removed from LMS. The Linux account and current terminal session were not changed.";
+            connectionProfileNoticeTone = "success";
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = $"Could not remove saved connection: {exception.Message}";
+        }
     }
+
+    private async Task RequestRemoveConnectionProfileAsync(TerminalTabState tab)
+    {
+        if (!CanDeleteSelectedConnectionProfile(tab) ||
+            !ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId))
+        {
+            return;
+        }
+
+        if (pendingRemovalProfileId != profileId)
+        {
+            pendingRemovalProfileId = profileId;
+            connectionProfileNotice = "Click again to remove this saved connection and its stored credentials from LMS. The Linux account will remain.";
+            connectionProfileNoticeTone = "warning";
+            return;
+        }
+
+        pendingRemovalProfileId = null;
+        connectionProfileNotice = string.Empty;
+        await DeleteConnectionProfileAsync(tab);
+    }
+
+    private string GetRemoveConnectionLabel(TerminalTabState tab) =>
+        ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId) &&
+        pendingRemovalProfileId == profileId
+            ? "Click to confirm removal"
+            : "Remove saved connection";
+
+    private string GetRemoveConnectionClass(TerminalTabState tab) =>
+        ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId) &&
+        pendingRemovalProfileId == profileId
+            ? "connection-user-editor-action terminal-remove-profile-action is-armed"
+            : "connection-user-editor-action terminal-remove-profile-action";
 
     private bool CanDeleteSelectedConnectionProfile(TerminalTabState tab) =>
         userId.HasValue && ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out _);
