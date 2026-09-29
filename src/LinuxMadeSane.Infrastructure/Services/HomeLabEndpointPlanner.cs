@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text.RegularExpressions;
+using System.Net;
 using LinuxMadeSane.Application.Contracts.HomeLab;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.HomeLab;
@@ -58,6 +59,12 @@ internal static partial class HomeLabEndpointPlanner
     }
 
     public static string ResolveInternalHost(HomeLabInstallationEntity installation) => installation.AppId;
+
+    public static string ResolveInternalHost(HomeLabInstallationEntity source, HomeLabInstallationEntity target) =>
+        source.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
+        source.NetworkMode.Equals(target.NetworkMode, StringComparison.OrdinalIgnoreCase)
+            ? IPAddress.Loopback.ToString()
+            : ResolveInternalHost(target);
 
     public static int ResolveInternalPort(HomeLabPortManifest port, HomeLabInstallationEntity installation) =>
         HomeLabContainerPortPlan.Resolve(

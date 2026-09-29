@@ -72,7 +72,9 @@ internal static class HomeLabCatalogFileStore
                 },
                 ref recipesCache);
 
-            return MergeById(builtIns, custom, static recipe => recipe.Id);
+            return MergeById(builtIns, custom, static recipe => recipe.Id)
+                .Select(EnforceRequiredVpnRouting)
+                .ToArray();
         }
     }
 
@@ -89,7 +91,13 @@ internal static class HomeLabCatalogFileStore
                 static recipe => recipe,
                 ref promptRecipesCache);
             var custom = definitions.Select(converter).OfType<HomeLabPromptRecipe>().ToArray();
-            return MergeById(builtIns, custom, static recipe => recipe.Id);
+            var builtInById = builtIns.ToDictionary(recipe => recipe.Id, StringComparer.OrdinalIgnoreCase);
+            return MergeById(builtIns, custom, static recipe => recipe.Id)
+                .Select(recipe => builtInById.TryGetValue(recipe.Id, out var builtIn) &&
+                                  builtIn.RequiresVpnGateway && !recipe.RequiresVpnGateway
+                    ? builtIn
+                    : recipe)
+                .ToArray();
         }
     }
 
@@ -204,6 +212,41 @@ internal static class HomeLabCatalogFileStore
                 StartPeriodSeconds: 30),
             Exposure = exposure,
             SupportsVpnGateway = true
+        };
+    }
+
+    private static HomeLabRecipeManifest EnforceRequiredVpnRouting(HomeLabRecipeManifest recipe)
+    {
+        var requiredApps = recipe.AppIds
+            .Where(appId => HomeLabCatalog.GetApp(appId).RequiresVpnGateway)
+            .ToArray();
+        if (requiredApps.Length == 0)
+        {
+            return recipe;
+        }
+
+        var relationships = recipe.Relationships.ToList();
+        foreach (var appId in requiredApps)
+        {
+            var index = relationships.FindIndex(item => item.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                relationships.Add(new HomeLabRecipeRelationship(appId, RouteVia: "vpn-gateway"));
+            }
+            else
+            {
+                relationships[index] = relationships[index] with { RouteVia = "vpn-gateway" };
+            }
+        }
+
+        var appIds = recipe.AppIds.Contains("vpn-gateway", StringComparer.OrdinalIgnoreCase)
+            ? recipe.AppIds
+            : new[] { "vpn-gateway" }.Concat(recipe.AppIds).ToArray();
+        return recipe with
+        {
+            AppIds = appIds,
+            Relationships = relationships,
+            RequiresVpnGateway = true
         };
     }
 

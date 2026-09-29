@@ -1176,7 +1176,65 @@ public sealed class HomeLabService(
             newNetworkMode = $"container:{selectedGateway.ContainerName}";
         }
 
-        if (installation.NetworkMode.Equals(newNetworkMode, StringComparison.OrdinalIgnoreCase))
+        HomeLabInstallationEntity? routedDependency = null;
+        string? previousDependencyNetworkMode = null;
+        if (app.RequiresVpnGateway && app.Dependencies.Count > 0)
+        {
+            var dependencies = await dbContext.HomeLabInstallations
+                .Where(item => item.DeploymentId == installation.DeploymentId)
+                .ToListAsync(cancellationToken);
+            dependencies = dependencies
+                .Where(item => app.Dependencies.Contains(item.AppId, StringComparer.OrdinalIgnoreCase) &&
+                               HomeLabCatalog.GetApp(item.AppId).IsSystemDependency)
+                .ToList();
+            if (useVpnGateway && dependencies.Count != app.Dependencies.Count)
+            {
+                return Failure("Network route change failed.",
+                    $"{app.Name} is missing a managed dependency in its deployment.", output, HomeLabHealthState.Blocked);
+            }
+            foreach (var dependency in dependencies)
+            {
+                if (dependency.NetworkMode.Equals(newNetworkMode, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (dependencies.Count > 1)
+                {
+                    return Failure("Network route change failed.",
+                        $"{app.Name} has multiple dependencies that need a coordinated network move.", output, HomeLabHealthState.Blocked);
+                }
+                routedDependency = dependency;
+                previousDependencyNetworkMode = dependency.NetworkMode;
+            }
+        }
+
+        if (routedDependency is not null)
+        {
+            var dependencyApp = HomeLabCatalog.GetApp(routedDependency.AppId);
+            var removeDependency = await RunDockerAsync(
+                ["rm", "--force", routedDependency.ContainerName],
+                $"Move {dependencyApp.Name} into the selected network namespace", cancellationToken);
+            AppendOutput(output, removeDependency);
+            if (removeDependency.ExitCode != 0 && !ContainsNoSuchContainer(removeDependency))
+            {
+                return Failure("Network route change failed.", NormalizeFailure(removeDependency), output, HomeLabHealthState.Failed);
+            }
+            routedDependency.NetworkMode = newNetworkMode;
+            var dependencyRun = await RunContainerAsync(routedDependency, dependencyApp,
+                DeserializeBindings(routedDependency.VolumeMappingsJson),
+                DeserializeDictionary(routedDependency.ConfigurationJson),
+                DeserializeDictionary(routedDependency.SecretConfigurationJson), output, cancellationToken);
+            if (!dependencyRun.Succeeded)
+            {
+                await RestoreNetworkRouteDependencyAsync(routedDependency, previousDependencyNetworkMode!, output, cancellationToken);
+                return Failure("Network route change failed.",
+                    $"{dependencyApp.Name} could not move to the selected network namespace.", output, HomeLabHealthState.Failed);
+            }
+            routedDependency.PortMappingsJson = JsonSerializer.Serialize(dependencyRun.PortBindings, JsonOptions);
+            await RefreshHealthInternalAsync(routedDependency, cancellationToken);
+        }
+
+        if (installation.NetworkMode.Equals(newNetworkMode, StringComparison.OrdinalIgnoreCase) && routedDependency is null)
         {
             PersistNetworkRouteConfiguration(installation, useVpnGateway, selectedGateway?.Id);
             await RefreshHealthInternalAsync(installation, cancellationToken);
@@ -1199,6 +1257,10 @@ public sealed class HomeLabService(
         AppendOutput(output, remove);
         if (remove.ExitCode != 0 && !ContainsNoSuchContainer(remove))
         {
+            if (routedDependency is not null)
+            {
+                await RestoreNetworkRouteDependencyAsync(routedDependency, previousDependencyNetworkMode!, output, cancellationToken);
+            }
             return Failure("Network route change failed.", NormalizeFailure(remove), output, HomeLabHealthState.Failed);
         }
 
@@ -1216,6 +1278,10 @@ public sealed class HomeLabService(
         {
             installation.NetworkMode = oldNetworkMode;
             installation.ConfigurationJson = oldConfigurationJson;
+            if (routedDependency is not null)
+            {
+                await RestoreNetworkRouteDependencyAsync(routedDependency, previousDependencyNetworkMode!, output, cancellationToken);
+            }
             var rollback = await RunContainerAsync(
                 installation,
                 app,
@@ -1246,6 +1312,34 @@ public sealed class HomeLabService(
                 : $"{app.Name} now uses a direct route without VPN.",
             output,
             ToHealth(installation.HealthState));
+    }
+
+    private async Task RestoreNetworkRouteDependencyAsync(
+        HomeLabInstallationEntity dependency,
+        string previousNetworkMode,
+        List<string> output,
+        CancellationToken cancellationToken)
+    {
+        var remove = await RunDockerAsync(["rm", "--force", dependency.ContainerName],
+            $"Restore {dependency.DisplayName} network route", cancellationToken);
+        AppendOutput(output, remove);
+        dependency.NetworkMode = previousNetworkMode;
+        var app = HomeLabCatalog.GetApp(dependency.AppId);
+        var restored = await RunContainerAsync(dependency, app,
+            DeserializeBindings(dependency.VolumeMappingsJson),
+            DeserializeDictionary(dependency.ConfigurationJson),
+            DeserializeDictionary(dependency.SecretConfigurationJson), output, cancellationToken);
+        if (restored.Succeeded)
+        {
+            dependency.PortMappingsJson = JsonSerializer.Serialize(restored.PortBindings, JsonOptions);
+            await RefreshHealthInternalAsync(dependency, cancellationToken);
+        }
+        else
+        {
+            dependency.HealthState = (int)HomeLabHealthState.Failed;
+            dependency.HealthDetail = "The previous network route could not be restored.";
+        }
+        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<HomeLabOperationResult> SetListenAddressAsync(
@@ -1815,6 +1909,20 @@ public sealed class HomeLabService(
                             $"The selected VPN Gateway is {gatewayHealth.ToString().ToLowerInvariant()}. Start it or wait for it to finish starting before repairing this app.",
                             output,
                             HomeLabHealthState.Blocked);
+                    }
+                }
+
+                if (reuseExistingImage && app.RequiresVpnGateway && app.Dependencies.Count > 0)
+                {
+                    var managedDependencies = await dbContext.HomeLabInstallations
+                        .Where(item => item.DeploymentId == installation.DeploymentId)
+                        .ToListAsync(cancellationToken);
+                    if (managedDependencies.Any(item =>
+                            app.Dependencies.Contains(item.AppId, StringComparer.OrdinalIgnoreCase) &&
+                            HomeLabCatalog.GetApp(item.AppId).IsSystemDependency &&
+                            !item.NetworkMode.Equals(installation.NetworkMode, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return await SetNetworkRouteAsync(installation.Id, true, gateway.Id, cancellationToken);
                     }
                 }
 
@@ -4811,7 +4919,9 @@ public sealed class HomeLabService(
                   item.AppId.Equals(serviceId, StringComparison.OrdinalIgnoreCase))
               ?? dbContext.HomeLabInstallations.Local.FirstOrDefault(item =>
                   item.DeploymentId == current.DeploymentId &&
-                  item.AppId.Equals(serviceId, StringComparison.OrdinalIgnoreCase));
+                  item.AppId.Equals(serviceId, StringComparison.OrdinalIgnoreCase))
+              ?? dbContext.HomeLabInstallations.FirstOrDefault(item =>
+                  item.DeploymentId == current.DeploymentId && item.AppId == serviceId);
         if (installation is null)
         {
             return null;
@@ -4828,7 +4938,7 @@ public sealed class HomeLabService(
                                      installation.NetworkMode.Equals(current.NetworkMode, StringComparison.OrdinalIgnoreCase);
         if (sharesNetworkNamespace && ResolvePrimaryPort(app) is { } sharedPort)
         {
-            var sharedHost = "127.0.0.1";
+            var sharedHost = HomeLabEndpointPlanner.ResolveInternalHost(current, installation);
             var sharedPortNumber = HomeLabContainerPortPlan.Resolve(sharedPort, true);
             var sharedScheme = ResolveApplicationScheme(sharedPort);
             return new HomeLabServiceEndpoint(
