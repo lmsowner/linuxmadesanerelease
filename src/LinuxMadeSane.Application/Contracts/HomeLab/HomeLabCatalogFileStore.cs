@@ -51,7 +51,11 @@ internal static class HomeLabCatalogFileStore
                 NormalizeApp,
                 ref appsCache);
 
-            return MergeById(builtIns, custom, static app => app.Id);
+            var builtInManagers = builtIns.Where(app => app.IsDockerManager)
+                .Select(app => app.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return MergeById(builtIns, custom, static app => app.Id)
+                .Select(app => builtInManagers.Contains(app.Id) ? app with { IsDockerManager = true } : app)
+                .ToArray();
         }
     }
 
@@ -94,7 +98,8 @@ internal static class HomeLabCatalogFileStore
             var builtInById = builtIns.ToDictionary(recipe => recipe.Id, StringComparer.OrdinalIgnoreCase);
             return MergeById(builtIns, custom, static recipe => recipe.Id)
                 .Select(recipe => builtInById.TryGetValue(recipe.Id, out var builtIn) &&
-                                  builtIn.RequiresVpnGateway && !recipe.RequiresVpnGateway
+                                  (builtIn.Category.Equals("Docker Management", StringComparison.OrdinalIgnoreCase) ||
+                                   builtIn.RequiresVpnGateway && !recipe.RequiresVpnGateway)
                     ? builtIn
                     : recipe)
                 .ToArray();

@@ -64,7 +64,8 @@ public sealed class HomeLabService(
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
         installationEntities = (await ReconcileMissingInstallationsAsync(installationEntities, cancellationToken)).ToList();
-        await RemoveHomeLabSubpathRoutesAsync(installationEntities, cancellationToken);
+        await RemoveHomeLabSubpathRoutesAsync(
+            installationEntities.Where(item => !IsExternallyManaged(item)).ToArray(), cancellationToken);
         var deploymentEntities = await dbContext.HomeLabDeployments
             .AsNoTracking()
             .OrderBy(item => item.Name)
@@ -173,7 +174,8 @@ public sealed class HomeLabService(
             .ToListAsync(cancellationToken);
         entities = (await ReconcileMissingInstallationsAsync(entities, cancellationToken)).ToList();
 
-        await RemoveHomeLabSubpathRoutesAsync(entities, cancellationToken);
+        await RemoveHomeLabSubpathRoutesAsync(
+            entities.Where(item => !IsExternallyManaged(item)).ToArray(), cancellationToken);
 
         try
         {
@@ -186,6 +188,12 @@ public sealed class HomeLabService(
 
         foreach (var entity in entities)
         {
+            if (IsExternallyManaged(entity))
+            {
+                await RefreshHealthInternalAsync(entity, cancellationToken);
+                continue;
+            }
+
             try
             {
                 var app = HomeLabCatalog.GetApp(entity.AppId);
@@ -862,6 +870,12 @@ public sealed class HomeLabService(
         var installations = await dbContext.HomeLabInstallations
             .OrderBy(item => item.DisplayName)
             .ToListAsync(cancellationToken);
+        if (installations.Any(item => HomeLabCatalog.GetApp(item.AppId).IsDockerManager && IsExternallyManaged(item)))
+        {
+            return Failure("Docker manager owns Home Lab.",
+                "Apply storage mounts in your Docker manager; LMS will not recreate containers after handoff.",
+                [], HomeLabHealthState.Blocked);
+        }
         if (installations.Count == 0)
         {
             return Success(
@@ -1568,7 +1582,8 @@ public sealed class HomeLabService(
         }
 
         var portForwarding = app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase)
-            ? await ResolveQbittorrentPortForwardingAsync(gatewayContainer, installation.ContainerName, gatewayInspect, cancellationToken)
+            ? await ResolveQbittorrentPortForwardingAsync(gatewayContainer, installation.ContainerName, gatewayInspect,
+                !IsExternallyManaged(installation), cancellationToken)
             : (Status: (string?)null, Port: (int?)null, Detail: (string?)null);
         var status = portForwarding.Status is "ACTIVE" ? "SECURED" :
             portForwarding.Status is null ? "SECURED" : "SECURED / FIREWALLED";
@@ -1595,6 +1610,7 @@ public sealed class HomeLabService(
         string gatewayContainer,
         string qbittorrentContainer,
         JsonObject gatewayInspect,
+        bool synchronize,
         CancellationToken cancellationToken)
     {
         var environment = gatewayInspect["Config"]?["Env"]?.AsArray()
@@ -1636,6 +1652,12 @@ public sealed class HomeLabService(
 
         if (!HomeLabQbittorrentPortForwarding.Matches(settings, forwardedPort))
         {
+            if (!synchronize)
+            {
+                return ("MISMATCH", forwardedPort,
+                    "Gluetun opened a VPN port, but qBittorrent's listening port differs. Change it in your Docker manager.");
+            }
+
             var synchronization = await RunDockerAsync(
                 [
                     "exec", qbittorrentContainer,
@@ -1708,6 +1730,31 @@ public sealed class HomeLabService(
         string composeYaml,
         CancellationToken cancellationToken = default) =>
         SaveDockerManagementDraftCoreAsync(installationId, composeYaml, handOff: true, cancellationToken);
+
+    public async Task<int> HandOffHomeLabToDockerManagerAsync(CancellationToken cancellationToken = default)
+    {
+        var installations = await dbContext.HomeLabInstallations.ToListAsync(cancellationToken);
+        if (!installations.Any(item => HomeLabCatalog.GetApp(item.AppId).IsDockerManager))
+        {
+            throw new InvalidOperationException("Install a supported Docker manager before handing Home Lab over.");
+        }
+
+        foreach (var installation in installations)
+        {
+            var configuration = DeserializeDictionary(installation.ConfigurationJson);
+            if (!configuration.ContainsKey(ComposeDraftKey))
+            {
+                configuration[ComposeDraftKey] = BuildDockerComposeDraft(
+                    installation, HomeLabCatalog.GetApp(installation.AppId), configuration);
+            }
+            configuration[ManagementOwnerKey] = ExternalManagementOwner;
+            installation.ConfigurationJson = JsonSerializer.Serialize(configuration, JsonOptions);
+            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return installations.Count;
+    }
 
     private async Task<HomeLabDockerManagementDraft> SaveDockerManagementDraftCoreAsync(
         Guid installationId,
@@ -3910,6 +3957,16 @@ public sealed class HomeLabService(
         IReadOnlySet<string>? selectedAppIds,
         CancellationToken cancellationToken)
     {
+        var currentInstallations = await dbContext.HomeLabInstallations.ToListAsync(cancellationToken);
+        if (currentInstallations.Any(item => HomeLabCatalog.GetApp(item.AppId).IsDockerManager && IsExternallyManaged(item)))
+        {
+            return Failure(
+                "Docker manager owns Home Lab.",
+                "LMS no longer installs or recreates Home Lab containers after the Docker manager handoff. Deploy new containers in your manager.",
+                [],
+                HomeLabHealthState.Blocked);
+        }
+
         var standaloneApp = recipeId is null ? HomeLabCatalog.GetApp(id) : null;
         var standaloneUsesVpn = recipeId is null && IsVpnRouteSelected(configuration);
         if (standaloneApp?.RequiresVpnGateway == true && !standaloneUsesVpn)
@@ -4776,7 +4833,7 @@ public sealed class HomeLabService(
                 if (!PortBindingsMatch(savedBindings, currentBindings))
                 {
                     installation.PortMappingsJson = JsonSerializer.Serialize(currentBindings, JsonOptions);
-                    if (installation.CaddyRouteId.HasValue)
+                    if (installation.CaddyRouteId.HasValue && !IsExternallyManaged(installation))
                     {
                         await UpdateCaddyAccessAsync(installation, app, currentBindings, cancellationToken);
                     }
@@ -5531,6 +5588,14 @@ public sealed class HomeLabService(
                 throw new InvalidOperationException($"Enter {field.Label}.");
             }
             secretReferences[field.Id] = await secretStore.StoreSecretAsync(item.Value, $"Home Lab {app.Name}: {field.Label}", cancellationToken);
+        }
+
+        if (app.Id.Equals("arcane", StringComparison.OrdinalIgnoreCase) &&
+            !secretReferences.ContainsKey("ENCRYPTION_KEY"))
+        {
+            var key = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+            secretReferences["ENCRYPTION_KEY"] = await secretStore.StoreSecretAsync(
+                key, "Home Lab Arcane: encryption key", cancellationToken);
         }
 
         return new PreparedConfiguration(values, secretReferences);

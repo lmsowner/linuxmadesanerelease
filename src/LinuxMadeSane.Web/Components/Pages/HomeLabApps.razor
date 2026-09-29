@@ -687,16 +687,19 @@
 
                 <section class="surface-subcard home-lab-docker-heading">
                     <div>
-                        <p class="eyebrow">Managed Docker</p>
+                        <p class="eyebrow">@(IsDockerManagerMode ? "Docker manager ownership" : "Managed Docker")</p>
                         <h2>Installed containers</h2>
-                        <p class="meta-text">Use AI Help on a container to inspect its health, LMS Caddy route, dependencies, and Docker networking, then approve a repair if one is needed.</p>
+                        <p class="meta-text">@(IsDockerManagerMode ? "Your Docker manager owns every HomeLab container. LMS shows status and saved settings but no longer installs or changes containers." : "Use AI Help on a container to inspect its health, LMS Caddy route, dependencies, and Docker networking, then approve a repair if one is needed.")</p>
                     </div>
+                    @if (!IsDockerManagerMode)
+                    {
                     <UiCommandButton Label="Add VPN Gateway"
                                      Title="Install another independently configured VPN gateway"
                                      Glyph="UiIconGlyph.Plus"
                                      Variant="UiButtonVariant.PrimaryMuted"
                                      Disabled="@busy"
                                      OnClick='() => InstallAsync(GetApp("vpn-gateway"))' />
+                    }
                 </section>
 
                 <div class="surface-card home-lab-app-list">
@@ -733,7 +736,7 @@
                             @if (hasRepairCandidates || group.Installations.Count > 0)
                             {
                                 <div class="home-lab-installation-group-actions">
-                                    @if (group.RecipeRunId.HasValue)
+                                    @if (group.RecipeRunId.HasValue && !IsDockerManagerMode)
                                     {
                                         <UiCommandButton Label="Add app"
                                                          Title="Add another app to this existing recipe group"
@@ -862,13 +865,18 @@
                     }
                 </div>
                 <section class="surface-subcard home-lab-docker-managers">
-                    <h2>Want full control of Docker?</h2>
-                    <p>Use a dedicated manager for containers, images, networks, volumes and Compose stacks. LMS will still show the Home Lab containers it installed.</p>
-                    <p><a href="https://www.portainer.io/" target="_blank" rel="noopener noreferrer">Portainer</a> manages Docker broadly; <a href="https://getarcane.app/" target="_blank" rel="noopener noreferrer">Arcane</a> and <a href="https://github.com/louislam/dockge" target="_blank" rel="noopener noreferrer">Dockge</a> offer Compose-focused workflows.</p>
-                    <UiCommandButton Label="Install Portainer with a HomeLab Recipe"
-                                     Glyph="UiIconGlyph.Plus"
-                                     Variant="UiButtonVariant.Action"
-                                     OnClick="OpenPortainerRecipe" />
+                    <h2>Choose a Docker manager</h2>
+                    <p>Pick one manager for full control. Once its recipe succeeds, it owns all HomeLab containers, including itself. LMS stops installing, starting, stopping, repairing, updating, removing and recreating them. You handle their configuration and Compose stacks in the manager.</p>
+                    <p><a href="https://docs.portainer.io/start/install-ce/server/docker/linux" target="_blank" rel="noopener noreferrer">Portainer</a> covers Docker broadly. <a href="https://getarcane.app/docs/get-started/installation" target="_blank" rel="noopener noreferrer">Arcane</a> manages Docker and Compose projects. <a href="https://github.com/louislam/dockge" target="_blank" rel="noopener noreferrer">Dockge</a> focuses on Compose stacks. <a href="https://komo.do/docs/setup" target="_blank" rel="noopener noreferrer">Komodo</a> and <a href="https://dev.yacht.sh/docs/Installation/Getting_Started" target="_blank" rel="noopener noreferrer">Yacht</a> are other options you can install yourself.</p>
+                    @if (!IsDockerManagerMode)
+                    {
+                        <div class="home-lab-action-row">
+                            @foreach (var managerRecipe in promptRecipes.Where(IsDockerManagerRecipe))
+                            {
+                                <UiCommandButton Label="@managerRecipe.Name" Glyph="UiIconGlyph.Plus" Variant="UiButtonVariant.Action" OnClick="() => OpenDockerManagerRecipe(managerRecipe.Id)" />
+                            }
+                        </div>
+                    }
                 </section>
             </TabPage>
 
@@ -1002,6 +1010,13 @@
                             {
                                 <p class="meta-text">This recipe needs choices from you before LMS can safely deploy it. The AI will identify supported parts and will not install a misleading partial stack.</p>
                             }
+                            @if (IsDockerManagerRecipe(selectedRecipe))
+                            {
+                                <label class="home-lab-manager-handoff-consent">
+                                    <input type="checkbox" @bind="dockerManagerHandoffAccepted" />
+                                    <span>I will manage all HomeLab containers in this Docker manager. After it is installed and verified, LMS will hand over every container, including the manager, and stop all container lifecycle changes and new installs.</span>
+                                </label>
+                            }
                             <label for="home-lab-recipe-prompt">Base recipe prompt</label>
                             <textarea id="home-lab-recipe-prompt"
                                       class="ui-control-textarea"
@@ -1017,7 +1032,7 @@
                                 <UiCommandButton Label="Go"
                                                  Glyph="UiIconGlyph.Ai"
                                                  Variant="UiButtonVariant.PrimaryMuted"
-                                                 Disabled="@(startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft) || string.IsNullOrWhiteSpace(selectedPromptListenAddress) || string.IsNullOrWhiteSpace(selectedPromptOutboundRoute))"
+                                                 Disabled="@(IsDockerManagerMode || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft) || string.IsNullOrWhiteSpace(selectedPromptListenAddress) || string.IsNullOrWhiteSpace(selectedPromptOutboundRoute) || (IsDockerManagerRecipe(selectedRecipe) && !dockerManagerHandoffAccepted))"
                                                  OnClick="StartPromptRecipeAsync" />
                             </div>
                         </div>
@@ -1037,7 +1052,7 @@
                             <UiCommandButton Label="Go"
                                              Glyph="UiIconGlyph.Ai"
                                              Variant="UiButtonVariant.PrimaryMuted"
-                                             Disabled="@(busy || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(customPrompt))"
+                                                         Disabled="@(IsDockerManagerMode || busy || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(customPrompt))"
                                              OnClick="StartCustomPromptAsync" />
                         </div>
                     }
@@ -1134,6 +1149,7 @@
     private IReadOnlyList<HomeLabPromptRecipe> promptRecipes = HomeLabPromptRecipeCatalog.All;
     private HomeLabPromptRecipe? customizingPromptRecipe;
     private string recipePromptDraft = string.Empty;
+    private bool dockerManagerHandoffAccepted;
     private Guid? selectedPromptVpnGatewayId;
     private string selectedPromptListenAddress = string.Empty;
     private string selectedPromptOutboundRoute = string.Empty;
@@ -1189,6 +1205,13 @@
             .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
             .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
         ?? Enumerable.Empty<HomeLabAppInstallation>();
+
+    private bool IsDockerManagerMode => workspace?.Installations.Any(item =>
+        item.IsExternallyManaged && HomeLabCatalog.GetApp(item.AppId).IsDockerManager) == true;
+
+    private static bool IsDockerManagerRecipe(HomeLabPromptRecipe recipe) =>
+        recipe.AppIds.Count == 1 && HomeLabCatalog.Apps.Any(app =>
+            app.Id.Equals(recipe.AppIds[0], StringComparison.OrdinalIgnoreCase) && app.IsDockerManager);
 
     private IReadOnlyList<EdgeGatewayCloudflareDomainOption> AvailableExternalDomains =>
         edgeGatewayDashboard?.Cloudflare.Domains
@@ -1790,6 +1813,7 @@
 
     private void SelectPromptRecipeCategory(ChangeEventArgs eventArgs)
     {
+        dockerManagerHandoffAccepted = false;
         selectedRecipeCategory = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
         selectedPromptRecipeId = selectedRecipeCategory.Equals("custom", StringComparison.OrdinalIgnoreCase)
             ? "custom"
@@ -1801,15 +1825,16 @@
         selectedPromptOutboundRoute = string.Empty;
     }
 
-    private void OpenPortainerRecipe()
+    private void OpenDockerManagerRecipe(string recipeId)
     {
         selectedRecipeCategory = "Docker Management";
-        SelectPromptRecipe(new ChangeEventArgs { Value = "portainer-manager" });
+        SelectPromptRecipe(new ChangeEventArgs { Value = recipeId });
         activeTab = "prompts";
     }
 
     private void SelectPromptRecipe(ChangeEventArgs eventArgs)
     {
+        dockerManagerHandoffAccepted = false;
         selectedPromptRecipeId = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
         selectedPromptVpnGatewayId = null;
         selectedPromptListenAddress = string.Empty;
@@ -1830,6 +1855,7 @@
 
     private IReadOnlyList<HomeLabAppManifest> AppsAvailableForGroup(HomeLabInstallationGroup group) =>
         HomeLabCatalog.VisibleApps
+            .Where(app => !app.IsDockerManager)
             .Where(app => !group.Installations.Any(installation => installation.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase)))
             .OrderBy(app => app.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -1914,6 +1940,12 @@
     {
         if (customizingPromptRecipe is not { } promptRecipe || string.IsNullOrWhiteSpace(recipePromptDraft))
         {
+            return;
+        }
+
+        if (IsDockerManagerMode || IsDockerManagerRecipe(promptRecipe) && !dockerManagerHandoffAccepted)
+        {
+            SetMessage("Confirm the Docker manager handoff before starting this recipe.", true);
             return;
         }
 

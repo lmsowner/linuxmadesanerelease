@@ -33,6 +33,8 @@ public interface IHomeLabService
         throw new NotSupportedException("Docker management handoff is unavailable.");
     Task<HomeLabDockerManagementDraft> HandOffToDockerManagerAsync(Guid installationId, string composeYaml, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("Docker management handoff is unavailable.");
+    Task<int> HandOffHomeLabToDockerManagerAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Docker management handoff is unavailable.");
     Task<HomeLabNetworkSecurity> GetNetworkSecurityAsync(Guid installationId, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> ExecuteAsync(Guid installationId, HomeLabLifecycleAction action, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> ResetCredentialsAsync(Guid installationId, CancellationToken cancellationToken = default);

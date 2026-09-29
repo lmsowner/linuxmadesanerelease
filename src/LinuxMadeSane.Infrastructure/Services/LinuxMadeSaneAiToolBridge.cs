@@ -990,6 +990,14 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 cancellationToken);
         }
 
+        if (succeeded && targetInstallations.Count == recipe.AppIds.Count &&
+            recipe.AppIds.Count == 1 &&
+            HomeLabCatalog.GetApp(recipe.AppIds[0]).IsDockerManager)
+        {
+            var handedOff = await service.HandOffHomeLabToDockerManagerAsync(cancellationToken);
+            details.Add($"Docker manager handoff complete: {handedOff} Home Lab container(s) now belong to your manager. LMS will no longer install, start, stop, repair, update, remove, or recreate Home Lab containers.");
+        }
+
         return CreateHomeLabApplyResult(
             definition,
             context.Invocation,

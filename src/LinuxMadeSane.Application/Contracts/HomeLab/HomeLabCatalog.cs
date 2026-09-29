@@ -514,7 +514,62 @@ public static class HomeLabCatalog
             [],
             new HomeLabHealthCheckManifest(HttpPath: "/", Port: 9000),
             [],
-            Exposure: ClientExposure(HomeLabBasePathSupportMode.None))
+            Exposure: ClientExposure(HomeLabBasePathSupportMode.None),
+            IsDockerManager: true),
+        new(
+            "arcane",
+            "Arcane",
+            "Manage Docker containers, Compose projects, images, networks, and volumes in a dedicated web UI.",
+            HomeLabAppCategory.Infrastructure,
+            "docker",
+            "https://getarcane.app/",
+            "https://getarcane.app/docs/get-started/installation",
+            "ghcr.io/getarcaneapp/manager",
+            "latest",
+            "1",
+            [new("web", 3552, Primary: true)],
+            [
+                new("data", "/app/data", HomeLabStorageKind.Configuration),
+                new("docker-socket", "/var/run/docker.sock", HomeLabStorageKind.Configuration,
+                    HostPath: "/var/run/docker.sock", HostSocket: true)
+            ],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["APP_URL"] = "${endpoint:self:client}"
+            },
+            [],
+            new HomeLabHealthCheckManifest(DockerCommand: "arcane health"),
+            [new("ENCRYPTION_KEY", "Encryption key", Secret: true,
+                Help: "LMS generates a 32-byte key if left blank. Keep it when moving Arcane to your Docker manager.")],
+            Exposure: ClientExposure(HomeLabBasePathSupportMode.None),
+            IsDockerManager: true),
+        new(
+            "dockge",
+            "Dockge",
+            "Manage Compose stacks through an editor and terminal in a dedicated web UI.",
+            HomeLabAppCategory.Infrastructure,
+            "docker",
+            "https://github.com/louislam/dockge",
+            "https://github.com/louislam/dockge/blob/master/README.md",
+            "louislam/dockge",
+            "1",
+            "1",
+            [new("web", 5001, Primary: true)],
+            [
+                new("data", "/app/data", HomeLabStorageKind.Configuration),
+                new("stacks", "/opt/stacks", HomeLabStorageKind.UserData, HostPath: "/opt/stacks"),
+                new("docker-socket", "/var/run/docker.sock", HomeLabStorageKind.Configuration,
+                    HostPath: "/var/run/docker.sock", HostSocket: true)
+            ],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["DOCKGE_STACKS_DIR"] = "/opt/stacks"
+            },
+            [],
+            new HomeLabHealthCheckManifest(HttpPath: "/", Port: 5001),
+            [],
+            Exposure: ClientExposure(HomeLabBasePathSupportMode.None),
+            IsDockerManager: true)
     ];
 
     private static IReadOnlyList<HomeLabRecipeManifest> BuiltInRecipes { get; } =
