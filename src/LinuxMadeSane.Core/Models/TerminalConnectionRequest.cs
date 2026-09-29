@@ -14,5 +14,5 @@ public sealed record TerminalConnectionRequest(
     string? WorkingDirectory = null,
     Guid? OwnerId = null)
 {
-    public IProgress<string>? Progress { get; init; }
+    public Action<string>? Progress { get; init; }
 }

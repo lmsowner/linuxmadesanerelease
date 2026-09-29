@@ -37,7 +37,7 @@ public sealed class SshTerminalSessionService(
         using var setupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         setupCancellation.CancelAfter(SessionSetupTimeout);
         var setupToken = setupCancellation.Token;
-        void Report(string message) => request.Progress?.Report(message);
+        void Report(string message) => request.Progress?.Invoke(message);
         Report($"Configured SSH target: {host.Hostname.Trim()}:{host.Port} as {request.Username}. SSH.NET uses this host setting; the OS chooses the route.");
         _ = ReportDnsCandidatesAsync(host.Hostname.Trim(), request.Progress, cancellationToken);
         Report("Resolving SSH credentials");
@@ -85,12 +85,18 @@ public sealed class SshTerminalSessionService(
             Report($"SSH handshake and authentication complete ({Stopwatch.GetElapsedTime(credentialsResolved, sshConnected).TotalMilliseconds:0} ms)");
             logger.LogInformation("SSH terminal handshake completed for host {HostId} as {Username} after {ElapsedMs} ms",
                 host.Id, credentials.Username, Stopwatch.GetElapsedTime(credentialsResolved, sshConnected).TotalMilliseconds);
-            setupStage = "working directory lookup";
-            Report("Resolving the connected user's working directory");
-            var workingDirectory = await ResolveInitialWorkingDirectoryAsync(client, host, request, credentials.Username, setupToken);
+            setupStage = "working directory selection";
+            var useConnectedUserHome = ShouldUseConnectedUserHome(host, request, credentials.Username);
+            var workingDirectory = useConnectedUserHome
+                ? string.Empty
+                : string.IsNullOrWhiteSpace(request.WorkingDirectory)
+                    ? host.DefaultWorkingDirectory
+                    : request.WorkingDirectory.Trim();
             var workingDirectoryResolved = Stopwatch.GetTimestamp();
-            Report($"Working directory ready: {workingDirectory} ({Stopwatch.GetElapsedTime(sshConnected, workingDirectoryResolved).TotalMilliseconds:0} ms)");
-            logger.LogInformation("SSH terminal working directory resolved for host {HostId} as {Username} after {ElapsedMs} ms",
+            Report(useConnectedUserHome
+                ? "Using the connected user's shell home directory"
+                : $"Working directory selected: {workingDirectory}");
+            logger.LogInformation("SSH terminal working directory selected for host {HostId} as {Username} after {ElapsedMs} ms",
                 host.Id, credentials.Username, Stopwatch.GetElapsedTime(sshConnected, workingDirectoryResolved).TotalMilliseconds);
             setupStage = "shell creation";
             Report("Requesting interactive SSH shell and PTY");
@@ -696,7 +702,7 @@ public sealed class SshTerminalSessionService(
 
     private static async Task ReportDnsCandidatesAsync(
         string hostname,
-        IProgress<string>? progress,
+        Action<string>? progress,
         CancellationToken cancellationToken)
     {
         if (progress is null)
@@ -708,7 +714,7 @@ public sealed class SshTerminalSessionService(
         {
             var family = literalAddress.AddressFamily == AddressFamily.InterNetworkV6 ? "IPv6" : "IPv4";
             var loopback = IPAddress.IsLoopback(literalAddress) ? " loopback" : string.Empty;
-            progress.Report($"Configured target is a literal {family}{loopback} address: {literalAddress}");
+            progress($"Configured target is a literal {family}{loopback} address: {literalAddress}");
             return;
         }
 
@@ -720,18 +726,18 @@ public sealed class SshTerminalSessionService(
             var candidates = addresses.Take(8).Select(address =>
                 $"{address} ({(address.AddressFamily == AddressFamily.InterNetworkV6 ? "IPv6" : "IPv4")}{(IPAddress.IsLoopback(address) ? ", loopback" : string.Empty)})");
             var suffix = addresses.Length > 8 ? $" (+{addresses.Length - 8} more)" : string.Empty;
-            progress.Report($"DNS candidates for {hostname}: {string.Join(", ", candidates)}{suffix}. These are not the confirmed SSH peer address.");
+            progress($"DNS candidates for {hostname}: {string.Join(", ", candidates)}{suffix}. These are not the confirmed SSH peer address.");
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            progress.Report($"DNS diagnostic lookup for {hostname} exceeded 2 seconds; SSH continues independently.");
+            progress($"DNS diagnostic lookup for {hostname} exceeded 2 seconds; SSH continues independently.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
         catch (Exception exception) when (exception is SocketException or ArgumentException)
         {
-            progress.Report($"DNS diagnostic lookup for {hostname} failed: {exception.Message}. SSH continues independently.");
+            progress($"DNS diagnostic lookup for {hostname} failed: {exception.Message}. SSH continues independently.");
         }
     }
 
@@ -739,31 +745,6 @@ public sealed class SshTerminalSessionService(
         !string.Equals(username, host.Username.Trim(), StringComparison.Ordinal) &&
         (string.IsNullOrWhiteSpace(request.WorkingDirectory) ||
          string.Equals(request.WorkingDirectory.Trim(), host.DefaultWorkingDirectory.Trim(), StringComparison.Ordinal));
-
-    private static async Task<string> ResolveInitialWorkingDirectoryAsync(
-        SshClient client,
-        ManagedHost host,
-        TerminalConnectionRequest request,
-        string username,
-        CancellationToken cancellationToken)
-    {
-        if (!ShouldUseConnectedUserHome(host, request, username))
-        {
-            return string.IsNullOrWhiteSpace(request.WorkingDirectory)
-                ? host.DefaultWorkingDirectory
-                : request.WorkingDirectory.Trim();
-        }
-
-        using var command = client.CreateCommand("printf '%s' \"$HOME\"");
-        command.CommandTimeout = ConnectTimeout;
-        await command.ExecuteAsync(cancellationToken);
-        if (command.ExitStatus != 0 || !command.Result.StartsWith('/'))
-        {
-            throw new InvalidOperationException("Could not resolve the connected Linux user's home directory.");
-        }
-
-        return command.Result;
-    }
 
     private static string BuildAiRemoteCommand(string commandText, string workingDirectory) =>
         string.IsNullOrWhiteSpace(workingDirectory)
