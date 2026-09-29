@@ -4,6 +4,7 @@
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models;
+using System.Text.Json;
 
 namespace LinuxMadeSane.Application.Services;
 
@@ -32,6 +33,7 @@ public sealed class UserDisplayPreferenceService(IUserDisplayPreferenceStore sto
             Math.Clamp(fontScalePercent, MinimumFontScalePercent, MaximumFontScalePercent),
             existing?.TerminalCopyOnSelect ?? false,
             existing?.DockerAiActionsApproved ?? false,
+            existing?.NavigationOrderJson ?? "[]",
             DateTimeOffset.UtcNow);
 
         await store.SaveAsync(preference, cancellationToken);
@@ -51,6 +53,7 @@ public sealed class UserDisplayPreferenceService(IUserDisplayPreferenceStore sto
             existing?.FontScalePercent ?? 100,
             enabled,
             existing?.DockerAiActionsApproved ?? false,
+            existing?.NavigationOrderJson ?? "[]",
             DateTimeOffset.UtcNow);
 
         await store.SaveAsync(preference, cancellationToken);
@@ -70,6 +73,35 @@ public sealed class UserDisplayPreferenceService(IUserDisplayPreferenceStore sto
             existing?.FontScalePercent ?? 100,
             existing?.TerminalCopyOnSelect ?? false,
             approved,
+            existing?.NavigationOrderJson ?? "[]",
+            DateTimeOffset.UtcNow);
+
+        await store.SaveAsync(preference, cancellationToken);
+        return preference;
+    }
+
+    public async Task<UserDisplayPreference> SaveNavigationOrderAsync(
+        Guid userId,
+        IReadOnlyList<string> navigationOrder,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(navigationOrder);
+        if (navigationOrder.Count > 64 || navigationOrder.Any(path =>
+                string.IsNullOrWhiteSpace(path) || path.Length > 128 || !path.StartsWith('/')) ||
+            navigationOrder.Distinct(StringComparer.Ordinal).Count() != navigationOrder.Count)
+        {
+            throw new ArgumentException("Navigation order contains invalid or duplicate paths.", nameof(navigationOrder));
+        }
+
+        var existing = await store.GetAsync(userId, cancellationToken);
+        var preference = new UserDisplayPreference(
+            userId,
+            existing?.ThemePaletteId ?? DefaultPaletteId,
+            existing?.ThemeMode ?? DefaultThemeMode,
+            existing?.FontScalePercent ?? 100,
+            existing?.TerminalCopyOnSelect ?? false,
+            existing?.DockerAiActionsApproved ?? false,
+            JsonSerializer.Serialize(navigationOrder),
             DateTimeOffset.UtcNow);
 
         await store.SaveAsync(preference, cancellationToken);

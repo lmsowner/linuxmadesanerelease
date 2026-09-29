@@ -10,4 +10,5 @@ public sealed record UserDisplayPreference(
     int FontScalePercent,
     bool TerminalCopyOnSelect,
     bool DockerAiActionsApproved,
+    string NavigationOrderJson,
     DateTimeOffset UpdatedAtUtc);

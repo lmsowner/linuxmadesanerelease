@@ -932,6 +932,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.HasKey(item => item.UserId);
             entity.Property(item => item.ThemePaletteId).HasMaxLength(64);
             entity.Property(item => item.ThemeMode).HasMaxLength(16);
+            entity.Property(item => item.NavigationOrderJson).HasMaxLength(8192);
         });
 
         modelBuilder.Entity<FileBrowserShortcutEntity>(entity =>

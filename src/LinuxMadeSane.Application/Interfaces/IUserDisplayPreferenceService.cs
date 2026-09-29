@@ -24,4 +24,9 @@ public interface IUserDisplayPreferenceService
         Guid userId,
         bool approved,
         CancellationToken cancellationToken = default);
+
+    Task<UserDisplayPreference> SaveNavigationOrderAsync(
+        Guid userId,
+        IReadOnlyList<string> navigationOrder,
+        CancellationToken cancellationToken = default);
 }

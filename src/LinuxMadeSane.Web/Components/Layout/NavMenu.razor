@@ -2,8 +2,13 @@
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @using LinuxMadeSane.Core.Versioning
+@using LinuxMadeSane.Application.Interfaces
+@using System.Text.Json
+@implements IAsyncDisposable
+@inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject IJSRuntime JSRuntime
 
-<div class="nav-shell">
+<div class="nav-shell @(mobileMenuOpen ? "mobile-open" : string.Empty)">
     <div class="nav-shell-top">
         <div class="brand-lockup">
             <button class="brand-link"
@@ -19,6 +24,13 @@
                 <span class="brand-version" title="Linux Made Sane @ProductVersion">@VersionLabel</span>
             </span>
         </button>
+        <button class="ui-button glass-button glass-button-toolbar sidebar-mobile-menu-button"
+                type="button"
+                aria-expanded="@mobileMenuOpen"
+                aria-controls="sidebar-mobile-navigation"
+                @onclick="ToggleMobileMenu">
+            Menu <span aria-hidden="true">@(mobileMenuOpen ? "▴" : "▾")</span>
+        </button>
         </div>
 
         <button class="ui-button glass-button glass-button-toolbar ui-icon-button sidebar-hide-button"
@@ -33,18 +45,24 @@
         </button>
     </div>
 
-    <div class="sidebar-section">
-        <div class="nav-button-list">
-            @foreach (var item in NavItems)
+    <div id="sidebar-mobile-navigation" class="sidebar-section @(mobileMenuOpen ? "mobile-open" : string.Empty)">
+        <div class="nav-button-list" @ref="navListElement" @onclick="CloseMobileMenu">
+            @foreach (var item in OrderedNavItems)
             {
-                <UiNavButton Href="@item.Href"
-                             Label="@item.Label"
-                             Match="@item.Match"
-                             Preview="@item.Preview"
-                             IconName="@item.Icon"
-                             AdditionalActivePathPrefixes="@item.AdditionalActivePathPrefixes" />
+                <div @key="item.Href" class="nav-reorder-item" data-nav-path="@item.Href">
+                    <UiNavButton Href="@item.Href"
+                                 Label="@item.Label"
+                                 Match="@item.Match"
+                                 Preview="@item.Preview"
+                                 IconName="@item.Icon"
+                                 AdditionalActivePathPrefixes="@item.AdditionalActivePathPrefixes" />
+                </div>
             }
         </div>
+        @if (!string.IsNullOrWhiteSpace(orderError))
+        {
+            <p class="sidebar-order-error" role="alert">@orderError</p>
+        }
     </div>
 
     <div class="sidebar-footer">
@@ -106,12 +124,123 @@
 
 @code {
     [Parameter] public bool IsAuthenticated { get; set; }
+    [Parameter] public Guid? UserId { get; set; }
     [Parameter] public string AuthenticatedEmail { get; set; } = string.Empty;
     [Parameter] public string AuthenticationMethod { get; set; } = "Authenticated session";
     [Parameter] public string LinuxUsername { get; set; } = Environment.UserName;
 
     private readonly string signOutTitleId = $"lms-signout-title-{Guid.NewGuid():N}";
     private readonly string signOutDescriptionId = $"lms-signout-description-{Guid.NewGuid():N}";
+    private readonly List<string> navigationOrder = [];
+    private ElementReference navListElement;
+    private IJSObjectReference? navOrderModule;
+    private DotNetObjectReference<NavMenu>? navOrderReference;
+    private Guid? loadedUserId;
+    private bool mobileMenuOpen;
+    private string? orderError;
+
+    private IReadOnlyList<NavItem> OrderedNavItems => NavItems
+        .OrderBy(item =>
+        {
+            var index = navigationOrder.IndexOf(item.Href);
+            return index < 0 ? int.MaxValue : index;
+        })
+        .ToArray();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedUserId == UserId)
+        {
+            return;
+        }
+
+        loadedUserId = UserId;
+        navigationOrder.Clear();
+        if (UserId is not { } userId)
+        {
+            return;
+        }
+
+        var preference = await UserDisplayPreferenceService.GetAsync(userId);
+        if (preference is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var savedOrder = JsonSerializer.Deserialize<string[]>(preference.NavigationOrderJson) ?? [];
+            navigationOrder.AddRange(savedOrder.Where(path => NavItems.Any(item => item.Href == path)).Distinct());
+        }
+        catch (JsonException)
+        {
+            // Older or damaged preferences fall back to the standard menu order.
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        navOrderModule = await JSRuntime.InvokeAsync<IJSObjectReference>("import", "/scripts/nav-order.js");
+        navOrderReference = DotNetObjectReference.Create(this);
+        await navOrderModule.InvokeVoidAsync("bindNavOrder", navListElement, navOrderReference);
+    }
+
+    [JSInvokable]
+    public async Task MoveNavigationItemAsync(string sourcePath, string targetPath, bool insertBefore)
+    {
+        if (UserId is not { } userId || sourcePath == targetPath ||
+            !NavItems.Any(item => item.Href == sourcePath) ||
+            !NavItems.Any(item => item.Href == targetPath))
+        {
+            return;
+        }
+
+        var previousOrder = navigationOrder.ToArray();
+        var orderedPaths = OrderedNavItems.Select(item => item.Href).ToList();
+        orderedPaths.Remove(sourcePath);
+        orderedPaths.Insert(orderedPaths.IndexOf(targetPath) + (insertBefore ? 0 : 1), sourcePath);
+        navigationOrder.Clear();
+        navigationOrder.AddRange(orderedPaths);
+        orderError = null;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            await UserDisplayPreferenceService.SaveNavigationOrderAsync(userId, orderedPaths);
+        }
+        catch
+        {
+            navigationOrder.Clear();
+            navigationOrder.AddRange(previousOrder);
+            orderError = "Menu order could not be saved. Please try again.";
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ToggleMobileMenu() => mobileMenuOpen = !mobileMenuOpen;
+    private void CloseMobileMenu() => mobileMenuOpen = false;
+
+    public async ValueTask DisposeAsync()
+    {
+        if (navOrderModule is not null)
+        {
+            try
+            {
+                await navOrderModule.InvokeVoidAsync("disposeNavOrder", navListElement);
+                await navOrderModule.DisposeAsync();
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+        }
+
+        navOrderReference?.Dispose();
+    }
 
     private static readonly string ProductVersion = LinuxMadeSaneBuildVersion.GetCurrent(typeof(Program).Assembly);
     private static string VersionLabel => ProductVersion.Equals("dev", StringComparison.OrdinalIgnoreCase)
@@ -129,7 +258,6 @@
         new("/storage", "Storage", UiIconName.Storage),
         new("/edge-gateway", "Edge Gateway", UiIconName.Integrations),
         new("/home-lab/apps", "Home Lab", UiIconName.Services, AdditionalActivePathPrefixes: ["/home-lab/assist"]),
-        new("/mail-relay", "Mail Relay", UiIconName.MailRelay),
         new("/scheduling", "Scheduling", UiIconName.Scheduling),
         new("/updates", "Updates", UiIconName.Updates),
         new("/commands", "Runbooks", UiIconName.Runbooks),

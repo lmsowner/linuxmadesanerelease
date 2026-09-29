@@ -11,5 +11,6 @@ public sealed class UserDisplayPreferenceEntity
     public int FontScalePercent { get; set; }
     public bool TerminalCopyOnSelect { get; set; }
     public bool DockerAiActionsApproved { get; set; }
+    public string NavigationOrderJson { get; set; } = "[]";
     public DateTimeOffset UpdatedAtUtc { get; set; }
 }

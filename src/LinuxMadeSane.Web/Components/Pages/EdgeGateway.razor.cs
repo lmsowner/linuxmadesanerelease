@@ -11,6 +11,7 @@ namespace LinuxMadeSane.Web.Components.Pages;
 public partial class EdgeGateway
 {
     private const string CaddyTabValue = "caddy";
+    private const string MailRelayTabValue = "mail-relay";
     private readonly CancellationTokenSource quickSetupCancellation = new();
     private readonly Dictionary<string, ZoneSetupMessage> zoneSetupMessages = new(StringComparer.OrdinalIgnoreCase);
     private MailRelayProvisioningJobSnapshot? quickMailJob;
@@ -21,7 +22,7 @@ public partial class EdgeGateway
 
     protected override void OnParametersSet()
     {
-        if (Tab is OnDemandAppsTabValue or PublishedAppsTabValue or SetupTabValue or DiagnosticsTabValue or CaddyTabValue)
+        if (Tab is OnDemandAppsTabValue or PublishedAppsTabValue or SetupTabValue or DiagnosticsTabValue or CaddyTabValue or MailRelayTabValue)
             activeTab = Tab;
     }
 
@@ -70,7 +71,7 @@ public partial class EdgeGateway
             {
                 zoneSetupMessages[domain.DomainName] = new(
                     string.Join(" ", preview.Errors.DefaultIfEmpty("Mail Relay preflight did not pass. Review the checks in Mail Relay.")),
-                    true, HelpUrl: "/mail-relay");
+                    true, HelpUrl: "/edge-gateway?tab=mail-relay");
                 return;
             }
             quickMailJob = await MailRelayService.StartProvisioningAsync(preview.Request);
@@ -78,7 +79,7 @@ public partial class EdgeGateway
         }
         catch (Exception exception)
         {
-            zoneSetupMessages[domain.DomainName] = new(exception.Message, true, HelpUrl: "/mail-relay");
+            zoneSetupMessages[domain.DomainName] = new(exception.Message, true, HelpUrl: "/edge-gateway?tab=mail-relay");
         }
         finally { busySetupZone = null; }
     }
