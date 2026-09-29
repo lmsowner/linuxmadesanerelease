@@ -29,7 +29,8 @@ public sealed record HomeLabAppInstallation(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     bool IsRecipeInstallation,
-    IReadOnlyList<HomeLabServiceEndpoint>? ServiceEndpoints = null);
+    IReadOnlyList<HomeLabServiceEndpoint>? ServiceEndpoints = null,
+    bool IsExternallyManaged = false);
 
 public sealed record HomeLabServiceEndpoint(
     Guid Id,

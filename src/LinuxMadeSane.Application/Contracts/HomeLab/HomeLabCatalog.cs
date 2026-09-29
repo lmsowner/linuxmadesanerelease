@@ -492,7 +492,29 @@ public static class HomeLabCatalog
             [new("config", "/app/config", HomeLabStorageKind.Configuration, HostOwner: "1000:1000")],
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["PORT"] = "5055", ["TZ"] = "UTC" }, [], new HomeLabHealthCheckManifest(HttpPath: "/api/v1/settings/public", Port: 5055),
             [new("network-route", "Internet route", "select", true, Help: "Choose direct access or an installed VPN Gateway.", Options: ["VPN Gateway (Gluetun)", "Direct (no VPN)"]), new("vpn-gateway", "VPN gateway", "select", true, Help: "Choose which installed gateway carries Seerr traffic.")],
-            SupportsVpnGateway: true)
+            SupportsVpnGateway: true),
+        new(
+            "portainer",
+            "Portainer CE",
+            "Manage Docker containers, images, volumes, networks, and Compose stacks in a dedicated web UI.",
+            HomeLabAppCategory.Infrastructure,
+            "docker",
+            "https://www.portainer.io/",
+            "https://docs.portainer.io/start/install-ce/server/docker/linux",
+            "portainer/portainer-ce",
+            "lts",
+            "1",
+            [new("web", 9000, Primary: true)],
+            [
+                new("data", "/data", HomeLabStorageKind.Configuration),
+                new("docker-socket", "/var/run/docker.sock", HomeLabStorageKind.Configuration,
+                    HostPath: "/var/run/docker.sock", HostSocket: true)
+            ],
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            [],
+            new HomeLabHealthCheckManifest(HttpPath: "/", Port: 9000),
+            [],
+            Exposure: ClientExposure(HomeLabBasePathSupportMode.None))
     ];
 
     private static IReadOnlyList<HomeLabRecipeManifest> BuiltInRecipes { get; } =

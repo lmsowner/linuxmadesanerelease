@@ -27,6 +27,12 @@ public interface IHomeLabService
     Task<HomeLabOperationResult> SetListenAddressAsync(Guid installationId, string listenAddress, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> UpdateContainerSettingsAsync(Guid installationId, HomeLabContainerSettingsUpdate settings, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> RestoreContainerSettingsAsync(Guid installationId, CancellationToken cancellationToken = default);
+    Task<HomeLabDockerManagementDraft> GetDockerManagementDraftAsync(Guid installationId, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Docker management handoff is unavailable.");
+    Task<HomeLabDockerManagementDraft> SaveDockerManagementDraftAsync(Guid installationId, string composeYaml, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Docker management handoff is unavailable.");
+    Task<HomeLabDockerManagementDraft> HandOffToDockerManagerAsync(Guid installationId, string composeYaml, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Docker management handoff is unavailable.");
     Task<HomeLabNetworkSecurity> GetNetworkSecurityAsync(Guid installationId, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> ExecuteAsync(Guid installationId, HomeLabLifecycleAction action, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> ResetCredentialsAsync(Guid installationId, CancellationToken cancellationToken = default);

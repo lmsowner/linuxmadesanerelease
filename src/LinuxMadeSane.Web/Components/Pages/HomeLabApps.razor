@@ -381,6 +381,8 @@
                                         </TabPage>
                                         }
 
+                                        @if (!selectedInstallation.IsExternallyManaged)
+                                        {
                                         <TabPage Value="network" Title="Network &amp; VPN">
                                             <div class="home-lab-settings-stack">
                                                 <div class="home-lab-setting-card">
@@ -557,27 +559,35 @@
                                             </div>
                                         </TabPage>
 
+                                        }
+
                                         <TabPage Value="container" Title="Container">
                                             <div class="home-lab-container-editor">
+                                                @if (selectedInstallation.IsExternallyManaged)
+                                                {
+                                                    <p class="meta-text">Docker manager owns this container. These LMS-saved settings are for reference; edit and redeploy it in your Docker manager.</p>
+                                                }
                                                 <div class="home-lab-config-field">
                                                     <label for="home-lab-container-image">Docker image</label>
-                                                    <input id="home-lab-container-image" class="ui-control-input" @bind="containerImageDraft" @bind:event="oninput" />
+                                                    <input id="home-lab-container-image" class="ui-control-input" readonly="@selectedInstallation.IsExternallyManaged" @bind="containerImageDraft" @bind:event="oninput" />
                                                 </div>
                                                 <div class="home-lab-config-field">
                                                     <label for="home-lab-container-environment">Environment</label>
-                                                    <textarea id="home-lab-container-environment" class="ui-control-textarea home-lab-code-editor" @bind="containerEnvironmentDraft" @bind:event="oninput"></textarea>
+                                                    <textarea id="home-lab-container-environment" class="ui-control-textarea home-lab-code-editor" readonly="@selectedInstallation.IsExternallyManaged" @bind="containerEnvironmentDraft" @bind:event="oninput"></textarea>
                                                     <span class="meta-text">One KEY=value entry per line. Protected secrets and LMS-managed routing values are excluded.</span>
                                                 </div>
                                                 <div class="home-lab-config-field">
                                                     <label for="home-lab-container-volumes">Volume mappings</label>
-                                                    <textarea id="home-lab-container-volumes" class="ui-control-textarea home-lab-code-editor" @bind="containerVolumesDraft" @bind:event="oninput"></textarea>
+                                                    <textarea id="home-lab-container-volumes" class="ui-control-textarea home-lab-code-editor" readonly="@selectedInstallation.IsExternallyManaged" @bind="containerVolumesDraft" @bind:event="oninput"></textarea>
                                                     <span class="meta-text">One absolute host:container mapping per line. Add :ro for read-only mounts.</span>
                                                 </div>
                                                 <div class="home-lab-setting-card">
                                                     <h3>Published ports</h3>
                                                     <code>@(selectedDetails.Ports.Count == 0 ? "None" : string.Join(Environment.NewLine, selectedDetails.Ports))</code>
-                                                    <p class="meta-text">LMS manages published ports and checks every shared VPN namespace for collisions.</p>
+                                                    <p class="meta-text">@(selectedInstallation.IsExternallyManaged ? "Manage published ports in your Docker manager." : "LMS manages published ports and checks every shared VPN namespace for collisions.")</p>
                                                 </div>
+                                                @if (!selectedInstallation.IsExternallyManaged)
+                                                {
                                                 <div class="home-lab-config-footer">
                                                     <span class="meta-text">Saving recreates the container with these values. Use AI Help if an edited container does not start.</span>
                                                     <div class="home-lab-action-row">
@@ -589,6 +599,45 @@
                                                         <UiCommandButton Label="Save and recreate" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Primary" Disabled="@busy" OnClick="SaveContainerSettingsAsync" />
                                                     </div>
                                                 </div>
+                                                }
+                                            </div>
+                                        </TabPage>
+
+                                        <TabPage Value="advanced" Title="Advanced Settings">
+                                            <div class="home-lab-container-editor">
+                                                <div class="home-lab-setting-card">
+                                                    <strong>Owner: @(selectedInstallation.IsExternallyManaged ? "Docker manager" : "LMS")</strong>
+                                                    <p class="meta-text">@(selectedInstallation.IsExternallyManaged
+                                                        ? "LMS only observes this container. Manage its lifecycle and configuration in your Docker manager."
+                                                        : "LMS currently creates and updates this container. Handing it off leaves it running and permanently stops LMS lifecycle changes for it.")</p>
+                                                </div>
+                                                <div class="home-lab-config-field">
+                                                    <label for="home-lab-compose-yaml">Full Compose file</label>
+                                                    <textarea id="home-lab-compose-yaml"
+                                                              class="ui-control-textarea home-lab-code-editor home-lab-compose-editor"
+                                                              spellcheck="false"
+                                                              @bind="composeYamlDraft" @bind:event="oninput"></textarea>
+                                                    <span class="meta-text">This is an editable export of the container's saved Docker settings. Protected values use placeholders. Saving the file does not deploy it. Before deploying the Compose stack, stop and remove the old standalone container in your Docker manager; keep its host-mounted data.</span>
+                                                </div>
+                                                <div class="home-lab-action-row">
+                                                    <UiCommandButton Label="Save Compose file" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="SaveComposeDraftAsync" />
+                                                    <a class="ui-button" download="compose.yaml" href="@($"data:text/yaml;charset=utf-8,{Uri.EscapeDataString(composeYamlDraft)}")">Download compose.yaml</a>
+                                                    @if (!selectedInstallation.IsExternallyManaged)
+                                                    {
+                                                        <UiCommandButton Label="Hand off to Docker manager" Glyph="UiIconGlyph.PopOut" Variant="UiButtonVariant.PrimaryMuted" Disabled="@busy" OnClick="() => confirmDockerHandoff = true" />
+                                                    }
+                                                </div>
+                                                @if (confirmDockerHandoff && !selectedInstallation.IsExternallyManaged)
+                                                {
+                                                    <div class="home-lab-setting-card">
+                                                        <strong>Hand off this container?</strong>
+                                                        <p class="meta-text">The container keeps running. LMS will stop starting, stopping, repairing, updating, removing, and recreating it. Import the Compose file into your Docker manager when you want to redeploy it. For VPN-routed apps, preserve the gateway network mode in that manager.</p>
+                                                        <div class="home-lab-action-row">
+                                                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="() => confirmDockerHandoff = false" />
+                                                            <UiCommandButton Label="Confirm handoff" Glyph="UiIconGlyph.PopOut" Variant="UiButtonVariant.Primary" Disabled="@busy" OnClick="HandOffToDockerManagerAsync" />
+                                                        </div>
+                                                    </div>
+                                                }
                                             </div>
                                         </TabPage>
 
@@ -604,7 +653,10 @@
                                                             <label class="home-lab-password-label" for="qbittorrent-temporary-password">Current temporary password</label>
                                                             <input id="qbittorrent-temporary-password" class="ui-control-input home-lab-password-field" value="@temporaryPassword" readonly />
                                                         }
-                                                        <UiCommandButton Label="Reset to temporary password" Glyph="UiIconGlyph.Restart" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="ResetSelectedCredentialsAsync" />
+                                                        @if (!selectedInstallation.IsExternallyManaged)
+                                                        {
+                                                            <UiCommandButton Label="Reset to temporary password" Glyph="UiIconGlyph.Restart" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="ResetSelectedCredentialsAsync" />
+                                                        }
                                                     </div>
                                                 }
                                                 <div class="home-lab-setting-card home-lab-logs-card">
@@ -694,7 +746,7 @@
                                                      Title="Remove every container and managed resource in this group"
                                                      Glyph="UiIconGlyph.Delete"
                                                      Variant="UiButtonVariant.Danger"
-                                                     Disabled="@busy"
+                                                     Disabled="@(busy || group.Installations.Any(item => item.IsExternallyManaged))"
                                                      OnClick="() => BeginGroupRemoval(group)" />
                                     @if (hasRepairCandidates)
                                     {
@@ -773,7 +825,14 @@
                                                          Variant="UiButtonVariant.Ghost"
                                                          Disabled="@busy"
                                                          OnClick="() => ManageAsync(installation)" />
+                                        @if (installation.IsExternallyManaged)
+                                        {
+                                            <UiPill Tone="@UiPillTone.Neutral">Docker manager</UiPill>
+                                        }
+                                        else
+                                        {
                                         <select class="ui-control-input home-lab-action-select"
+                                                @key="(installation.Id, actionSelectionRevision)"
                                                 aria-label="Actions for @installation.DisplayName"
                                                 value=""
                                                 disabled="@busy"
@@ -794,6 +853,7 @@
                                             }
                                             <option value="remove">Remove...</option>
                                         </select>
+                                        }
                                     </div>
                                 </div>
                             }
@@ -801,6 +861,15 @@
                         }
                     }
                 </div>
+                <section class="surface-subcard home-lab-docker-managers">
+                    <h2>Want full control of Docker?</h2>
+                    <p>Use a dedicated manager for containers, images, networks, volumes and Compose stacks. LMS will still show the Home Lab containers it installed.</p>
+                    <p><a href="https://www.portainer.io/" target="_blank" rel="noopener noreferrer">Portainer</a> manages Docker broadly; <a href="https://getarcane.app/" target="_blank" rel="noopener noreferrer">Arcane</a> and <a href="https://github.com/louislam/dockge" target="_blank" rel="noopener noreferrer">Dockge</a> offer Compose-focused workflows.</p>
+                    <UiCommandButton Label="Install Portainer with a HomeLab Recipe"
+                                     Glyph="UiIconGlyph.Plus"
+                                     Variant="UiButtonVariant.Action"
+                                     OnClick="OpenPortainerRecipe" />
+                </section>
             </TabPage>
 
             <TabPage Value="prompts" Title="HomeLab Recipes">
@@ -1056,6 +1125,7 @@
     private string message = string.Empty;
     private bool error;
     private bool busy;
+    private long actionSelectionRevision;
     private string activeTab = "apps";
     private string? startingPromptRecipeId;
     private string selectedRecipeCategory = string.Empty;
@@ -1097,6 +1167,8 @@
     private string containerImageDraft = string.Empty;
     private string containerEnvironmentDraft = string.Empty;
     private string containerVolumesDraft = string.Empty;
+    private string composeYamlDraft = string.Empty;
+    private bool confirmDockerHandoff;
     private string externalHostnameDraft = string.Empty;
     private string externalDomainDraft = string.Empty;
     private EdgeGatewayAuthMode externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
@@ -1612,7 +1684,7 @@
 
     private async Task HandleSettingsTabChangedAsync(string? value)
     {
-        settingsTab = value is "connections" or "network" or "external" or "container" or "logs" ? value : "overview";
+        settingsTab = value is "connections" or "network" or "external" or "container" or "advanced" or "logs" ? value : "overview";
         if (settingsTab != "external" || selectedInstallation is null)
         {
             return;
@@ -1727,6 +1799,13 @@
         selectedPromptVpnGatewayId = null;
         selectedPromptListenAddress = string.Empty;
         selectedPromptOutboundRoute = string.Empty;
+    }
+
+    private void OpenPortainerRecipe()
+    {
+        selectedRecipeCategory = "Docker Management";
+        SelectPromptRecipe(new ChangeEventArgs { Value = "portainer-manager" });
+        activeTab = "prompts";
     }
 
     private void SelectPromptRecipe(ChangeEventArgs eventArgs)
@@ -2041,6 +2120,8 @@
             externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
             externalAccessLoading = false;
             ResetContainerSettingsDraft();
+            composeYamlDraft = (await HomeLabService.GetDockerManagementDraftAsync(installation.Id)).ComposeYaml;
+            confirmDockerHandoff = false;
             await LoadSelectedLogsCoreAsync();
             activeTab = "apps";
         }
@@ -2071,6 +2152,8 @@
         containerImageDraft = string.Empty;
         containerEnvironmentDraft = string.Empty;
         containerVolumesDraft = string.Empty;
+        composeYamlDraft = string.Empty;
+        confirmDockerHandoff = false;
         externalHostnameDraft = string.Empty;
         externalDomainDraft = string.Empty;
         externalAccessLoading = false;
@@ -2133,6 +2216,30 @@
                 selectedInstallation.Id,
                 new HomeLabContainerSettingsUpdate(containerImageDraft, environment, volumes));
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private async Task SaveComposeDraftAsync()
+    {
+        if (selectedInstallation is null || busy) return;
+        await RunUiOperationAsync(async () =>
+        {
+            var saved = await HomeLabService.SaveDockerManagementDraftAsync(selectedInstallation.Id, composeYamlDraft);
+            composeYamlDraft = saved.ComposeYaml;
+            SetMessage("Compose file saved. The running container was not changed.", false);
+        });
+    }
+
+    private async Task HandOffToDockerManagerAsync()
+    {
+        if (selectedInstallation is null || busy) return;
+        await RunUiOperationAsync(async () =>
+        {
+            var saved = await HomeLabService.HandOffToDockerManagerAsync(selectedInstallation.Id, composeYamlDraft);
+            composeYamlDraft = saved.ComposeYaml;
+            confirmDockerHandoff = false;
+            settingsTab = "advanced";
+            SetMessage("Handoff complete. LMS will no longer change or recreate this container. Manage it in your Docker manager.", false);
         });
     }
 
@@ -2745,6 +2852,7 @@
 
     private async Task HandleContainerActionAsync(HomeLabAppInstallation installation, string? selection)
     {
+        actionSelectionRevision++;
         switch (selection?.Trim().ToLowerInvariant())
         {
             case "start":
@@ -2784,7 +2892,8 @@
 
     private void BeginGroupRemoval(HomeLabInstallationGroup group)
     {
-        if (!busy && group.Installations.Count > 0)
+        if (!busy && group.Installations.Count > 0 &&
+            group.Installations.All(item => !item.IsExternallyManaged))
         {
             pendingGroupRemoval = group;
         }
@@ -3065,6 +3174,10 @@
 
     private bool CanRepair(HomeLabAppInstallation installation)
     {
+        if (installation.IsExternallyManaged)
+        {
+            return false;
+        }
         if (installation.HealthState is HomeLabHealthState.Starting or HomeLabHealthState.Degraded or HomeLabHealthState.Failed)
         {
             return true;

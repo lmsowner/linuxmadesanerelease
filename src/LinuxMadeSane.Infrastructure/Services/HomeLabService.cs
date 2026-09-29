@@ -42,6 +42,9 @@ public sealed class HomeLabService(
     private const string ContainerSettingsBackupImageKey = "lms-container-backup-image";
     private const string ContainerSettingsBackupConfigurationKey = "lms-container-backup-configuration";
     private const string ContainerSettingsBackupVolumesKey = "lms-container-backup-volumes";
+    private const string ManagementOwnerKey = "lms-management-owner";
+    private const string ComposeDraftKey = "lms-compose-draft";
+    private const string ExternalManagementOwner = "external";
     private const string HomeLabFilesRole = "home-lab";
     private const string DefaultHomeLabFilesRoot = "/mnt/storage/home-lab";
     private const string StandardStorageHostPath = "/mnt/storage";
@@ -257,6 +260,13 @@ public sealed class HomeLabService(
         var missing = new List<HomeLabInstallationEntity>();
         foreach (var installation in installations)
         {
+            // A manager may temporarily remove/recreate its container. Keep the
+            // ownership marker and saved Compose draft through that transition.
+            if (IsExternallyManaged(installation))
+            {
+                continue;
+            }
+
             var presence = await InspectContainerPresenceAsync(installation.ContainerName, cancellationToken);
             if (presence is null || presence.Value)
             {
@@ -1034,6 +1044,16 @@ public sealed class HomeLabService(
         var gateway = await dbContext.HomeLabInstallations
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The VPN Gateway installation was not found.");
+        EnsureLmsOwns(gateway);
+        var routedInstallations = await dbContext.HomeLabInstallations
+            .Where(item => item.NetworkMode == $"container:{gateway.ContainerName}")
+            .ToListAsync(cancellationToken);
+        if (routedInstallations.Any(IsExternallyManaged))
+        {
+            return Failure("VPN Gateway reconfiguration blocked.",
+                "A Docker manager owns a routed container, so LMS will not recreate this shared VPN namespace.",
+                [], HomeLabHealthState.Blocked);
+        }
         if (!gateway.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
         {
             return Failure("VPN Gateway reconfiguration is unavailable.", "The selected installation is not a VPN Gateway.", [], HomeLabHealthState.Failed);
@@ -1134,6 +1154,14 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        if (IsExternallyManaged(installation))
+        {
+            return Failure(
+                "Docker manager owns this container.",
+                "LMS will not start, stop, remove, repair, update, or recreate it after handoff. Use your Docker manager.",
+                [],
+                ToHealth(installation.HealthState));
+        }
         var app = HomeLabCatalog.GetApp(installation.AppId);
         if (!app.SupportsVpnGateway)
         {
@@ -1352,6 +1380,19 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        EnsureLmsOwns(installation);
+        if (installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            var routed = await dbContext.HomeLabInstallations
+                .Where(item => item.NetworkMode == $"container:{installation.ContainerName}")
+                .ToListAsync(cancellationToken);
+            if (routed.Any(IsExternallyManaged))
+            {
+                return Failure("Listen address change blocked.",
+                    "A Docker manager owns a routed container, so LMS will not recreate this shared VPN namespace.",
+                    [], HomeLabHealthState.Blocked);
+            }
+        }
         var app = HomeLabCatalog.GetApp(installation.AppId);
         var configuration = DeserializeDictionary(installation.ConfigurationJson);
         if (configuration.TryGetValue("listen-address", out var currentAddress) &&
@@ -1640,6 +1681,62 @@ public sealed class HomeLabService(
             : (result, null);
     }
 
+    public async Task<HomeLabDockerManagementDraft> GetDockerManagementDraftAsync(
+        Guid installationId,
+        CancellationToken cancellationToken = default)
+    {
+        var installation = await dbContext.HomeLabInstallations
+            .AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        return new HomeLabDockerManagementDraft(
+            configuration.TryGetValue(ComposeDraftKey, out var savedDraft)
+                ? savedDraft
+                : BuildDockerComposeDraft(installation, HomeLabCatalog.GetApp(installation.AppId), configuration),
+            IsExternallyManaged(installation));
+    }
+
+    public Task<HomeLabDockerManagementDraft> SaveDockerManagementDraftAsync(
+        Guid installationId,
+        string composeYaml,
+        CancellationToken cancellationToken = default) =>
+        SaveDockerManagementDraftCoreAsync(installationId, composeYaml, handOff: false, cancellationToken);
+
+    public Task<HomeLabDockerManagementDraft> HandOffToDockerManagerAsync(
+        Guid installationId,
+        string composeYaml,
+        CancellationToken cancellationToken = default) =>
+        SaveDockerManagementDraftCoreAsync(installationId, composeYaml, handOff: true, cancellationToken);
+
+    private async Task<HomeLabDockerManagementDraft> SaveDockerManagementDraftCoreAsync(
+        Guid installationId,
+        string composeYaml,
+        bool handOff,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(composeYaml) ||
+            Encoding.UTF8.GetByteCount(composeYaml) > MaximumConfigInspectionBytes)
+        {
+            throw new InvalidOperationException("The Compose file must contain text and fit within 256 KB.");
+        }
+
+        var installation = await dbContext.HomeLabInstallations
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        configuration[ComposeDraftKey] = composeYaml.Replace("\r\n", "\n", StringComparison.Ordinal);
+        if (handOff)
+        {
+            configuration[ManagementOwnerKey] = ExternalManagementOwner;
+        }
+
+        installation.ConfigurationJson = JsonSerializer.Serialize(configuration, JsonOptions);
+        installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return new HomeLabDockerManagementDraft(configuration[ComposeDraftKey], IsExternallyManaged(installation));
+    }
+
     public async Task<HomeLabOperationResult> UpdateContainerSettingsAsync(
         Guid installationId,
         HomeLabContainerSettingsUpdate settings,
@@ -1649,6 +1746,7 @@ public sealed class HomeLabService(
         var installation = await dbContext.HomeLabInstallations
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        EnsureLmsOwns(installation);
         var app = HomeLabCatalog.GetApp(installation.AppId);
         var image = NormalizeContainerImage(settings.Image);
         var environment = NormalizeContainerEnvironment(settings.Environment);
@@ -1712,6 +1810,7 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        EnsureLmsOwns(installation);
         var configuration = DeserializeDictionary(installation.ConfigurationJson);
         if (!configuration.TryGetValue(ContainerSettingsBackupImageKey, out var image) ||
             !configuration.TryGetValue(ContainerSettingsBackupConfigurationKey, out var configurationJson) ||
@@ -1743,6 +1842,14 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        if (IsExternallyManaged(installation))
+        {
+            return Failure(
+                "Docker manager owns this container.",
+                "LMS will not start, stop, remove, repair, update, or recreate it after handoff. Use your Docker manager.",
+                [],
+                ToHealth(installation.HealthState));
+        }
         var app = HomeLabCatalog.GetApp(installation.AppId);
         if (app.RequiresVpnGateway &&
             !installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
@@ -2207,6 +2314,17 @@ public sealed class HomeLabService(
         bool pullImage,
         CancellationToken cancellationToken)
     {
+        var routedInstallations = await dbContext.HomeLabInstallations
+            .Where(item => item.NetworkMode == $"container:{gateway.ContainerName}")
+            .ToListAsync(cancellationToken);
+        if (IsExternallyManaged(gateway) || routedInstallations.Any(IsExternallyManaged))
+        {
+            return Failure(
+                "VPN Gateway recreation blocked.",
+                "A Docker manager owns the gateway or one of its routed containers. LMS will not recreate either side of that network namespace.",
+                output,
+                HomeLabHealthState.Blocked);
+        }
         var gatewayConfiguration = DeserializeDictionary(gateway.ConfigurationJson);
         if (HomeLabVpnPortForwardingPlan.RefreshManagedCallbackCommands(gatewayConfiguration))
         {
@@ -2214,10 +2332,6 @@ public sealed class HomeLabService(
             gateway.UpdatedAtUtc = DateTimeOffset.UtcNow;
             await dbContext.SaveChangesAsync(cancellationToken);
         }
-
-        var routedInstallations = await dbContext.HomeLabInstallations
-            .Where(item => item.NetworkMode == $"container:{gateway.ContainerName}")
-            .ToListAsync(cancellationToken);
 
         if (pullImage)
         {
@@ -2385,6 +2499,7 @@ public sealed class HomeLabService(
         var installation = await dbContext.HomeLabInstallations
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        EnsureLmsOwns(installation);
         var app = HomeLabCatalog.GetApp(installation.AppId);
         if (!app.Id.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
         {
@@ -2518,6 +2633,7 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        EnsureLmsOwns(installation);
         var app = HomeLabCatalog.GetApp(installation.AppId);
         var sourceDeployment = await dbContext.HomeLabDeployments
             .AsNoTracking()
@@ -2698,6 +2814,7 @@ public sealed class HomeLabService(
             .Include(item => item.ServiceEndpoints)
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        EnsureLmsOwns(installation);
         var routeIds = installation.ServiceEndpoints
             .Where(endpoint => endpoint.Scope == (int)HomeLabEndpointScope.Public && endpoint.EdgeGatewayRouteId.HasValue)
             .Select(endpoint => endpoint.EdgeGatewayRouteId!.Value)
@@ -2908,6 +3025,7 @@ public sealed class HomeLabService(
         var installation = await dbContext.HomeLabInstallations
             .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
             ?? throw new InvalidOperationException("The Home Lab installation was not found.");
+        EnsureLmsOwns(installation);
         var target = ResolveConfigurationFile(ResolveConfigurationRoots(installation), patch.RelativePath);
         var originalBytes = await File.ReadAllBytesAsync(target.Path, cancellationToken);
         if (originalBytes.LongLength > MaximumConfigFileBytes)
@@ -3459,6 +3577,131 @@ public sealed class HomeLabService(
             configuration.ContainsKey(ContainerSettingsBackupImageKey));
     }
 
+    private string BuildDockerComposeDraft(
+        HomeLabInstallationEntity installation,
+        HomeLabAppManifest app,
+        IReadOnlyDictionary<string, string> configuration)
+    {
+        var lines = new List<string>
+        {
+            "# Exported from the running LMS configuration. Review before deploying in your Docker manager.",
+            "# Secret values are deliberately omitted; provide them in the manager before redeployment.",
+            "services:",
+            $"  {app.Id}:",
+            $"    container_name: {ComposeScalar(installation.ContainerName)}",
+            $"    image: {ComposeScalar(installation.Image)}",
+            "    restart: unless-stopped"
+        };
+
+        var usesVpnNamespace = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
+        if (usesVpnNamespace)
+        {
+            lines.Add($"    network_mode: {ComposeScalar(installation.NetworkMode)}");
+        }
+        else
+        {
+            lines.Add("    networks:");
+            lines.Add("      - lms");
+        }
+
+        var environment = app.Environment
+            .Concat(configuration.Where(item => !IsInternalConfigurationKey(item.Key)))
+            .Concat(BuildGatewayEnvironment(app))
+            .Concat(BuildVpnPortEnvironment(app, installation.NetworkMode))
+            .Concat(BuildPublicUrlEnvironment(app, installation))
+            .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.Last())
+            .ToDictionary(item => item.Key,
+                item => ResolveEndpointTokens(installation, item.Value), StringComparer.OrdinalIgnoreCase);
+        foreach (var secret in DeserializeDictionary(installation.SecretConfigurationJson).Keys
+                     .Where(key => !key.StartsWith("FILE:", StringComparison.OrdinalIgnoreCase)))
+        {
+            environment[secret] = string.Empty;
+        }
+        if (environment.Count > 0)
+        {
+            lines.Add("    environment:");
+            foreach (var item in environment.OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                var secret = IsSensitiveComposeEnvironmentKey(item.Key) || item.Value.Length == 0;
+                lines.Add($"      {item.Key}: {ComposeScalar(secret ? $"${{{item.Key}:?Set {item.Key} in your Docker manager}}" : item.Value, secret)}");
+            }
+        }
+
+        var bindings = DeserializeBindings(installation.VolumeMappingsJson);
+        if (bindings.Count > 0)
+        {
+            lines.Add("    volumes:");
+            foreach (var binding in bindings)
+            {
+                lines.Add($"      - {ComposeScalar($"{binding.HostPath}:{binding.ContainerPath}{(binding.ReadOnly ? ":ro" : string.Empty)}")}");
+            }
+        }
+
+        if (!usesVpnNamespace)
+        {
+            var ports = DeserializePortBindings(installation.PortMappingsJson)
+                .Where(binding => binding.HostPort > 0)
+                .ToArray();
+            if (ports.Length > 0)
+            {
+                lines.Add("    ports:");
+                foreach (var binding in ports)
+                {
+                    var protocol = app.Ports.FirstOrDefault(port => port.Name.Equals(binding.Name, StringComparison.OrdinalIgnoreCase))?.Protocol ?? "tcp";
+                    lines.Add($"      - {ComposeScalar($"{binding.HostIp ?? "127.0.0.1"}:{binding.HostPort}:{binding.ContainerPort}/{protocol}")}");
+                }
+            }
+        }
+
+        if (app.DockerCapabilities is { Count: > 0 })
+        {
+            lines.Add("    cap_add:");
+            lines.AddRange(app.DockerCapabilities.Select(value => $"      - {ComposeScalar(value)}"));
+        }
+        if (app.DockerDevices is { Count: > 0 })
+        {
+            lines.Add("    devices:");
+            lines.AddRange(app.DockerDevices.Select(value => $"      - {ComposeScalar(value)}"));
+        }
+        if (app.HealthCheck?.DockerCommand is { Length: > 0 } healthCommand)
+        {
+            lines.Add("    healthcheck:");
+            lines.Add($"      test: [\"CMD-SHELL\", {ComposeScalar(healthCommand)}]");
+            lines.Add($"      interval: {app.HealthCheck.IntervalSeconds}s");
+            lines.Add($"      timeout: {app.HealthCheck.TimeoutSeconds}s");
+            lines.Add($"      retries: {app.HealthCheck.Retries}");
+            lines.Add($"      start_period: {app.HealthCheck.StartPeriodSeconds}s");
+        }
+
+        var overrideCommand = HomeLabContainerPortPlan.BuildVpnFileOverrideCommand(app, usesVpnNamespace);
+        if (overrideCommand is not null)
+        {
+            lines.Add($"    entrypoint: {ComposeScalar("/bin/sh")}");
+        }
+        var command = (app.Command ?? []).Concat(overrideCommand is null ? [] : ["-c", overrideCommand]).ToArray();
+        if (command.Length > 0)
+        {
+            lines.Add($"    command: [{string.Join(", ", command.Select(value => ComposeScalar(value)))}]");
+        }
+
+        if (!usesVpnNamespace)
+        {
+            lines.Add("networks:");
+            lines.Add("  lms:");
+            lines.Add("    external: true");
+            lines.Add($"    name: {ComposeScalar(installation.NetworkName)}");
+        }
+        return string.Join("\n", lines) + "\n";
+    }
+
+    private static string ComposeScalar(string value, bool interpolate = false) =>
+        JsonSerializer.Serialize(interpolate ? value : value.Replace("$", "$$", StringComparison.Ordinal));
+
+    private static bool IsSensitiveComposeEnvironmentKey(string key) =>
+        Regex.IsMatch(key, "(?:^|_)(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|PRIVATE_KEY|CREDENTIAL)(?:$|_)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     private async Task EnsureCaddyAccessAsync(
         HomeLabInstallationEntity installation,
         CancellationToken cancellationToken)
@@ -3946,6 +4189,29 @@ public sealed class HomeLabService(
     {
         foreach (var binding in bindings)
         {
+            var volume = app.Volumes.FirstOrDefault(candidate =>
+                candidate.ContainerPath.Equals(binding.ContainerPath, StringComparison.Ordinal));
+            if (volume?.HostSocket == true)
+            {
+                var socket = await RunAsync(
+                    new LinuxCommandRequest(
+                        "test",
+                        ["-S", binding.HostPath],
+                        true,
+                        TimeSpan.FromSeconds(10),
+                        $"Verify Home Lab socket {binding.ContainerPath}"),
+                    cancellationToken);
+                if (socket.ExitCode != 0)
+                {
+                    return ContainerRunResult.Failed(Failure(
+                        "Home Lab socket is unavailable.",
+                        $"The host socket for {binding.ContainerPath} does not exist at {binding.HostPath}.",
+                        output,
+                        HomeLabHealthState.Failed));
+                }
+                continue;
+            }
+
             var mkdir = await RunAsync(
                 new LinuxCommandRequest(
                     "mkdir",
@@ -3960,8 +4226,6 @@ public sealed class HomeLabService(
                 return ContainerRunResult.Failed(Failure("Home Lab volume setup failed.", NormalizeFailure(mkdir), output, HomeLabHealthState.Failed));
             }
 
-            var volume = app.Volumes.FirstOrDefault(candidate =>
-                candidate.ContainerPath.Equals(binding.ContainerPath, StringComparison.Ordinal));
             if (volume?.HostOwner is { Length: > 0 } hostOwner)
             {
                 var chown = await RunAsync(
@@ -4624,6 +4888,10 @@ public sealed class HomeLabService(
         HomeLabAppManifest app,
         CancellationToken cancellationToken)
     {
+        if (IsExternallyManaged(installation))
+        {
+            return;
+        }
         if (!app.RequiresVpnGateway ||
             installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
         {
@@ -4992,6 +5260,11 @@ public sealed class HomeLabService(
         HomeLabVolumeManifest volume,
         IReadOnlyDictionary<string, string>? storagePaths)
     {
+        if (!string.IsNullOrWhiteSpace(volume.HostPath))
+        {
+            return NormalizeHostPath(volume.HostPath);
+        }
+
         if (!string.IsNullOrWhiteSpace(volume.SharedRole))
         {
             var supplied = storagePaths?.FirstOrDefault(item => item.Key.Equals(volume.SharedRole, StringComparison.OrdinalIgnoreCase)).Value;
@@ -5574,12 +5847,27 @@ public sealed class HomeLabService(
             ? gatewayId
             : null;
 
+    private static bool IsExternallyManaged(HomeLabInstallationEntity installation) =>
+        DeserializeDictionary(installation.ConfigurationJson).TryGetValue(ManagementOwnerKey, out var owner) &&
+        owner.Equals(ExternalManagementOwner, StringComparison.OrdinalIgnoreCase);
+
+    private static void EnsureLmsOwns(HomeLabInstallationEntity installation)
+    {
+        if (IsExternallyManaged(installation))
+        {
+            throw new InvalidOperationException(
+                "A Docker manager owns this container. LMS will not change or recreate it after handoff.");
+        }
+    }
+
     private static bool IsInternalConfigurationKey(string key) =>
         key.Equals("network-route", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("listen-address", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase) ||
-        key.StartsWith("lms-container-backup-", StringComparison.OrdinalIgnoreCase);
+        key.StartsWith("lms-container-backup-", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals(ManagementOwnerKey, StringComparison.OrdinalIgnoreCase) ||
+        key.Equals(ComposeDraftKey, StringComparison.OrdinalIgnoreCase);
 
     private static void ConfigureVpnPortForwarding(
         IDictionary<string, string> values,
@@ -5926,7 +6214,8 @@ public sealed class HomeLabService(
                 .OrderBy(endpoint => endpoint.Scope)
                 .ThenBy(endpoint => endpoint.PortName, StringComparer.OrdinalIgnoreCase)
                 .Select(MapServiceEndpoint)
-                .ToArray());
+                .ToArray(),
+            IsExternallyManaged(item));
 
     private static HomeLabServiceEndpoint MapServiceEndpoint(HomeLabServiceEndpointEntity item) =>
         new(

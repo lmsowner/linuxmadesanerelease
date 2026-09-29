@@ -42,6 +42,10 @@ public sealed record HomeLabContainerSettingsUpdate(
     IReadOnlyDictionary<string, string> Environment,
     IReadOnlyList<HomeLabContainerVolumeSetting> Volumes);
 
+public sealed record HomeLabDockerManagementDraft(
+    string ComposeYaml,
+    bool IsExternallyManaged);
+
 public enum HomeLabLifecycleAction
 {
     Start = 0,
