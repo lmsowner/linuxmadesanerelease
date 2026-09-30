@@ -196,16 +196,45 @@ window.lmsFileBrowser = (() => {
             return;
         }
 
-        const reposition = () => positionContextSubmenu(submenu);
-        submenu.addEventListener("pointerenter", reposition);
-        submenu.addEventListener("focusin", reposition);
+        const trigger = submenu.querySelector(".host-file-context-submenu-trigger");
+        const panel = submenu.querySelector(".host-file-context-submenu-panel");
+        if (!(trigger instanceof HTMLElement) || !(panel instanceof HTMLElement)) {
+            return;
+        }
+
+        let closeTimer;
+        const open = () => {
+            clearTimeout(closeTimer);
+            if (trigger.hasAttribute("disabled")) return;
+            positionContextSubmenu(submenu);
+            submenu.classList.add("submenu-open");
+            trigger.setAttribute("aria-expanded", "true");
+        };
+        const close = () => {
+            submenu.classList.remove("submenu-open");
+            trigger.setAttribute("aria-expanded", "false");
+        };
+        const scheduleClose = () => {
+            clearTimeout(closeTimer);
+            closeTimer = setTimeout(close, 350);
+        };
+
+        submenu.addEventListener("pointerenter", open);
+        submenu.addEventListener("pointerleave", scheduleClose);
+        panel.addEventListener("pointerenter", open);
+        panel.addEventListener("pointerleave", scheduleClose);
+        submenu.addEventListener("focusin", open);
+        submenu.addEventListener("focusout", event => {
+            if (!submenu.contains(event.relatedTarget)) scheduleClose();
+        });
+        trigger.addEventListener("click", open);
 
         const menu = submenu.closest("[data-lms-context-menu='true']");
         if (menu) {
-            menu.addEventListener("scroll", reposition, { passive: true });
+            menu.addEventListener("scroll", () => positionContextSubmenu(submenu), { passive: true });
         }
 
-        window.addEventListener("resize", reposition, { passive: true });
+        window.addEventListener("resize", () => positionContextSubmenu(submenu), { passive: true });
         submenu.dataset.positionWatcher = "true";
     }
 
