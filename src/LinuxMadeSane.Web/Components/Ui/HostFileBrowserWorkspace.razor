@@ -1696,6 +1696,24 @@ else
             {
                 await LoadItemsAsync(currentPath, preserveSessionOnFailure: false, updatePathInputOnSuccess: true);
 
+                if (!canBrowse && !HasScopedRoot &&
+                    ConnectionProfileSelectionKeys.TryParseSaved(connectionProfileKey, out _) &&
+                    string.Equals(accessDeniedPath, currentPath, StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        var homePath = await FileAccessService.GetHomeDirectoryAsync(browser.Host, BuildConnectionProfile());
+                        if (!string.Equals(ResolveBrowserPath(homePath), currentPath, StringComparison.Ordinal))
+                        {
+                            await LoadItemsAsync(homePath, preserveSessionOnFailure: false, updatePathInputOnSuccess: true);
+                        }
+                    }
+                    catch
+                    {
+                        // Keep the original access error when the selected account cannot open its home.
+                    }
+                }
+
                 if (!string.IsNullOrWhiteSpace(detachedState?.SelectedPath))
                 {
                     var restoredSelection = FindItemByPath(items, detachedState.SelectedPath);
