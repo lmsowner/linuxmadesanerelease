@@ -96,10 +96,12 @@
                     {
                         <div class="field-row">
                             <UiTextField @bind-Value="providerContext.Editor.BaseUrl"
+                                         @bind-Value:after="RefreshCurrentProviderModelsAsync"
                                          Label="Service URL"
                                          Helper="The URL supplied with your Linux Made Sane AI Service." />
 
                             <UiTextField @bind-Value="providerContext.Editor.ApiKeyInput"
+                                                 @bind-Value:after="RefreshCurrentProviderModelsAsync"
                                          Label="@(providerContext.Editor.HasApiKeyConfigured ? "Replacement token" : "Token")"
                                          Type="password"
                                          Autocomplete="new-password"
@@ -132,6 +134,7 @@
                                     </UiComboboxField>
 
                                     <UiTextField @bind-Value="providerContext.Editor.BaseUrl"
+                                         @bind-Value:after="RefreshCurrentProviderModelsAsync"
                                                  Label="Base URL"
                                                  Helper="OpenAI-compatible API root, for example http://127.0.0.1:8000/v1." />
                                 </div>
@@ -143,10 +146,7 @@
                                            @bind-Value="providerContext.Editor.DefaultModelId"
                                            Label="Default model"
                                            Helper="@DefaultModelFieldHelper">
-                                @if (CurrentModelOptions.Count == 0)
-                                {
-                                    <option value="">Select an engine or refresh models</option>
-                                }
+                                <option value="">Select a model from the live provider list</option>
                                 @foreach (var model in CurrentModelOptions)
                                 {
                                     <option value="@model.ModelId">@model.DisplayName</option>
@@ -192,6 +192,7 @@
                                 <summary>Protected API key</summary>
                                 <div class="advanced-fields">
                                     <UiTextField @bind-Value="providerContext.Editor.ApiKeyInput"
+                                                 @bind-Value:after="RefreshCurrentProviderModelsAsync"
                                                  Label="@(providerContext.Editor.HasApiKeyConfigured ? "Replacement API key" : "API key")"
                                                  Type="password"
                                                  Autocomplete="new-password" />
@@ -205,6 +206,7 @@
                                     @if (providerContext.Editor.HasApiKeyConfigured)
                                     {
                                         <UiCheckboxField @bind-Value="providerContext.Editor.ClearStoredApiKey"
+                                                         @bind-Value:after="RefreshCurrentProviderModelsAsync"
                                                          Label="Clear stored API key" />
                                     }
                                 </div>
@@ -340,7 +342,7 @@
             ? "Used for new chats that pick this provider."
             : providerContext?.Editor.ProviderType == AiProviderType.Custom
                 ? "Select a Docker-hosted AI endpoint, or enter a Base URL and refresh models."
-                : null;
+                : "Enter an API key to load the current models, or refresh the provider list.";
 
     private IReadOnlyList<AiProviderModelOption> CurrentModelOptions
     {
@@ -394,7 +396,7 @@
                 dockerDiscoveryMessage = $"Docker API-compatible engine discovery is unavailable: {exception.Message}";
             }
 
-            EnsureSelectedDefaultModelIsSelectable();
+            await RefreshCurrentProviderModelsAsync();
         }
         catch (Exception exception)
         {
@@ -460,7 +462,7 @@
         lastProviderType = providerContext.Editor.ProviderType;
         providerContext.Editor.RequiresApiKey = selectedDefinition.RequiresApiKey;
 
-        return Task.CompletedTask;
+        return RefreshCurrentProviderModelsAsync();
     }
 
     private async Task SaveAsync()
@@ -483,6 +485,7 @@
             if (string.Equals(currentPath, targetPath, StringComparison.OrdinalIgnoreCase))
             {
                 providerContext = await ProviderSettingsService.GetEditorAsync(providerKey);
+                await RefreshCurrentProviderModelsAsync();
             }
             else
             {
@@ -530,6 +533,31 @@
         }
     }
 
+    private async Task RefreshCurrentProviderModelsAsync()
+    {
+        if (providerContext is null || providerContext.Editor.ProviderType is
+            AiProviderType.LinuxMadeSaneAiService or AiProviderType.RemoteLmsAiEngine)
+        {
+            return;
+        }
+
+        // Hide bundled choices until this endpoint/key supplies its current catalog.
+        providerContext = providerContext with
+        {
+            AvailableModelOptions = providerContext.AvailableModelOptions
+                .Where(model => model.ProviderType != providerContext.Editor.ProviderType).ToArray()
+        };
+        if (providerContext.Editor.RequiresApiKey &&
+            string.IsNullOrWhiteSpace(providerContext.Editor.ApiKeyInput) &&
+            (!providerContext.Editor.HasApiKeyConfigured || providerContext.Editor.ClearStoredApiKey))
+        {
+            modelRefreshTone = "warning";
+            modelRefreshMessage = "Enter an API key to load the provider's current models.";
+            return;
+        }
+        await HandleRefreshModelsAsync();
+    }
+
     private async Task HandleRefreshModelsAsync()
     {
         if (providerContext is null)
@@ -547,10 +575,16 @@
             var refreshedCatalog = await ProviderSettingsService.RefreshModelCatalogAsync(providerContext.Editor);
             providerContext = providerContext with { AvailableModelOptions = refreshedCatalog };
 
-            EnsureSelectedDefaultModelIsSelectable();
-
-            modelRefreshTone = "success";
-            modelRefreshMessage = $"Model list refreshed. {CurrentModelOptions.Count} option(s) available for {SelectedProviderTypeDefinition.DisplayName}.";
+            var previousModel = providerContext.Editor.DefaultModelId;
+            var modelUnavailable = !string.IsNullOrWhiteSpace(previousModel) &&
+                !CurrentModelOptions.Any(model => model.ModelId.Equals(previousModel, StringComparison.OrdinalIgnoreCase));
+            if (modelUnavailable)
+            {
+                providerContext.Editor.DefaultModelId = string.Empty;
+            }
+            modelRefreshTone = modelUnavailable ? "warning" : "success";
+            modelRefreshMessage = $"Model list refreshed. {CurrentModelOptions.Count} option(s) available for {SelectedProviderTypeDefinition.DisplayName}." +
+                (modelUnavailable ? $" {previousModel} is no longer available for this provider. Select a current model before saving." : string.Empty);
         }
         catch (Exception exception)
         {

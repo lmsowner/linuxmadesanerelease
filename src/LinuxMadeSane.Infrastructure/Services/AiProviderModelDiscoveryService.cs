@@ -57,8 +57,7 @@ public sealed class AiProviderModelDiscoveryService(
             .Select(item => item["id"]?.GetValue<string>() ?? string.Empty)
             .Where(IsOpenAiTextModel)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderByDescending(IsLikelyLatestOpenAiModel)
-            .ThenBy(id => id, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
             .Select(id => new AiProviderModelOption(
                 AiProviderType.OpenAi,
                 id,
@@ -427,16 +426,9 @@ public sealed class AiProviderModelDiscoveryService(
         }
 
         return normalized.StartsWith("gpt-", StringComparison.Ordinal) ||
-               normalized.StartsWith("o1", StringComparison.Ordinal) ||
-               normalized.StartsWith("o3", StringComparison.Ordinal) ||
-               normalized.StartsWith("o4", StringComparison.Ordinal) ||
+               (normalized.Length > 1 && normalized[0] == 'o' && char.IsDigit(normalized[1])) ||
                normalized.StartsWith("codex-", StringComparison.Ordinal);
     }
-
-    private static bool IsLikelyLatestOpenAiModel(string modelId) =>
-        modelId.StartsWith("gpt-5.5", StringComparison.OrdinalIgnoreCase) ||
-        modelId.StartsWith("gpt-5.4", StringComparison.OrdinalIgnoreCase) ||
-        modelId.StartsWith("gpt-5.2", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsOpenAiDatedSnapshot(string normalizedModelId)
     {

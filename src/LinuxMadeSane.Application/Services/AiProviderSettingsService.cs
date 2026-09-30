@@ -7,6 +7,8 @@ using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.Ai;
 using System.ComponentModel.DataAnnotations;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace LinuxMadeSane.Application.Services;
 
@@ -17,6 +19,23 @@ public sealed class AiProviderSettingsService(
     IAiProviderConnectionTester connectionTester,
     IAiProviderModelDiscoveryService modelDiscoveryService) : IAiProviderSettingsService
 {
+    // Circuit-scoped evidence: never trust client-supplied validation or retain API key plaintext.
+    private static readonly TimeSpan ValidationLifetime = TimeSpan.FromMinutes(10);
+    private ModelCatalogSnapshot? liveCatalog;
+    private ModelTestSnapshot? successfulTest;
+
+    private sealed record ModelValidationContext(AiProviderType Type, string ProviderKey, string BaseUrl,
+        string SecretReference, string ReplacementKeyHash, bool ClearKey, bool Streaming, bool ToolUse);
+    private sealed record ModelCatalogSnapshot(ModelValidationContext Context,
+        IReadOnlyList<AiProviderModelOption> Models, DateTimeOffset ExpiresAt);
+    private sealed record ModelTestSnapshot(ModelValidationContext Context, string ModelId, DateTimeOffset ExpiresAt);
+
+    private static ModelValidationContext GetValidationContext(AiProviderSettingsEditor editor, AiProviderSettings? existing) => new(
+        editor.ProviderType, existing?.ProviderKey ?? string.Empty, ResolveBaseUrl(editor, existing),
+        existing?.ApiKeySecretReference ?? string.Empty,
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(editor.ApiKeyInput?.Trim() ?? string.Empty))),
+        editor.ClearStoredApiKey, editor.StreamingEnabled, editor.ToolUseEnabled);
+
     public async Task<AiProviderSettingsPageViewModel> GetPageAsync(CancellationToken cancellationToken = default)
     {
         var providers = await providerRegistry.ListConfiguredProvidersAsync(cancellationToken);
@@ -140,10 +159,19 @@ public sealed class AiProviderSettingsService(
             existing?.CreatedAtUtc ?? now,
             now);
 
+        var context = GetValidationContext(editor, existing);
         var discoveredModels = await modelDiscoveryService.DiscoverAsync(settings, editor.ApiKeyInput, cancellationToken);
-        var mergedCatalog = MergeModelCatalog(providerRegistry.ListModelCatalog(), discoveredModels);
-
-        return EnsureCurrentModelIsListed(editor, mergedCatalog);
+        var selectableModels = discoveredModels
+            .Where(model => model.ProviderType == editor.ProviderType && !IsAuxiliaryModelArtifact(model.ModelId))
+            .DistinctBy(model => model.ModelId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        liveCatalog = new(context, selectableModels, DateTimeOffset.UtcNow + ValidationLifetime);
+        // A refresh is authoritative. Do not re-add retired bundled or configured models.
+        successfulTest = null;
+        return providerRegistry.ListModelCatalog()
+            .Where(model => model.ProviderType != editor.ProviderType)
+            .Concat(selectableModels)
+            .ToArray();
     }
 
     public async Task<string> SaveAsync(AiProviderSettingsEditor editor, CancellationToken cancellationToken = default)
@@ -299,20 +327,13 @@ public sealed class AiProviderSettingsService(
 
         await DiscoverLinuxMadeSaneAiServiceModelAsync(editor, existing, allProviders, cancellationToken);
 
-        var supportedModels = providerRegistry.ListModelCatalog(editor.ProviderType);
         var selectedModelId = editor.DefaultModelId.Trim();
-        var selectedModelIsSupported = editor.ProviderType == AiProviderType.LinuxMadeSaneAiService ||
-            await IsSelectedModelSupportedAsync(
-                editor,
-                existing,
-                supportedModels,
-                selectedModelId,
-                allProviders,
-                cancellationToken);
-        if (!selectedModelIsSupported)
+        if (IsAuxiliaryModelArtifact(selectedModelId))
         {
-            throw new InvalidOperationException("Select a supported default model before testing.");
+            throw new InvalidOperationException("Select a chat model before testing.");
         }
+        var validationContext = GetValidationContext(editor, existing);
+        successfulTest = null;
 
         var effectiveSecretReference = existing?.ApiKeySecretReference ?? string.Empty;
         string? temporarySecretReference = null;
@@ -366,7 +387,12 @@ public sealed class AiProviderSettingsService(
 
         try
         {
-            return await connectionTester.TestAsync(settings, cancellationToken);
+            var result = await connectionTester.TestAsync(settings, cancellationToken);
+            if (result.Succeeded)
+            {
+                successfulTest = new(validationContext, selectedModelId, DateTimeOffset.UtcNow + ValidationLifetime);
+            }
+            return result;
         }
         finally
         {
@@ -460,14 +486,24 @@ public sealed class AiProviderSettingsService(
             return false;
         }
 
-        if (supportedModels.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase)))
+        var context = GetValidationContext(editor, existing);
+        var nowUtc = DateTimeOffset.UtcNow;
+        if (successfulTest is { } test && test.Context == context && test.ExpiresAt > nowUtc &&
+            test.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
-
-        if (existing is not null && existing.DefaultModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase))
+        if (liveCatalog is { } catalog && catalog.Context == context && catalog.ExpiresAt > nowUtc)
         {
-            return true;
+            return catalog.Models.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase));
+        }
+
+        // Remote LMS engines have no model-list discovery API. Other providers must
+        // validate against their current endpoint, not an old bundled/configured ID.
+        if (editor.ProviderType == AiProviderType.RemoteLmsAiEngine)
+        {
+            return supportedModels.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase)) ||
+                existing?.DefaultModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase) == true;
         }
 
         try
@@ -491,33 +527,17 @@ public sealed class AiProviderSettingsService(
                 now);
 
             var discoveredModels = await modelDiscoveryService.DiscoverAsync(settings, editor.ApiKeyInput, cancellationToken);
-            return discoveredModels.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase));
+            liveCatalog = new(context, discoveredModels.Where(model => model.ProviderType == editor.ProviderType).ToArray(),
+                DateTimeOffset.UtcNow + ValidationLifetime);
+            return liveCatalog.Models.Any(model => model.ModelId.Equals(selectedModelId, StringComparison.OrdinalIgnoreCase));
         }
-        catch
+        catch (OperationCanceledException) { throw; }
+        catch (Exception exception)
         {
-            return false;
+            throw new InvalidOperationException(
+                "Could not verify the model list. Refresh models or successfully test this model before saving. " + exception.Message,
+                exception);
         }
-    }
-
-    private static IReadOnlyList<AiProviderModelOption> MergeModelCatalog(
-        IReadOnlyList<AiProviderModelOption> catalog,
-        IReadOnlyList<AiProviderModelOption> discoveredModels)
-    {
-        var merged = new List<AiProviderModelOption>(catalog);
-
-        foreach (var discoveredModel in discoveredModels)
-        {
-            if (merged.Any(model =>
-                    model.ProviderType == discoveredModel.ProviderType &&
-                    model.ModelId.Equals(discoveredModel.ModelId, StringComparison.OrdinalIgnoreCase)))
-            {
-                continue;
-            }
-
-            merged.Add(discoveredModel);
-        }
-
-        return merged.ToArray();
     }
 
     private static string GenerateProviderKey(
