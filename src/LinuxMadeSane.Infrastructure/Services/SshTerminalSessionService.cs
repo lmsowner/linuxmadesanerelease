@@ -174,6 +174,17 @@ public sealed class SshTerminalSessionService(
         catch (Exception exception)
         {
             Report($"Failed during {setupStage}: {exception.Message}");
+            if (setupStage == "shell creation")
+            {
+                Report($"SSH failure type: {exception.GetType().FullName}");
+                foreach (var frame in (exception.StackTrace ?? string.Empty)
+                             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                             .Where(static frame => frame.Contains("Renci.SshNet", StringComparison.Ordinal))
+                             .Take(8))
+                {
+                    Report(frame.Split(" in ", 2, StringSplitOptions.None)[0]);
+                }
+            }
             logger.LogWarning(
                 exception,
                 "SSH terminal setup failed for host {HostId} as {Username} during {Stage} after {ElapsedMs} ms",
