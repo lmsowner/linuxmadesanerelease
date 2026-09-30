@@ -186,7 +186,7 @@
             return;
         }
 
-        navOrderModule = await JSRuntime.InvokeAsync<IJSObjectReference>("import", "/scripts/nav-order.js");
+        navOrderModule = await JSRuntime.InvokeAsync<IJSObjectReference>("import", $"/scripts/nav-order.js?v={ProductVersion}");
         navOrderReference = DotNetObjectReference.Create(this);
         await navOrderModule.InvokeVoidAsync("bindNavOrder", navListElement, navOrderReference);
     }
@@ -194,7 +194,14 @@
     [JSInvokable]
     public async Task MoveNavigationItemAsync(string sourcePath, string targetPath, bool insertBefore)
     {
-        if (UserId is not { } userId || sourcePath == targetPath ||
+        if (UserId is not { } userId)
+        {
+            orderError = "Sign in to save the menu order to your profile.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        if (sourcePath == targetPath ||
             !NavItems.Any(item => item.Href == sourcePath) ||
             !NavItems.Any(item => item.Href == targetPath))
         {

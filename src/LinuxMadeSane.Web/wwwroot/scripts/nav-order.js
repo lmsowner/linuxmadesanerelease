@@ -40,11 +40,37 @@ export function bindNavOrder(list, dotNet) {
     };
 
     const locateTarget = (x, y) => {
-        clearMarker();
-        const candidate = document.elementFromPoint(x, y)?.closest(".nav-reorder-item");
-        if (!candidate || candidate === source || !list.contains(candidate)) return;
+        const listBounds = list.getBoundingClientRect();
+        if (x < listBounds.left || x > listBounds.right || y < listBounds.top || y > listBounds.bottom) {
+            clearMarker();
+            return;
+        }
+
+        const items = [...list.querySelectorAll(".nav-reorder-item")];
+        const hovered = items.find(item => {
+            const bounds = item.getBoundingClientRect();
+            return y >= bounds.top && y <= bounds.bottom;
+        });
+        if (hovered === source) {
+            clearMarker();
+            return;
+        }
+
+        const candidate = hovered ?? items.filter(item => item !== source).reduce((nearest, item) => {
+            const bounds = item.getBoundingClientRect();
+            const distance = Math.min(Math.abs(y - bounds.top), Math.abs(y - bounds.bottom));
+            return !nearest || distance < nearest.distance ? { item, distance } : nearest;
+        }, null)?.item;
+        if (!candidate) {
+            clearMarker();
+            return;
+        }
+
         const bounds = candidate.getBoundingClientRect();
-        insertBefore = y < bounds.top + bounds.height / 2;
+        const before = y < bounds.top + bounds.height / 2;
+        if (marker === candidate && insertBefore === before) return;
+        clearMarker();
+        insertBefore = before;
         candidate.classList.add(insertBefore ? "nav-insert-before" : "nav-insert-after");
         marker = candidate;
     };
