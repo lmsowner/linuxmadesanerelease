@@ -608,6 +608,7 @@ window.lmsTerminal = (() => {
         getSelection,
         stageClipboardRead,
         readClipboard,
+        isSecureContext: () => window.isSecureContext,
         promptPasteCommand,
         clear,
         resetForNewSession,
