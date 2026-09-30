@@ -201,24 +201,6 @@ else
                                     <strong>@AccessGuidanceTitle</strong>
                                     <span>@BuildAccessGuidanceMessage(accessDeniedPath, suggestedAccessUser)</span>
                                 </div>
-                                <div class="host-file-access-guidance-actions">
-                                    @if (browser is not null && !IsLocalBrowser)
-                                    {
-                                        <UiCommandButton Label="Edit credentials"
-                                                         Title="Open this host's saved SSH credentials."
-                                                         Glyph="UiIconGlyph.Key"
-                                                         Variant="UiButtonVariant.Ghost"
-                                                         Href="@($"/hosts/{browser.Host.Id}/edit")" />
-                                    }
-                                    @if (browser is not null)
-                                    {
-                                        <UiCommandButton Label="Open terminal"
-                                                         Title="Open a separate terminal window as the current Linux account for sudo, ownership, or ACL changes."
-                                                         Glyph="UiIconGlyph.Run"
-                                                         Variant="UiButtonVariant.Ghost"
-                                                         OnClick="@(() => OpenTerminalForAccessGuidanceAsync(accessDeniedPath))" />
-                                    }
-                                </div>
                             </section>
                         }
 
@@ -393,25 +375,8 @@ else
                                 {
                                     var suggestedItemUser = GetSuggestedAccessUser(item.FullPath);
                                     <div class="empty-state host-file-preview-empty host-file-preview-main host-file-access-detail">
-                                        <h3>Folder needs a different identity</h3>
+                                        <h3>Folder unavailable to the current account</h3>
                                         <p>@BuildAccessGuidanceMessage(item.FullPath, suggestedItemUser)</p>
-                                        <div class="host-file-access-guidance-actions">
-                                            @if (browser is not null && !IsLocalBrowser)
-                                            {
-                                                <UiCommandButton Label="Edit credentials"
-                                                                 Glyph="UiIconGlyph.Key"
-                                                                 Variant="UiButtonVariant.Ghost"
-                                                                 Href="@($"/hosts/{browser.Host.Id}/edit")" />
-                                            }
-                                            @if (browser is not null)
-                                            {
-                                                <UiCommandButton Label="Open terminal"
-                                                                 Title="Open a separate terminal window as the current Linux account for sudo, ownership, or ACL changes."
-                                                                 Glyph="UiIconGlyph.Run"
-                                                                 Variant="UiButtonVariant.Ghost"
-                                                                 OnClick="@(() => OpenTerminalForAccessGuidanceAsync(item.FullPath))" />
-                                            }
-                                        </div>
                                     </div>
                                 }
                                 else
@@ -1344,8 +1309,8 @@ else
     private bool ShowAccessDeniedGuidance => !string.IsNullOrWhiteSpace(accessDeniedPath);
     private string? SuggestedAccessUser => GetSuggestedAccessUser(accessDeniedPath);
     private string AccessGuidanceTitle => sudoModeEnabled
-        ? "This item rejects root access."
-        : "Use the right Linux identity for this folder.";
+        ? "This folder is unavailable with sudo access."
+        : "This folder is unavailable to the current account.";
     private bool CanShowPopout => AllowPopout && !DetachedBrowserId.HasValue && !DetachedSearchId.HasValue;
     private bool ShouldOpenFileSearchInline => DetachedSearchId.HasValue || !AllowPopout;
     private string ResolvedExplorerTitle => string.IsNullOrWhiteSpace(Title) ? "Filesystem explorer" : Title.Trim();
@@ -1367,7 +1332,9 @@ else
                 ? "Enter a directory path to browse the remote host. Saved credentials will be used automatically."
                 : HasConfiguredStoredCredentials && preferStoredCredentials && !HasInlineCredentialOverrides
                     ? "Saved credentials are unavailable. Enter credentials and a directory path to browse the remote host."
-                : "Set up a connection user in Terminal, then right-click here and choose Connect as.";
+                : ConnectionProfileSelectionKeys.TryParseSaved(connectionProfileKey, out _)
+                    ? $"Cannot browse as {ConnectionIdentityDisplayName}. Choose another connection user or an accessible folder."
+                    : "Choose a connection user or enter an accessible folder path.";
     private FileBrowserClipboardState? Clipboard => WorkspaceState.Clipboard;
     private bool CanPasteFromClipboard => browser is not null && Clipboard is not null;
     private IReadOnlyList<SftpItem> SelectedItems => items
@@ -3125,8 +3092,20 @@ else
         browserStatus = $"Connecting as {ConnectionIdentityDisplayName}";
         PersistDetachedBrowserState();
 
-        var targetPath = ResolveAddressInputPath(string.IsNullOrWhiteSpace(pathInput) ? currentPath : pathInput);
-        await LoadItemsAsync(targetPath, preserveSessionOnFailure: false, updatePathInputOnSuccess: true);
+        try
+        {
+            var homePath = HasScopedRoot
+                ? EffectiveRootPath!
+                : await FileAccessService.GetHomeDirectoryAsync(browser.Host, BuildConnectionProfile());
+            await LoadItemsAsync(homePath, preserveSessionOnFailure: false, updatePathInputOnSuccess: true);
+        }
+        catch (Exception exception)
+        {
+            errorMessage = $"Could not open {ConnectionIdentityDisplayName}'s home directory: {exception.Message}";
+            browserStatus = "Connection failed";
+            canBrowse = false;
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     private void ResetConnectionScopedBrowserState()
@@ -3205,21 +3184,6 @@ else
         ClearOperationMessage();
 
         await OpenDetachedTerminalAsync(targetDirectoryPath);
-    }
-
-    private Task OpenTerminalForAccessGuidanceAsync(string blockedPath)
-    {
-        if (browser is null)
-        {
-            return Task.CompletedTask;
-        }
-
-        DismissContextMenu();
-        ClearOperationMessage();
-
-        var normalizedBlockedPath = ResolveBrowserPath(blockedPath);
-        var workingDirectoryPath = GetParentDirectory(normalizedBlockedPath);
-        return OpenDetachedTerminalAsync(workingDirectoryPath, normalizedBlockedPath);
     }
 
     private async Task OpenDetachedTerminalAsync(string targetDirectoryPath, string? relatedPath = null)
@@ -5590,20 +5554,18 @@ else
         var normalizedPath = ResolveBrowserPath(path);
         if (sudoModeEnabled)
         {
-            return $"{normalizedPath} still rejects privileged access. User-session mounts such as GVFS and redirected drives can deny root; open it through the owning user's session.";
+            return $"{normalizedPath} still rejects privileged access. Choose an account that can read this folder or navigate elsewhere.";
         }
 
         if (!string.IsNullOrWhiteSpace(suggestedUser))
         {
             return UsesSshTransport &&
                    string.Equals(suggestedUser, connectionUsername, StringComparison.Ordinal)
-                ? $"{normalizedPath} looks like {suggestedUser}'s home folder, but the current SSH account still cannot read it. Check that account's permissions or use an explicit terminal/sudo action."
-                : $"{normalizedPath} looks like {suggestedUser}'s home folder. Set that user up in Terminal, then right-click in this browser and choose Connect as.";
+                ? $"{normalizedPath} cannot be read by {connectionUsername}. Choose another folder or account."
+                : $"{normalizedPath} may belong to {suggestedUser}. Choose an account that can read it, or navigate elsewhere.";
         }
 
-        return !UsesSshTransport
-            ? $"{normalizedPath} is blocked by local filesystem permissions. Set up the owning Linux account in Terminal, then right-click and choose Connect as, or use a terminal for explicit sudo, ownership, or ACL work."
-            : $"{normalizedPath} is blocked by the SSH account currently in use. Set up the owning Linux account in Terminal, then right-click and choose Connect as, or use a terminal for explicit sudo, ownership, or ACL work.";
+        return $"{normalizedPath} cannot be read by the current account. Choose an account that can access it, or navigate elsewhere.";
     }
 
     private static bool IsAccessDeniedFailure(Exception exception)

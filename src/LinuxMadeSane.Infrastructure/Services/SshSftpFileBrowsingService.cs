@@ -23,6 +23,29 @@ public sealed class SshSftpFileBrowsingService(
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(15);
 
+    public async Task<string> GetHomeDirectoryAsync(
+        ManagedHost host,
+        string username,
+        string? password,
+        string? privateKey,
+        string? privateKeyPassphrase,
+        bool preferStoredCredentials,
+        CancellationToken cancellationToken = default)
+    {
+        var credentials = await ResolveCredentialsAsync(
+            host, username, password, privateKey, privateKeyPassphrase,
+            preferStoredCredentials, cancellationToken);
+        return await RunBlockingRemoteOperationAsync(() =>
+        {
+            using var client = Connect(host, credentials);
+            var home = client.WorkingDirectory;
+            client.Disconnect();
+            return string.IsNullOrWhiteSpace(home)
+                ? throw new InvalidOperationException("The SFTP server did not provide this account's home directory.")
+                : home;
+        }, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<SftpItem>> ListItemsAsync(
         ManagedHost host,
         string path,

@@ -7,6 +7,15 @@ namespace LinuxMadeSane.Core.Abstractions;
 
 public interface ISftpFileBrowsingService
 {
+    Task<string> GetHomeDirectoryAsync(
+        ManagedHost host,
+        string username,
+        string? password,
+        string? privateKey,
+        string? privateKeyPassphrase,
+        bool preferStoredCredentials,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<SftpItem>> ListItemsAsync(
         ManagedHost host,
         string path,

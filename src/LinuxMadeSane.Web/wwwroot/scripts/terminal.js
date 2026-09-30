@@ -4,6 +4,7 @@
 window.lmsTerminal = (() => {
     const terminals = new Map();
     const baseTerminalFontSize = 14;
+    let pendingClipboardRead = null;
 
     function invokeDotNetSafely(dotNetRef, methodName, ...args) {
         if (!dotNetRef) {
@@ -348,45 +349,69 @@ window.lmsTerminal = (() => {
         }
     }
 
-    function captureClipboardPaste() {
+    function promptPasteCommand() {
         return new Promise(resolve => {
+            const backdrop = document.createElement("div");
             const shell = document.createElement("div");
             const label = document.createElement("div");
             const input = document.createElement("textarea");
+            const actions = document.createElement("div");
+            const cancel = document.createElement("button");
+            const submit = document.createElement("button");
             let completed = false;
+
+            backdrop.style.position = "fixed";
+            backdrop.style.inset = "0";
+            backdrop.style.zIndex = "2147483647";
+            backdrop.style.background = "rgba(0, 0, 0, 0.28)";
+            backdrop.style.display = "grid";
+            backdrop.style.placeItems = "center";
+            backdrop.style.padding = "16px";
 
             shell.setAttribute("role", "dialog");
             shell.setAttribute("aria-modal", "true");
-            shell.style.position = "fixed";
-            shell.style.left = "50%";
-            shell.style.top = "50%";
-            shell.style.transform = "translate(-50%, -50%)";
-            shell.style.zIndex = "2147483647";
-            shell.style.width = "min(360px, calc(100vw - 32px))";
-            shell.style.padding = "12px";
-            shell.style.border = `1px solid ${getCssValue("--color-border") || "rgba(255,255,255,.18)"}`;
+            shell.setAttribute("aria-label", "Paste command");
+            shell.style.width = "min(440px, 100%)";
+            shell.style.padding = "16px";
+            shell.style.border = `1px solid ${getCssValue("--color-line-strong") || "#9ca3af"}`;
             shell.style.borderRadius = "8px";
-            shell.style.background = getCssValue("--color-surface") || "#ffffff";
+            shell.style.background = getCssValue("--surface-elevated") || "#ffffff";
             shell.style.boxShadow = "0 16px 40px rgba(0,0,0,.35)";
 
-            label.textContent = "Press Ctrl+V to paste";
+            label.textContent = "Type or paste a command. It will appear at the terminal prompt; press Enter there to run it.";
             label.style.marginBottom = "8px";
             label.style.fontSize = "13px";
-            label.style.fontWeight = "700";
             label.style.color = getCssValue("--color-text") || "#1f2937";
 
-            input.setAttribute("aria-label", "Paste terminal clipboard text");
+            input.setAttribute("aria-label", "Command to paste into terminal");
             input.style.boxSizing = "border-box";
             input.style.width = "100%";
-            input.style.minHeight = "76px";
+            input.style.minHeight = "96px";
             input.style.resize = "vertical";
-            input.style.border = `1px solid ${getCssValue("--color-border-strong") || "#9ca3af"}`;
+            input.style.border = `1px solid ${getCssValue("--color-line-strong") || "#9ca3af"}`;
             input.style.borderRadius = "6px";
             input.style.padding = "8px";
-            input.style.background = getCssValue("--color-input-bg") || "#ffffff";
+            input.style.background = getCssValue("--surface-soft-1") || "#ffffff";
             input.style.color = getCssValue("--color-text") || "#111827";
             input.style.font = "13px monospace";
             input.style.outline = "none";
+
+            actions.style.display = "flex";
+            actions.style.justifyContent = "flex-end";
+            actions.style.gap = "8px";
+            actions.style.marginTop = "12px";
+
+            for (const button of [cancel, submit]) {
+                button.type = "button";
+                button.style.border = `1px solid ${getCssValue("--color-line-strong") || "#9ca3af"}`;
+                button.style.borderRadius = "6px";
+                button.style.padding = "7px 12px";
+                button.style.cursor = "pointer";
+                button.style.color = getCssValue("--color-text") || "#111827";
+                button.style.background = getCssValue("--surface-soft-1") || "#ffffff";
+            }
+            cancel.textContent = "Cancel";
+            submit.textContent = "Paste command";
 
             const finish = value => {
                 if (completed) {
@@ -394,68 +419,62 @@ window.lmsTerminal = (() => {
                 }
 
                 completed = true;
-                window.clearTimeout(timeout);
-                input.removeEventListener("paste", handlePaste);
-                input.removeEventListener("input", handleInput);
-                input.removeEventListener("keydown", handleKeydown);
-                document.removeEventListener("mousedown", handleOutsideMouseDown, true);
-                shell.remove();
+                document.removeEventListener("keydown", handleKeydown, true);
+                backdrop.remove();
                 resolve(value ?? "");
-            };
-
-            const handlePaste = event => {
-                const pastedText = event.clipboardData?.getData("text") ?? "";
-                if (pastedText) {
-                    event.preventDefault();
-                    finish(pastedText);
-                    return;
-                }
-
-                window.setTimeout(() => finish(input.value), 0);
-            };
-
-            const handleInput = () => {
-                if (input.value) {
-                    finish(input.value);
-                }
             };
 
             const handleKeydown = event => {
                 if (event.key === "Escape") {
                     event.preventDefault();
                     finish("");
-                }
-            };
-
-            const handleOutsideMouseDown = event => {
-                if (!shell.contains(event.target)) {
-                    finish("");
+                } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                    event.preventDefault();
+                    finish(input.value);
                 }
             };
 
             shell.appendChild(label);
             shell.appendChild(input);
-            document.body.appendChild(shell);
+            actions.appendChild(cancel);
+            actions.appendChild(submit);
+            shell.appendChild(actions);
+            backdrop.appendChild(shell);
+            document.body.appendChild(backdrop);
 
-            input.addEventListener("paste", handlePaste);
-            input.addEventListener("input", handleInput);
-            input.addEventListener("keydown", handleKeydown);
-            document.addEventListener("mousedown", handleOutsideMouseDown, true);
-
-            const timeout = window.setTimeout(() => finish(""), 15000);
+            cancel.addEventListener("click", () => finish(""));
+            submit.addEventListener("click", () => finish(input.value));
+            backdrop.addEventListener("pointerdown", event => {
+                if (event.target === backdrop) finish("");
+            });
+            document.addEventListener("keydown", handleKeydown, true);
             input.focus({ preventScroll: true });
         });
     }
 
+    function stageClipboardRead() {
+        try {
+            pendingClipboardRead = {
+                startedAt: Date.now(),
+                result: navigator.clipboard?.readText?.().catch(() => null) ?? Promise.resolve(null)
+            };
+        } catch {
+            pendingClipboardRead = { startedAt: Date.now(), result: Promise.resolve(null) };
+        }
+    }
+
     async function readClipboard() {
-        if (navigator.clipboard?.readText) {
-            try {
-                return await navigator.clipboard.readText();
-            } catch {
-            }
+        const staged = pendingClipboardRead;
+        pendingClipboardRead = null;
+        if (staged && Date.now() - staged.startedAt < 15000) {
+            return await staged.result;
         }
 
-        return await captureClipboardPaste();
+        try {
+            return await navigator.clipboard?.readText?.() ?? null;
+        } catch {
+            return null;
+        }
     }
 
     function clear(id) {
@@ -587,7 +606,9 @@ window.lmsTerminal = (() => {
         copySelection,
         setCopyOnSelect,
         getSelection,
+        stageClipboardRead,
         readClipboard,
+        promptPasteCommand,
         clear,
         resetForNewSession,
         registerAiPromptShortcut,

@@ -242,7 +242,8 @@
                                                        AddUserRequested="AddConnectionUserAsync"
                                                        ManageUsersRequested="OpenConnectionPanelAsync" />
                                 <UiContextMenuButton Label="Copy selection" Glyph="UiIconGlyph.Copy" OnClick="CopySelectionAsync" />
-                                <UiContextMenuButton Label="Paste" Glyph="UiIconGlyph.Paste" OnClick="PasteClipboardAsync" />
+                                <UiContextMenuButton Label="Paste clipboard" Glyph="UiIconGlyph.Paste" OnClientPointerDown="window.lmsTerminal.stageClipboardRead()" OnClick="PasteClipboardAsync" />
+                                <UiContextMenuButton Label="Paste command" Glyph="UiIconGlyph.Terminal" OnClick="PasteCommandAsync" />
                                 <UiContextMenuButton Label="Ask AI" Glyph="UiIconGlyph.Ai" OnClick="AskAiAsync" />
                                 @if (hasContextMenuSelection)
                                 {
@@ -1107,10 +1108,35 @@
             return;
         }
 
-        var clipboard = await JSRuntime.InvokeAsync<string>("lmsTerminal.readClipboard");
+        var clipboard = await JSRuntime.InvokeAsync<string?>("lmsTerminal.readClipboard");
+        if (clipboard is null)
+        {
+            tab.ErrorMessage = "Browser clipboard access is unavailable. Use Paste command and Ctrl+V, or paste directly in the terminal.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        tab.ErrorMessage = string.Empty;
         if (!string.IsNullOrEmpty(clipboard))
         {
             await JSRuntime.InvokeVoidAsync("lmsTerminal.paste", terminalClientId, clipboard);
+        }
+    }
+
+    private async Task PasteCommandAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        if (tab is not { ConnectionDesired: true, SessionId: not null })
+        {
+            return;
+        }
+
+        var command = await JSRuntime.InvokeAsync<string>("lmsTerminal.promptPasteCommand");
+        if (!string.IsNullOrEmpty(command))
+        {
+            tab.ErrorMessage = string.Empty;
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.paste", terminalClientId, command);
         }
     }
 

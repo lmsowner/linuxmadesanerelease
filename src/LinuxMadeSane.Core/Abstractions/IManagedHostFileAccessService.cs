@@ -14,6 +14,11 @@ public interface IManagedHostFileAccessService
         ManagedHostConnectionProfile connectionProfile,
         CancellationToken cancellationToken = default);
 
+    Task<string> GetHomeDirectoryAsync(
+        ManagedHost host,
+        ManagedHostConnectionProfile connectionProfile,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<SftpItem>> ListItemsAsync(
         ManagedHost host,
         string path,

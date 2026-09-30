@@ -55,6 +55,28 @@ public sealed class ManagedHostFileAccessService(
             : new ManagedHostConnectionValidationResult(true, string.Empty);
     }
 
+    public Task<string> GetHomeDirectoryAsync(
+        ManagedHost host,
+        ManagedHostConnectionProfile connectionProfile,
+        CancellationToken cancellationToken = default)
+    {
+        if (ShouldUseLocalFileBrowsing(host, connectionProfile))
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            return Task.FromResult(string.IsNullOrWhiteSpace(home) ? host.DefaultWorkingDirectory : home);
+        }
+
+        var request = BuildRemoteRequest(host, connectionProfile);
+        return sftpFileBrowsingService.GetHomeDirectoryAsync(
+            host,
+            request.Username,
+            request.Password,
+            request.PrivateKey,
+            request.PrivateKeyPassphrase,
+            request.PreferStoredCredentials,
+            cancellationToken);
+    }
+
     public Task<IReadOnlyList<SftpItem>> ListItemsAsync(
         ManagedHost host,
         string path,
