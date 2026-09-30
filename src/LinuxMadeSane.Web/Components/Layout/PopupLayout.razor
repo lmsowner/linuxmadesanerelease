@@ -2,7 +2,50 @@
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @inherits LayoutComponentBase
+@using System.Security.Claims
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
+@inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject ConnectionProfileUserResolver ConnectionProfileUserResolver
+@inject IJSRuntime JSRuntime
 
 <div class="popup-layout-shell">
     @Body
 </div>
+
+@code {
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private Guid? currentUserId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var principal = AuthenticationStateTask is null
+            ? HttpContext?.User
+            : (await AuthenticationStateTask).User;
+        currentUserId = Guid.TryParse(principal?.FindFirstValue(ClaimTypes.NameIdentifier), out var userId)
+            ? userId
+            : (await ConnectionProfileUserResolver.ResolveAsync(principal))?.Id;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || currentUserId is not { } userId)
+        {
+            return;
+        }
+
+        var preference = await UserDisplayPreferenceService.GetAsync(userId);
+        if (preference is not null)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTheme.applyUserPreferences", new
+            {
+                paletteId = preference.ThemePaletteId,
+                mode = preference.ThemeMode,
+                fontScalePercent = preference.FontScalePercent
+            });
+        }
+    }
+}

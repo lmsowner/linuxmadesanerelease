@@ -221,7 +221,9 @@ window.lmsFileBrowser = (() => {
         }
 
         const margin = 8;
-        const gap = 4;
+        // Keep the panel touching its trigger so moving the pointer into it
+        // does not end the submenu's hover state.
+        const gap = -1;
         const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
         const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
         const triggerRect = trigger.getBoundingClientRect();

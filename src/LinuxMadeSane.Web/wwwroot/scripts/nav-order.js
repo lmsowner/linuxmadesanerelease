@@ -13,6 +13,7 @@ export function bindNavOrder(list, dotNet) {
     let insertBefore = true;
     let startX = 0;
     let startY = 0;
+    let reorderMode = false;
     let dragging = false;
     let suppressClick = false;
 
@@ -21,15 +22,21 @@ export function bindNavOrder(list, dotNet) {
         marker = null;
     };
 
-    const reset = () => {
+    const endGesture = () => {
         clearTimeout(pressTimer);
         clearMarker();
         if (source?.hasPointerCapture(pointerId)) source.releasePointerCapture(pointerId);
         source?.classList.remove("nav-dragging", "nav-pressing");
-        list.classList.remove("nav-reordering");
         source = null;
         pointerId = null;
         dragging = false;
+    };
+
+    const leaveReorderMode = () => {
+        endGesture();
+        reorderMode = false;
+        suppressClick = false;
+        list.classList.remove("nav-reordering");
     };
 
     const locateTarget = (x, y) => {
@@ -46,18 +53,25 @@ export function bindNavOrder(list, dotNet) {
         if (event.button !== 0 || event.target.closest("button, input, select, textarea")) return;
         const item = event.target.closest(".nav-reorder-item");
         if (!item || !list.contains(item)) return;
-        suppressClick = false;
-        reset();
+
+        endGesture();
         source = item;
         pointerId = event.pointerId;
         startX = event.clientX;
         startY = event.clientY;
-        item.classList.add("nav-pressing");
+
+        if (reorderMode) {
+            event.preventDefault();
+            source.setPointerCapture(pointerId);
+            suppressClick = true;
+            return;
+        }
+
+        source.classList.add("nav-pressing");
         pressTimer = setTimeout(() => {
             if (!source) return;
-            dragging = true;
+            reorderMode = true;
             source.classList.remove("nav-pressing");
-            source.classList.add("nav-dragging");
             list.classList.add("nav-reordering");
             source.setPointerCapture(pointerId);
             suppressClick = true;
@@ -66,76 +80,75 @@ export function bindNavOrder(list, dotNet) {
 
     const onPointerMove = event => {
         if (event.pointerId !== pointerId || !source) return;
-        if (!dragging) {
-            if (event.pointerType === "touch" &&
-                Math.hypot(event.clientX - startX, event.clientY - startY) > 18) reset();
+        const distance = Math.hypot(event.clientX - startX, event.clientY - startY);
+        if (!reorderMode) {
+            if (distance > 18) endGesture();
             return;
         }
+        if (distance < 5 && !dragging) return;
+
+        dragging = true;
+        source.classList.add("nav-dragging");
         event.preventDefault();
         locateTarget(event.clientX, event.clientY);
     };
 
     const onPointerUp = event => {
         if (event.pointerId !== pointerId || !source) return;
+        if (dragging) locateTarget(event.clientX, event.clientY);
         const from = source.dataset.navPath;
-        const to = marker?.dataset.navPath;
+        const to = dragging ? marker?.dataset.navPath : null;
         const before = insertBefore;
-        const wasDragging = dragging;
-        reset();
-        if (wasDragging && to) dotNet.invokeMethodAsync("MoveNavigationItemAsync", from, to, before);
+        const wasReordering = reorderMode;
+        endGesture();
+        if (wasReordering) suppressClick = true;
+        if (to) void dotNet.invokeMethodAsync("MoveNavigationItemAsync", from, to, before);
     };
 
     const onClick = event => {
-        if (!suppressClick) return;
+        if (!suppressClick && !reorderMode) return;
         event.preventDefault();
         event.stopPropagation();
         suppressClick = false;
     };
 
-    const onTouchMove = event => {
-        if (!dragging || !event.touches.length) return;
-        event.preventDefault();
-        locateTarget(event.touches[0].clientX, event.touches[0].clientY);
+    const onOutsidePointerDown = event => {
+        if (reorderMode && !list.contains(event.target)) leaveReorderMode();
     };
 
-    const onTouchEnd = () => {
-        if (!dragging || !source) return;
-        const from = source.dataset.navPath;
-        const to = marker?.dataset.navPath;
-        const before = insertBefore;
-        reset();
-        if (to) dotNet.invokeMethodAsync("MoveNavigationItemAsync", from, to, before);
+    const onKeyDown = event => {
+        if (reorderMode && event.key === "Escape") leaveReorderMode();
     };
 
     const onDragStart = event => {
-        if (source) event.preventDefault();
+        if (source || reorderMode) event.preventDefault();
     };
 
     const onContextMenu = event => {
-        if (source) event.preventDefault();
+        if (source || reorderMode) event.preventDefault();
     };
 
     list.addEventListener("pointerdown", onPointerDown);
     list.addEventListener("dragstart", onDragStart);
     list.addEventListener("contextmenu", onContextMenu);
+    list.addEventListener("click", onClick, true);
     window.addEventListener("pointermove", onPointerMove, { passive: false });
     window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", reset);
-    list.addEventListener("click", onClick, true);
-    window.addEventListener("touchmove", onTouchMove, { passive: false });
-    window.addEventListener("touchend", onTouchEnd);
+    window.addEventListener("pointercancel", endGesture);
+    document.addEventListener("pointerdown", onOutsidePointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
 
     controllers.set(list, () => {
-        reset();
+        leaveReorderMode();
         list.removeEventListener("pointerdown", onPointerDown);
         list.removeEventListener("dragstart", onDragStart);
         list.removeEventListener("contextmenu", onContextMenu);
+        list.removeEventListener("click", onClick, true);
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("pointerup", onPointerUp);
-        window.removeEventListener("pointercancel", reset);
-        list.removeEventListener("click", onClick, true);
-        window.removeEventListener("touchmove", onTouchMove);
-        window.removeEventListener("touchend", onTouchEnd);
+        window.removeEventListener("pointercancel", endGesture);
+        document.removeEventListener("pointerdown", onOutsidePointerDown, true);
+        window.removeEventListener("keydown", onKeyDown);
     });
 }
 
