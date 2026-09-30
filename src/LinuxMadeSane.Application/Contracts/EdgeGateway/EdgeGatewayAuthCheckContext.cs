@@ -15,4 +15,5 @@ public sealed record EdgeGatewayAuthCheckContext(
     IPAddress? RemoteIpAddress,
     ClaimsPrincipal User,
     string CountryCode = "",
-    string UserAgent = "");
+    string UserAgent = "",
+    bool HasTemporaryRecoveryAccess = false);

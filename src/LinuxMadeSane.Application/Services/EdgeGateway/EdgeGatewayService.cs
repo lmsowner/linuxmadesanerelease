@@ -1558,6 +1558,16 @@ public sealed class EdgeGatewayService(
                 cancellationToken);
         }
 
+        // Recovery is scoped to this LMS backend, not other applications behind the gateway.
+        if (context.HasTemporaryRecoveryAccess && route.TargetScheme == EdgeGatewayTargetScheme.Http &&
+            route.TargetPort == options.LmsForwardAuthPort && string.IsNullOrEmpty(route.TargetPathPrefix) &&
+            (route.TargetHost.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+             (IPAddress.TryParse(route.TargetHost, out var targetAddress) && IPAddress.IsLoopback(targetAddress))))
+        {
+            return await AllowAsync(route, requestedHost, requestedPath, sourceIp, userEmail, context.User,
+                "Temporary setup code allowed LMS recovery access.", cancellationToken);
+        }
+
         route = route with { AuthMode = NormalizePublicAuthMode(route.AuthMode) };
 
         if (route.AuthMode == EdgeGatewayAuthMode.PassThrough)

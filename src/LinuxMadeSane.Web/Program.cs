@@ -274,6 +274,18 @@ public class Program
                 return;
             }
 
+            if (await HasTemporaryRecoveryAccessAsync(context))
+            {
+                // The installer code grants temporary LMS access without requiring an
+                // account. Account/MFA enrollment remains an optional recovery task.
+                context.Items["LmsTrustedNetworkAccess"] = new TrustedNetworkAccessResult(
+                    context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    context.Request.Host.Host, true, "Temporary setup code", true,
+                    false, true, true, false);
+                await next();
+                return;
+            }
+
             var remoteTunnelAccessService = context.RequestServices.GetRequiredService<RemoteLmsTunnelAccessService>();
             if (remoteTunnelAccessService.IsAuthorized(
                     context.Connection.RemoteIpAddress,
@@ -380,7 +392,8 @@ public class Program
             // which deliberately skips this path.
             var requiresAuthentication = !remoteTunnelAccessService.IsAuthorized(
                 context.Connection.RemoteIpAddress,
-                context.Request.Cookies[RemoteLmsTunnelAccessService.CookieName]);
+                context.Request.Cookies[RemoteLmsTunnelAccessService.CookieName]) &&
+                !await HasTemporaryRecoveryAccessAsync(context);
             if (requiresAuthentication)
             {
                 var accessResult = await trustedNetworkAccessService.EvaluateAsync(
@@ -559,7 +572,9 @@ public class Program
             }
 
             setupAuthorization.Authorize(context.Response, context.Request.IsHttps);
-            return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl));
+            return Results.Redirect(form["setup"].ToString().Equals("true", StringComparison.OrdinalIgnoreCase)
+                ? BuildInitialSetupRedirectTarget(returnUrl)
+                : returnUrl);
         }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
         app.MapPost("/auth/setup/network", async (
             HttpContext context,
@@ -853,7 +868,8 @@ public class Program
                     context.Connection.RemoteIpAddress,
                     context.User,
                     context.Request.Headers["CF-IPCountry"].ToString(),
-                    context.Request.Headers.UserAgent.ToString()),
+                    context.Request.Headers.UserAgent.ToString(),
+                    await HasTemporaryRecoveryAccessAsync(context)),
                 context.RequestAborted);
 
             context.Response.StatusCode = result.StatusCode;
@@ -2811,6 +2827,11 @@ public class Program
         return $"/setup?{string.Join("&", queryParts)}";
     }
 
+    private static async Task<bool> HasTemporaryRecoveryAccessAsync(HttpContext context) =>
+        context.RequestServices.GetRequiredService<TemporarySetupAuthorizationService>().IsAuthorized(context.Request) &&
+        await context.RequestServices.GetRequiredService<LocalAccessRecoveryService>()
+            .HasActiveTemporarySetupAsync(context.RequestAborted);
+
     private static async Task<bool> ShouldRedirectToInitialSetupAsync(HttpContext context)
     {
         if (!HttpMethods.IsGet(context.Request.Method) &&
@@ -2820,8 +2841,7 @@ public class Program
         }
 
         var path = context.Request.Path;
-        if (IsInitialSetupPath(path) ||
-            IsSetupPath(path) ||
+        if (IsAuthenticationEntryPath(path) ||
             IsAlwaysAnonymousAllowedPath(path) ||
             path.StartsWithSegments("/auth") ||
             path.StartsWithSegments("/api") ||
@@ -2832,7 +2852,9 @@ public class Program
 
         var securitySettingsService = context.RequestServices.GetRequiredService<ISecuritySettingsService>();
         var setup = await securitySettingsService.GetInitialSetupAsync(context.RequestAborted);
-        if (setup.IsComplete)
+        // MFA enrollment is ready; a normal login is what completes setup. Sending
+        // that session back to setup would prevent the required first login forever.
+        if (setup.IsComplete || setup.AwaitingFirstLogin)
         {
             return false;
         }

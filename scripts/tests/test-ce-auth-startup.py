@@ -5,7 +5,12 @@
 
 Run after building CE in Release. Never use an installed LMS database or recovery code.
 """
+import base64
 import hashlib
+import hmac
+import http.cookiejar
+import re
+import struct
 import json
 import os
 from pathlib import Path
@@ -39,13 +44,14 @@ def main():
         workspace = Path(directory)
         challenge = workspace / "access-recovery.json"
         now = datetime.now(timezone.utc)
-        challenge.write_text(json.dumps({
+        challenge_payload = json.dumps({
             "purpose": "linux-made-sane-temporary-setup", "version": 1,
             "challengeId": "ce-regression", "salt": "ce-test-salt",
             "codeHash": hashlib.sha256(b"ce-test-salt:A1B2C3D4").hexdigest(),
             "attempts": 0, "createdAtUtc": now.isoformat(),
             "expiresAtUtc": (now + timedelta(minutes=10)).isoformat(),
-        }))
+        })
+        challenge.write_text(challenge_payload)
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -58,7 +64,8 @@ def main():
             "AccessRecovery__ChallengePath": str(challenge),
             "ApplicationUpdates__Enabled": "false",
         }
-        client = urllib.request.build_opener(NoRedirect)
+        cookies = http.cookiejar.CookieJar()
+        client = urllib.request.build_opener(NoRedirect, urllib.request.HTTPCookieProcessor(cookies))
 
         def request(path, data=None):
             try:
@@ -88,6 +95,68 @@ def main():
                     time.sleep(0.2)
                 else:
                     raise RuntimeError("CE did not become healthy.")
+
+                # A fresh database must allow leaving setup for the first normal login.
+                status, body, _ = request("/setup")
+                check(status == 200 and "Temporary Setup Code" in body, "Fresh setup must render.")
+                status, _, headers = request("/auth/setup/authorize", b"temporarySetupCode=A1B2-C3D4")
+                check(status == 302 and headers.get("Location") == "/" and
+                      "lms.temporary-setup=" in headers["Set-Cookie"],
+                      "A valid fresh code must grant entry without an account.")
+                check(request("/")[0] == 200,
+                      "A valid recovery code must open LMS even with no accounts.")
+                check(request("/ai/providers")[0] == 200,
+                      "Recovery access must allow LMS pages without a login redirect.")
+                with sqlite3.connect(workspace / "lms.db") as database:
+                    check(database.execute("SELECT COUNT(*) FROM security_users").fetchone()[0] == 0,
+                          "Recovery entry must not require or invent an account.")
+                print("PASS fresh recovery code: LMS entry with no account", flush=True)
+                status, body, _ = request("/setup")
+                check(status == 200 and "Register LMS login" in body,
+                      "After entering the code, a fresh install must render account registration.")
+                status, _, headers = request("/auth/initial-setup/start",
+                    b"email=first%40example.test&linuxUsername=cecheck&returnUrl=%2F")
+                check(status == 302 and "error=" not in headers.get("Location", ""),
+                      "Fresh account registration must succeed.")
+                status, body, _ = request("/setup")
+                secret_match = re.search(r"<code\b[^>]*>([A-Z2-7 ]+)</code>", body)
+                check(status == 200 and secret_match is not None, "Pending setup must render the MFA key.")
+                secret = secret_match.group(1).replace(" ", "")
+                # Model successful setup MFA without changing the test machine's Linux
+                # accounts, SSH configuration or network rules. LastLogin remains NULL.
+                with sqlite3.connect(workspace / "lms.db") as database:
+                    database.execute("UPDATE security_users SET IsEnabled=1 WHERE Email='first@example.test'")
+                    database.execute("UPDATE trusted_network_entries SET IsAuthenticationEnabled=0")
+                status, body, _ = request("/setup")
+                check(status == 200 and "Complete your first login" in body,
+                      "Setup must offer the first login after MFA setup.")
+                cookies.clear()
+                for path in ("/login", "/LMSMFALogin"):
+                    status, body, headers = request(path)
+                    check(status == 200 and "Continue with passkey" in body,
+                          f"First login must render instead of returning to setup: {path}, "
+                          f"status={status}, Location={headers.get('Location')}")
+                counter = struct.pack(">Q", int(time.time()) // 30)
+                key = base64.b32decode(secret + "=" * (-len(secret) % 8))
+                digest = hmac.new(key, counter, hashlib.sha1).digest()
+                offset = digest[-1] & 15
+                code = f"{(struct.unpack('>I', digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000:06d}"
+                status, _, headers = request("/auth/login",
+                    f"email=first%40example.test&otpCode={code}&returnUrl=%2F".encode())
+                check(status == 302 and (headers.get("Location") == "/" or
+                      headers.get("Location", "").startswith("/auth/setup-passkey?")),
+                      "The first normal MFA login must succeed and leave setup.")
+                with sqlite3.connect(workspace / "lms.db") as database:
+                    check(database.execute("SELECT LastLoginAtUtc FROM security_users "
+                          "WHERE Email='first@example.test'").fetchone()[0] is not None,
+                          "The first real login must be recorded.")
+                check(request("/setup")[0] == 404 and not challenge.exists(),
+                      "Successful first login must close the temporary setup challenge.")
+                print("PASS fresh install: code, registration, first login and recovery closure", flush=True)
+                cookies.clear()
+                fresh_challenge = json.loads(challenge_payload)
+                fresh_challenge["createdAtUtc"] = datetime.now(timezone.utc).isoformat()
+                challenge.write_text(json.dumps(fresh_challenge))
 
                 # Model an existing account whose last login predates a newly minted
                 # installer challenge. This tests recovery after a reinstall, rather
@@ -120,12 +189,19 @@ def main():
 
                 status, _, headers = request(
                     "/auth/setup/authorize", b"temporarySetupCode=A1B2-C3D4&returnUrl=%2F")
-                check(status == 302 and headers.get("Location", "").startswith("/setup?")
+                check(status == 302 and headers.get("Location") == "/"
                       and "lms.temporary-setup=" in headers["Set-Cookie"],
-                      "A valid setup code must authorize recovery and return to setup.")
+                      "A valid code must authorize recovery and enter LMS.")
+                check(request("/")[0] == 200, "Reinstall recovery code must open LMS.")
                 print("PASS setup code: recovery authorized", flush=True)
 
                 challenge.unlink()
+                # A recovery cookie alone cannot bypass access after challenge closure.
+                with sqlite3.connect(workspace / "lms.db") as database:
+                    database.execute("UPDATE trusted_network_entries SET IsAuthenticationEnabled=1")
+                status, _, headers = request("/")
+                check(status == 302 and headers.get("Location", "").startswith("/login"),
+                      "Recovery entry must end when the temporary challenge closes.")
                 status, _, headers = request("/setup")
                 check(status == 404 and not headers.get("Location"),
                       "An unavailable setup challenge must return 404 without a login redirect.")
