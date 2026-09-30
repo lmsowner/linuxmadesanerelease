@@ -4,9 +4,12 @@
 @using LinuxMadeSane.Core.Versioning
 @rendermode InteractiveServer
 @using LinuxMadeSane.Application.Interfaces
+@using Microsoft.AspNetCore.Components.Authorization
+@using System.Security.Claims
 @using System.Text.Json
 @implements IAsyncDisposable
 @inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject AuthenticationStateProvider AuthenticationStateProvider
 @inject IJSRuntime JSRuntime
 
 <div class="nav-shell @(mobileMenuOpen ? "mobile-open" : string.Empty)">
@@ -137,6 +140,7 @@
     private IJSObjectReference? navOrderModule;
     private DotNetObjectReference<NavMenu>? navOrderReference;
     private Guid? loadedUserId;
+    private Guid? preferenceUserId;
     private bool mobileMenuOpen;
     private string? orderError;
 
@@ -150,14 +154,26 @@
 
     protected override async Task OnParametersSetAsync()
     {
-        if (loadedUserId == UserId)
+        // Direct access uses one default menu order for this LMS instance. A
+        // signed-in account uses its own profile, including in the CE layout.
+        preferenceUserId = IsAuthenticated ? UserId : Guid.Empty;
+        if (IsAuthenticated && preferenceUserId is null)
+        {
+            var authenticationState = await AuthenticationStateProvider.GetAuthenticationStateAsync();
+            if (Guid.TryParse(authenticationState.User.FindFirstValue(ClaimTypes.NameIdentifier), out var authenticatedUserId))
+            {
+                preferenceUserId = authenticatedUserId;
+            }
+        }
+
+        if (loadedUserId == preferenceUserId)
         {
             return;
         }
 
-        loadedUserId = UserId;
+        loadedUserId = preferenceUserId;
         navigationOrder.Clear();
-        if (UserId is not { } userId)
+        if (preferenceUserId is not { } userId)
         {
             return;
         }
@@ -194,7 +210,7 @@
     [JSInvokable]
     public async Task MoveNavigationItemAsync(string sourcePath, string targetPath, bool insertBefore)
     {
-        if (UserId is not { } userId)
+        if (preferenceUserId is not { } userId)
         {
             orderError = "Sign in to save the menu order to your profile.";
             await InvokeAsync(StateHasChanged);
