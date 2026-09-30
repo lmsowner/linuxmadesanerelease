@@ -2,7 +2,9 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Net;
+using System.Globalization;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.RateLimiting;
@@ -10,19 +12,24 @@ using LinuxMadeSane.Application;
 using LinuxMadeSane.Application.Contracts.Ai;
 using LinuxMadeSane.Application.Contracts.DesktopAssistant;
 using LinuxMadeSane.Application.Contracts.EdgeGateway;
+using LinuxMadeSane.Application.Contracts.HomeLab;
 using LinuxMadeSane.Application.Contracts.Security;
 using LinuxMadeSane.Application.Interfaces;
+using LinuxMadeSane.Application.Services.EdgeGateway;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
 using LinuxMadeSane.Core.Models.Ai;
 using LinuxMadeSane.Core.Models.DesktopSession;
+using LinuxMadeSane.Core.Models.LocalAi;
 using LinuxMadeSane.Core.Models.Scheduling;
 using LinuxMadeSane.Core.Versioning;
 using LinuxMadeSane.Infrastructure;
 using LinuxMadeSane.Infrastructure.Persistence;
+using LinuxMadeSane.Infrastructure.Services;
 using LinuxMadeSane.Web.Components;
 using LinuxMadeSane.Web.Services;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
@@ -33,11 +40,19 @@ namespace LinuxMadeSane.Web;
 
 public class Program
 {
+    private const string AntiforgeryCookieName = "lms.antiforgery";
     private const string OriginalConnectionRemoteIpAddressItemKey = "LmsOriginalConnectionRemoteIpAddress";
     private const string OriginalRequestHostItemKey = "LmsOriginalRequestHost";
 
     public static void Main(string[] args)
     {
+        if (TryHandlePrivilegedDriveUsageCommand(args))
+        {
+            return;
+        }
+
+        var launchDirectory = Environment.CurrentDirectory;
+
         if (args.Any(argument =>
                 argument.Equals("version", StringComparison.OrdinalIgnoreCase) ||
                 argument.Equals("--version", StringComparison.OrdinalIgnoreCase)))
@@ -56,6 +71,15 @@ public class Program
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddMemoryCache();
         builder.Services.AddRequiredComponentServices(builder.Configuration, builder.Environment.ContentRootPath);
+        builder.Services.AddAntiforgery(options =>
+        {
+            options.Cookie.Name = AntiforgeryCookieName;
+            options.Cookie.HttpOnly = true;
+            options.Cookie.IsEssential = true;
+            options.Cookie.Path = "/";
+            options.Cookie.SameSite = SameSiteMode.Lax;
+            options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        });
         builder.Services.Configure<ForwardedHeadersOptions>(options =>
         {
             options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
@@ -120,13 +144,18 @@ public class Program
         builder.Services.AddSingleton<RemoteLmsTunnelAccessService>();
         builder.Services.AddSingleton<RemoteLmsRelayCaddyService>();
         builder.Services.AddSingleton<RemoteLmsSshTunnelService>();
+        builder.Services.AddSingleton<OnDemandAppLaunchTicketStore>();
+        builder.Services.AddSingleton<OnDemandAppLaunchCoordinator>();
         builder.Services.AddSingleton<HttpServiceDiscoveryCoordinator>();
         builder.Services.AddHostedService(serviceProvider =>
             serviceProvider.GetRequiredService<HttpServiceDiscoveryCoordinator>());
+        builder.Services.AddHostedService<EdgeGatewayConfigurationStartupService>();
+        builder.Services.AddHostedService<OnDemandAppCleanupHostedService>();
         builder.Services.AddScoped<LocalInstanceIdentityService>();
         builder.Services.AddScoped<PasskeyAuthenticationService>();
         builder.Services.Configure<ApplicationUpdateOptions>(builder.Configuration.GetSection("ApplicationUpdates"));
-        builder.Services.AddHttpClient("ApplicationUpdates");
+        builder.Services.AddHttpClient("ApplicationUpdates", client =>
+            client.Timeout = TimeSpan.FromSeconds(30));
         builder.Services.AddSingleton(provider =>
             new ApplicationUpdateService(
                 provider.GetRequiredService<IHttpClientFactory>().CreateClient("ApplicationUpdates"),
@@ -153,11 +182,6 @@ public class Program
             initializer.InitializeAsync().GetAwaiter().GetResult();
         }
 
-        if (TryHandleConsoleCommand(args, app.Services))
-        {
-            return;
-        }
-
         RegisterStartupConsoleSummary(app);
 
         // Configure the HTTP request pipeline.
@@ -168,7 +192,6 @@ public class Program
             app.UseHsts();
         }
 
-        app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
         app.Use(async (context, next) =>
         {
             context.Items[OriginalConnectionRemoteIpAddressItemKey] = context.Connection.RemoteIpAddress;
@@ -176,6 +199,7 @@ public class Program
             await next();
         });
         app.UseForwardedHeaders();
+        app.UseLocalAiPeerApiPortIsolation();
         var forceHttpsRedirection = IsHttpsRedirectionForced(app.Configuration);
         var isDevelopment = app.Environment.IsDevelopment();
         app.UseWhen(
@@ -208,6 +232,39 @@ public class Program
         });
         app.UseAuthentication();
         app.UseAuthorization();
+
+        app.Use(async (context, next) =>
+        {
+            if (HttpMethods.IsGet(context.Request.Method) &&
+                context.Request.Path.Value?.Equals("/setup", StringComparison.OrdinalIgnoreCase) == true &&
+                !context.Request.IsHttps &&
+                bool.TryParse(context.RequestServices.GetRequiredService<IConfiguration>()["Setup:RequireHttps"], out var requireHttps) &&
+                requireHttps)
+            {
+                var host = context.Request.Host.Host;
+                if (host.Contains(":", StringComparison.Ordinal) && !host.StartsWith("[", StringComparison.Ordinal))
+                {
+                    host = $"[{host}]";
+                }
+
+                var port = context.RequestServices.GetRequiredService<IConfiguration>()["Setup:HttpsPort"] ?? "5443";
+                context.Response.Redirect($"https://{host}:{port}{context.Request.Path}{context.Request.QueryString}");
+                return;
+            }
+
+            if (HttpMethods.IsGet(context.Request.Method) &&
+                context.Request.Path.Value?.Equals("/setup", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var recoveryService = context.RequestServices.GetRequiredService<LocalAccessRecoveryService>();
+                if (!await recoveryService.HasActiveTemporarySetupAsync(context.RequestAborted))
+                {
+                    context.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return;
+                }
+            }
+
+            await next();
+        });
 
         app.Use(async (context, next) =>
         {
@@ -275,27 +332,25 @@ public class Program
                     return;
                 }
 
-                if (HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
+                await RespondToDeniedNetworkRequestAsync(context, accessResult);
+                return;
+            }
+
+            if (context.Request.Path.StartsWithSegments("/access-denied"))
+            {
+                if (accessResult.DeniedResponseMode == NetworkAccessDeniedResponseMode.EmptyNotFound)
                 {
-                    context.Response.Redirect("/access-denied");
+                    await RespondToDeniedNetworkRequestAsync(context, accessResult);
                     return;
                 }
 
-                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                await context.Response.WriteAsync("No access from this network interface.");
+                await next();
                 return;
             }
 
             if (!accessResult.IsAllowed)
             {
-                if (HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
-                {
-                    context.Response.Redirect("/access-denied");
-                    return;
-                }
-
-                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                await context.Response.WriteAsync("No access from this network interface.");
+                await RespondToDeniedNetworkRequestAsync(context, accessResult);
                 return;
             }
 
@@ -312,6 +367,39 @@ public class Program
         app.UseAntiforgery();
 
         app.MapStaticAssets();
+        // The gateway already allows this prefix before authentication, including after a restart.
+        app.MapGet(EdgeGatewayAuthenticationPaths.Availability, async (
+            HttpContext context,
+            ITrustedNetworkAccessService trustedNetworkAccessService,
+            RemoteLmsTunnelAccessService remoteTunnelAccessService) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+
+            // This endpoint is intentionally anonymous so a browser can detect LMS after a
+            // restart. Evaluate access here rather than relying on the normal access middleware,
+            // which deliberately skips this path.
+            var requiresAuthentication = !remoteTunnelAccessService.IsAuthorized(
+                context.Connection.RemoteIpAddress,
+                context.Request.Cookies[RemoteLmsTunnelAccessService.CookieName]);
+            if (requiresAuthentication)
+            {
+                var accessResult = await trustedNetworkAccessService.EvaluateAsync(
+                    context.Connection.RemoteIpAddress,
+                    context.Request.Host.Host,
+                    context.RequestAborted);
+                accessResult = await TryEvaluateNoAccessCloudflareLocalExposureAsync(
+                    context,
+                    trustedNetworkAccessService) ?? accessResult;
+                requiresAuthentication = accessResult.RequiresAuthentication;
+            }
+
+            return Results.Json(new
+            {
+                status = "ok",
+                product = "linux-made-sane",
+                requiresAuthentication
+            });
+        });
         app.MapGet("/healthz", () => Results.Json(new
         {
             status = "ok",
@@ -319,6 +407,210 @@ public class Program
             name = "Linux Made Sane",
             version = ResolveProductVersion()
         }));
+        app.MapGet("/on-demand-apps/open", (
+            HttpContext context,
+            OnDemandAppLaunchCoordinator launches,
+            string? service,
+            Guid? lease) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers.Pragma = "no-cache";
+            context.Response.Headers["Referrer-Policy"] = "no-referrer";
+
+            var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var email = context.User.FindFirstValue(ClaimTypes.Email);
+            if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(email))
+            {
+                return Results.Unauthorized();
+            }
+
+            var jobId = launches.Start(new OnDemandAppLaunchRequest(
+                service ?? string.Empty,
+                lease.GetValueOrDefault() == Guid.Empty ? Guid.NewGuid() : lease!.Value,
+                userId,
+                email,
+                context.Request.Host.Host,
+                context.Request.IsHttps));
+            context.Response.Headers["Content-Security-Policy"] =
+                "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'";
+            context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            return Results.Content(BuildOnDemandAppLaunchProgressHtml(jobId), "text/html", Encoding.UTF8);
+        }).RequireAuthorization();
+        app.MapGet("/on-demand-apps/launch/{jobId:guid}/status", (
+            HttpContext context,
+            Guid jobId,
+            OnDemandAppLaunchCoordinator launches) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            var snapshot = launches.GetSnapshot(jobId, userId);
+            return snapshot is null ? Results.NotFound() : Results.Json(snapshot);
+        }).RequireAuthorization();
+        app.MapGet("/on-demand-apps/launch/{jobId:guid}/complete", async (
+            HttpContext context,
+            Guid jobId,
+            OnDemandAppLaunchCoordinator launches,
+            OnDemandAppLaunchTicketStore launchTickets) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers.Pragma = "no-cache";
+            context.Response.Headers["Referrer-Policy"] = "no-referrer";
+            var userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            var snapshot = launches.GetSnapshot(jobId, userId);
+            if (snapshot is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (snapshot.State == "failed")
+            {
+                return Results.Content(
+                    BuildOnDemandAppLaunchFailureHtml(snapshot.Error ?? "The temporary app connection could not be created."),
+                    "text/html",
+                    Encoding.UTF8,
+                    StatusCodes.Status400BadRequest);
+            }
+
+            var launch = launches.GetCompletedLaunch(jobId, userId);
+            if (launch is null)
+            {
+                return Results.StatusCode(StatusCodes.Status409Conflict);
+            }
+
+            context.Response.Headers["Content-Security-Policy"] =
+                $"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action https://{launch.Hostname}";
+            context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            var authentication = await context.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+            var ticket = launchTickets.Issue(
+                context.User,
+                launch.Hostname,
+                authentication.Properties?.IssuedUtc,
+                authentication.Properties?.ExpiresUtc);
+            return Results.Content(BuildOnDemandAppLaunchHtml(launch, ticket), "text/html", Encoding.UTF8);
+        }).RequireAuthorization();
+        app.MapPost("/edge-auth/on-demand", async (
+            HttpContext context,
+            OnDemandAppLaunchTicketStore launchTickets) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            var ticket = launchTickets.Consume(form["ticket"].ToString(), context.Request.Host.Host);
+            if (ticket is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            await context.SignInAsync(
+                CookieAuthenticationDefaults.AuthenticationScheme,
+                ticket.Principal,
+                new AuthenticationProperties
+                {
+                    IsPersistent = false,
+                    AllowRefresh = false,
+                    IssuedUtc = ticket.SessionIssuedUtc ?? DateTimeOffset.UtcNow,
+                    ExpiresUtc = ticket.SessionExpiresUtc ?? DateTimeOffset.UtcNow.AddHours(12)
+                });
+            // This endpoint is reached through the temporary app hostname. Use that
+            // ticket-bound hostname explicitly so the browser can never fall back to
+            // the LMS host when it follows the post-authentication redirect.
+            return Results.Redirect($"https://{ticket.ExpectedHost}/");
+        }).DisableAntiforgery();
+        app.MapPost("/on-demand-apps/lease/{leaseId:guid}/heartbeat", async (
+            HttpContext context,
+            Guid leaseId,
+            OnDemandAppService onDemandApps) =>
+        {
+            var email = context.User.FindFirstValue(ClaimTypes.Email) ?? string.Empty;
+            return await onDemandApps.TouchAsync(leaseId, email, context.RequestAborted)
+                ? Results.NoContent()
+                : Results.NotFound();
+        }).DisableAntiforgery().RequireAuthorization();
+        app.MapPost("/on-demand-apps/lease/{leaseId:guid}/release", async (
+            HttpContext context,
+            Guid leaseId,
+            OnDemandAppService onDemandApps) =>
+        {
+            var email = context.User.FindFirstValue(ClaimTypes.Email) ?? string.Empty;
+            return await onDemandApps.ReleaseAsync(leaseId, email, context.RequestAborted)
+                ? Results.NoContent()
+                : Results.NotFound();
+        }).DisableAntiforgery().RequireAuthorization();
+        app.MapPost("/auth/setup/authorize", async (
+            HttpContext context,
+            LocalAccessRecoveryService recoveryService,
+            TemporarySetupAuthorizationService setupAuthorization) =>
+        {
+            if (!context.Request.IsHttps &&
+                bool.TryParse(context.RequestServices.GetRequiredService<IConfiguration>()["Setup:RequireHttps"], out var requireHttps) &&
+                requireHttps)
+            {
+                return Results.BadRequest("Initial setup must be completed over HTTPS.");
+            }
+
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
+            var result = await recoveryService.ConsumeTemporarySetupCodeAsync(
+                form["temporarySetupCode"].ToString(),
+                context.Connection.RemoteIpAddress?.ToString(),
+                context.RequestAborted);
+            if (!result.Succeeded)
+            {
+                return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl, result.ErrorMessage));
+            }
+
+            setupAuthorization.Authorize(context.Response, context.Request.IsHttps);
+            return Results.Redirect(BuildInitialSetupRedirectTarget(returnUrl));
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
+        app.MapPost("/auth/setup/network", async (
+            HttpContext context,
+            ISecuritySettingsService securitySettingsService,
+            LocalAccessRecoveryService recoveryService,
+            TemporarySetupAuthorizationService setupAuthorization) =>
+        {
+            if (!setupAuthorization.IsAuthorized(context.Request) ||
+                !await recoveryService.HasActiveTemporarySetupAsync(context.RequestAborted))
+            {
+                return Results.Redirect("/setup?networkMessage=The%20temporary%20setup%20session%20has%20expired.&networkError=true");
+            }
+
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            if (!Guid.TryParse(form["entryId"].ToString(), out var entryId))
+            {
+                return Results.Redirect("/setup?networkMessage=The%20interface%20access%20rule%20was%20not%20valid.&networkError=true");
+            }
+
+            var action = form["action"].ToString();
+            var page = await securitySettingsService.GetPageAsync(context.RequestAborted);
+            var entry = page.TrustedNetworks.FirstOrDefault(candidate => candidate.Id == entryId);
+            if (entry is null)
+            {
+                return Results.Redirect("/setup?networkMessage=The%20interface%20access%20rule%20was%20not%20found.&networkError=true");
+            }
+
+            try
+            {
+                switch (action)
+                {
+                    case "enable":
+                        await securitySettingsService.SetTrustedNetworkEnabledAsync(entry.Id, true, context.RequestAborted);
+                        return Results.Redirect("/setup?networkMessage=Interface%20access%20enabled.");
+                    case "toggle-authentication" when entry.IsEnabled:
+                        await securitySettingsService.SetTrustedNetworkAuthenticationEnabledAsync(
+                            entry.Id,
+                            !entry.IsAuthenticationEnabled,
+                            context.RequestAborted);
+                        return Results.Redirect(entry.IsAuthenticationEnabled
+                            ? "/setup?networkMessage=Interface%20authentication%20disabled.%20Direct%20access%20is%20now%20allowed."
+                            : "/setup?networkMessage=Interface%20authentication%20enabled.%20LMS%20login%20is%20now%20required.");
+                    default:
+                        return Results.Redirect("/setup?networkMessage=That%20interface%20change%20was%20not%20allowed.&networkError=true");
+                }
+            }
+            catch (Exception exception)
+            {
+                return Results.Redirect($"/setup?networkMessage={Uri.EscapeDataString(exception.Message)}&networkError=true");
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-start");
         app.MapGet("/desktop-assistant/launch", (
             HttpContext context,
             string? ticket,
@@ -338,9 +630,7 @@ public class Program
             context.Response.Headers.CacheControl = "no-store";
             context.Response.Headers.Pragma = "no-cache";
 
-            return context.User.Identity?.IsAuthenticated == true
-                ? Results.Redirect(safeReturnUrl)
-                : Results.Redirect(BuildLoginRedirectTarget(safeReturnUrl, null, null));
+            return Results.Redirect(safeReturnUrl);
         });
         app.MapGet("/api/desktop-assistant/native/workspace", async (
             HttpContext context,
@@ -540,6 +830,7 @@ public class Program
                 {
                     HttpOnly = true,
                     IsEssential = true,
+                    Path = "/",
                     SameSite = SameSiteMode.Lax,
                     Secure = context.Request.IsHttps,
                     Expires = session.ExpiresAtUtc
@@ -549,7 +840,8 @@ public class Program
         }).DisableAntiforgery();
         app.MapGet("/edge-auth/check", async Task (
             HttpContext context,
-            IEdgeGatewayService edgeGatewayService) =>
+            IEdgeGatewayService edgeGatewayService,
+            OnDemandAppService onDemandApps) =>
         {
             var result = await edgeGatewayService.EvaluateAuthAsync(
                 new EdgeGatewayAuthCheckContext(
@@ -559,7 +851,9 @@ public class Program
                     context.Request.Headers["X-Forwarded-For"].ToString(),
                     context.Request.Headers.Host.ToString(),
                     context.Connection.RemoteIpAddress,
-                    context.User),
+                    context.User,
+                    context.Request.Headers["CF-IPCountry"].ToString(),
+                    context.Request.Headers.UserAgent.ToString()),
                 context.RequestAborted);
 
             context.Response.StatusCode = result.StatusCode;
@@ -587,8 +881,24 @@ public class Program
                 {
                     context.Response.Headers["X-LMS-Groups"] = result.Groups;
                 }
+
+                if (!string.IsNullOrWhiteSpace(result.UserEmail))
+                {
+                    _ = await onDemandApps.TouchByHostnameAsync(
+                        context.Request.Headers["X-Forwarded-Host"].ToString(),
+                        result.UserEmail,
+                        context.RequestAborted);
+                }
             }
         }).DisableAntiforgery();
+        app.MapGet("/edge-auth/approve-ip", async (
+            string? token,
+            IEdgeGatewayService edgeGatewayService,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await edgeGatewayService.ApproveTemporaryIpAsync(token ?? string.Empty, cancellationToken);
+            return Results.Content(BuildTemporaryIpApprovalHtml(result), "text/html", Encoding.UTF8);
+        });
         app.MapGet("/edge-auth/return", async (
             string? target,
             IEdgeGatewayService edgeGatewayService,
@@ -604,8 +914,14 @@ public class Program
         });
         app.MapPost("/auth/initial-setup/start", async (
             HttpContext context,
-            ISecuritySettingsService securitySettingsService) =>
+            ISecuritySettingsService securitySettingsService,
+            TemporarySetupAuthorizationService setupAuthorization) =>
         {
+            if (!setupAuthorization.IsAuthorized(context.Request))
+            {
+                return Results.Redirect("/setup?error=Enter%20the%20Temporary%20Setup%20Code%20first.");
+            }
+
             var form = await context.Request.ReadFormAsync(context.RequestAborted);
             var email = form["email"].ToString();
             var linuxUsername = form["linuxUsername"].ToString();
@@ -633,8 +949,14 @@ public class Program
         }).DisableAntiforgery().RequireRateLimiting("lms-auth-start");
         app.MapPost("/auth/initial-setup/reset", async (
             HttpContext context,
-            ISecuritySettingsService securitySettingsService) =>
+            ISecuritySettingsService securitySettingsService,
+            TemporarySetupAuthorizationService setupAuthorization) =>
         {
+            if (!setupAuthorization.IsAuthorized(context.Request))
+            {
+                return Results.Redirect("/setup?error=Enter%20the%20Temporary%20Setup%20Code%20first.");
+            }
+
             var form = await context.Request.ReadFormAsync(context.RequestAborted);
             var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
 
@@ -654,8 +976,14 @@ public class Program
         app.MapPost("/auth/initial-setup/verify", async (
             HttpContext context,
             ISecuritySettingsService securitySettingsService,
-            PasskeyAuthenticationService passkeyAuthenticationService) =>
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            TemporarySetupAuthorizationService setupAuthorization) =>
         {
+            if (!setupAuthorization.IsAuthorized(context.Request))
+            {
+                return Results.Redirect("/setup?error=Enter%20the%20Temporary%20Setup%20Code%20first.");
+            }
+
             var form = await context.Request.ReadFormAsync(context.RequestAborted);
             var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
             if (!Guid.TryParse(form["userId"].ToString(), out var userId))
@@ -725,7 +1053,7 @@ public class Program
                 email = form["identifier"].ToString();
             }
 
-            var otpCode = form["otpCode"].ToString();
+            var otpCode = ReadOtpCode(form);
             var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
 
             var result = await authenticationService.ValidateOtpAsync(email, otpCode, context.RequestAborted);
@@ -763,10 +1091,10 @@ public class Program
                 });
 
             if (IsPasskeyCapableRequest(context) &&
-                (IsEdgeGatewayReturnUrl(returnUrl) ||
+                !IsEdgeGatewayReturnUrl(returnUrl) &&
                 await passkeyAuthenticationService.ShouldOfferPasskeySetupAsync(
                     result.UserId.Value,
-                    context.RequestAborted)))
+                    context.RequestAborted))
             {
                 context.Response.Redirect(BuildPasskeySetupRedirectTarget(returnUrl));
                 return;
@@ -774,11 +1102,377 @@ public class Program
 
             context.Response.Redirect(returnUrl);
         }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
+        app.MapPost(EdgeGatewayAuthenticationPaths.LoginPost, async (
+            HttpContext context,
+            ISecurityAuthenticationService authenticationService,
+            PasskeyAuthenticationService passkeyAuthenticationService) =>
+        {
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            var email = form["email"].ToString();
+            if (string.IsNullOrWhiteSpace(email))
+            {
+                email = form["identifier"].ToString();
+            }
+
+            var otpCode = ReadOtpCode(form);
+            var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
+
+            var result = await authenticationService.ValidateOtpAsync(email, otpCode, context.RequestAborted);
+            if (!result.Succeeded || !result.UserId.HasValue || string.IsNullOrWhiteSpace(result.Email))
+            {
+                context.Response.Redirect(BuildLoginRedirectTarget(
+                    returnUrl,
+                    result.FailureMessage,
+                    email,
+                    loginPath: EdgeGatewayAuthenticationPaths.Login));
+                return;
+            }
+
+            Claim[] claims =
+            [
+                new Claim(ClaimTypes.NameIdentifier, result.UserId.Value.ToString()),
+                new Claim(ClaimTypes.Name, result.Email),
+                new Claim(ClaimTypes.Email, result.Email),
+                new Claim("lms:mfa", "true"),
+                new Claim("amr", "otp")
+            ];
+
+            var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme));
+            var sessionLifetime = TimeSpan.FromMinutes(
+                SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(result.SessionLifetimeMinutes));
+            var issuedAtUtc = DateTimeOffset.UtcNow;
+            ((ClaimsIdentity)principal.Identity!).AddClaim(new Claim(
+                "auth_time",
+                issuedAtUtc.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            await context.SignInAsync(
+                CookieAuthenticationDefaults.AuthenticationScheme,
+                principal,
+                new AuthenticationProperties
+                {
+                    IsPersistent = false,
+                    AllowRefresh = false,
+                    IssuedUtc = issuedAtUtc,
+                    ExpiresUtc = issuedAtUtc.Add(sessionLifetime)
+                });
+
+            if (IsPasskeyCapableRequest(context) &&
+                !IsEdgeGatewayReturnUrl(returnUrl) &&
+                await passkeyAuthenticationService.ShouldOfferPasskeySetupAsync(
+                    result.UserId.Value,
+                    context.RequestAborted))
+            {
+                context.Response.Redirect(BuildPasskeySetupRedirectTarget(returnUrl));
+                return;
+            }
+
+            context.Response.Redirect(returnUrl);
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
+        app.MapPost("/auth/recovery", async (
+            HttpContext context,
+            LocalAccessRecoveryService recoveryService,
+            ILogger<Program> logger) =>
+        {
+            var returnUrl = "/";
+            var challengeId = string.Empty;
+            var email = string.Empty;
+
+            try
+            {
+                var form = await context.Request.ReadFormAsync(context.RequestAborted);
+                returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
+                challengeId = form["recovery"].ToString();
+                email = form["email"].ToString();
+                var recoveryCode = form["recoveryCode"].ToString();
+
+                var result = await recoveryService.RecoverAsync(
+                    email,
+                    challengeId,
+                    recoveryCode,
+                    context.RequestAborted);
+                if (!result.Succeeded || result.User is null)
+                {
+                    context.Response.Redirect(BuildLoginRedirectTarget(
+                        returnUrl,
+                        result.ErrorMessage,
+                        email,
+                        challengeId,
+                        authenticationMethod: "recovery"));
+                    return;
+                }
+
+                await SignInLmsUserAsync(context, result.User, "local-recovery");
+                context.Response.Redirect(returnUrl);
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Local access recovery failed.");
+                context.Response.Redirect(BuildLoginRedirectTarget(
+                    returnUrl,
+                    "Local access recovery failed. Re-run the installer over SSH with sudo to generate a new code.",
+                    email,
+                    challengeId,
+                    authenticationMethod: "recovery"));
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
+        app.MapPost("/api/email-mfa/login/send", async (
+            HttpContext context,
+            EmailMfaAuthenticationService emailMfaAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var request = await context.Request.ReadFromJsonAsync<EmailMfaStartRequest>(
+                    cancellationToken: context.RequestAborted) ?? new EmailMfaStartRequest(null, null);
+                var result = await emailMfaAuthenticationService.SendLoginChallengeAsync(
+                    request.Email ?? string.Empty,
+                    BuildAbsoluteRequestOrigin(context),
+                    NormalizeReturnUrl(request.ReturnUrl),
+                    context.RequestAborted);
+
+                return Results.Json(new { result.Succeeded, result.Message });
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Email MFA sign-in request failed.");
+                return Results.Json(new
+                {
+                    succeeded = true,
+                    message = "If that LMS account can receive email sign-in, check your inbox for the code or secure login link."
+                });
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-start");
+        app.MapPost("/api/email-mfa/login/complete", async (
+            HttpContext context,
+            EmailMfaAuthenticationService emailMfaAuthenticationService,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var request = await context.Request.ReadFromJsonAsync<EmailMfaCompleteRequest>(
+                    cancellationToken: context.RequestAborted) ?? new EmailMfaCompleteRequest(null, null, null);
+                var returnUrl = NormalizeReturnUrl(request.ReturnUrl);
+                var result = await emailMfaAuthenticationService.ValidateCodeAsync(
+                    request.Email ?? string.Empty,
+                    request.Code ?? string.Empty,
+                    context.RequestAborted);
+                if (!result.Succeeded || result.User is null)
+                {
+                    return Results.Json(new { succeeded = false, message = result.ErrorMessage });
+                }
+
+                await SignInLmsUserAsync(context, result.User, "email");
+                var redirectUrl = await ResolvePostMfaRedirectUrlAsync(
+                    context,
+                    passkeyAuthenticationService,
+                    result.User,
+                    returnUrl);
+                return Results.Json(new { succeeded = true, redirectUrl });
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Email MFA code completion failed.");
+                return Results.Json(
+                    new { succeeded = false, message = "Email sign-in failed." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
+        app.MapGet("/auth/email-mfa/login", async (
+            HttpContext context,
+            EmailMfaAuthenticationService emailMfaAuthenticationService,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var returnUrl = NormalizeReturnUrl(context.Request.Query["returnUrl"].ToString());
+                var token = context.Request.Query["token"].ToString();
+                var result = await emailMfaAuthenticationService.ValidateTokenAsync(
+                    token,
+                    context.RequestAborted);
+                if (!result.Succeeded || result.User is null)
+                {
+                    return Results.Redirect(BuildLoginRedirectTarget(
+                        returnUrl,
+                        result.ErrorMessage,
+                        null,
+                        authenticationMethod: "email"));
+                }
+
+                await SignInLmsUserAsync(context, result.User, "email-link");
+                return Results.Redirect(await ResolvePostMfaRedirectUrlAsync(
+                    context,
+                    passkeyAuthenticationService,
+                    result.User,
+                    returnUrl));
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Email MFA link completion failed.");
+                var returnUrl = NormalizeReturnUrl(context.Request.Query["returnUrl"].ToString());
+                return Results.Redirect(BuildLoginRedirectTarget(
+                    returnUrl,
+                    "Email sign-in failed.",
+                    null,
+                    authenticationMethod: "email"));
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
+        app.MapPost(EdgeGatewayAuthenticationPaths.EmailSend, async (
+            HttpContext context,
+            EmailMfaAuthenticationService emailMfaAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var request = await context.Request.ReadFromJsonAsync<EmailMfaStartRequest>(
+                    cancellationToken: context.RequestAborted) ?? new EmailMfaStartRequest(null, null);
+                var result = await emailMfaAuthenticationService.SendLoginChallengeAsync(
+                    request.Email ?? string.Empty,
+                    BuildAbsoluteRequestOrigin(context),
+                    NormalizeReturnUrl(request.ReturnUrl),
+                    EdgeGatewayAuthenticationPaths.EmailLink,
+                    context.RequestAborted);
+
+                return Results.Json(new { result.Succeeded, result.Message });
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Edge Gateway email MFA sign-in request failed.");
+                return Results.Json(new
+                {
+                    succeeded = true,
+                    message = "If that LMS account can receive email sign-in, check your inbox for the code or secure login link."
+                });
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-start");
+        app.MapPost(EdgeGatewayAuthenticationPaths.EmailComplete, async (
+            HttpContext context,
+            EmailMfaAuthenticationService emailMfaAuthenticationService,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var request = await context.Request.ReadFromJsonAsync<EmailMfaCompleteRequest>(
+                    cancellationToken: context.RequestAborted) ?? new EmailMfaCompleteRequest(null, null, null);
+                var returnUrl = NormalizeReturnUrl(request.ReturnUrl);
+                var result = await emailMfaAuthenticationService.ValidateCodeAsync(
+                    request.Email ?? string.Empty,
+                    request.Code ?? string.Empty,
+                    context.RequestAborted);
+                if (!result.Succeeded || result.User is null)
+                {
+                    return Results.Json(new { succeeded = false, message = result.ErrorMessage });
+                }
+
+                await SignInLmsUserAsync(context, result.User, "email");
+                var redirectUrl = await ResolvePostMfaRedirectUrlAsync(
+                    context,
+                    passkeyAuthenticationService,
+                    result.User,
+                    returnUrl);
+                return Results.Json(new { succeeded = true, redirectUrl });
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Edge Gateway email MFA code completion failed.");
+                return Results.Json(
+                    new { succeeded = false, message = "Email sign-in failed." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
+        app.MapGet(EdgeGatewayAuthenticationPaths.EmailLink, async (
+            HttpContext context,
+            EmailMfaAuthenticationService emailMfaAuthenticationService,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var returnUrl = NormalizeReturnUrl(context.Request.Query["returnUrl"].ToString());
+                var token = context.Request.Query["token"].ToString();
+                var result = await emailMfaAuthenticationService.ValidateTokenAsync(
+                    token,
+                    context.RequestAborted);
+                if (!result.Succeeded || result.User is null)
+                {
+                    return Results.Redirect(BuildLoginRedirectTarget(
+                        returnUrl,
+                        result.ErrorMessage,
+                        null,
+                        loginPath: EdgeGatewayAuthenticationPaths.Login,
+                        authenticationMethod: "email"));
+                }
+
+                await SignInLmsUserAsync(context, result.User, "email-link");
+                return Results.Redirect(await ResolvePostMfaRedirectUrlAsync(
+                    context,
+                    passkeyAuthenticationService,
+                    result.User,
+                    returnUrl));
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Edge Gateway email MFA link completion failed.");
+                var returnUrl = NormalizeReturnUrl(context.Request.Query["returnUrl"].ToString());
+                return Results.Redirect(BuildLoginRedirectTarget(
+                    returnUrl,
+                    "Email sign-in failed.",
+                    null,
+                    loginPath: EdgeGatewayAuthenticationPaths.Login,
+                    authenticationMethod: "email"));
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
         app.MapPost("/auth/logout", async (HttpContext context) =>
         {
             await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
             context.Response.Redirect("/login");
         }).DisableAntiforgery();
+        app.MapPost("/auth/passkeys/verify", async (
+            HttpContext context,
+            ISecurityAuthenticationService authenticationService,
+            ISecurityUserStore securityUserStore) =>
+        {
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            var returnUrl = NormalizeReturnUrl(form["returnUrl"].ToString());
+            var setupUrl = BuildPasskeySetupRedirectTarget(returnUrl);
+            var currentUserIdValue = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var currentEmail = context.User.FindFirstValue(ClaimTypes.Email) ??
+                               context.User.Identity?.Name ??
+                               string.Empty;
+            if (context.User.Identity?.IsAuthenticated != true ||
+                !Guid.TryParse(currentUserIdValue, out var currentUserId) ||
+                string.IsNullOrWhiteSpace(currentEmail))
+            {
+                return Results.Redirect(BuildLoginRedirectTarget(
+                    setupUrl,
+                    "Sign in before setting up a passkey.",
+                    currentEmail));
+            }
+
+            var result = await authenticationService.ValidateOtpAsync(
+                currentEmail,
+                ReadOtpCode(form),
+                context.RequestAborted);
+            if (!result.Succeeded ||
+                result.UserId != currentUserId)
+            {
+                return Results.Redirect(BuildPasskeySetupRedirectTarget(
+                    returnUrl,
+                    result.FailureMessage ?? "The authenticator code was not valid."));
+            }
+
+            var user = await securityUserStore.GetAsync(currentUserId, context.RequestAborted);
+            if (user is null || !user.IsEnabled)
+            {
+                return Results.Redirect(BuildPasskeySetupRedirectTarget(
+                    returnUrl,
+                    "The signed-in LMS account is no longer available."));
+            }
+
+            await SignInLmsUserAsync(context, user, "otp");
+            return Results.Redirect(setupUrl);
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
         app.MapGet("/api/passkeys", async (
             HttpContext context,
             PasskeyAuthenticationService passkeyAuthenticationService) =>
@@ -814,12 +1508,41 @@ public class Program
             try
             {
                 var request = await context.Request.ReadFromJsonAsync<PasskeyEnrollmentOptionsRequest>(
-                    cancellationToken: context.RequestAborted) ?? new PasskeyEnrollmentOptionsRequest(null);
-                var result = await passkeyAuthenticationService.BuildAuthenticatedRegistrationOptionsAsync(
-                    context.User,
-                    request.FriendlyName ?? string.Empty,
-                    context.Request,
-                    context.RequestAborted);
+                    cancellationToken: context.RequestAborted) ?? new PasskeyEnrollmentOptionsRequest(null, null);
+                var localAdministrator = IsTrustedLocalAdministrator(context);
+                var currentUserId = TryResolveAuthenticatedUserId(context.User);
+                PasskeyOptionsResult result;
+                if (request.TargetUserId is { } targetUserId)
+                {
+                    if (!localAdministrator && currentUserId != targetUserId)
+                    {
+                        result = PasskeyOptionsResult.Fail("You can only add a passkey to your own LMS account.");
+                    }
+                    else if (localAdministrator)
+                    {
+                        result = await passkeyAuthenticationService.BuildAdministratorRegistrationOptionsAsync(
+                            targetUserId,
+                            request.FriendlyName ?? string.Empty,
+                            context.Request,
+                            context.RequestAborted);
+                    }
+                    else
+                    {
+                        result = await passkeyAuthenticationService.BuildAuthenticatedRegistrationOptionsAsync(
+                            context.User,
+                            request.FriendlyName ?? string.Empty,
+                            context.Request,
+                            context.RequestAborted);
+                    }
+                }
+                else
+                {
+                    result = await passkeyAuthenticationService.BuildAuthenticatedRegistrationOptionsAsync(
+                        context.User,
+                        request.FriendlyName ?? string.Empty,
+                        context.Request,
+                        context.RequestAborted);
+                }
 
                 return BuildPasskeyOptionsResponse(result);
             }
@@ -844,12 +1567,18 @@ public class Program
                     return Results.BadRequest(new { succeeded = false, message = error });
                 }
 
-                var result = await passkeyAuthenticationService.CompleteRegistrationAsync(
-                    context.User,
-                    stateId,
-                    credentialJson,
-                    context.Request,
-                    context.RequestAborted);
+                var result = IsTrustedLocalAdministrator(context)
+                    ? await passkeyAuthenticationService.CompleteAdministratorRegistrationAsync(
+                        stateId,
+                        credentialJson,
+                        context.Request,
+                        context.RequestAborted)
+                    : await passkeyAuthenticationService.CompleteRegistrationAsync(
+                        context.User,
+                        stateId,
+                        credentialJson,
+                        context.Request,
+                        context.RequestAborted);
                 return Results.Json(new { result.Succeeded, result.Message });
             }
             catch (Exception exception)
@@ -940,6 +1669,91 @@ public class Program
             catch (Exception exception)
             {
                 logger.LogWarning(exception, "Passkey sign-in completion request failed.");
+                return Results.Json(
+                    new { succeeded = false, message = "Passkey sign-in failed." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
+        app.MapPost(EdgeGatewayAuthenticationPaths.PasskeyOptions, async (
+            HttpContext context,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                _ = await context.Request.ReadFromJsonAsync<PasskeyLoginOptionsRequest>(
+                    cancellationToken: context.RequestAborted) ?? new PasskeyLoginOptionsRequest();
+                var result = await passkeyAuthenticationService.BuildLoginOptionsAsync(
+                    context.Request,
+                    context.RequestAborted);
+
+                return BuildPasskeyOptionsResponse(result);
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Edge Gateway passkey sign-in options request failed.");
+                return Results.Json(
+                    new { succeeded = false, message = "Passkey sign-in could not start." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }).DisableAntiforgery().RequireRateLimiting("lms-auth-start");
+        app.MapPost(EdgeGatewayAuthenticationPaths.PasskeyComplete, async (
+            HttpContext context,
+            PasskeyAuthenticationService passkeyAuthenticationService,
+            ILogger<Program> logger) =>
+        {
+            try
+            {
+                var (stateId, credentialJson, error) = await ReadPasskeyCeremonyRequestAsync(context);
+                if (!string.IsNullOrWhiteSpace(error))
+                {
+                    return Results.BadRequest(new { succeeded = false, message = error });
+                }
+
+                var returnUrl = NormalizeReturnUrl(context.Request.Query["returnUrl"].ToString());
+                var result = await passkeyAuthenticationService.CompleteLoginAsync(
+                    stateId,
+                    credentialJson,
+                    context.Request,
+                    context.RequestAborted);
+                if (!result.Succeeded || result.User is null)
+                {
+                    return Results.Json(new { succeeded = false, message = result.ErrorMessage });
+                }
+
+                Claim[] claims =
+                [
+                    new Claim(ClaimTypes.NameIdentifier, result.User.Id.ToString()),
+                    new Claim(ClaimTypes.Name, result.User.Email),
+                    new Claim(ClaimTypes.Email, result.User.Email),
+                    new Claim("lms:mfa", "true"),
+                    new Claim("lms:passkey", "true"),
+                    new Claim("amr", "passkey"),
+                    new Claim(
+                        "auth_time",
+                        DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture))
+                ];
+
+                var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme));
+                var sessionLifetime = TimeSpan.FromMinutes(
+                    SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(result.User.SessionLifetimeMinutes));
+                var issuedAtUtc = DateTimeOffset.UtcNow;
+                await context.SignInAsync(
+                    CookieAuthenticationDefaults.AuthenticationScheme,
+                    principal,
+                    new AuthenticationProperties
+                    {
+                        IsPersistent = false,
+                        AllowRefresh = false,
+                        IssuedUtc = issuedAtUtc,
+                        ExpiresUtc = issuedAtUtc.Add(sessionLifetime)
+                    });
+
+                return Results.Json(new { succeeded = true, redirectUrl = returnUrl });
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Edge Gateway passkey sign-in completion request failed.");
                 return Results.Json(
                     new { succeeded = false, message = "Passkey sign-in failed." },
                     statusCode: StatusCodes.Status500InternalServerError);
@@ -1100,8 +1914,38 @@ public class Program
             componentEndpoint.AddAdditionalAssemblies(PluginModuleLoader.LoadedAssemblies.ToArray());
         }
 
+        if (TryHandleConsoleCommand(args, app, launchDirectory))
+        {
+            return;
+        }
+
         app.AddLocalAiServiceAddressesAsync().GetAwaiter().GetResult();
         app.Run();
+    }
+
+    private static bool TryHandlePrivilegedDriveUsageCommand(string[] args)
+    {
+        if (args.Length != 2 ||
+            !args[0].Equals(LocalDriveUsageService.PrivilegedScanCommand, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            var snapshot = new LocalDriveUsageService()
+                .ScanAsync(args[1])
+                .GetAwaiter()
+                .GetResult();
+            Console.WriteLine(JsonSerializer.Serialize(snapshot));
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"Drive usage scan failed: {exception.Message}");
+            Environment.ExitCode = 1;
+        }
+
+        return true;
     }
 
     private static void ApplyDefaultUrls(WebApplicationBuilder builder)
@@ -1142,13 +1986,13 @@ public class Program
         });
     }
 
-    private static bool TryHandleConsoleCommand(string[] args, IServiceProvider services)
+    private static bool TryHandleConsoleCommand(string[] args, WebApplication app, string launchDirectory)
     {
         if (args.Any(argument =>
                 argument.Equals("smoke-startup", StringComparison.OrdinalIgnoreCase) ||
                 argument.Equals("--smoke-startup", StringComparison.OrdinalIgnoreCase)))
         {
-            SmokeStartupAsync(services).GetAwaiter().GetResult();
+            SmokeStartupAsync(app.Services).GetAwaiter().GetResult();
             return true;
         }
 
@@ -1156,11 +2000,65 @@ public class Program
                 argument.Equals("unlock-security", StringComparison.OrdinalIgnoreCase) ||
                 argument.Equals("--unlock-security", StringComparison.OrdinalIgnoreCase)))
         {
-            UnlockSecurityAsync(services).GetAwaiter().GetResult();
+            UnlockSecurityAsync(app.Services).GetAwaiter().GetResult();
+            return true;
+        }
+
+        if (args.Any(argument =>
+                argument.Equals("repair-home-lab-gateways", StringComparison.OrdinalIgnoreCase) ||
+                argument.Equals("--repair-home-lab-gateways", StringComparison.OrdinalIgnoreCase)))
+        {
+            RepairHomeLabGatewaysAsync(app.Services).GetAwaiter().GetResult();
+            return true;
+        }
+
+        if (args.Any(argument =>
+                argument.Equals("apply-home-lab-storage", StringComparison.OrdinalIgnoreCase) ||
+                argument.Equals("--apply-home-lab-storage", StringComparison.OrdinalIgnoreCase)))
+        {
+            ApplyHomeLabStorageAsync(app.Services).GetAwaiter().GetResult();
             return true;
         }
 
         return false;
+    }
+
+    private static async Task RepairHomeLabGatewaysAsync(IServiceProvider services)
+    {
+        await using var scope = services.CreateAsyncScope();
+        var homeLabService = scope.ServiceProvider.GetRequiredService<IHomeLabService>();
+        var workspace = await homeLabService.GetWorkspaceAsync();
+        var gateways = workspace.Installations
+            .Where(installation => installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        if (gateways.Length == 0)
+        {
+            Console.WriteLine("No Home Lab VPN Gateways are installed.");
+            return;
+        }
+
+        foreach (var gateway in gateways)
+        {
+            var result = await homeLabService.ExecuteAsync(gateway.Id, HomeLabLifecycleAction.Repair);
+            Console.WriteLine($"{gateway.DisplayName}: {result.Summary} {result.Detail}");
+            if (!result.Succeeded)
+            {
+                Environment.ExitCode = 1;
+            }
+        }
+    }
+
+    private static async Task ApplyHomeLabStorageAsync(IServiceProvider services)
+    {
+        await using var scope = services.CreateAsyncScope();
+        var homeLabService = scope.ServiceProvider.GetRequiredService<IHomeLabService>();
+        var result = await homeLabService.ApplyStandardStorageAsync();
+        Console.WriteLine($"{result.Summary} {result.Detail}");
+        if (!result.Succeeded)
+        {
+            Environment.ExitCode = 1;
+        }
     }
 
     private static async Task SmokeStartupAsync(IServiceProvider services)
@@ -1246,13 +2144,17 @@ public class Program
             return true;
         }
 
-        if (path.StartsWithSegments("/access-denied") ||
-            path.StartsWithSegments("/healthz") ||
+        if (path.StartsWithSegments("/healthz") ||
             path.StartsWithSegments("/v1") ||
+            path.StartsWithSegments("/setup") ||
+            path.StartsWithSegments("/auth/setup") ||
             path.StartsWithSegments("/desktop-assistant/launch") ||
             path.StartsWithSegments("/api/desktop-assistant/native") ||
+            path.StartsWithSegments(EdgeGatewayAuthenticationPaths.ApiPrefix) ||
             path.StartsWithSegments("/edge-auth/check") ||
+            path.Value?.Equals("/edge-auth/on-demand", StringComparison.OrdinalIgnoreCase) == true ||
             path.StartsWithSegments("/api/passkeys/login") ||
+            path.StartsWithSegments("/api/email-mfa/login") ||
             path.StartsWithSegments("/internal/lms-tunnel") ||
             path.StartsWithSegments("/api/integrations/media-library") ||
             path.StartsWithSegments("/internal/scheduler") ||
@@ -1261,8 +2163,7 @@ public class Program
             path.StartsWithSegments("/scripts") ||
             path.StartsWithSegments("/styles") ||
             path.StartsWithSegments("/lib") ||
-            path.StartsWithSegments("/Error") ||
-            path.StartsWithSegments("/not-found"))
+            path.StartsWithSegments("/Error"))
         {
             return true;
         }
@@ -1340,16 +2241,260 @@ public class Program
         path.Value?.Equals("/InitialSetup", StringComparison.OrdinalIgnoreCase) == true ||
         path.Value?.Equals("/initial-setup", StringComparison.OrdinalIgnoreCase) == true;
 
+    private static bool IsSetupPath(PathString path) =>
+        path.Value?.Equals("/setup", StringComparison.OrdinalIgnoreCase) == true;
+
     private static bool IsAuthenticationEntryPath(PathString path) =>
+        IsSetupPath(path) ||
         IsInitialSetupPath(path) ||
+        path.StartsWithSegments(EdgeGatewayAuthenticationPaths.Login) ||
+        path.StartsWithSegments(EdgeGatewayAuthenticationPaths.ApiPrefix) ||
         path.StartsWithSegments("/login") ||
         path.StartsWithSegments("/auth");
 
-    private static string BuildPasskeySetupRedirectTarget(string returnUrl) =>
-        $"/auth/setup-passkey?returnUrl={Uri.EscapeDataString(NormalizeReturnUrl(returnUrl))}";
+    private static string BuildPasskeySetupRedirectTarget(string returnUrl, string? errorMessage = null)
+    {
+        var target = $"/auth/setup-passkey?returnUrl={Uri.EscapeDataString(NormalizeReturnUrl(returnUrl))}";
+        return string.IsNullOrWhiteSpace(errorMessage)
+            ? target
+            : $"{target}&error={Uri.EscapeDataString(errorMessage)}";
+    }
 
     private static bool IsEdgeGatewayReturnUrl(string? returnUrl) =>
         NormalizeReturnUrl(returnUrl).StartsWith("/edge-auth/return", StringComparison.OrdinalIgnoreCase);
+
+    private static string BuildTemporaryIpApprovalHtml(EdgeGatewayTemporaryIpApprovalCompletionViewModel result)
+    {
+        var statusColor = result.Success ? "#0f7b57" : "#a33d2f";
+        var eyebrow = result.Success ? "Linux Made Sane - Edge Gateway" : "Approval unavailable";
+        var title = WebUtility.HtmlEncode(result.Title);
+        var message = WebUtility.HtmlEncode(result.Message);
+        var routeName = WebUtility.HtmlEncode(result.RouteName);
+        var sourceIp = WebUtility.HtmlEncode(result.SourceIp);
+        var country = WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(result.CountryCode) ? "Unknown" : result.CountryCode);
+        var approvedUrl = WebUtility.HtmlEncode(result.ApprovedUrl);
+        var idleExpiry = WebUtility.HtmlEncode(FormatApprovalTime(result.IdleExpiresAtUtc));
+        var maxExpiry = WebUtility.HtmlEncode(FormatApprovalTime(result.ExpiresAtUtc));
+        var action = result.Success && !string.IsNullOrWhiteSpace(result.ApprovedUrl)
+            ? $"""<a class="button" href="{approvedUrl}">Open approved app</a>"""
+            : """<a class="button secondary" href="/">Return to LMS</a>""";
+
+        return $$"""
+            <!doctype html>
+            <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <title>{{title}}</title>
+              <style>
+                :root { color-scheme: light; }
+                body { margin: 0; background: #edf3f8; color: #142033; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+                main { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+                article { width: min(620px, 100%); background: #fff; border: 1px solid #dce7f3; border-radius: 22px; box-shadow: 0 28px 80px rgba(20,32,51,.16); overflow: hidden; }
+                header { padding: 24px 28px; background: #102033; color: #fff; }
+                .eyebrow { color: #9fd5ff; font-size: 12px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+                h1 { margin: 8px 0 0; font-size: clamp(24px, 4vw, 34px); line-height: 1.05; }
+                .body { padding: 26px 28px 30px; }
+                .status { display: inline-flex; align-items: center; gap: 8px; color: {{statusColor}}; font-weight: 900; }
+                .dot { width: 10px; height: 10px; border-radius: 99px; background: {{statusColor}}; }
+                p { line-height: 1.55; }
+                .details { display: grid; gap: 10px; margin: 20px 0; }
+                .detail { border: 1px solid #e3edf7; border-radius: 14px; background: #f7f9fc; padding: 12px 14px; }
+                .detail span { display: block; color: #607089; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+                .detail strong { display: block; margin-top: 4px; word-break: break-word; }
+                .button { display: inline-block; margin-top: 8px; padding: 13px 18px; border-radius: 12px; background: {{statusColor}}; color: #fff; font-weight: 900; text-decoration: none; }
+                .button.secondary { background: #526070; }
+              </style>
+            </head>
+            <body>
+              <main>
+                <article>
+                  <header>
+                    <div class="eyebrow">{{WebUtility.HtmlEncode(eyebrow)}}</div>
+                    <h1>{{title}}</h1>
+                  </header>
+                  <div class="body">
+                    <div class="status"><span class="dot" aria-hidden="true"></span><span>{{(result.Success ? "Approved" : "Not approved")}}</span></div>
+                    <p>{{message}}</p>
+                    {{(result.Success ? $"""
+                    <div class="details">
+                      {BuildApprovalDetail("Route", routeName)}
+                      {BuildApprovalDetail("Source IP", sourceIp)}
+                      {BuildApprovalDetail("Country", country)}
+                      {BuildApprovalDetail("Idle expiry", idleExpiry)}
+                      {BuildApprovalDetail("Maximum expiry", maxExpiry)}
+                    </div>
+                    """ : string.Empty)}}
+                    {{action}}
+                  </div>
+                </article>
+              </main>
+            </body>
+            </html>
+            """;
+    }
+
+    private static string BuildOnDemandAppLaunchProgressHtml(Guid jobId)
+    {
+        var statusUrl = WebUtility.HtmlEncode($"/on-demand-apps/launch/{jobId:D}/status");
+        return $$$"""
+                 <!doctype html>
+                 <html lang="en">
+                 <head>
+                   <meta charset="utf-8">
+                   <meta name="viewport" content="width=device-width,initial-scale=1">
+                   <meta name="referrer" content="no-referrer">
+                   <title>Connecting app | Linux Made Sane</title>
+                   <style>
+                     :root{color-scheme:dark}*{box-sizing:border-box}body{background:radial-gradient(circle at top,#1d2a44 0,#101827 42rem);color:#e8eef8;font:15px system-ui,sans-serif;display:grid;min-height:100vh;margin:0;place-items:center;padding:1.25rem}main{background:rgba(15,23,42,.92);border:1px solid #334155;border-radius:1rem;box-shadow:0 24px 70px rgba(0,0,0,.4);max-width:42rem;padding:2rem;width:100%}.heading{align-items:center;display:flex;gap:1rem}.hero-spinner,.step-spinner{animation:spin .85s linear infinite;border:3px solid #334155;border-radius:50%;border-top-color:#60a5fa;display:inline-block;flex:0 0 auto;height:2rem;width:2rem}.step-spinner{border-width:2px;height:1rem;width:1rem}h1{font-size:1.5rem;margin:0}#summary{color:#a9b8ce;margin:.45rem 0 1.5rem}.log{display:grid;gap:.65rem;list-style:none;margin:0;padding:0}.log li{align-items:start;background:#111c30;border:1px solid #28364e;border-radius:.65rem;display:grid;gap:.75rem;grid-template-columns:1.1rem 1fr auto;padding:.75rem .85rem}.log li.done .icon{color:#4ade80}.log li.failed{border-color:#7f1d1d}.log li.failed .icon{color:#f87171}.icon{color:#7dd3fc;font-weight:800;line-height:1.1}.message{line-height:1.35}.time{color:#718096;font-size:.75rem;white-space:nowrap}.actions{display:none;margin-top:1.25rem}.actions.show{display:flex;gap:.75rem}.actions a,.actions button{background:#2563eb;border:0;border-radius:.55rem;color:white;cursor:pointer;font:inherit;font-weight:700;padding:.7rem 1rem;text-decoration:none}.actions button{background:#334155}@keyframes spin{to{transform:rotate(360deg)}}
+                   </style>
+                 </head>
+                 <body>
+                   <main id="launch" data-status-url="{{{statusUrl}}}">
+                     <div class="heading"><span class="hero-spinner" aria-hidden="true"></span><div><h1>Opening your app</h1><p id="summary" role="status" aria-live="polite">LMS is preparing a secure temporary connection.</p></div></div>
+                     <ol id="log" class="log" aria-live="polite"></ol>
+                     <div id="actions" class="actions"><a href="/edge-gateway?tab=on-demand-apps">Return to apps</a><button id="close" type="button">Close window</button></div>
+                   </main>
+                   <script>
+                     (() => {
+                       const root = document.getElementById('launch');
+                       const log = document.getElementById('log');
+                       const summary = document.getElementById('summary');
+                       const spinner = document.querySelector('.hero-spinner');
+                       const actions = document.getElementById('actions');
+                       document.getElementById('close').addEventListener('click', () => window.close());
+                       let finished = false;
+
+                       const stopWithError = message => {
+                         finished = true;
+                         spinner.style.display = 'none';
+                         summary.textContent = message;
+                         actions.classList.add('show');
+                       };
+
+                       const render = data => {
+                         log.replaceChildren();
+                         const entries = Array.isArray(data.entries) ? data.entries : [];
+                         entries.forEach((entry, index) => {
+                           const item = document.createElement('li');
+                           const isCurrent = data.state === 'running' && index === entries.length - 1;
+                           item.className = data.state === 'failed' && index === entries.length - 1 ? 'failed' : (isCurrent ? 'current' : 'done');
+                           const icon = document.createElement('span');
+                           icon.className = 'icon';
+                           if (isCurrent) {
+                             icon.className = 'step-spinner';
+                           } else {
+                             icon.textContent = item.className === 'failed' ? '×' : '✓';
+                           }
+                           const message = document.createElement('span');
+                           message.className = 'message';
+                           message.textContent = entry.message;
+                           const time = document.createElement('time');
+                           time.className = 'time';
+                           time.textContent = new Date(entry.timestampUtc).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+                           item.append(icon, message, time);
+                           log.append(item);
+                         });
+                       };
+
+                       const poll = async () => {
+                         if (finished) return;
+                         try {
+                           const response = await fetch(root.dataset.statusUrl, {credentials:'same-origin',cache:'no-store'});
+                           if (response.status === 401 || response.status === 403) {
+                             stopWithError('Your LMS sign-in ended before the app connection was ready. Return to LMS and sign in again.');
+                             return;
+                           }
+                           if (response.status === 404) {
+                             stopWithError('This app launch is no longer available. Return to On-Demand Apps and open it again.');
+                             return;
+                           }
+                           if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                           const data = await response.json();
+                           render(data);
+                           if (data.state === 'succeeded') {
+                             finished = true;
+                             summary.textContent = 'Connection ready. Passing your LMS sign-in to the app.';
+                             setTimeout(() => window.location.replace(data.completionUrl), 350);
+                             return;
+                           }
+                           if (data.state === 'failed') {
+                             stopWithError(data.error || 'The app connection could not be created.');
+                             return;
+                           }
+                           summary.textContent = entriesSummary(data.entries);
+                         } catch {
+                           summary.textContent = 'Reconnecting to LMS while the app preparation continues…';
+                         }
+                         setTimeout(poll, 600);
+                       };
+
+                       const entriesSummary = entries => Array.isArray(entries) && entries.length
+                         ? entries[entries.length - 1].message
+                         : 'LMS is preparing a secure temporary connection.';
+                       poll();
+                     })();
+                   </script>
+                 </body>
+                 </html>
+                 """;
+    }
+
+    private static string BuildOnDemandAppLaunchHtml(OnDemandAppLaunch launch, string ticket)
+    {
+        var action = WebUtility.HtmlEncode($"https://{launch.Hostname}/edge-auth/on-demand");
+        var encodedTicket = WebUtility.HtmlEncode(ticket);
+        var appUrl = WebUtility.HtmlEncode(launch.Url);
+        return $$$"""
+                 <!doctype html>
+                 <html lang="en">
+                 <head>
+                   <meta charset="utf-8">
+                   <meta name="viewport" content="width=device-width,initial-scale=1">
+                   <meta name="referrer" content="no-referrer">
+                   <title>Opening app | Linux Made Sane</title>
+                   <style>body{background:#101827;color:#e8eef8;font:16px system-ui,sans-serif;display:grid;min-height:100vh;margin:0;place-items:center}main{max-width:34rem;padding:2rem;text-align:center}.spinner{animation:spin .85s linear infinite;border:3px solid #334155;border-radius:50%;border-top-color:#60a5fa;display:inline-block;height:2rem;width:2rem}@keyframes spin{to{transform:rotate(360deg)}}button{background:#3b82f6;border:0;border-radius:.5rem;color:#fff;font:inherit;font-weight:700;padding:.75rem 1rem}</style>
+                 </head>
+                 <body>
+                   <main>
+                     <span class="spinner" aria-hidden="true"></span>
+                     <h1>Connection ready</h1>
+                     <p>Passing your LMS sign-in to {{{appUrl}}}.</p>
+                     <form method="post" action="{{{action}}}">
+                       <input type="hidden" name="ticket" value="{{{encodedTicket}}}">
+                       <noscript><button type="submit">Continue</button></noscript>
+                     </form>
+                   </main>
+                   <script>document.forms[0].submit();</script>
+                 </body>
+                 </html>
+                 """;
+    }
+
+    private static string BuildOnDemandAppLaunchFailureHtml(string message)
+    {
+        var encodedMessage = WebUtility.HtmlEncode(message);
+        return $$"""
+                 <!doctype html>
+                 <html lang="en">
+                 <head>
+                   <meta charset="utf-8">
+                   <meta name="viewport" content="width=device-width,initial-scale=1">
+                   <title>App unavailable | Linux Made Sane</title>
+                   <style>body{background:#101827;color:#e8eef8;font:16px system-ui,sans-serif;display:grid;min-height:100vh;margin:0;place-items:center}main{max-width:38rem;padding:2rem}button{background:#3b82f6;border:0;border-radius:.5rem;color:#fff;font:inherit;font-weight:700;padding:.75rem 1rem}</style>
+                 </head>
+                 <body><main><h1>App could not be opened</h1><p>{{encodedMessage}}</p><button type="button" onclick="window.close()">Close</button></main></body>
+                 </html>
+                 """;
+    }
+
+    private static string BuildApprovalDetail(string label, string value) =>
+        $"""<div class="detail"><span>{WebUtility.HtmlEncode(label)}</span><strong>{value}</strong></div>""";
+
+    private static string FormatApprovalTime(DateTimeOffset? value) =>
+        value.HasValue
+            ? value.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm zzz", CultureInfo.InvariantCulture)
+            : "Unknown";
 
     private static IResult BuildPasskeyOptionsResponse(PasskeyOptionsResult result)
     {
@@ -1394,6 +2539,30 @@ public class Program
 
     private static bool IsLoopbackRequest(IPAddress? remoteIpAddress) =>
         remoteIpAddress is not null && IPAddress.IsLoopback(remoteIpAddress);
+
+    private static bool IsTrustedLocalAdministrator(HttpContext context) =>
+        context.User.Identity?.IsAuthenticated != true &&
+        context.Items.TryGetValue("LmsTrustedNetworkAccess", out var value) &&
+        value is TrustedNetworkAccessResult { IsTrusted: true };
+
+    private static Guid? TryResolveAuthenticatedUserId(ClaimsPrincipal principal)
+    {
+        var value = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        return Guid.TryParse(value, out var userId) ? userId : null;
+    }
+
+    private static bool TokenMatches(string configuredToken, string suppliedToken)
+    {
+        if (string.IsNullOrWhiteSpace(configuredToken) || string.IsNullOrWhiteSpace(suppliedToken))
+        {
+            return false;
+        }
+
+        var configuredBytes = Encoding.UTF8.GetBytes(configuredToken.Trim());
+        var suppliedBytes = Encoding.UTF8.GetBytes(suppliedToken.Trim());
+        return configuredBytes.Length == suppliedBytes.Length &&
+               CryptographicOperations.FixedTimeEquals(configuredBytes, suppliedBytes);
+    }
 
     private static bool TryAuthorizeDesktopAssistantNativeRequest(
         HttpContext context,
@@ -1566,7 +2735,13 @@ public class Program
     private static string BuildLoginRedirectTarget(PathString path, string? queryString) =>
         BuildLoginRedirectTarget(NormalizeReturnUrl($"{path}{queryString}"), null, null);
 
-    private static string BuildLoginRedirectTarget(string returnUrl, string? errorMessage, string? email)
+    private static string BuildLoginRedirectTarget(
+        string returnUrl,
+        string? errorMessage,
+        string? email,
+        string? recovery = null,
+        string loginPath = "/login",
+        string? authenticationMethod = null)
     {
         var queryParts = new List<string>
         {
@@ -1583,7 +2758,28 @@ public class Program
             queryParts.Add($"email={Uri.EscapeDataString(email.Trim())}");
         }
 
-        return $"/login?{string.Join("&", queryParts)}";
+        if (!string.IsNullOrWhiteSpace(recovery))
+        {
+            queryParts.Add($"recovery={Uri.EscapeDataString(recovery.Trim())}");
+        }
+
+        var normalizedAuthenticationMethod = authenticationMethod?.Trim().ToLowerInvariant();
+        if (normalizedAuthenticationMethod is "passkey" or "authenticator" or "email" or "recovery")
+        {
+            queryParts.Add($"method={Uri.EscapeDataString(normalizedAuthenticationMethod)}");
+        }
+
+        return $"{NormalizeLocalRedirectPath(loginPath)}?{string.Join("&", queryParts)}";
+    }
+
+    private static string NormalizeLocalRedirectPath(string path)
+    {
+        var trimmed = path.Trim();
+        return trimmed.StartsWith("/", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("//", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("/\\", StringComparison.Ordinal)
+            ? trimmed
+            : "/login";
     }
 
     private static string BuildInitialSetupRedirectTarget(
@@ -1612,7 +2808,7 @@ public class Program
             queryParts.Add($"linuxUsername={Uri.EscapeDataString(linuxUsername.Trim())}");
         }
 
-        return $"/InitialSetup?{string.Join("&", queryParts)}";
+        return $"/setup?{string.Join("&", queryParts)}";
     }
 
     private static async Task<bool> ShouldRedirectToInitialSetupAsync(HttpContext context)
@@ -1625,6 +2821,7 @@ public class Program
 
         var path = context.Request.Path;
         if (IsInitialSetupPath(path) ||
+            IsSetupPath(path) ||
             IsAlwaysAnonymousAllowedPath(path) ||
             path.StartsWithSegments("/auth") ||
             path.StartsWithSegments("/api") ||
@@ -1635,7 +2832,13 @@ public class Program
 
         var securitySettingsService = context.RequestServices.GetRequiredService<ISecuritySettingsService>();
         var setup = await securitySettingsService.GetInitialSetupAsync(context.RequestAborted);
-        return !setup.IsComplete;
+        if (setup.IsComplete)
+        {
+            return false;
+        }
+
+        var recoveryService = context.RequestServices.GetRequiredService<LocalAccessRecoveryService>();
+        return await recoveryService.HasActiveTemporarySetupAsync(context.RequestAborted);
     }
 
     private static string BuildAbsoluteLoginUrl(HttpContext context, string? email)
@@ -1653,6 +2856,127 @@ public class Program
         }
 
         return builder.ToString();
+    }
+
+    private static string BuildAbsoluteRequestOrigin(HttpContext context)
+    {
+        var builder = new StringBuilder();
+        builder.Append(context.Request.Scheme);
+        builder.Append("://");
+        builder.Append(context.Request.Host.ToUriComponent());
+        return builder.ToString();
+    }
+
+    private static string ReadOtpCode(IFormCollection form)
+    {
+        var directCode = NormalizeOtpCode(form["otpCode"].ToString());
+        if (directCode.Length == 6)
+        {
+            return directCode;
+        }
+
+        var digitValues = form["otpDigit"];
+        if (digitValues.Count == 0)
+        {
+            return directCode;
+        }
+
+        var builder = new StringBuilder(6);
+        foreach (var value in digitValues)
+        {
+            foreach (var character in value ?? string.Empty)
+            {
+                if (!char.IsDigit(character))
+                {
+                    continue;
+                }
+
+                builder.Append(character);
+                if (builder.Length == 6)
+                {
+                    return builder.ToString();
+                }
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static string NormalizeOtpCode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder(6);
+        foreach (var character in value)
+        {
+            if (!char.IsDigit(character))
+            {
+                continue;
+            }
+
+            builder.Append(character);
+            if (builder.Length == 6)
+            {
+                break;
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static async Task SignInLmsUserAsync(
+        HttpContext context,
+        SecurityUser user,
+        string authenticationMethod)
+    {
+        Claim[] claims =
+        [
+            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new Claim(ClaimTypes.Name, user.Email),
+            new Claim(ClaimTypes.Email, user.Email),
+            new Claim("lms:mfa", "true"),
+            new Claim("amr", authenticationMethod)
+        ];
+
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme));
+        var sessionLifetime = TimeSpan.FromMinutes(
+            SecuritySessionPolicy.NormalizeSessionLifetimeMinutes(user.SessionLifetimeMinutes));
+        var issuedAtUtc = DateTimeOffset.UtcNow;
+        ((ClaimsIdentity)principal.Identity!).AddClaim(new Claim(
+            "auth_time",
+            issuedAtUtc.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        await context.SignInAsync(
+            CookieAuthenticationDefaults.AuthenticationScheme,
+            principal,
+            new AuthenticationProperties
+            {
+                IsPersistent = false,
+                AllowRefresh = false,
+                IssuedUtc = issuedAtUtc,
+                ExpiresUtc = issuedAtUtc.Add(sessionLifetime)
+            });
+    }
+
+    private static async Task<string> ResolvePostMfaRedirectUrlAsync(
+        HttpContext context,
+        PasskeyAuthenticationService passkeyAuthenticationService,
+        SecurityUser user,
+        string returnUrl)
+    {
+        var normalizedReturnUrl = NormalizeReturnUrl(returnUrl);
+        if (IsPasskeyCapableRequest(context) &&
+            !IsEdgeGatewayReturnUrl(normalizedReturnUrl) &&
+            await passkeyAuthenticationService.ShouldOfferPasskeySetupAsync(
+                user.Id,
+                context.RequestAborted))
+        {
+            return BuildPasskeySetupRedirectTarget(normalizedReturnUrl);
+        }
+
+        return normalizedReturnUrl;
     }
 
     private static bool IsPasskeyCapableRequest(HttpContext context)
@@ -1709,6 +3033,29 @@ public class Program
         await context.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
     }
 
+    internal static async Task RespondToDeniedNetworkRequestAsync(
+        HttpContext context,
+        TrustedNetworkAccessResult accessResult)
+    {
+        if (accessResult.DeniedResponseMode == NetworkAccessDeniedResponseMode.EmptyNotFound)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            context.Response.ContentLength = 0;
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers.Pragma = "no-cache";
+            return;
+        }
+
+        if (HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
+        {
+            context.Response.Redirect("/access-denied");
+            return;
+        }
+
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsync("No access from this network interface.");
+    }
+
     private static string BuildAttachmentContentDisposition(string fileName)
     {
         var safeFileName = string.IsNullOrWhiteSpace(fileName)
@@ -1737,9 +3084,13 @@ public class Program
         value.Replace("\\", "\\\\", StringComparison.Ordinal)
             .Replace("\"", "\\\"", StringComparison.Ordinal);
 
-    private sealed record PasskeyEnrollmentOptionsRequest(string? FriendlyName);
+    private sealed record PasskeyEnrollmentOptionsRequest(string? FriendlyName, Guid? TargetUserId);
 
     private sealed record PasskeyLoginOptionsRequest;
+
+    private sealed record EmailMfaStartRequest(string? Email, string? ReturnUrl);
+
+    private sealed record EmailMfaCompleteRequest(string? Email, string? Code, string? ReturnUrl);
 
     private sealed class ActionProgress<T>(Action<T> report) : IProgress<T>
     {
