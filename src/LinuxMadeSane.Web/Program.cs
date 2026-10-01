@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Net;
+using Microsoft.AspNetCore.SignalR;
 using System.Globalization;
 using System.Security.Claims;
 using System.Security.Cryptography;
@@ -66,7 +67,11 @@ public class Program
 
         // Add services to the container.
         builder.Services.AddRazorComponents()
-            .AddInteractiveServerComponents();
+            .AddInteractiveServerComponents()
+            .AddHubOptions(options => options.AddFilter<ConnectedUserHubFilter>());
+        builder.Services.AddSingleton<ConnectedUserRegistry>();
+        builder.Services.AddScoped<LmsHostEdgeGatewaySummaryService>();
+        builder.Services.AddSingleton<ConnectedUserHubFilter>();
         builder.Services.AddCascadingAuthenticationState();
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddMemoryCache();

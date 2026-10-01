@@ -32,9 +32,7 @@
 
     @if (viewModel is null)
     {
-        <section class="surface-card">
-            <p class="meta-text">Opening Desktop Assistant...</p>
-        </section>
+        <UiPageLoader Message="Loading services..." OnLoad="LoadAsync" />
     }
     else
     {
@@ -802,6 +800,7 @@
     private string selectedDesktopModelId = string.Empty;
     private PendingDesktopFix? pendingDesktopFix;
     private CancellationTokenSource? desktopHelperAutoRefreshCancellation;
+    private bool isPageDisposed;
     private ElementReference desktopChatMessageListElement;
     private int lastDesktopChatMessageCount = -1;
     private Guid? lastDesktopChatScrollSessionId;
@@ -830,11 +829,6 @@
             commands.Add(new DesktopHelperCommand("Check installed service", "systemctl --user status linux-made-sane-desktop-helper.service"));
             return commands;
         }
-    }
-
-    protected override async Task OnInitializedAsync()
-    {
-        await LoadAsync();
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -1201,6 +1195,7 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
 
     private void UpdateDesktopHelperAutoRefreshLoop()
     {
+        if (isPageDisposed) return;
         if (HasDesktopHelperSession || IsDesktopHelperConfiguredOff)
         {
             desktopHelperAutoRefreshCancellation?.Cancel();
@@ -1729,6 +1724,7 @@ Use LMS-collected helper diagnostics and desktop evidence first. Give the single
 
     public ValueTask DisposeAsync()
     {
+        isPageDisposed = true;
         desktopHelperAutoRefreshCancellation?.Cancel();
         desktopHelperAutoRefreshCancellation?.Dispose();
         desktopHelperAutoRefreshCancellation = null;

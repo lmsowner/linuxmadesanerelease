@@ -1,0 +1,55 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@implements IDisposable
+
+<section class="surface-card page-loading-banner" role="status" aria-live="polite" aria-busy="@isLoading">
+    @if (string.IsNullOrWhiteSpace(error))
+    {
+        <span class="page-loading-spinner" aria-hidden="true"></span>
+        <p>@Message</p>
+    }
+    else
+    {
+        <div class="stack-tight">
+            <p class="callout error">Could not load this page. @error</p>
+            <UiCommandButton Label="Try again" Glyph="UiIconGlyph.Refresh" OnClick="LoadAsync" />
+        </div>
+    }
+</section>
+
+@code {
+    [Parameter] public string Message { get; set; } = "Loading services...";
+    [Parameter, EditorRequired] public EventCallback OnLoad { get; set; }
+    private string error = string.Empty;
+    private bool isLoading = true;
+    private bool isDisposed;
+
+    protected override Task OnAfterRenderAsync(bool firstRender) =>
+        firstRender ? LoadAsync() : Task.CompletedTask;
+
+    private async Task LoadAsync()
+    {
+        error = string.Empty;
+        isLoading = true;
+        StateHasChanged();
+        try
+        {
+            await OnLoad.InvokeAsync();
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+        }
+        finally
+        {
+            isLoading = false;
+            if (!isDisposed)
+            {
+                StateHasChanged();
+            }
+        }
+    }
+
+    public void Dispose() => isDisposed = true;
+}

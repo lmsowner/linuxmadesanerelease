@@ -16,6 +16,7 @@
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject FileThumbnailCacheService FileThumbnailCacheService
 @inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
+@inject LmsHostEdgeGatewaySummaryService EdgeGatewaySummaryService
 @inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
 @inject IJSRuntime JSRuntime
 @inject NavigationManager NavigationManager
@@ -195,6 +196,24 @@
                                         </div>
                                     </td>
                                 </tr>
+                                @if (edgeGatewaySummaries.TryGetValue(row.Host.Id, out var edgeSummary) && edgeSummary.Links.Count > 0)
+                                {
+                                    <tr class="hosts-edge-routes-row">
+                                        <td colspan="6">
+                                            <div class="hosts-edge-routes">
+                                                <span class="meta-text">Edge Gateway routes</span>
+                                                @foreach (var link in edgeSummary.Links)
+                                                {
+                                                    <a href="@link.Url" title="@link.Label" target="_blank" rel="noopener noreferrer">@link.Label</a>
+                                                }
+                                                @if (edgeSummary.RouteCount > edgeSummary.Links.Count)
+                                                {
+                                                    <span class="meta-text">+@(edgeSummary.RouteCount - edgeSummary.Links.Count) more</span>
+                                                }
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
                             }
                         }
                     </tbody>
@@ -456,6 +475,7 @@
     private const string SshHostsTabValue = "ssh";
     private static readonly TimeSpan StatusCheckTimeout = TimeSpan.FromSeconds(8);
     private IReadOnlyList<HostRowState> hostRows = [];
+    private readonly Dictionary<Guid, LmsHostEdgeGatewaySummary> edgeGatewaySummaries = [];
     private CancellationTokenSource? statusRefreshCancellationTokenSource;
     private bool isStatusRefreshInProgress;
     private bool isLmsUpdateRefreshInProgress;
@@ -545,6 +565,7 @@
             statusRefreshCancellationTokenSource = new CancellationTokenSource();
             _ = RefreshStatusesAsync(statusRefreshCancellationTokenSource.Token);
             _ = RefreshLmsUpdateStatusesAsync(statusRefreshCancellationTokenSource.Token);
+            _ = RefreshEdgeGatewaySummariesAsync(statusRefreshCancellationTokenSource.Token);
         }
 
         return Task.CompletedTask;
@@ -633,6 +654,36 @@
         {
             isRemovingHost = false;
             await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RefreshEdgeGatewaySummariesAsync(CancellationToken cancellationToken)
+    {
+        using var concurrency = new SemaphoreSlim(3);
+        var tasks = LmsHostRows.Select(async row =>
+        {
+            await concurrency.WaitAsync(cancellationToken);
+            try
+            {
+                var summary = await EdgeGatewaySummaryService.GetAsync(row.Host, cancellationToken);
+                await InvokeAsync(() =>
+                {
+                    if (cancellationToken.IsCancellationRequested) return;
+                    edgeGatewaySummaries[row.Host.Id] = summary;
+                    StateHasChanged();
+                });
+            }
+            finally
+            {
+                concurrency.Release();
+            }
+        }).ToArray();
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
     }
 

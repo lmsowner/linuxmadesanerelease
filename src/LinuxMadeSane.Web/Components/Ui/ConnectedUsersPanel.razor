@@ -1,0 +1,59 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@implements IDisposable
+@inject ConnectedUserRegistry Registry
+
+<section class="surface-card connected-users-panel">
+    <div class="table-header">
+        <h2>Connected users</h2>
+        <span role="status" aria-live="polite">@snapshot.UserCount user(s) · @snapshot.ConnectionCount connection(s)</span>
+    </div>
+    @if (snapshot.Users.Count == 0)
+    {
+        <p class="meta-text">No browser connections are active.</p>
+    }
+    else
+    {
+        <div class="connected-users-scroll">
+            <table>
+                <thead><tr><th>LMS account</th><th>Source IP address</th><th>Connected since</th><th>Connections</th></tr></thead>
+                <tbody>
+                    @foreach (var user in snapshot.Users)
+                    {
+                        <tr>
+                            <td>@(user.UserName ?? "Trusted network access")</td>
+                            <td class="connected-users-ip">@user.SourceIpAddress</td>
+                            <td><time datetime="@user.ConnectedAtUtc.ToString("O")">@user.ConnectedAtUtc.ToLocalTime().ToString("dd MMM yyyy HH:mm:ss zzz")</time></td>
+                            <td>@user.ConnectionCount</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</section>
+
+@code {
+    private ConnectedUserSnapshot snapshot = new(0, 0, []);
+    private bool isDisposed;
+
+    protected override void OnInitialized()
+    {
+        Registry.Changed += Refresh;
+        snapshot = Registry.GetSnapshot();
+    }
+
+    private void Refresh() => _ = InvokeAsync(() =>
+    {
+        if (isDisposed) return;
+        snapshot = Registry.GetSnapshot();
+        StateHasChanged();
+    });
+
+    public void Dispose()
+    {
+        isDisposed = true;
+        Registry.Changed -= Refresh;
+    }
+}

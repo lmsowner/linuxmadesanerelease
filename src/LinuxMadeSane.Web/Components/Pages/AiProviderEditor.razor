@@ -4,12 +4,15 @@
 @page "/ai/providers/new"
 @page "/ai/providers/{ProviderKey}"
 @rendermode InteractiveServer
+@attribute [StreamRendering]
+@implements IDisposable
+@using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Application.Contracts.LocalAi
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Models.Ai
 @using LinuxMadeSane.Core.Models.LocalAi
 @inject IAiProviderSettingsService ProviderSettingsService
-@inject ILocalAiEngineManagerService LocalAiService
+@inject IDockerAiEngineDiscoveryService DockerAiService
 @inject NavigationManager NavigationManager
 
 <PageTitle>@(IsEditMode ? "Edit AI Provider" : "New AI Provider") | Linux Made Sane</PageTitle>
@@ -145,6 +148,7 @@
                             <UiComboboxField TValue="string"
                                            @bind-Value="providerContext.Editor.DefaultModelId"
                                            Label="Default model"
+                                           Disabled="@isRefreshingModels"
                                            Helper="@DefaultModelFieldHelper">
                                 <option value="">Select a model from the live provider list</option>
                                 @foreach (var model in CurrentModelOptions)
@@ -162,7 +166,7 @@
 
                         @if (!string.IsNullOrWhiteSpace(modelRefreshMessage))
                         {
-                            <div class="callout @modelRefreshTone">@modelRefreshMessage</div>
+                            <div class="callout @modelRefreshTone" role="status" aria-live="polite">@modelRefreshMessage</div>
                         }
 
                         <details class="identity-advanced" open>
@@ -227,12 +231,12 @@
                         <UiCommandButton Label="@(isTestingProvider ? "Testing..." : "Test provider")"
                                          Glyph="UiIconGlyph.Search"
                                          Variant="UiButtonVariant.ActionSubtle"
-                                         Disabled="@(isSaving || isTestingProvider)"
+                                         Disabled="@(isSaving || isTestingProvider || isRefreshingModels)"
                                          OnClick="HandleTestProviderAsync" />
                         <UiCommandButton Label="@(isSaving ? "Saving..." : IsEditMode ? "Save provider" : "Create provider")"
                                          Glyph="UiIconGlyph.Connect"
                                          Type="submit"
-                                         Disabled="@(isSaving || isTestingProvider)" />
+                                         Disabled="@(isSaving || isTestingProvider || isRefreshingModels)" />
                         <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Href="/ai/providers" Variant="UiButtonVariant.Secondary" />
                     </div>
                 </EditForm>
@@ -255,12 +259,13 @@
                     <div class="stack-list">
                         @foreach (var provider in providerContext.ExistingProviders)
                         {
-                            <a class="list-row" href="@($"/ai/providers/{provider.ProviderKey}")">
+                            <a class="list-row" data-ai-provider-link href="@($"/ai/providers/{provider.ProviderKey}")">
                                 <div class="stack-tight">
                                     <strong>@provider.DisplayName</strong>
                                     <span class="meta-text">@provider.ProviderType | @provider.DefaultModelId</span>
                                 </div>
                                 <div class="row-action-cluster">
+                                    <span class="meta-text" data-provider-navigation-status>Open provider</span>
                                     @if (provider.IsDefault)
                                     {
                                         <span class="status-pill neutral">Default</span>
@@ -288,7 +293,13 @@
     public string? ProviderKey { get; set; }
 
     private AiProviderSettingsEditorContextViewModel? providerContext;
-    private LocalAiEngineWorkspaceViewModel? localAiWorkspace;
+    private DockerAiEngineWorkspace? localAiWorkspace;
+    private CancellationTokenSource loadCancellation = new();
+    private CancellationTokenSource? modelRefreshCancellation;
+    private bool supplementalLoadPending;
+    private bool isDiscoveringDocker;
+    private bool isDisposed;
+    private int modelRefreshRequest;
     private bool isLoaded;
     private bool isSaving;
     private bool isTestingProvider;
@@ -308,7 +319,7 @@
         providerContext?.SupportedProviders.FirstOrDefault(provider => provider.ProviderType == providerContext.Editor.ProviderType)
         ?? new AiProviderDefinition("unknown", AiProviderType.Unknown, "Unknown", "Unknown provider type.", false, false);
     private IReadOnlyList<DockerAiDiscoveredEngine> ReadyDockerCompatibleEngines =>
-        localAiWorkspace?.DockerEngines.DiscoveredEngines
+        localAiWorkspace?.DiscoveredEngines
             .Where(engine => engine.IsRunning &&
                              engine.IsReachable &&
                              !string.IsNullOrWhiteSpace(engine.BaseUrl) &&
@@ -333,7 +344,7 @@
     }
 
     private string DockerHostedAiHelper =>
-        ReadyDockerCompatibleEngines.Count == 0
+        isDiscoveringDocker ? "Finding Docker model endpoints..." : ReadyDockerCompatibleEngines.Count == 0
             ? "No running Docker model endpoint was found. Use a manual endpoint below, or start one in Local AI."
             : "Choose a Docker engine LMS has already found, then pick the model below.";
 
@@ -374,6 +385,17 @@
 
     private async Task LoadAsync()
     {
+        loadCancellation.Cancel();
+        loadCancellation.Dispose();
+        loadCancellation = new CancellationTokenSource();
+        var cancellationToken = loadCancellation.Token;
+        modelRefreshCancellation?.Cancel();
+        modelRefreshRequest++;
+        isRefreshingModels = false;
+        isDiscoveringDocker = false;
+        supplementalLoadPending = false;
+        localAiWorkspace = null;
+        dockerDiscoveryMessage = string.Empty;
         isLoaded = false;
         loadError = string.Empty;
         saveError = string.Empty;
@@ -382,31 +404,94 @@
 
         try
         {
-            providerContext = await ProviderSettingsService.GetEditorAsync(ProviderKey);
+            var context = await ProviderSettingsService.GetEditorAsync(ProviderKey, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            providerContext = context;
             lastProviderType = providerContext.Editor.ProviderType;
             providerContext.Editor.RequiresApiKey = SelectedProviderTypeDefinition.RequiresApiKey;
-            try
-            {
-                localAiWorkspace = await LocalAiService.GetWorkspaceAsync();
-                dockerDiscoveryMessage = string.Empty;
-            }
-            catch (Exception exception)
-            {
-                localAiWorkspace = null;
-                dockerDiscoveryMessage = $"Docker API-compatible engine discovery is unavailable: {exception.Message}";
-            }
-
-            await RefreshCurrentProviderModelsAsync();
+            supplementalLoadPending = !IsEditMode || providerContext.ProviderExists;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
         catch (Exception exception)
         {
-            providerContext = null;
-            loadError = exception.Message;
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                providerContext = null;
+                loadError = exception.Message;
+            }
         }
         finally
         {
-            isLoaded = true;
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                isLoaded = true;
+            }
         }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!supplementalLoadPending || !isLoaded || providerContext is null)
+        {
+            return;
+        }
+
+        // External checks start only after the saved settings are visible, never during prerender.
+        supplementalLoadPending = false;
+        var cancellationToken = loadCancellation.Token;
+        await RefreshCurrentProviderModelsAsync();
+        if (!cancellationToken.IsCancellationRequested && providerContext?.Editor.ProviderType == AiProviderType.Custom)
+        {
+            await LoadDockerEnginesAsync();
+        }
+        if (!isDisposed && !cancellationToken.IsCancellationRequested)
+        {
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadDockerEnginesAsync()
+    {
+        if (isDiscoveringDocker || localAiWorkspace is not null) return;
+        var cancellationToken = loadCancellation.Token;
+        isDiscoveringDocker = true;
+        StateHasChanged();
+        try
+        {
+            var workspace = await DockerAiService.GetWorkspaceAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            localAiWorkspace = workspace;
+            dockerDiscoveryMessage = string.Empty;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                dockerDiscoveryMessage = $"Could not find Docker model endpoints: {exception.Message}";
+            }
+        }
+        finally
+        {
+            if (!isDisposed && !cancellationToken.IsCancellationRequested)
+            {
+                isDiscoveringDocker = false;
+                StateHasChanged();
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        isDisposed = true;
+        loadCancellation.Cancel();
+        loadCancellation.Dispose();
+        modelRefreshCancellation?.Cancel();
+        modelRefreshCancellation?.Dispose();
     }
 
     private Task OnProviderTypeChanged()
@@ -418,6 +503,9 @@
 
         ClearProviderTestMessage();
         ClearModelRefreshMessage();
+        modelRefreshCancellation?.Cancel();
+        modelRefreshRequest++;
+        isRefreshingModels = false;
 
         var previousDefinition = lastProviderType.HasValue
             ? providerContext.SupportedProviders.FirstOrDefault(provider => provider.ProviderType == lastProviderType.Value)
@@ -461,8 +549,8 @@
 
         lastProviderType = providerContext.Editor.ProviderType;
         providerContext.Editor.RequiresApiKey = selectedDefinition.RequiresApiKey;
-
-        return RefreshCurrentProviderModelsAsync();
+        supplementalLoadPending = true;
+        return Task.CompletedTask;
     }
 
     private async Task SaveAsync()
@@ -545,7 +633,8 @@
         providerContext = providerContext with
         {
             AvailableModelOptions = providerContext.AvailableModelOptions
-                .Where(model => model.ProviderType != providerContext.Editor.ProviderType).ToArray()
+                .Where(model => model.ProviderType != providerContext.Editor.ProviderType ||
+                                model.ModelId.Equals(providerContext.Editor.DefaultModelId, StringComparison.OrdinalIgnoreCase)).ToArray()
         };
         if (providerContext.Editor.RequiresApiKey &&
             string.IsNullOrWhiteSpace(providerContext.Editor.ApiKeyInput) &&
@@ -565,14 +654,37 @@
             return;
         }
 
+        modelRefreshCancellation?.Cancel();
+        modelRefreshCancellation?.Dispose();
+        modelRefreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(loadCancellation.Token);
+        var cancellationToken = modelRefreshCancellation.Token;
+        var request = ++modelRefreshRequest;
+        var editor = providerContext.Editor;
+        var snapshot = new LinuxMadeSane.Application.Contracts.Ai.AiProviderSettingsEditor
+        {
+            ProviderKey = editor.ProviderKey, ProviderType = editor.ProviderType, DisplayName = editor.DisplayName,
+            BaseUrl = editor.BaseUrl, DefaultModelId = editor.DefaultModelId,
+            IsEnabled = editor.IsEnabled, IsDefault = editor.IsDefault,
+            StreamingEnabled = editor.StreamingEnabled, ToolUseEnabled = editor.ToolUseEnabled,
+            RequiresApiKey = editor.RequiresApiKey, HasApiKeyConfigured = editor.HasApiKeyConfigured,
+            ApiKeyInput = editor.ApiKeyInput, ClearStoredApiKey = editor.ClearStoredApiKey
+        };
         isRefreshingModels = true;
         saveError = string.Empty;
         modelRefreshTone = "warning";
-        modelRefreshMessage = "Refreshing model list...";
+        modelRefreshMessage = "Loading available models... You can edit the provider while this finishes.";
+        StateHasChanged();
 
         try
         {
-            var refreshedCatalog = await ProviderSettingsService.RefreshModelCatalogAsync(providerContext.Editor);
+            var refreshedCatalog = await ProviderSettingsService.RefreshModelCatalogAsync(snapshot, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (request != modelRefreshRequest || providerContext?.Editor != editor ||
+                editor.ProviderType != snapshot.ProviderType || editor.BaseUrl != snapshot.BaseUrl ||
+                editor.ApiKeyInput != snapshot.ApiKeyInput || editor.ClearStoredApiKey != snapshot.ClearStoredApiKey)
+            {
+                return;
+            }
             providerContext = providerContext with { AvailableModelOptions = refreshedCatalog };
 
             var previousModel = providerContext.Editor.DefaultModelId;
@@ -586,14 +698,24 @@
             modelRefreshMessage = $"Model list refreshed. {CurrentModelOptions.Count} option(s) available for {SelectedProviderTypeDefinition.DisplayName}." +
                 (modelUnavailable ? $" {previousModel} is no longer available for this provider. Select a current model before saving." : string.Empty);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
         catch (Exception exception)
         {
-            modelRefreshTone = "error";
-            modelRefreshMessage = exception.Message;
+            if (!cancellationToken.IsCancellationRequested && request == modelRefreshRequest)
+            {
+                modelRefreshTone = "error";
+                modelRefreshMessage = exception.Message;
+            }
         }
         finally
         {
-            isRefreshingModels = false;
+            if (!isDisposed && request == modelRefreshRequest)
+            {
+                isRefreshingModels = false;
+                StateHasChanged();
+            }
         }
     }
 
