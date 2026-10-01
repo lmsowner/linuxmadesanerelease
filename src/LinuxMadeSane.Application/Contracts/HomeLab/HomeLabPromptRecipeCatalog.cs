@@ -18,7 +18,8 @@ public sealed record HomeLabPromptRecipe(
     string StarterPrompt,
     string TechnicalGuidance,
     string Prompt,
-    PublishedHomeLabRecipeConnectivity? Connectivity = null)
+    PublishedHomeLabRecipeConnectivity? Connectivity = null,
+    HomeLabRecipeNetworkRecommendation? NetworkRecommendation = null)
 {
     public bool RoutesAppThroughVpn(string appId) =>
         VpnRoutedAppIds.Contains(appId, StringComparer.OrdinalIgnoreCase);
@@ -40,7 +41,14 @@ public sealed record PublishedHomeLabPromptRecipe(
     string? Category = null,
     IReadOnlyList<string>? Components = null,
     bool RequiresPlanning = false,
-    PublishedHomeLabRecipeConnectivity? Connectivity = null);
+    PublishedHomeLabRecipeConnectivity? Connectivity = null,
+    HomeLabRecipeNetworkRecommendation? NetworkRecommendation = null);
+
+public sealed record HomeLabRecipeNetworkRecommendation(
+    string ListenInterface,
+    string ListenReason,
+    string OutboundRoute,
+    string OutboundReason);
 
 public sealed record PublishedHomeLabRecipeConnectivity(
     string PublicOriginMode,
@@ -445,7 +453,8 @@ public static class HomeLabPromptRecipeCatalog
         }
 
         ValidatePublishedConnectivity(id, appIds, definition.Connectivity);
-        return Create(category, id, name, description, components, appIds, definition.RequiresPlanning, definition.RequiresVpnGateway, basePrompt, technicalGuidance, vpnRoutedAppIds, definition.Connectivity);
+        ValidateNetworkRecommendation(id, definition.NetworkRecommendation, definition.RequiresVpnGateway, definition.RequiresPlanning, appIds);
+        return Create(category, id, name, description, components, appIds, definition.RequiresPlanning, definition.RequiresVpnGateway, basePrompt, technicalGuidance, vpnRoutedAppIds, definition.Connectivity, definition.NetworkRecommendation);
     }
 
     private static HomeLabPromptRecipe? TryCreatePublished(PublishedHomeLabPromptRecipe definition)
@@ -519,6 +528,9 @@ public static class HomeLabPromptRecipeCatalog
             Required network choices already made by the user:
             - Listen on {listenInterface} at {listenAddress}. Pass this exact address as listenAddress.
             - Send outbound traffic through {(outboundRoute == "vpn" ? "the selected VPN Gateway" : "the server's normal direct/LAN route")}. Pass "{outboundRoute}" as outboundRoute.
+            {(recipe.RequiresVpnGateway
+                ? $"Only these recipe apps use the VPN Gateway: {string.Join(", ", recipe.VpnRoutedAppIds)}. Other recipe apps keep their normal direct route."
+                : "Direct follows the host routing table; it does not pin traffic to the listener interface or block Internet access.")}
             Do not ask for these network choices again unless the selected interface or gateway is no longer available.
 
             User-edited requirements for this recipe:
@@ -638,7 +650,8 @@ public static class HomeLabPromptRecipeCatalog
         string starterPrompt,
         string technicalGuidance,
         IReadOnlyList<string>? vpnRoutedAppIds = null,
-        PublishedHomeLabRecipeConnectivity? connectivity = null) =>
+        PublishedHomeLabRecipeConnectivity? connectivity = null,
+        HomeLabRecipeNetworkRecommendation? networkRecommendation = null) =>
         new(
             id,
             name,
@@ -664,7 +677,28 @@ public static class HomeLabPromptRecipeCatalog
                 ? "Start by inspecting Home Lab. This recipe requires planning because LMS cannot yet deploy every component safely. Ask only for the missing choices, explain exactly which parts LMS supports, and do not call apply_home_lab_prompt_recipe or install a partial stack. Produce a concrete plan the user can review."
                 : "Start by inspecting Home Lab. Explain what already exists, resolve any required infrastructure choice, then ask for approval through the LMS apply tool. After the approved action completes, inspect again and report actual health, network security where applicable, and local access details.")}
             """,
-            connectivity);
+            connectivity,
+            networkRecommendation ?? DefaultNetworkRecommendation(name, requiresVpnGateway, vpnRoutedAppIds ?? appIds));
+
+    private static HomeLabRecipeNetworkRecommendation DefaultNetworkRecommendation(
+        string name, bool requiresVpnGateway, IReadOnlyList<string> vpnApps) =>
+        new("lan", $"Use a private LAN address so local clients can reach {name}. Choose a Tailnet address instead if access should be limited to your private remote network.",
+            requiresVpnGateway ? "vpn" : "direct",
+            requiresVpnGateway
+                ? $"Use an existing VPN Gateway for {string.Join(", ", vpnApps)}. Apps outside that VPN list keep their normal host route."
+                : "Use the host's normal route for LAN access and any Internet requests. This does not restrict traffic to the LAN.");
+
+    private static void ValidateNetworkRecommendation(string id, HomeLabRecipeNetworkRecommendation? recommendation, bool requiresVpnGateway, bool requiresPlanning, IReadOnlyList<string> appIds)
+    {
+        if (recommendation is null) return; // Older published catalogs remain compatible.
+        if (recommendation.ListenInterface is not ("lan" or "tailnet") ||
+            recommendation.OutboundRoute is not ("direct" or "vpn") ||
+            requiresVpnGateway && recommendation.OutboundRoute != "vpn" ||
+            recommendation.OutboundRoute == "vpn" && !requiresVpnGateway && !requiresPlanning && appIds.Any(appId => !HomeLabCatalog.GetApp(appId).SupportsVpnGateway) ||
+            string.IsNullOrWhiteSpace(recommendation.ListenReason) || recommendation.ListenReason.Length > 1000 ||
+            string.IsNullOrWhiteSpace(recommendation.OutboundReason) || recommendation.OutboundReason.Length > 1000)
+            throw new InvalidOperationException($"Published HomeLab Recipe '{id}' has invalid network recommendations.");
+    }
 
     private static void ValidatePublishedConnectivity(
         string recipeId,

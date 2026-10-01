@@ -100,7 +100,7 @@ internal static class HomeLabCatalogFileStore
                 .Select(recipe => builtInById.TryGetValue(recipe.Id, out var builtIn) &&
                                   (builtIn.Category.Equals("Docker Management", StringComparison.OrdinalIgnoreCase) ||
                                    builtIn.RequiresVpnGateway && !recipe.RequiresVpnGateway)
-                    ? builtIn
+                    ? builtIn with { NetworkRecommendation = builtIn.RequiresVpnGateway == recipe.RequiresVpnGateway ? recipe.NetworkRecommendation ?? builtIn.NetworkRecommendation : builtIn.NetworkRecommendation }
                     : recipe)
                 .ToArray();
         }

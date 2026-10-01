@@ -971,10 +971,11 @@
                                         <option value="">Choose an interface...</option>
                                         @foreach (var option in RecipeListenInterfaces)
                                         {
-                                            <option value="@option.Address">@option.InterfaceName — @option.Address</option>
+                                            <option value="@option.Address">@option.InterfaceName — @option.Address@(RecommendedRecipeListener?.Address == option.Address ? " (recommended)" : "")</option>
                                         }
                                     </select>
-                                    <span class="meta-text">Only clients able to reach this address can use the deployed services.</span>
+                                    <span class="home-lab-network-recommendation"><strong>Recommended:</strong> @RecipeListenerRecommendation</span>
+                                    <span class="meta-text">The host address that accepts incoming connections from browsers, TVs and other clients. It does not choose where app traffic leaves the server.</span>
                                 </div>
                                 <div class="home-lab-recipe-choice home-lab-recipe-vpn-choice">
                                     <label for="home-lab-recipe-outbound-route">Outbound network</label>
@@ -985,17 +986,22 @@
                                         <option value="">Choose outbound traffic...</option>
                                         @if (!selectedRecipe.RequiresVpnGateway)
                                         {
-                                            <option value="direct">Direct — regular LAN/Internet route</option>
+                                            <option value="direct">Direct — normal host route@(selectedRecipe.NetworkRecommendation?.OutboundRoute == "direct" ? " (recommended)" : "")</option>
                                         }
                                         @if (CanRouteRecipeThroughVpn(selectedRecipe))
                                         {
                                             @foreach (var gateway in InstalledVpnGateways)
                                             {
-                                                <option value="vpn:@gateway.Id">VPN — @gateway.DisplayName (@gateway.HealthState)</option>
+                                                <option value="vpn:@gateway.Id">VPN — @gateway.DisplayName (@gateway.HealthState)@(RecommendedRecipeGateway?.Id == gateway.Id ? " (recommended)" : "")</option>
                                             }
                                         }
                                     </select>
-                                    <span class="meta-text">Direct uses the server's normal route. VPN keeps outbound app traffic behind the selected gateway.</span>
+                                    <span class="home-lab-network-recommendation"><strong>Recommended:</strong> @selectedRecipe.NetworkRecommendation?.OutboundReason</span>
+                                    @if (selectedRecipe.NetworkRecommendation?.OutboundRoute == "direct")
+                                    {
+                                        <span class="meta-text">@HomeLabRecipeNetworkSelection.DescribeDirectRoute(RecipeListenInterfaces)</span>
+                                    }
+                                    <span class="meta-text">Where app-initiated traffic goes. Direct follows the host routing table for LAN and Internet access; it does not limit traffic to the LAN. VPN uses the selected gateway.</span>
                                     @if ((selectedRecipe.RequiresVpnGateway || CanRouteRecipeThroughVpn(selectedRecipe)) && !InstalledVpnGateways.Any())
                                     {
                                         <UiCommandButton Label="Add VPN Gateway"
@@ -1153,7 +1159,20 @@
     private Guid? selectedPromptVpnGatewayId;
     private string selectedPromptListenAddress = string.Empty;
     private string selectedPromptOutboundRoute = string.Empty;
-    private IReadOnlyList<RecipeListenInterface> RecipeListenInterfaces { get; } = LoadRecipeListenInterfaces();
+    private IReadOnlyList<HomeLabRecipeListenInterface> RecipeListenInterfaces { get; } = LoadRecipeListenInterfaces();
+    private HomeLabRecipeListenInterface? RecommendedRecipeListener =>
+        HomeLabRecipeNetworkSelection.RecommendListener(customizingPromptRecipe?.NetworkRecommendation, RecipeListenInterfaces);
+    private HomeLabAppInstallation? RecommendedRecipeGateway =>
+        customizingPromptRecipe?.NetworkRecommendation?.OutboundRoute == "vpn" &&
+        InstalledVpnGateways.Count(gateway => gateway.HealthState == HomeLabHealthState.Healthy) == 1
+            ? InstalledVpnGateways.Single(gateway => gateway.HealthState == HomeLabHealthState.Healthy) : null;
+    private string RecipeListenerRecommendation =>
+        (customizingPromptRecipe?.NetworkRecommendation?.ListenReason ?? string.Empty) + " " +
+        (RecommendedRecipeListener is { } listener
+            ? $"Suggested here: {listener.InterfaceName} — {listener.Address}."
+            : "Choose the interface your clients use; no single matching interface is available.") +
+        (customizingPromptRecipe?.NetworkRecommendation?.ListenInterface == "tailnet" && !RecipeListenInterfaces.Any(item => item.IsTailnet)
+            ? " No Tailnet interface is available, so a private LAN address is suggested where possible." : string.Empty);
     private IEnumerable<string> RecipeCategories => promptRecipes
         .Select(recipe => recipe.Category)
         .Distinct(StringComparer.OrdinalIgnoreCase);
@@ -1377,9 +1396,7 @@
         Guid? RecipeRunId = null,
         string? PromptRecipeId = null);
 
-    private sealed record RecipeListenInterface(string InterfaceName, string Address);
-
-    private static IReadOnlyList<RecipeListenInterface> LoadRecipeListenInterfaces()
+    private static IReadOnlyList<HomeLabRecipeListenInterface> LoadRecipeListenInterfaces()
     {
         try
         {
@@ -1388,7 +1405,10 @@
                 .SelectMany(item => item.GetIPProperties().UnicastAddresses
                     .Where(address => address.Address.AddressFamily == AddressFamily.InterNetwork &&
                                       !IPAddress.IsLoopback(address.Address))
-                    .Select(address => new RecipeListenInterface(item.Name, address.Address.ToString())))
+                    .Select(address => new HomeLabRecipeListenInterface(item.Name, address.Address.ToString(),
+                        item.GetIPProperties().GatewayAddresses.Any(gateway => gateway.Address.AddressFamily == AddressFamily.InterNetwork && !gateway.Address.Equals(IPAddress.Any)),
+                        item.NetworkInterfaceType == NetworkInterfaceType.Tunnel,
+                        item.Name.Contains("tailscale", StringComparison.OrdinalIgnoreCase) || item.Description.Contains("tailscale", StringComparison.OrdinalIgnoreCase))))
                 .Distinct()
                 .OrderBy(item => item.InterfaceName, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(item => item.Address, StringComparer.OrdinalIgnoreCase)
@@ -1850,7 +1870,10 @@
             recipe.Id.Equals(selectedPromptRecipeId, StringComparison.OrdinalIgnoreCase));
         customizingPromptRecipe = promptRecipe;
         recipePromptDraft = promptRecipe?.StarterPrompt ?? string.Empty;
-        selectedPromptVpnGatewayId = null;
+        selectedPromptListenAddress = RecommendedRecipeListener?.Address ?? string.Empty;
+        selectedPromptOutboundRoute = promptRecipe?.NetworkRecommendation?.OutboundRoute == "direct"
+            ? "direct" : RecommendedRecipeGateway is { } gateway ? $"vpn:{gateway.Id}" : string.Empty;
+        selectedPromptVpnGatewayId = RecommendedRecipeGateway?.Id;
     }
 
     private IReadOnlyList<HomeLabAppManifest> AppsAvailableForGroup(HomeLabInstallationGroup group) =>
