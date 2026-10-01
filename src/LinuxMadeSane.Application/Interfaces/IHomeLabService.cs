@@ -26,6 +26,8 @@ public interface IHomeLabService
     Task<HomeLabOperationResult> SetNetworkRouteAsync(Guid installationId, bool useVpnGateway, Guid? gatewayInstallationId = null, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> SetListenAddressAsync(Guid installationId, string listenAddress, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> UpdateContainerSettingsAsync(Guid installationId, HomeLabContainerSettingsUpdate settings, CancellationToken cancellationToken = default);
+    Task<HomeLabOperationResult> SetBrowserEntryAsync(Guid installationId, string entry, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Browser entry configuration is unavailable.");
     Task<HomeLabOperationResult> RestoreContainerSettingsAsync(Guid installationId, CancellationToken cancellationToken = default);
     Task<HomeLabDockerManagementDraft> GetDockerManagementDraftAsync(Guid installationId, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("Docker management handoff is unavailable.");

@@ -18,6 +18,7 @@ internal static class HomeLabCatalogFileStore
     private static string? userCatalogRoot;
     private static string? defaultCatalogRoot;
     private static FileCache<HomeLabAppManifest>? appsCache;
+    private static FileCache<HomeLabAppManifest>? defaultAppsCache;
     private static FileCache<HomeLabRecipeManifest>? recipesCache;
     private static FileCache<PublishedHomeLabPromptRecipe>? promptRecipesCache;
 
@@ -35,6 +36,7 @@ internal static class HomeLabCatalogFileStore
             Directory.CreateDirectory(userCatalogRoot);
             SeedMissingDefaults();
             appsCache = null;
+            defaultAppsCache = null;
             recipesCache = null;
             promptRecipesCache = null;
         }
@@ -51,10 +53,14 @@ internal static class HomeLabCatalogFileStore
                 NormalizeApp,
                 ref appsCache);
 
-            var builtInById = builtIns.ToDictionary(app => app.Id, StringComparer.OrdinalIgnoreCase);
+            var shipped = defaultCatalogRoot is null ? [] : LoadFile<AppCatalogDocument, HomeLabAppManifest>(
+                AppsFileName, document => document.Apps, static app => app.Id, NormalizeApp,
+                ref defaultAppsCache, defaultCatalogRoot);
+            var defaults = MergeById(builtIns, shipped, static app => app.Id);
+            var builtInById = defaults.ToDictionary(app => app.Id, StringComparer.OrdinalIgnoreCase);
             var builtInManagers = builtIns.Where(app => app.IsDockerManager)
                 .Select(app => app.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            return MergeById(builtIns, custom, static app => app.Id)
+            return MergeById(defaults, custom, static app => app.Id)
                 .Select(app => builtInById.TryGetValue(app.Id, out var builtIn) ? UpgradeLegacyDefaults(app, builtIn) : app)
                 .Select(app => builtInManagers.Contains(app.Id) ? app with { IsDockerManager = true } : app)
                 .ToArray();
@@ -87,6 +93,13 @@ internal static class HomeLabCatalogFileStore
             app.HealthCheck?.DockerCommand == "wget --no-verbose --tries=1 --spider http://127.0.0.1:3003/ping")
         {
             upgraded = upgraded with { HealthCheck = builtIn.HealthCheck, DefinitionVersion = builtIn.DefinitionVersion };
+        }
+        if (app.ImageRepository == builtIn.ImageRepository && builtIn.Exposure?.ClientAccess?.BrowserEntry is { } browserEntry)
+        {
+            if (upgraded.Exposure is null)
+                upgraded = upgraded with { Exposure = builtIn.Exposure };
+            else if (upgraded.Exposure.ClientAccess is { BrowserEntry: null } access)
+                upgraded = upgraded with { Exposure = upgraded.Exposure with { ClientAccess = access with { BrowserEntry = browserEntry } } };
         }
         return upgraded;
     }
@@ -151,9 +164,11 @@ internal static class HomeLabCatalogFileStore
         Func<TDocument, IReadOnlyList<T>?> getItems,
         Func<T, string> getId,
         Func<T, T> normalize,
-        ref FileCache<T>? cache)
+        ref FileCache<T>? cache,
+        string? catalogRoot = null)
     {
-        var path = GetUserFilePath(fileName);
+        var root = catalogRoot ?? userCatalogRoot;
+        var path = root is null ? null : Path.Combine(root, fileName);
         if (path is null || !File.Exists(path))
         {
             return [];

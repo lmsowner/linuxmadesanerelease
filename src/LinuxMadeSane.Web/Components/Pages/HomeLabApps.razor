@@ -272,6 +272,14 @@
                                                             <li>@RenderAccessItem(item)</li>
                                                         }
                                                     </ul>
+                                                    <label class="meta-text" for="home-lab-browser-entry">Open link path or URL</label>
+                                                    <div class="d-flex gap-2 align-items-center">
+                                                        <input id="home-lab-browser-entry" class="form-control form-control-sm" @bind="browserEntryDraft" placeholder="Configured path or URL" />
+                                                        <UiCommandButton Label="Save" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle"
+                                                                         Disabled="@(busy || !HomeLabBrowserUrl.IsValid(browserEntryDraft))" OnClick="SaveBrowserEntryAsync" />
+                                                    </div>
+                                                    <span class="meta-text">Uses deployment metadata or the documented recipe setting. Saving changes only the Open link.</span>
+
                                                 </div>
                                                 <div class="home-lab-detail-block">
                                                     <h3>Files</h3>
@@ -1215,6 +1223,7 @@
     private string containerEnvironmentDraft = string.Empty;
     private string containerVolumesDraft = string.Empty;
     private string composeYamlDraft = string.Empty;
+    private string browserEntryDraft = string.Empty;
     private bool confirmDockerHandoff;
     private string externalHostnameDraft = string.Empty;
     private string externalDomainDraft = string.Empty;
@@ -2145,6 +2154,7 @@
             connectionGuide = loadedConnectionGuide;
             networkSecurity = GetSummaryNetworkSecurity(installation);
             selectedInstallation = installation;
+            browserEntryDraft = installation.BrowserEntry ?? string.Empty;
             selectedLogs = null;
             settingsTab = "overview";
             externalHostnameDraft = string.Empty;
@@ -2220,6 +2230,16 @@
             Environment.NewLine,
             details.Environment.Where(item => IsEditableEnvironmentEntry(item, managedKeys)));
         containerVolumesDraft = string.Join(Environment.NewLine, details.Volumes);
+    }
+
+    private async Task SaveBrowserEntryAsync()
+    {
+        if (selectedInstallation is null) return;
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.SetBrowserEntryAsync(selectedInstallation.Id, browserEntryDraft);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
     }
 
     private async Task SaveContainerSettingsAsync()
@@ -2856,26 +2876,10 @@
 
     private async Task RepairGroupAsync(HomeLabInstallationGroup group)
     {
-        var candidates = GroupRepairCandidates(group);
-        if (candidates.Count == 0)
-        {
-            return;
-        }
-
         await RunUiOperationAsync(async () =>
         {
-            var results = new List<HomeLabOperationResult>(candidates.Count);
-            foreach (var installation in candidates.OrderByDescending(IsVpnGateway))
-            {
-                results.Add(await HomeLabService.ExecuteAsync(installation.Id, HomeLabLifecycleAction.Repair));
-            }
-
-            var failed = results.Count(result => !result.Succeeded);
-            SetMessage(
-                failed == 0
-                    ? $"Repaired {results.Count} installation{(results.Count == 1 ? string.Empty : "s")} in {group.Name}."
-                    : $"Repaired {results.Count - failed} of {results.Count} installations in {group.Name}. Review the remaining degraded items or use Repair with terminal AI.",
-                failed > 0);
+            var result = await HomeLabGroupRepairWorkflow.RunAsync(HomeLabService, group.Installations.Select(item => item.Id).ToArray());
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
         });
     }
 
@@ -3260,7 +3264,7 @@
                 endpoint.Scope == HomeLabEndpointScope.Public &&
                 IsPrimary(endpoint) &&
                 endpoint.EdgeGatewayRouteId.HasValue &&
-                endpoint.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))?.Url;
+                endpoint.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)) is { } endpoint ? HomeLabBrowserUrl.Resolve(endpoint.Url, installation.BrowserEntry) : null;
         }
 
         // A local LMS session should stay on the host/LAN route even when this
@@ -3270,13 +3274,14 @@
             endpoint.Scope == HomeLabEndpointScope.Lan && IsPrimary(endpoint));
         if (lanEndpoint is not null)
         {
-            return lanEndpoint.Url;
+            return HomeLabBrowserUrl.Resolve(lanEndpoint.Url, installation.BrowserEntry);
         }
 
-        return endpoints.FirstOrDefault(endpoint =>
+        var clientEndpoint = endpoints.FirstOrDefault(endpoint =>
             endpoint.Scope == HomeLabEndpointScope.Client &&
             IsPrimary(endpoint) &&
-            !endpoint.EdgeGatewayRouteId.HasValue)?.Url;
+            !endpoint.EdgeGatewayRouteId.HasValue);
+        return clientEndpoint is null ? null : HomeLabBrowserUrl.Resolve(clientEndpoint.Url, installation.BrowserEntry);
     }
 
     private static string? BuildExternalUrl(EdgeGatewayRouteListItem route)

@@ -265,81 +265,21 @@ public sealed class HomeLabService(
             return installations;
         }
 
-        var missing = new List<HomeLabInstallationEntity>();
+        var changed = false;
         foreach (var installation in installations)
         {
-            // A manager may temporarily remove/recreate its container. Keep the
-            // ownership marker and saved Compose draft through that transition.
-            if (IsExternallyManaged(installation))
-            {
-                continue;
-            }
-
+            if (IsExternallyManaged(installation)) continue;
             var presence = await InspectContainerPresenceAsync(installation.ContainerName, cancellationToken);
-            if (presence is null || presence.Value)
-            {
-                continue;
-            }
-
-            missing.Add(installation);
-            logger.LogInformation(
-                "Removing stale Home Lab installation {InstallationId} for missing container {ContainerName}.",
-                installation.Id,
-                installation.ContainerName);
+            if (presence is not false) continue;
+            // A failed or in-progress recreation must not destroy the configuration
+            // needed to recover it. Removal is an explicit lifecycle action only.
+            installation.HealthState = (int)HomeLabHealthState.Failed;
+            installation.HealthDetail = "Container is missing. Saved configuration and data are retained for repair.";
+            installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            changed = true;
         }
-
-        if (missing.Count == 0)
-        {
-            await RemoveOrphanedDeploymentsAsync(cancellationToken);
-            return installations;
-        }
-
-        var missingIds = missing.Select(item => item.Id).ToHashSet();
-        foreach (var installation in missing)
-        {
-            await CleanupMissingInstallationResourcesAsync(installation, missingIds, cancellationToken);
-        }
-
-        var deploymentIds = missing.Select(item => item.DeploymentId).Distinct().ToArray();
-        foreach (var installation in missing)
-        {
-            dbContext.HomeLabServiceEndpoints.RemoveRange(installation.ServiceEndpoints);
-            dbContext.HomeLabInstallations.Remove(installation);
-        }
-
-        var deployments = await dbContext.HomeLabDeployments
-            .Where(item => deploymentIds.Contains(item.Id))
-            .ToListAsync(cancellationToken);
-        foreach (var deployment in deployments)
-        {
-            var hasRemainingInstallation = await dbContext.HomeLabInstallations
-                .AnyAsync(item => item.DeploymentId == deployment.Id && !missingIds.Contains(item.Id), cancellationToken);
-            if (hasRemainingInstallation)
-            {
-                continue;
-            }
-
-            dbContext.HomeLabDeployments.Remove(deployment);
-            if (!string.IsNullOrWhiteSpace(deployment.NetworkName))
-            {
-                var network = await RunDockerAsync(
-                    ["network", "rm", deployment.NetworkName],
-                    $"Remove stale Home Lab network {deployment.NetworkName}",
-                    cancellationToken);
-                if (network.ExitCode != 0 && !ContainsNoSuchNetwork(network))
-                {
-                    logger.LogWarning(
-                        "Could not remove stale Home Lab network {NetworkName}: {Failure}.",
-                        deployment.NetworkName,
-                        NormalizeFailure(network));
-                }
-            }
-        }
-
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await RemoveOrphanedDeploymentsAsync(cancellationToken);
-
-        return installations.Where(item => !missingIds.Contains(item.Id)).ToArray();
+        if (changed) await dbContext.SaveChangesAsync(cancellationToken);
+        return installations;
     }
 
     private async Task RemoveOrphanedDeploymentsAsync(CancellationToken cancellationToken)
@@ -3221,7 +3161,7 @@ public sealed class HomeLabService(
         {
             await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
             await RefreshHealthInternalAsync(installation, cancellationToken);
-            if (ToHealth(installation.HealthState) == HomeLabHealthState.Healthy && await ProbeCaddyAccessAsync(installation, cancellationToken))
+            if (ToHealth(installation.HealthState) == HomeLabHealthState.Healthy)
             {
                 return true;
             }
@@ -3526,11 +3466,13 @@ public sealed class HomeLabService(
             var isWeb = manifest?.Name.Equals("web", StringComparison.OrdinalIgnoreCase) == true;
             if (port.HostPort > 0)
             {
-                access.Add(isWeb
-                    ? installation.CaddySourcePort is int caddyPort
-                        ? $"LMS UI: http://<LMS host>:{caddyPort}"
-                        : $"LMS UI: http://<LMS host>:{port.HostPort}"
-                    : $"LMS port: http://<LMS host>:{port.HostPort}/{manifest?.Protocol ?? "tcp"}");
+                if (isWeb)
+                {
+                    var origin = $"http://{Dns.GetHostName()}:{installation.CaddySourcePort ?? port.HostPort}";
+                    var browserUrl = HomeLabBrowserUrl.Resolve(origin, ResolveBrowserEntry(installation, app));
+                    access.Add(browserUrl is not null ? $"LMS UI: {browserUrl}" : "Browser entry point is not configured.");
+                }
+                else access.Add($"LMS port: http://<LMS host>:{port.HostPort}/{manifest?.Protocol ?? "tcp"}");
             }
             else if (!isWeb)
             {
@@ -3639,6 +3581,12 @@ public sealed class HomeLabService(
             $"    image: {ComposeScalar(installation.Image)}",
             "    restart: unless-stopped"
         };
+
+        if (ResolveBrowserEntry(installation, app) is { } browserEntry)
+        {
+            lines.Add("    labels:");
+            lines.Add($"      {HomeLabBrowserUrl.Label}: {ComposeScalar(browserEntry)}");
+        }
 
         var usesVpnNamespace = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
         if (usesVpnNamespace)
@@ -4311,6 +4259,8 @@ public sealed class HomeLabService(
             "--label", $"com.linuxmadesane.homelab.app={app.Id}",
             "--label", $"com.linuxmadesane.homelab.deployment={installation.DeploymentId}"
         };
+        if (ResolveBrowserEntry(installation, app) is { } browserEntry)
+            args.AddRange(["--label", $"{HomeLabBrowserUrl.Label}={browserEntry}"]);
         var usesSharedNetworkNamespace = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
         var networkGateway = await ResolveNetworkGatewayAsync(installation.NetworkName, cancellationToken);
         if (!usesSharedNetworkNamespace && networkGateway is not null)
@@ -4842,6 +4792,7 @@ public sealed class HomeLabService(
         }
 
         var inspect = await InspectContainerAsync(installation.ContainerName, cancellationToken);
+        if (inspect is not null) CaptureBrowserEntryMetadata(installation, inspect);
         var health = inspect is null
             ? (HomeLabHealthState.Failed, "Container could not be inspected.")
             : ResolveHealth(inspect);
@@ -4868,17 +4819,41 @@ public sealed class HomeLabService(
                 healthPath,
                 cancellationToken);
         }
-        if (health.Item1 == HomeLabHealthState.Healthy && installation.CaddySourcePort is > 0 &&
-            HomeLabEndpointPlanner.ResolveClientAccesses(app).Any(access => access.PortName.Equals("web", StringComparison.OrdinalIgnoreCase)) &&
-            !await ProbeCaddyAccessAsync(installation, cancellationToken))
-        {
-            health = inspect is not null && IsWithinHttpHealthStartPeriod(inspect, app)
-                ? (HomeLabHealthState.Starting, "Waiting for the local access URL to start.")
-                : (HomeLabHealthState.Degraded, "The container is running, but its local access URL did not return a usable HTTP response. Check its base URL and proxy route.");
-        }
         installation.HealthState = (int)health.Item1;
         installation.HealthDetail = health.Item2;
         installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+    }
+
+    internal static void CaptureBrowserEntryMetadata(HomeLabInstallationEntity installation, JsonObject inspect)
+    {
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        var entry = HomeLabBrowserUrl.SupportedLabels
+            .Select(label => inspect["Config"]?["Labels"]?[label]?.GetValue<string>())
+            .FirstOrDefault(HomeLabBrowserUrl.IsValid);
+        if (entry is null) configuration.Remove(HomeLabBrowserUrl.DiscoveredKey);
+        else configuration[HomeLabBrowserUrl.DiscoveredKey] = entry;
+        installation.ConfigurationJson = JsonSerializer.Serialize(configuration, JsonOptions);
+    }
+
+    internal static string? ResolveBrowserEntry(HomeLabInstallationEntity installation, HomeLabAppManifest app)
+    {
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        foreach (var key in new[] { HomeLabBrowserUrl.ConfigurationKey, HomeLabBrowserUrl.DiscoveredKey })
+            if (configuration.TryGetValue(key, out var configured) && HomeLabBrowserUrl.IsValid(configured)) return configured;
+        return app.Exposure?.ClientAccess?.BrowserEntry?.Value is { } declared && HomeLabBrowserUrl.IsValid(declared)
+            ? declared : null;
+    }
+
+    public async Task<HomeLabOperationResult> SetBrowserEntryAsync(Guid installationId, string entry, CancellationToken cancellationToken = default)
+    {
+        if (!HomeLabBrowserUrl.IsValid(entry)) throw new InvalidOperationException("Enter a browser path beginning with / or an HTTP(S) URL without credentials.");
+        var installation = await dbContext.HomeLabInstallations.SingleAsync(item => item.Id == installationId, cancellationToken);
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        configuration[HomeLabBrowserUrl.ConfigurationKey] = entry.Trim();
+        installation.ConfigurationJson = JsonSerializer.Serialize(configuration, JsonOptions);
+        installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Success("Browser entry point saved.", "The Open link now uses this configured entry point.", [], ToHealth(installation.HealthState));
     }
 
     private async Task<(HomeLabHealthState, string)> ProbeHttpHealthAsync(
@@ -5943,7 +5918,9 @@ public sealed class HomeLabService(
         key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase) ||
         key.StartsWith("lms-container-backup-", StringComparison.OrdinalIgnoreCase) ||
         key.Equals(ManagementOwnerKey, StringComparison.OrdinalIgnoreCase) ||
-        key.Equals(ComposeDraftKey, StringComparison.OrdinalIgnoreCase);
+        key.Equals(ComposeDraftKey, StringComparison.OrdinalIgnoreCase) ||
+        key.Equals(HomeLabBrowserUrl.ConfigurationKey, StringComparison.OrdinalIgnoreCase) ||
+        key.Equals(HomeLabBrowserUrl.DiscoveredKey, StringComparison.OrdinalIgnoreCase);
 
     private static void ConfigureVpnPortForwarding(
         IDictionary<string, string> values,
@@ -6291,7 +6268,8 @@ public sealed class HomeLabService(
                 .ThenBy(endpoint => endpoint.PortName, StringComparer.OrdinalIgnoreCase)
                 .Select(MapServiceEndpoint)
                 .ToArray(),
-            IsExternallyManaged(item));
+            IsExternallyManaged(item),
+            ResolveBrowserEntry(item, HomeLabCatalog.GetApp(item.AppId)));
 
     private static HomeLabServiceEndpoint MapServiceEndpoint(HomeLabServiceEndpointEntity item) =>
         new(

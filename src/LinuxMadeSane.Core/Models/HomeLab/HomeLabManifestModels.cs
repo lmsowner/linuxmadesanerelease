@@ -81,7 +81,10 @@ public sealed record HomeLabClientAccessManifest(
     string PreferredPath = "",
     HomeLabReverseProxyManifest? ReverseProxy = null,
     HomeLabEndpointCapabilities? Capabilities = null,
-    string? PublicUrlEnvironmentVariable = null);
+    string? PublicUrlEnvironmentVariable = null,
+    HomeLabBrowserEntryPoint? BrowserEntry = null);
+
+public sealed record HomeLabBrowserEntryPoint(string Value, string? Documentation = null);
 
 public sealed record HomeLabServiceExposureManifest(
     IReadOnlyList<HomeLabEndpointScope> Scopes,
