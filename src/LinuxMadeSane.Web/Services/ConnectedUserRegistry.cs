@@ -33,11 +33,11 @@ public sealed class ConnectedUserRegistry(TimeProvider? timeProvider = null)
     public ConnectedUserSnapshot GetSnapshot()
     {
         var active = connections.Values.ToArray();
-        var users = active.GroupBy(item => (Identity: item.AccountId ?? item.ConnectionId, item.SourceIpAddress))
+        var users = active.GroupBy(item => (Identity: item.AccountId ?? (item.SourceIpAddress == "Unknown" ? item.ConnectionId : "guest:" + item.SourceIpAddress), item.SourceIpAddress))
             .Select(group => new ConnectedUser(group.First().UserName, group.Key.SourceIpAddress,
                 group.Min(item => item.ConnectedAtUtc), group.Count()))
             .OrderBy(item => item.ConnectedAtUtc).ThenBy(item => item.SourceIpAddress, StringComparer.Ordinal).ToArray();
-        return new ConnectedUserSnapshot(active.Select(item => item.AccountId ?? item.ConnectionId).Distinct(StringComparer.Ordinal).Count(), active.Length, users);
+        return new ConnectedUserSnapshot(active.Select(item => item.AccountId ?? (item.SourceIpAddress == "Unknown" ? item.ConnectionId : "guest:" + item.SourceIpAddress)).Distinct(StringComparer.Ordinal).Count(), active.Length, users);
     }
 
     private sealed record Connection(string ConnectionId, string? AccountId, string? UserName, string SourceIpAddress, DateTimeOffset ConnectedAtUtc);

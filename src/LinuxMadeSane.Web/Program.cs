@@ -70,6 +70,7 @@ public class Program
             .AddInteractiveServerComponents()
             .AddHubOptions(options => options.AddFilter<ConnectedUserHubFilter>());
         builder.Services.AddSingleton<ConnectedUserRegistry>();
+        builder.Services.AddSingleton<ConnectedUserDnsResolver>();
         builder.Services.AddScoped<LmsHostEdgeGatewaySummaryService>();
         builder.Services.AddSingleton<ConnectedUserHubFilter>();
         builder.Services.AddCascadingAuthenticationState();

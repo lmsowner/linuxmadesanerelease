@@ -266,6 +266,10 @@
                                    @onchange="SetCopyOnSelectAsync" />
                             <span>Copy on select</span>
                         </label>
+                        <label class="terminal-copy-on-select">
+                            <input type="checkbox" checked="@closeWhenSessionEnds" @onchange="SetCloseWhenSessionEndsAsync" />
+                            <span>Close when session ends</span>
+                        </label>
                     </div>
                 </div>
 
@@ -322,6 +326,9 @@
     private bool autoConnectIssued;
     private Guid? userId;
     private string currentLinuxUsername = string.Empty;
+    private bool closeWhenSessionEnds;
+    private bool hasConnectedSession;
+    private bool automaticCloseIssued;
     private Guid? pendingRemovalProfileId;
     private string connectionProfileNotice = string.Empty;
     private string connectionProfileNoticeTone = "success";
@@ -358,6 +365,9 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (firstRender)
+            closeWhenSessionEnds = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.getCloseWhenSessionEnds");
+        if (tab?.IsSessionActive == true) hasConnectedSession = true;
         if (tab is null)
         {
             if (terminalInitialized)
@@ -500,6 +510,19 @@
             while (await timer.WaitForNextTickAsync(cancellationToken))
             {
                 var refresh = await RefreshAsync(cancellationToken);
+                if (tab?.IsSessionActive == true) hasConnectedSession = true;
+                if (closeWhenSessionEnds && hasConnectedSession && !automaticCloseIssued &&
+                    tab is { IsDetached: true, IsBusy: false, Snapshot.Status: TerminalSessionStatus.Closed } &&
+                    string.IsNullOrWhiteSpace(tab.ErrorMessage))
+                {
+                    automaticCloseIssued = true;
+                    await InvokeAsync(async () =>
+                    {
+                        await terminalWorkspace!.RemoveTabAsync(tab.Id, cancellationToken);
+                        await CloseWindowAsync();
+                    });
+                    return;
+                }
                 if (refresh.RequiresUiRefresh)
                 {
                     await InvokeAsync(async () =>
@@ -1268,6 +1291,12 @@
         }
 
         await JSRuntime.InvokeVoidAsync("lmsTerminalWindow.handleReattachToMain", BuildMainTerminalUrl(tab.HostId));
+    }
+
+    private async Task SetCloseWhenSessionEndsAsync(ChangeEventArgs args)
+    {
+        closeWhenSessionEnds = args.Value is bool enabled && enabled;
+        await JSRuntime.InvokeVoidAsync("lmsTerminalWindow.setCloseWhenSessionEnds", closeWhenSessionEnds);
     }
 
     private async Task CloseWindowAsync()

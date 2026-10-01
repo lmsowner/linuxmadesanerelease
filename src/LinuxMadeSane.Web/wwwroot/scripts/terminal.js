@@ -906,6 +906,16 @@ window.lmsTerminalWindow = (() => {
         return false;
     }
 
+    function getCloseWhenSessionEnds() {
+        try { return window.localStorage.getItem("lms-terminal-close-when-session-ends") === "true"; }
+        catch { return false; }
+    }
+
+    function setCloseWhenSessionEnds(enabled) {
+        try { window.localStorage.setItem("lms-terminal-close-when-session-ends", String(enabled)); }
+        catch { }
+    }
+
     function closeSelf() {
         window.close();
     }
@@ -916,6 +926,8 @@ window.lmsTerminalWindow = (() => {
         openPopup,
         openPopupAfterDelay,
         handleReattachToMain,
-        closeSelf
+        closeSelf,
+        getCloseWhenSessionEnds,
+        setCloseWhenSessionEnds
     };
 })();

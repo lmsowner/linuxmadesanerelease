@@ -3,29 +3,34 @@
 
 @implements IDisposable
 @inject ConnectedUserRegistry Registry
+@inject ConnectedUserDnsResolver DnsResolver
 
 <section class="surface-card connected-users-panel">
-    <div class="table-header">
-        <h2>Connected users</h2>
-        <span role="status" aria-live="polite">@snapshot.UserCount user(s) · @snapshot.ConnectionCount connection(s)</span>
+    <div class="connected-users-heading">
+        <h2>Connected users <span role="status" aria-live="polite">@snapshot.UserCount</span></h2>
     </div>
     @if (snapshot.Users.Count == 0)
     {
-        <p class="meta-text">No browser connections are active.</p>
+        <p class="meta-text">No active connections.</p>
     }
     else
     {
         <div class="connected-users-scroll">
             <table>
-                <thead><tr><th>LMS account</th><th>Source IP address</th><th>Connected since</th><th>Connections</th></tr></thead>
+                <thead><tr><th>Account</th><th>Source</th><th>Connected since</th></tr></thead>
                 <tbody>
                     @foreach (var user in snapshot.Users)
                     {
                         <tr>
-                            <td>@(user.UserName ?? "Trusted network access")</td>
-                            <td class="connected-users-ip">@user.SourceIpAddress</td>
-                            <td><time datetime="@user.ConnectedAtUtc.ToString("O")">@user.ConnectedAtUtc.ToLocalTime().ToString("dd MMM yyyy HH:mm:ss zzz")</time></td>
-                            <td>@user.ConnectionCount</td>
+                            <td>@(user.UserName ?? "Trusted network")</td>
+                            <td class="connected-users-source">
+                                <span>@user.SourceIpAddress</span>
+                                @if (hostNames.TryGetValue(user.SourceIpAddress, out var hostName) && hostName is not null)
+                                {
+                                    <span class="connected-users-dns" title="@hostName">@hostName</span>
+                                }
+                            </td>
+                            <td><time title="@user.ConnectedAtUtc.ToLocalTime().ToString("dd MMM yyyy HH:mm:ss zzz")" datetime="@user.ConnectedAtUtc.ToString("O")">@user.ConnectedAtUtc.ToLocalTime().ToString("dd MMM HH:mm:ss")</time></td>
                         </tr>
                     }
                 </tbody>
@@ -36,12 +41,33 @@
 
 @code {
     private ConnectedUserSnapshot snapshot = new(0, 0, []);
+    private readonly Dictionary<string, string?> hostNames = new(StringComparer.Ordinal);
+    private readonly HashSet<string> pendingLookups = new(StringComparer.Ordinal);
     private bool isDisposed;
 
     protected override void OnInitialized()
     {
         Registry.Changed += Refresh;
         snapshot = Registry.GetSnapshot();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        foreach (var address in snapshot.Users.Select(user => user.SourceIpAddress).Distinct())
+            if (!hostNames.ContainsKey(address) && pendingLookups.Add(address)) _ = ResolveHostNameAsync(address);
+        return Task.CompletedTask;
+    }
+
+    private async Task ResolveHostNameAsync(string address)
+    {
+        var name = await DnsResolver.ResolveAsync(address);
+        await InvokeAsync(() =>
+        {
+            if (isDisposed) return;
+            pendingLookups.Remove(address);
+            hostNames[address] = name;
+            if (name is not null) StateHasChanged();
+        });
     }
 
     private void Refresh() => _ = InvokeAsync(() =>
