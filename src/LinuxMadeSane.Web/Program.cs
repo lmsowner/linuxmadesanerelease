@@ -301,13 +301,6 @@ public class Program
                     true,
                     true,
                     false);
-                if (await ShouldRedirectToInitialSetupAsync(context))
-                {
-                    context.Response.Redirect(BuildInitialSetupRedirectTarget(
-                        NormalizeReturnUrl($"{context.Request.Path}{context.Request.QueryString}")));
-                    return;
-                }
-
                 await next();
                 return;
             }
@@ -325,13 +318,6 @@ public class Program
             if (accessResult.IsTrusted ||
                 (accessResult.RequiresAuthentication && context.User.Identity?.IsAuthenticated == true))
             {
-                if (await ShouldRedirectToInitialSetupAsync(context))
-                {
-                    context.Response.Redirect(BuildInitialSetupRedirectTarget(
-                        NormalizeReturnUrl($"{context.Request.Path}{context.Request.QueryString}")));
-                    return;
-                }
-
                 await next();
                 return;
             }
@@ -357,6 +343,18 @@ public class Program
                 }
 
                 await next();
+                return;
+            }
+
+            // Recovery does not permanently bypass interface policy. If access is
+            // still protected when the recovery session ends, return to its code entry.
+            // Trusted/direct access and signed-in sessions were already admitted above.
+            if ((HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method)) &&
+                await context.RequestServices.GetRequiredService<LocalAccessRecoveryService>()
+                    .HasActiveTemporarySetupAsync(context.RequestAborted))
+            {
+                context.Response.Redirect(BuildInitialSetupRedirectTarget(
+                    NormalizeReturnUrl($"{context.Request.Path}{context.Request.QueryString}")));
                 return;
             }
 
@@ -572,60 +570,8 @@ public class Program
             }
 
             setupAuthorization.Authorize(context.Response, context.Request.IsHttps);
-            return Results.Redirect(form["setup"].ToString().Equals("true", StringComparison.OrdinalIgnoreCase)
-                ? BuildInitialSetupRedirectTarget(returnUrl)
-                : returnUrl);
+            return Results.Redirect("/settings?tab=trusted-networks");
         }).DisableAntiforgery().RequireRateLimiting("lms-auth-verify");
-        app.MapPost("/auth/setup/network", async (
-            HttpContext context,
-            ISecuritySettingsService securitySettingsService,
-            LocalAccessRecoveryService recoveryService,
-            TemporarySetupAuthorizationService setupAuthorization) =>
-        {
-            if (!setupAuthorization.IsAuthorized(context.Request) ||
-                !await recoveryService.HasActiveTemporarySetupAsync(context.RequestAborted))
-            {
-                return Results.Redirect("/setup?networkMessage=The%20temporary%20setup%20session%20has%20expired.&networkError=true");
-            }
-
-            var form = await context.Request.ReadFormAsync(context.RequestAborted);
-            if (!Guid.TryParse(form["entryId"].ToString(), out var entryId))
-            {
-                return Results.Redirect("/setup?networkMessage=The%20interface%20access%20rule%20was%20not%20valid.&networkError=true");
-            }
-
-            var action = form["action"].ToString();
-            var page = await securitySettingsService.GetPageAsync(context.RequestAborted);
-            var entry = page.TrustedNetworks.FirstOrDefault(candidate => candidate.Id == entryId);
-            if (entry is null)
-            {
-                return Results.Redirect("/setup?networkMessage=The%20interface%20access%20rule%20was%20not%20found.&networkError=true");
-            }
-
-            try
-            {
-                switch (action)
-                {
-                    case "enable":
-                        await securitySettingsService.SetTrustedNetworkEnabledAsync(entry.Id, true, context.RequestAborted);
-                        return Results.Redirect("/setup?networkMessage=Interface%20access%20enabled.");
-                    case "toggle-authentication" when entry.IsEnabled:
-                        await securitySettingsService.SetTrustedNetworkAuthenticationEnabledAsync(
-                            entry.Id,
-                            !entry.IsAuthenticationEnabled,
-                            context.RequestAborted);
-                        return Results.Redirect(entry.IsAuthenticationEnabled
-                            ? "/setup?networkMessage=Interface%20authentication%20disabled.%20Direct%20access%20is%20now%20allowed."
-                            : "/setup?networkMessage=Interface%20authentication%20enabled.%20LMS%20login%20is%20now%20required.");
-                    default:
-                        return Results.Redirect("/setup?networkMessage=That%20interface%20change%20was%20not%20allowed.&networkError=true");
-                }
-            }
-            catch (Exception exception)
-            {
-                return Results.Redirect($"/setup?networkMessage={Uri.EscapeDataString(exception.Message)}&networkError=true");
-            }
-        }).DisableAntiforgery().RequireRateLimiting("lms-auth-start");
         app.MapGet("/desktop-assistant/launch", (
             HttpContext context,
             string? ticket,
@@ -2831,37 +2777,6 @@ public class Program
         context.RequestServices.GetRequiredService<TemporarySetupAuthorizationService>().IsAuthorized(context.Request) &&
         await context.RequestServices.GetRequiredService<LocalAccessRecoveryService>()
             .HasActiveTemporarySetupAsync(context.RequestAborted);
-
-    private static async Task<bool> ShouldRedirectToInitialSetupAsync(HttpContext context)
-    {
-        if (!HttpMethods.IsGet(context.Request.Method) &&
-            !HttpMethods.IsHead(context.Request.Method))
-        {
-            return false;
-        }
-
-        var path = context.Request.Path;
-        if (IsAuthenticationEntryPath(path) ||
-            IsAlwaysAnonymousAllowedPath(path) ||
-            path.StartsWithSegments("/auth") ||
-            path.StartsWithSegments("/api") ||
-            path.StartsWithSegments("/internal"))
-        {
-            return false;
-        }
-
-        var securitySettingsService = context.RequestServices.GetRequiredService<ISecuritySettingsService>();
-        var setup = await securitySettingsService.GetInitialSetupAsync(context.RequestAborted);
-        // MFA enrollment is ready; a normal login is what completes setup. Sending
-        // that session back to setup would prevent the required first login forever.
-        if (setup.IsComplete || setup.AwaitingFirstLogin)
-        {
-            return false;
-        }
-
-        var recoveryService = context.RequestServices.GetRequiredService<LocalAccessRecoveryService>();
-        return await recoveryService.HasActiveTemporarySetupAsync(context.RequestAborted);
-    }
 
     private static string BuildAbsoluteLoginUrl(HttpContext context, string? email)
     {

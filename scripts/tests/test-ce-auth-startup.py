@@ -100,7 +100,7 @@ def main():
                 status, body, _ = request("/setup")
                 check(status == 200 and "Temporary Setup Code" in body, "Fresh setup must render.")
                 status, _, headers = request("/auth/setup/authorize", b"temporarySetupCode=A1B2-C3D4")
-                check(status == 302 and headers.get("Location") == "/" and
+                check(status == 302 and headers.get("Location") == "/settings?tab=trusted-networks" and
                       "lms.temporary-setup=" in headers["Set-Cookie"],
                       "A valid fresh code must grant entry without an account.")
                 check(request("/")[0] == 200,
@@ -110,7 +110,24 @@ def main():
                 with sqlite3.connect(workspace / "lms.db") as database:
                     check(database.execute("SELECT COUNT(*) FROM security_users").fetchone()[0] == 0,
                           "Recovery entry must not require or invent an account.")
-                print("PASS fresh recovery code: LMS entry with no account", flush=True)
+                status, body, _ = request("/settings?tab=trusted-networks")
+                check(status == 200 and "Network Interfaces" in body and "Auth off" in body,
+                      "Recovery must land in the full interface security screen with editable controls.")
+                saved_cookies = list(cookies)
+                cookies.clear()
+                status, _, headers = request("/")
+                check(status == 302 and headers.get("Location", "").startswith("/setup?"),
+                      "An unfinished recovery without its session must return to setup.")
+                # Exercise persisted interface policy without modifying host networking.
+                with sqlite3.connect(workspace / "lms.db") as database:
+                    database.execute("UPDATE trusted_network_entries SET IsAuthenticationEnabled=0")
+                check(request("/")[0] == 200,
+                      "Turning interface authentication off must permit direct access without any account or recovery cookie.")
+                with sqlite3.connect(workspace / "lms.db") as database:
+                    database.execute("UPDATE trusted_network_entries SET IsAuthenticationEnabled=1")
+                for cookie in saved_cookies:
+                    cookies.set_cookie(cookie)
+                print("PASS recovery: full security landing, unfinished session returns to setup, auth-off permits entry", flush=True)
                 status, body, _ = request("/setup")
                 check(status == 200 and "Register LMS login" in body,
                       "After entering the code, a fresh install must render account registration.")
@@ -189,7 +206,7 @@ def main():
 
                 status, _, headers = request(
                     "/auth/setup/authorize", b"temporarySetupCode=A1B2-C3D4&returnUrl=%2F")
-                check(status == 302 and headers.get("Location") == "/"
+                check(status == 302 and headers.get("Location") == "/settings?tab=trusted-networks"
                       and "lms.temporary-setup=" in headers["Set-Cookie"],
                       "A valid code must authorize recovery and enter LMS.")
                 check(request("/")[0] == 200, "Reinstall recovery code must open LMS.")

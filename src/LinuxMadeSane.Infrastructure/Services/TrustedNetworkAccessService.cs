@@ -9,13 +9,19 @@ using LinuxMadeSane.Core.Models;
 
 namespace LinuxMadeSane.Infrastructure.Services;
 
-public sealed class TrustedNetworkAccessService(
-    ITrustedNetworkStore trustedNetworkStore,
-    ISecurityUserStore securityUserStore,
-    TrustedNetworkAccessTrialService? trustedNetworkAccessTrialService = null) : ITrustedNetworkAccessService
+public sealed class TrustedNetworkAccessService : ITrustedNetworkAccessService
 {
-    private readonly TrustedNetworkAccessTrialService trustedNetworkAccessTrialService =
-        trustedNetworkAccessTrialService ?? new TrustedNetworkAccessTrialService();
+    private readonly ITrustedNetworkStore trustedNetworkStore;
+    private readonly TrustedNetworkAccessTrialService trustedNetworkAccessTrialService;
+
+    public TrustedNetworkAccessService(
+        ITrustedNetworkStore trustedNetworkStore,
+        ISecurityUserStore securityUserStore,
+        TrustedNetworkAccessTrialService? trustedNetworkAccessTrialService = null)
+    {
+        this.trustedNetworkStore = trustedNetworkStore;
+        this.trustedNetworkAccessTrialService = trustedNetworkAccessTrialService ?? new TrustedNetworkAccessTrialService();
+    }
 
     public async Task<TrustedNetworkAccessResult> EvaluateAsync(
         IPAddress? remoteAddress,
@@ -33,10 +39,9 @@ public sealed class TrustedNetworkAccessService(
             await trustedNetworkStore.ListAsync(cancellationToken));
         var match = TrustedNetworkMatcher.Match(remoteAddress, entries);
         var isLocalRequestTarget = LocalRequestTargetEvaluator.IsLocal(normalizedRequestHost);
-        var isBootstrapAccess = await IsBootstrapAccessAsync(match, cancellationToken);
-        var isAuthenticationEnabled = match?.IsEnabled == true &&
-                                      match.IsAuthenticationEnabled &&
-                                      !isBootstrapAccess;
+        // Account existence must not silently override the saved interface policy.
+        // Fresh installs use the installer code for temporary recovery access.
+        var isAuthenticationEnabled = match?.IsEnabled == true && match.IsAuthenticationEnabled;
         var isTrusted = match?.IsEnabled == true && !isAuthenticationEnabled;
         var requiresAuthentication = isAuthenticationEnabled;
         var isAllowed = match?.IsEnabled == true;
@@ -55,16 +60,4 @@ public sealed class TrustedNetworkAccessService(
             match?.DeniedResponseMode ?? NetworkAccessDeniedResponseMode.AccessDeniedPage);
     }
 
-    private async Task<bool> IsBootstrapAccessAsync(
-        TrustedNetworkEntry? match,
-        CancellationToken cancellationToken)
-    {
-        if (match is not { IsEnabled: true, IsAuthenticationEnabled: true, IsBuiltIn: true })
-        {
-            return false;
-        }
-
-        var users = await securityUserStore.ListAsync(cancellationToken);
-        return users.All(user => !user.IsEnabled);
-    }
 }
