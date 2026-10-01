@@ -16,4 +16,6 @@ public sealed record EdgeGatewayAuthCheckContext(
     ClaimsPrincipal User,
     string CountryCode = "",
     string UserAgent = "",
-    bool HasTemporaryRecoveryAccess = false);
+    bool HasTemporaryRecoveryAccess = false,
+    bool HasPendingTemporarySetup = false,
+    bool LocalInterfaceAllowsDirectAccess = false);

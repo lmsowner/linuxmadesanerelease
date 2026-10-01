@@ -802,8 +802,15 @@ public class Program
         app.MapGet("/edge-auth/check", async Task (
             HttpContext context,
             IEdgeGatewayService edgeGatewayService,
+            ITrustedNetworkAccessService trustedNetworkAccessService,
             OnDemandAppService onDemandApps) =>
         {
+            // Caddy supplies the original source for its local forward-auth request.
+            var forwardedSource = context.Request.Headers["X-Forwarded-For"].ToString().Split(',')[0].Trim();
+            var sourceAddress = IPAddress.TryParse(forwardedSource, out var forwardedAddress)
+                ? forwardedAddress : context.Connection.RemoteIpAddress;
+            var interfaceAccess = await trustedNetworkAccessService.EvaluateAsync(sourceAddress,
+                context.Request.Headers["X-Forwarded-Host"].ToString(), context.RequestAborted);
             var result = await edgeGatewayService.EvaluateAuthAsync(
                 new EdgeGatewayAuthCheckContext(
                     context.Request.Headers["X-Forwarded-Host"].ToString(),
@@ -815,7 +822,10 @@ public class Program
                     context.User,
                     context.Request.Headers["CF-IPCountry"].ToString(),
                     context.Request.Headers.UserAgent.ToString(),
-                    await HasTemporaryRecoveryAccessAsync(context)),
+                    await HasTemporaryRecoveryAccessAsync(context),
+                    await context.RequestServices.GetRequiredService<LocalAccessRecoveryService>()
+                        .HasActiveTemporarySetupAsync(context.RequestAborted),
+                    interfaceAccess.IsTrusted),
                 context.RequestAborted);
 
             context.Response.StatusCode = result.StatusCode;

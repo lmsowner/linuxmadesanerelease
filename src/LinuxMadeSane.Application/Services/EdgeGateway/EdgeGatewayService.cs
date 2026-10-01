@@ -1559,10 +1559,11 @@ public sealed class EdgeGatewayService(
         }
 
         // Recovery is scoped to this LMS backend, not other applications behind the gateway.
-        if (context.HasTemporaryRecoveryAccess && route.TargetScheme == EdgeGatewayTargetScheme.Http &&
+        var isLocalLmsBackend = route.TargetScheme == EdgeGatewayTargetScheme.Http &&
             route.TargetPort == options.LmsForwardAuthPort && string.IsNullOrEmpty(route.TargetPathPrefix) &&
             (route.TargetHost.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
-             (IPAddress.TryParse(route.TargetHost, out var targetAddress) && IPAddress.IsLoopback(targetAddress))))
+             (IPAddress.TryParse(route.TargetHost, out var targetAddress) && IPAddress.IsLoopback(targetAddress)));
+        if (context.HasTemporaryRecoveryAccess && isLocalLmsBackend)
         {
             return await AllowAsync(route, requestedHost, requestedPath, sourceIp, userEmail, context.User,
                 "Temporary setup code allowed LMS recovery access.", cancellationToken);
@@ -1657,8 +1658,21 @@ public sealed class EdgeGatewayService(
                 cancellationToken);
         }
 
+        if (isLocalLmsBackend && context.LocalInterfaceAllowsDirectAccess)
+        {
+            return await AllowAsync(route, requestedHost, requestedPath, sourceIp, userEmail, context.User,
+                "Saved LMS interface policy allows direct access.", cancellationToken);
+        }
+
         if (context.User.Identity?.IsAuthenticated != true)
         {
+            if (isLocalLmsBackend && context.HasPendingTemporarySetup)
+            {
+                const string reason = "Complete interface recovery using the installer code.";
+                await AddAuditAsync(route, requestedHost, requestedPath, sourceIp, string.Empty,
+                    EdgeGatewayDecision.Redirect, reason, route.AuthMode, cancellationToken);
+                return new EdgeGatewayAuthCheckResult(StatusFound, EdgeGatewayDecision.Redirect, reason, "/setup");
+            }
             return await RedirectToLoginAsync(route, requestedHost, requestedPath, sourceIp, "MFA/passkey required.", cancellationToken);
         }
 
