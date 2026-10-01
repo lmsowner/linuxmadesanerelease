@@ -67,6 +67,8 @@ Environment names retain upstream case. New Jellyfin and Immich access defaults 
 | terraria-server | Planning | Choose vanilla or tModLoader explicitly and consult that version’s server instructions; preserve worlds and verify TCP 7777 when using its standard listener. | [Source 1](https://github.com/tModLoader/tModLoader/wiki/Starting-a-modded-server) |
 | lan-party | Planning | Select the actual games first and follow each selected publisher/image maintainer’s docs; generate a collision-free port plan rather than deploying generic idle templates. | [Source 1](https://github.com/LANCommander/LANCommander); [Source 2](https://github.com/wolveix/satisfactory-server); [Source 3](https://github.com/factoriotools/factorio-docker) |
 
+Immich machine learning uses the [official Python health check](https://github.com/immich-app/immich/blob/v3.2.4/machine-learning/Dockerfile); the legacy wget override is migrated because the runtime image does not ship wget.
+
 ## Application references
 
 | Application | Upstream references |

@@ -82,6 +82,12 @@ internal static class HomeLabCatalogFileStore
         {
             upgraded = upgraded with { Documentation = builtIn.Documentation };
         }
+        if (app.Id == "immich-machine-learning" && app.DefinitionVersion == "1" &&
+            app.ImageRepository == builtIn.ImageRepository &&
+            app.HealthCheck?.DockerCommand == "wget --no-verbose --tries=1 --spider http://127.0.0.1:3003/ping")
+        {
+            upgraded = upgraded with { HealthCheck = builtIn.HealthCheck, DefinitionVersion = builtIn.DefinitionVersion };
+        }
         return upgraded;
     }
 
