@@ -148,9 +148,13 @@ internal sealed class SambaConfigurationShareWriter
             await RunRequiredCommandAsync(
                 "testparm", [stagedPaths[Path.GetFullPath(ResolvePrimaryMainConfigPath())], "-s"],
                 "Validate Samba configuration", requiresSudo: false, cancellationToken);
-            foreach (var path in changedPaths)
+            // Keep backups outside the Samba include tree: wildcard includes must never reload them.
+            var backupDirectory = CreateTemporaryDirectory();
+            for (var index = 0; index < changedPaths.Length; index++)
             {
-                await WriteTextAsync(path + ".lms-backup", originals[path], cancellationToken);
+                var path = changedPaths[index];
+                await File.WriteAllTextAsync(Path.Combine(backupDirectory, $"{index}-{Path.GetFileName(path)}.backup"),
+                    originals[path], cancellationToken);
             }
             try
             {
