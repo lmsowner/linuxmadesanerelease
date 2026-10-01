@@ -3229,7 +3229,7 @@ public sealed class HomeLabService(
         return false;
     }
 
-    private static async Task<bool> ProbeCaddyAccessAsync(HomeLabInstallationEntity installation, CancellationToken cancellationToken)
+    internal static async Task<bool> ProbeCaddyAccessAsync(HomeLabInstallationEntity installation, CancellationToken cancellationToken)
     {
         if (installation.CaddySourcePort is not int port || port <= 0) return true;
         using var handler = new HttpClientHandler { UseProxy = false };
@@ -3240,7 +3240,7 @@ public sealed class HomeLabService(
         {
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             var code = (int)response.StatusCode;
-            return code < 500 && code != (int)HttpStatusCode.BadRequest;
+            return IsSuccessfulHttpResponse(code, allowAuthenticationChallenge: true);
         }
         catch (HttpRequestException) { return false; }
         catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested) { return false; }
@@ -4868,6 +4868,14 @@ public sealed class HomeLabService(
                 healthPath,
                 cancellationToken);
         }
+        if (health.Item1 == HomeLabHealthState.Healthy && installation.CaddySourcePort is > 0 &&
+            HomeLabEndpointPlanner.ResolveClientAccesses(app).Any(access => access.PortName.Equals("web", StringComparison.OrdinalIgnoreCase)) &&
+            !await ProbeCaddyAccessAsync(installation, cancellationToken))
+        {
+            health = inspect is not null && IsWithinHttpHealthStartPeriod(inspect, app)
+                ? (HomeLabHealthState.Starting, "Waiting for the local access URL to start.")
+                : (HomeLabHealthState.Degraded, "The container is running, but its local access URL did not return a usable HTTP response. Check its base URL and proxy route.");
+        }
         installation.HealthState = (int)health.Item1;
         installation.HealthDetail = health.Item2;
         installation.UpdatedAtUtc = DateTimeOffset.UtcNow;
@@ -4909,7 +4917,7 @@ public sealed class HomeLabService(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 timeout.Token);
-            if ((int)response.StatusCode < 500)
+            if (IsSuccessfulHttpResponse((int)response.StatusCode))
             {
                 return (HomeLabHealthState.Healthy, $"Container is running and HTTP port {binding.ContainerPort} responded.");
             }
@@ -4928,6 +4936,10 @@ public sealed class HomeLabService(
                 : (HomeLabHealthState.Degraded, $"The container is running, but its HTTP endpoint is unavailable: {exception.Message}");
         }
     }
+
+    internal static bool IsSuccessfulHttpResponse(int statusCode, bool allowAuthenticationChallenge = false) =>
+        statusCode is >= 200 and < 400 ||
+        allowAuthenticationChallenge && statusCode is 401 or 403;
 
     internal static bool IsWithinHttpHealthStartPeriod(
         JsonObject inspect,
@@ -6351,8 +6363,8 @@ public sealed class HomeLabService(
             accesses = [new HomeLabClientAccessManifest(
                 true,
                 port.Name,
-                HomeLabClientRoutingStrategy.Auto,
-                $"/{app.Id}",
+                HomeLabClientRoutingStrategy.Subdomain,
+                string.Empty,
                 new HomeLabReverseProxyManifest(HomeLabBasePathSupportMode.None))];
         }
 

@@ -1000,7 +1000,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             installation = await WaitForHomeLabInstallationAsync(service, installation.Id, cancellationToken);
             var mapped = await MapHomeLabInstallationAsync(service, installation, cancellationToken);
             targetInstallations.Add(mapped);
-            succeeded &= installation.HealthState is HomeLabHealthState.Healthy or HomeLabHealthState.Degraded;
+            succeeded &= installation.HealthState == HomeLabHealthState.Healthy;
             succeeded &= !routeThroughVpn || mapped.IsSecured;
         }
 

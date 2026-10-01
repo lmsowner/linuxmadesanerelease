@@ -51,12 +51,38 @@ internal static class HomeLabCatalogFileStore
                 NormalizeApp,
                 ref appsCache);
 
+            var builtInById = builtIns.ToDictionary(app => app.Id, StringComparer.OrdinalIgnoreCase);
             var builtInManagers = builtIns.Where(app => app.IsDockerManager)
                 .Select(app => app.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
             return MergeById(builtIns, custom, static app => app.Id)
+                .Select(app => builtInById.TryGetValue(app.Id, out var builtIn) ? UpgradeLegacyDefaults(app, builtIn) : app)
                 .Select(app => builtInManagers.Contains(app.Id) ? app with { IsDockerManager = true } : app)
                 .ToArray();
         }
+    }
+
+    internal static HomeLabAppManifest UpgradeLegacyDefaults(HomeLabAppManifest app, HomeLabAppManifest builtIn)
+    {
+        // Older catalog exports camel-cased Linux environment names. Correct only
+        // those exact aliases; retain custom keys and let an explicit canonical key win.
+        var environment = new Dictionary<string, string>(app.Environment, StringComparer.Ordinal);
+        foreach (var canonical in builtIn.Environment.Keys)
+        {
+            var legacy = JsonNamingPolicy.CamelCase.ConvertName(canonical);
+            if (legacy == canonical || !environment.Remove(legacy, out var value)) continue;
+            environment.TryAdd(canonical, value);
+        }
+
+        var upgraded = app with { Environment = environment };
+        if (app.Id is "jellyfin" or "immich" && app.DefinitionVersion == "1" && app.Exposure is null)
+        {
+            upgraded = upgraded with { Exposure = builtIn.Exposure, DefinitionVersion = builtIn.DefinitionVersion };
+        }
+        if (app.Id == "immich" && app.Documentation == "https://immich.app/docs/overview/introduction")
+        {
+            upgraded = upgraded with { Documentation = builtIn.Documentation };
+        }
+        return upgraded;
     }
 
     public static IReadOnlyList<HomeLabRecipeManifest> LoadRecipes(IReadOnlyList<HomeLabRecipeManifest> builtIns)
@@ -100,7 +126,15 @@ internal static class HomeLabCatalogFileStore
                 .Select(recipe => builtInById.TryGetValue(recipe.Id, out var builtIn) &&
                                   (builtIn.Category.Equals("Docker Management", StringComparison.OrdinalIgnoreCase) ||
                                    builtIn.RequiresVpnGateway && !recipe.RequiresVpnGateway)
-                    ? builtIn with { NetworkRecommendation = builtIn.RequiresVpnGateway == recipe.RequiresVpnGateway ? recipe.NetworkRecommendation ?? builtIn.NetworkRecommendation : builtIn.NetworkRecommendation }
+                    ? builtIn with
+                    {
+                        NetworkRecommendation = builtIn.RequiresVpnGateway == recipe.RequiresVpnGateway
+                            ? recipe.NetworkRecommendation ?? builtIn.NetworkRecommendation
+                            : builtIn.NetworkRecommendation,
+                        DocumentationSources = recipe.DocumentationSources,
+                        DocumentationCheckedAtUtc = recipe.DocumentationCheckedAtUtc,
+                        TechnicalGuidance = recipe.TechnicalGuidance
+                    }
                     : recipe)
                 .ToArray();
         }
@@ -281,7 +315,6 @@ internal static class HomeLabCatalogFileStore
         {
             PropertyNameCaseInsensitive = true,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DictionaryKeyPolicy = JsonNamingPolicy.CamelCase,
             Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
         };
 

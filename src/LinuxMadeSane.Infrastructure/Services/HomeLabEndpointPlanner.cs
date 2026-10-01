@@ -41,8 +41,8 @@ internal static partial class HomeLabEndpointPlanner
             ? [new HomeLabClientAccessManifest(
                 true,
                 primary.Name,
-                HomeLabClientRoutingStrategy.Auto,
-                $"/{app.Id}",
+                HomeLabClientRoutingStrategy.Subdomain,
+                string.Empty,
                 new HomeLabReverseProxyManifest(HomeLabBasePathSupportMode.None))]
             : [];
     }

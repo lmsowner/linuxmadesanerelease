@@ -19,7 +19,9 @@ public sealed record HomeLabPromptRecipe(
     string TechnicalGuidance,
     string Prompt,
     PublishedHomeLabRecipeConnectivity? Connectivity = null,
-    HomeLabRecipeNetworkRecommendation? NetworkRecommendation = null)
+    HomeLabRecipeNetworkRecommendation? NetworkRecommendation = null,
+    IReadOnlyList<string>? DocumentationSources = null,
+    DateTimeOffset? DocumentationCheckedAtUtc = null)
 {
     public bool RoutesAppThroughVpn(string appId) =>
         VpnRoutedAppIds.Contains(appId, StringComparer.OrdinalIgnoreCase);
@@ -42,7 +44,9 @@ public sealed record PublishedHomeLabPromptRecipe(
     IReadOnlyList<string>? Components = null,
     bool RequiresPlanning = false,
     PublishedHomeLabRecipeConnectivity? Connectivity = null,
-    HomeLabRecipeNetworkRecommendation? NetworkRecommendation = null);
+    HomeLabRecipeNetworkRecommendation? NetworkRecommendation = null,
+    IReadOnlyList<string>? DocumentationSources = null,
+    DateTimeOffset? DocumentationCheckedAtUtc = null);
 
 public sealed record HomeLabRecipeNetworkRecommendation(
     string ListenInterface,
@@ -454,7 +458,16 @@ public static class HomeLabPromptRecipeCatalog
 
         ValidatePublishedConnectivity(id, appIds, definition.Connectivity);
         ValidateNetworkRecommendation(id, definition.NetworkRecommendation, definition.RequiresVpnGateway, definition.RequiresPlanning, appIds);
-        return Create(category, id, name, description, components, appIds, definition.RequiresPlanning, definition.RequiresVpnGateway, basePrompt, technicalGuidance, vpnRoutedAppIds, definition.Connectivity, definition.NetworkRecommendation);
+        var sources = (definition.DocumentationSources ?? []).Distinct(StringComparer.Ordinal).ToArray();
+        if (sources.Length > 20 || sources.Any(source => !Uri.TryCreate(source, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new InvalidOperationException($"Published HomeLab Recipe '{id}' has invalid upstream documentation URLs.");
+        }
+        return Create(category, id, name, description, components, appIds, definition.RequiresPlanning, definition.RequiresVpnGateway, basePrompt, technicalGuidance, vpnRoutedAppIds, definition.Connectivity, definition.NetworkRecommendation) with
+        {
+            DocumentationSources = sources,
+            DocumentationCheckedAtUtc = definition.DocumentationCheckedAtUtc
+        };
     }
 
     private static HomeLabPromptRecipe? TryCreatePublished(PublishedHomeLabPromptRecipe definition)
