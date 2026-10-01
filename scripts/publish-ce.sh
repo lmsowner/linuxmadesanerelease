@@ -66,6 +66,9 @@ dotnet publish \
   /p:PathMap="$REPO_ROOT=/_/lms" \
   /p:LinuxMadeSaneSkipPluginPackaging=true
 
+[[ -f "$PACKAGE_ROOT/app/catalog/home-lab/apps.json" ]] ||
+  lms_die "CE package is missing its configured Home Lab application catalog."
+
 if find "$PACKAGE_ROOT/app" -path '*/.playwright' -type d -prune -print -quit | grep -q .; then
   lms_die "Playwright assets were published into the CE package. Remove demo tooling from the host package before release."
 fi
