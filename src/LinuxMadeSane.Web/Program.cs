@@ -200,6 +200,7 @@ public class Program
 
         app.Use(async (context, next) =>
         {
+            ConnectedUserClientAddress.Capture(context);
             context.Items[OriginalConnectionRemoteIpAddressItemKey] = context.Connection.RemoteIpAddress;
             context.Items[OriginalRequestHostItemKey] = context.Request.Host;
             await next();

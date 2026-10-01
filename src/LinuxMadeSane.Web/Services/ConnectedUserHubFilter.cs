@@ -11,7 +11,7 @@ public sealed class ConnectedUserHubFilter(ConnectedUserRegistry registry) : IHu
     {
         var httpContext = context.Context.GetHttpContext();
         registry.Connect(context.Context.ConnectionId, context.Context.User ?? new System.Security.Claims.ClaimsPrincipal(),
-            httpContext?.Connection.RemoteIpAddress);
+            ConnectedUserClientAddress.GetAddress(httpContext));
         try
         {
             await next(context);

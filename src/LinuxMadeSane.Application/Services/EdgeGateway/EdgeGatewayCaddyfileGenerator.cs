@@ -237,7 +237,12 @@ public sealed class EdgeGatewayCaddyfileGenerator(EdgeGatewayOptions options)
         builder.AppendLine(route.UsePublicHostHeader
             ? "            header_up Host {host}"
             : "            header_up Host {upstream_hostport}");
+        // Do not pass a visitor-supplied reporting header to any backend.
         var connectAsLms = !string.IsNullOrEmpty(route.UpstreamSourceAddress);
+        if (shouldTreatAsLocalLmsHop && !connectAsLms)
+            builder.AppendLine("            header_up X-LMS-Client-IP {vars.lms_edge_client_ip}");
+        else
+            builder.AppendLine("            header_up -X-LMS-Client-IP");
         if (connectAsLms)
         {
             // Only the application hop loses visitor identity. forward_auth above retains it.

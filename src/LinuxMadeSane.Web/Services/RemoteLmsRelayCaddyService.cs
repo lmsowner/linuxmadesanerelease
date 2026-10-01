@@ -231,6 +231,7 @@ public sealed class RemoteLmsRelayCaddyService(
             builder.AppendLine("        header_up X-Forwarded-Proto https");
             builder.AppendLine("        header_up X-Forwarded-Port 443");
             builder.AppendLine("        header_up X-Forwarded-For 127.0.0.1");
+            builder.AppendLine("        header_up X-LMS-Client-IP {vars.lms_edge_client_ip}");
             builder.AppendLine("    }");
             builder.AppendLine("}");
             builder.AppendLine();
