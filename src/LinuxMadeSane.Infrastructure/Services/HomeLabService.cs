@@ -4917,7 +4917,7 @@ public sealed class HomeLabService(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 timeout.Token);
-            if (IsSuccessfulHttpResponse((int)response.StatusCode))
+            if (IsSuccessfulHttpResponse((int)response.StatusCode, allowAuthenticationChallenge: path == "/"))
             {
                 return (HomeLabHealthState.Healthy, $"Container is running and HTTP port {binding.ContainerPort} responded.");
             }
