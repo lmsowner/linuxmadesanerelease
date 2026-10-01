@@ -192,7 +192,10 @@
                    OnDelete="DeleteAsync"
                    OnCreateAnother="CreateAnotherAsync" />
 
+<ShareRemovalConfirmation @ref="shareRemovalConfirmation" />
+
 @code {
+    private ShareRemovalConfirmation shareRemovalConfirmation = default!;
     [Parameter] public Guid? InitialShareId { get; set; }
     [Parameter] public bool Embedded { get; set; }
     [Parameter] public EventCallback<int> OnShareCountChanged { get; set; }
@@ -307,6 +310,12 @@
             return;
         }
 
+        var share = viewModel?.Shares.FirstOrDefault(item => item.Id == editor.Id.Value);
+        if (share is null || !await shareRemovalConfirmation.ShowAsync(share))
+        {
+            return;
+        }
+
         isDeleting = true;
 
         try
@@ -339,9 +348,7 @@
             return;
         }
 
-        var confirmed = await JSRuntime.InvokeAsync<bool>(
-            "confirm",
-            $"Delete share {share.Name}? This removes the Samba export but leaves {share.SharePath} untouched.");
+        var confirmed = await shareRemovalConfirmation.ShowAsync(share);
         if (!confirmed)
         {
             return;

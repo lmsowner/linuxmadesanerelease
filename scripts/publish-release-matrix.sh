@@ -57,24 +57,23 @@ release_cleanup_enabled() {
 cleanup_old_release_outputs() {
   release_cleanup_enabled || return 0
 
-  lms_log "Cleaning old generated release packages and staging output"
-  find "$PACKAGE_DIR" -maxdepth 1 -type f \( \
-      -name 'linux-made-sane-*.tar.gz' \
-      -o -name 'release-manifest-*.json' \
-      -o -name 'SHA256SUMS' \
-    \) -delete
-
-  if [[ -d "$REPO_ROOT/artifacts/publish" ]]; then
-    find "$REPO_ROOT/artifacts/publish" -mindepth 1 -maxdepth 1 -type d -name 'linux-made-sane-*' -exec rm -rf {} +
-  fi
-
-  if [[ -d "$REPO_ROOT/artifacts/public-site/community" ]]; then
-    find "$REPO_ROOT/artifacts/public-site/community" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-  fi
-
-  if [[ -d "$REPO_ROOT/artifacts/public-site/pro" ]]; then
-    find "$REPO_ROOT/artifacts/public-site/pro" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-  fi
+  lms_log "Cleaning old generated release packages and staging output for $EDITIONS"
+  local edition stage_directory
+  for edition in $EDITIONS; do
+    find "$PACKAGE_DIR" -maxdepth 1 -type f -name "linux-made-sane-${edition}-*.tar.gz" -delete
+    if [[ -d "$REPO_ROOT/artifacts/publish" ]]; then
+      find "$REPO_ROOT/artifacts/publish" -mindepth 1 -maxdepth 1 -type d -name "linux-made-sane-${edition}-*" -exec rm -rf {} +
+    fi
+    stage_directory=""
+    case "$edition" in
+      ce) stage_directory="$REPO_ROOT/artifacts/public-site/community" ;;
+      pro) stage_directory="$REPO_ROOT/artifacts/public-site/pro" ;;
+    esac
+    if [[ -n "$stage_directory" && -d "$stage_directory" ]]; then
+      find "$stage_directory" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    fi
+  done
+  find "$PACKAGE_DIR" -maxdepth 1 -type f \( -name 'release-manifest-*.json' -o -name 'SHA256SUMS' \) -delete
 }
 
 edition_runtimes() {

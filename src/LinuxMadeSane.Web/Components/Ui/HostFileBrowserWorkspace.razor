@@ -1092,7 +1092,10 @@ else
     </div>
 }
 
+<ShareRemovalConfirmation @ref="shareRemovalConfirmation" />
+
 @code {
+    private ShareRemovalConfirmation shareRemovalConfirmation = default!;
     [Parameter] public Guid? HostId { get; set; }
     [Parameter] public string? RootPath { get; set; }
     [Parameter] public string? InitialPath { get; set; }
@@ -2899,9 +2902,13 @@ else
             return;
         }
 
-        var confirmed = await JSRuntime.InvokeAsync<bool>(
-            "confirm",
-            $"Delete share {shareFolderEditor.Name}? This removes the Samba export but leaves {shareFolderEditor.SharePath} untouched.");
+        var share = (await ShareService.GetShareManagerAsync()).Shares.FirstOrDefault(item => item.Id == shareFolderEditor.Id.Value);
+        if (share is null)
+        {
+            return;
+        }
+
+        var confirmed = await shareRemovalConfirmation.ShowAsync(share);
         if (!confirmed)
         {
             return;

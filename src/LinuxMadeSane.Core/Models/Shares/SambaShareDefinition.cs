@@ -20,4 +20,11 @@ public sealed record SambaShareDefinition(
     string CreateMask,
     string DirectoryMask,
     string CreateMaskExplanation,
-    string DirectoryMaskExplanation);
+    string DirectoryMaskExplanation)
+{
+    public bool IsExternallyConfigured { get; init; }
+
+    public string RemovalConfirmation => IsExternallyConfigured
+        ? $"This share is in the Samba configuration and is not LMS-managed. Would you like me to remove {Name} for you? The files in {SharePath} will stay in place."
+        : $"Remove share {Name}? The files in {SharePath} will stay in place.";
+}

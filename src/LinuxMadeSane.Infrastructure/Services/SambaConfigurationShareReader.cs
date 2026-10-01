@@ -127,7 +127,7 @@ internal sealed class SambaConfigurationShareReader
         }
     }
 
-    private static IReadOnlyList<string> ExpandConfigurationPaths(string pathOrPattern, string? baseDirectory)
+    internal static IReadOnlyList<string> ExpandConfigurationPaths(string pathOrPattern, string? baseDirectory)
     {
         if (string.IsNullOrWhiteSpace(pathOrPattern))
         {

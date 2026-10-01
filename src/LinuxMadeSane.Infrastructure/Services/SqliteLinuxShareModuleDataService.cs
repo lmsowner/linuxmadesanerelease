@@ -106,7 +106,14 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
             .OrderBy(share => share.Name)
             .ToListAsync(cancellationToken);
 
-        return items.Select(Map).ToArray();
+        var managedShares = await sambaConfigurationShareWriter.ListManagedSharesAsync(cancellationToken);
+        var liveShares = await sambaConfigurationShareReader.ListSharesAsync(cancellationToken);
+        return items.Select(entity => Map(entity) with
+        {
+            IsExternallyConfigured = liveShares.Any(share => share.Name.Equals(entity.Name, StringComparison.OrdinalIgnoreCase)) &&
+                                     !managedShares.Any(share => share.Name.Equals(entity.Name, StringComparison.OrdinalIgnoreCase) &&
+                                                                share.SharePath.Equals(entity.SharePath, StringComparison.OrdinalIgnoreCase))
+        }).ToArray();
     }
 
     public async Task<SambaShareDefinition?> GetShareAsync(Guid id, CancellationToken cancellationToken = default) =>
@@ -168,8 +175,7 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
         var isManagedLiveShare = await sambaConfigurationShareWriter.IsManagedShareAsync(share, cancellationToken);
         if (await IsLiveSambaShareAsync(share, cancellationToken) && !isManagedLiveShare)
         {
-            throw new InvalidOperationException(
-                "This share comes from the current Samba configuration and is not LMS-managed. Remove it from Samba instead of deleting the local record here.");
+            await sambaConfigurationShareWriter.DeleteExternalShareAsync(share, cancellationToken);
         }
 
         if (isManagedLiveShare)

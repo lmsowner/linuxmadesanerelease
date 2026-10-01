@@ -82,6 +82,122 @@ internal sealed class SambaConfigurationShareWriter
         await ApplyManagedConfigurationAsync(managedShares, null, cancellationToken);
     }
 
+    public async Task DeleteExternalShareAsync(SambaShareDefinition share, CancellationToken cancellationToken = default)
+    {
+        var originals = new Dictionary<string, string>(StringComparer.Ordinal);
+        async Task ReadConfigurationAsync(string pattern, string? directory)
+        {
+            foreach (var path in SambaConfigurationShareReader.ExpandConfigurationPaths(pattern, directory))
+            {
+                var fullPath = Path.GetFullPath(path);
+                if (!File.Exists(fullPath) || originals.ContainsKey(fullPath))
+                {
+                    continue;
+                }
+
+                var text = await File.ReadAllTextAsync(fullPath, cancellationToken);
+                originals.Add(fullPath, text);
+                foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
+                {
+                    if (TryParseKeyValue(line, out var key, out var value) &&
+                        key.Equals("include", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await ReadConfigurationAsync(value, Path.GetDirectoryName(fullPath));
+                    }
+                }
+            }
+        }
+
+        await ReadConfigurationAsync(ResolvePrimaryMainConfigPath(), null);
+        var replacements = originals.ToDictionary(pair => pair.Key, pair => RemoveShareSection(pair.Value, share.Name));
+        var changedPaths = originals.Keys.Where(path => originals[path] != replacements[path]).ToArray();
+        if (changedPaths.Length == 0)
+        {
+            throw new InvalidOperationException($"Could not find {share.Name} in the Samba configuration. Refresh the shares and try again.");
+        }
+
+        var tempDirectory = CreateTemporaryDirectory();
+        try
+        {
+            var stagedPaths = originals.Keys.Select((path, index) => (path, staged: Path.Combine(tempDirectory, $"{index}.conf")))
+                .ToDictionary(pair => pair.path, pair => pair.staged);
+            foreach (var (path, text) in replacements)
+            {
+                var lines = text.Replace("\r\n", "\n").Split('\n');
+                var staged = new StringBuilder();
+                foreach (var line in lines)
+                {
+                    if (TryParseKeyValue(line, out var key, out var value) && key.Equals("include", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var includes = SambaConfigurationShareReader.ExpandConfigurationPaths(value, Path.GetDirectoryName(path))
+                            .Select(Path.GetFullPath).Where(stagedPaths.ContainsKey).ToArray();
+                        if (includes.Length > 0)
+                        {
+                            foreach (var include in includes)
+                            {
+                                staged.AppendLine($"    include = {stagedPaths[include]}");
+                            }
+                            continue;
+                        }
+                    }
+                    staged.AppendLine(line);
+                }
+                await File.WriteAllTextAsync(stagedPaths[path], staged.ToString(), cancellationToken);
+            }
+
+            await RunRequiredCommandAsync(
+                "testparm", [stagedPaths[Path.GetFullPath(ResolvePrimaryMainConfigPath())], "-s"],
+                "Validate Samba configuration", requiresSudo: false, cancellationToken);
+            foreach (var path in changedPaths)
+            {
+                await WriteTextAsync(path + ".lms-backup", originals[path], cancellationToken);
+            }
+            try
+            {
+                foreach (var path in changedPaths)
+                {
+                    await WriteTextAsync(path, replacements[path], cancellationToken);
+                }
+                await RunRequiredCommandAsync("systemctl", ["restart", "smbd"],
+                    "Restart Samba service", requiresSudo: true, cancellationToken);
+            }
+            catch
+            {
+                foreach (var path in changedPaths)
+                {
+                    await WriteTextAsync(path, originals[path], CancellationToken.None);
+                }
+                await TryEnableAndRestartSambaAsync(CancellationToken.None);
+                throw;
+            }
+        }
+        finally
+        {
+            Directory.Delete(tempDirectory, recursive: true);
+        }
+    }
+
+    private static string RemoveShareSection(string text, string shareName)
+    {
+        var newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var lines = text.Replace("\r\n", "\n").Split('\n');
+        var retained = new List<string>();
+        var removing = false;
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+            {
+                removing = trimmed[1..^1].Trim().Equals(shareName, StringComparison.OrdinalIgnoreCase);
+            }
+            if (!removing)
+            {
+                retained.Add(line);
+            }
+        }
+        return string.Join(newline, retained);
+    }
+
     private async Task<string> ReadManagedConfigurationTextAsync(CancellationToken cancellationToken)
     {
         if (File.Exists(managedConfigPath))
