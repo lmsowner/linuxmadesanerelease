@@ -60,7 +60,7 @@
                     <UiPill Tone="UiPillTone.Success">@(SupportsManagedHomeLabOperations ? "Allowed for this task" : "Allowed for this session")</UiPill>
                 }
             </div>
-            <span>@GetAccessModeDescription(Tab.AiAccessMode)</span>
+            <span>@(SupportsManagedHomeLabOperations && Tab.AiAccessMode == TerminalAiAccessMode.Agent ? "Runs checks automatically and asks before the first change. You can allow changes for this task." : GetAccessModeDescription(Tab.AiAccessMode))</span>
         </div>
 
         <UiSelectField TValue="TerminalAiAccessMode"
@@ -151,7 +151,7 @@
                                  Glyph="UiIconGlyph.Run"
                                  OnClick="AllowPendingCommandOnceAsync" />
                 <UiCommandButton Label="@(SupportsManagedHomeLabOperations ? "Allow for task" : "Allow for session")"
-                                 Title="Run this and all later AI commands in this terminal session without asking again."
+                                 Title="@(SupportsManagedHomeLabOperations ? "Run this and later changes in this Home Lab task without asking again." : "Run this and all later AI commands in this terminal session without asking again.")"
                                  Glyph="UiIconGlyph.Run"
                                  Variant="UiButtonVariant.ActionSubtle"
                                  Disabled="@(!SupportsManagedHomeLabOperations && !Tab.SessionId.HasValue)"
@@ -758,6 +758,7 @@ Selected terminal content:
         if (Tab.StartPendingAiTask && !isBusy)
         {
             Tab.StartPendingAiTask = false;
+            Tab.PendingAiTaskPrompt = null;
             await StartAgentPromptAsync(promptText);
         }
 
@@ -815,7 +816,6 @@ Selected terminal content:
         if (Tab.PendingAiTaskPrompt is { } pendingPrompt)
         {
             promptText = pendingPrompt;
-            Tab.PendingAiTaskPrompt = null;
         }
         StartProviderContextLoad();
         return Task.CompletedTask;
