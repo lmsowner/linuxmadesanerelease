@@ -27,7 +27,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
     IManagedHostFileAccessService fileAccessService,
     IHomeLabService? homeLabService = null,
     IHomeLabPromptRecipeProvider? promptRecipeProvider = null,
-    IWebResearchService? webResearchService = null) : IAiToolBridge
+    IWebResearchService? webResearchService = null) : IAiToolBridge, IHomeLabTerminalOperations
 {
     public LinuxMadeSaneAiToolBridge(
         IAiToolRegistry toolRegistry,
@@ -92,6 +92,27 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             AiToolNames.ApplyHomeLabPromptRecipe => await ExecuteApplyHomeLabPromptRecipeAsync(definition, context, cancellationToken),
             AiToolNames.RollbackSafeChange => await safeChangeService.ExecuteRollbackAsync(thread, invocation, cancellationToken),
             _ => throw new InvalidOperationException($"Tool {definition.Name} is not supported by this bridge.")
+        };
+    }
+
+    public async Task<AiToolExecutionResult> ExecuteAsync(string toolName, string argumentsJson, CancellationToken cancellationToken = default)
+    {
+        // No chat thread, conversation store or generic shell tool is involved in terminal operations.
+        var definition = FindTool(toolName) ?? throw new InvalidOperationException("Unknown Home Lab operation.");
+        var now = DateTimeOffset.UtcNow;
+        var thread = new AiChatThread(Guid.NewGuid(), "Home Lab terminal task", "", AiProviderType.Unknown, "",
+            AiTrustProfile.CreatePreset(AiTrustLevel.Guided), "", "", now, now);
+        var invocation = new AiToolInvocation(Guid.NewGuid(), thread.Id, null, null, null, toolName, argumentsJson,
+            AiInvocationStatus.Running, now, null, null);
+        var context = new AiToolExecutionContext(invocation, thread, AiLocalMachine.GetEffectiveAttachedServers(thread.Id, []));
+        return toolName switch
+        {
+            AiToolNames.InspectHomeLab => await ExecuteInspectHomeLabAsync(definition, context, cancellationToken),
+            AiToolNames.ApplyHomeLabPromptRecipe => await ExecuteApplyHomeLabPromptRecipeAsync(definition, context, cancellationToken),
+            AiToolNames.RepairHomeLabInstallation => await ExecuteRepairHomeLabInstallationAsync(definition, context, cancellationToken),
+            AiToolNames.InspectHomeLabApplicationConfig => await ExecuteInspectHomeLabApplicationConfigAsync(definition, context, cancellationToken),
+            AiToolNames.RepairHomeLabApplicationConfig => await ExecuteRepairHomeLabApplicationConfigAsync(definition, context, cancellationToken),
+            _ => throw new InvalidOperationException("Only managed Home Lab operations are available here.")
         };
     }
 
@@ -807,6 +828,10 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                 [],
                 ["This HomeLab Recipe needs the choices described in its starting prompt before LMS can safely deploy it. Review those choices in the AI conversation; LMS will not apply an incomplete or misleading partial stack."]);
         }
+        if (request.StoragePaths is not null && request.StoragePaths.Any(item =>
+                string.IsNullOrWhiteSpace(item.Value) || !item.Value.StartsWith('/') || item.Value.Any(char.IsControl)))
+            return CreateHomeLabApplyResult(definition, context.Invocation, recipe, request, false, [],
+                ["Storage paths must be absolute Linux paths without control characters."]);
         var service = RequireHomeLabService();
         var workspace = await service.GetWorkspaceAsync(cancellationToken);
         var details = new List<string>();
@@ -822,7 +847,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Where(role => workspace.StorageRoles.All(saved =>
                 !saved.Role.Equals(role, StringComparison.OrdinalIgnoreCase) ||
-                string.IsNullOrWhiteSpace(saved.HostPath)))
+                string.IsNullOrWhiteSpace(saved.HostPath)) &&
+                (request.StoragePaths is null || !request.StoragePaths.TryGetValue(role, out var supplied) || string.IsNullOrWhiteSpace(supplied)))
             .OrderBy(role => role, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (missingStorageRoles.Length > 0)
@@ -920,7 +946,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
                     configuration["vpn-gateway"] = gateway!.Id.ToString();
                 }
                 var install = await service.InstallAppAsync(
-                    new HomeLabInstallRequest(appId, Configuration: configuration),
+                    new HomeLabInstallRequest(appId, StoragePaths: request.StoragePaths, Configuration: configuration),
                     cancellationToken);
                 details.Add($"{HomeLabCatalog.GetApp(appId).Name}: {install.Summary} {install.Detail}");
                 if (!install.Succeeded)
@@ -1054,7 +1080,7 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
         HomeLabPromptRecipe recipe,
         ApplyHomeLabPromptRecipeToolRequest request)
     {
-        if (!OnDemandAppSourceBinding.GetSources().Any(source =>
+        if (request.ListenAddress != "127.0.0.1" && !OnDemandAppSourceBinding.GetSources().Any(source =>
                 source.Address.Equals(request.ListenAddress, StringComparison.OrdinalIgnoreCase)))
         {
             return "The selected listen address is not a current, active LMS IPv4 interface. Return to Home Lab Recipes and choose an available interface.";
@@ -1168,7 +1194,8 @@ public sealed partial class LinuxMadeSaneAiToolBridge(
             security?.ForwardedPort,
             security?.PortForwardingDetail ?? string.Empty,
             endpoints,
-            effectiveContainer?.Environment ?? []);
+            effectiveContainer?.Environment ?? [],
+            installation.IsExternallyManaged);
     }
 
     private IHomeLabService RequireHomeLabService() =>

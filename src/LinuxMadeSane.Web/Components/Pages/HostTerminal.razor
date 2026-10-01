@@ -370,6 +370,7 @@
                                                          @onpointerdown="@(args => OnAiSplitterPointerDownAsync(tab, args))"
                                                          @onpointerdown:preventDefault="true"></div>
                                                     <TerminalAiPanel Tab="tab"
+                                                                     WriteManagedOperationOutput="@(text => WriteHomeLabOutputAsync(tab, text))"
                                                                      @ref="terminalAiPanel"
                                                                      RunCommand="@((string commandText, CancellationToken cancellationToken) => RunCommandAsync(tab, commandText, cancellationToken))" />
                                                 }
@@ -532,6 +533,7 @@
             hosts.Any(host => host.Id == HostId) &&
             ActiveTab is { IsDetached: false, IsSessionActive: false, IsBusy: false } pendingTab &&
             pendingTab.HostId == HostId &&
+            !pendingTab.IsHomeLabTask &&
             autoConnectIssuedTabId != pendingTab.Id)
         {
             autoConnectIssuedTabId = pendingTab.Id;
@@ -1223,6 +1225,14 @@
         return InvokeAsync(StateHasChanged);
     }
 
+    private async Task WriteHomeLabOutputAsync(TerminalTabState target, string text)
+    {
+        target.HomeLabOperationOutput = (target.HomeLabOperationOutput + text.Replace("\r\n", "\n").Replace("\n", "\r\n"));
+        if (target.HomeLabOperationOutput.Length > 100000) target.HomeLabOperationOutput = target.HomeLabOperationOutput[^100000..];
+        target.HomeLabOutputRevision++;
+        await WriteRenderedSnapshotAsync();
+    }
+
     private async Task WriteRenderedSnapshotAsync()
     {
         if (!terminalInitialized || RenderedTab is null)
@@ -1231,8 +1241,8 @@
         }
 
         var snapshot = RenderedTab.Snapshot;
-        var output = snapshot?.Output ?? string.Empty;
-        var outputRevision = snapshot?.OutputRevision ?? 0;
+        var output = (snapshot?.Output ?? string.Empty) + RenderedTab.HomeLabOperationOutput;
+        var outputRevision = (snapshot?.OutputRevision ?? 0) + RenderedTab.HomeLabOutputRevision;
         var renderedRevision = renderedOutputRevisions.GetValueOrDefault(RenderedTab.Id, -1);
         if (outputRevision == renderedRevision)
         {
@@ -1685,6 +1695,7 @@
 
     private string GetTabTitle(TerminalTabState tab)
     {
+        if (tab.IsHomeLabTask) return tab.HomeLabTaskTitle;
         var siblings = OrderedTabs.Where(item => item.HostId == tab.HostId).ToArray();
         if (siblings.Length <= 1)
         {

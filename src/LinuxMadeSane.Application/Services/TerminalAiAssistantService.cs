@@ -4,6 +4,7 @@
 using System.Text;
 using System.Text.RegularExpressions;
 using LinuxMadeSane.Application.Contracts.Ai;
+using LinuxMadeSane.Application.Contracts.HomeLab;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
@@ -56,7 +57,7 @@ public sealed partial class TerminalAiAssistantService(
             new AiProviderMessageInputItem(AiChatMessageRole.User, sanitization.Content)
         ];
 
-        if (ShouldUseImmediateCommandFallback(provider.Settings.ProviderType) && (
+        if (!request.SupportsManagedHomeLabOperations && ShouldUseImmediateCommandFallback(provider.Settings.ProviderType) && (
                 TryBuildTerminalErrorFallback(request, out var immediateFallback) ||
                 TryBuildFallbackCommand(request, conversationRecap, out immediateFallback)))
         {
@@ -113,7 +114,7 @@ public sealed partial class TerminalAiAssistantService(
         }
 
         var suggestedCommand = ExtractSuggestedCommand(assistantText);
-        if (string.IsNullOrWhiteSpace(suggestedCommand) && (
+        if (!request.SupportsManagedHomeLabOperations && string.IsNullOrWhiteSpace(suggestedCommand) && (
                 TryBuildTerminalErrorFallback(request, out var fallback) ||
                 TryBuildFallbackCommand(request, conversationRecap, out fallback)))
         {
@@ -179,6 +180,7 @@ public sealed partial class TerminalAiAssistantService(
         var builder = new StringBuilder();
         builder.AppendLine("You are helping with an ongoing terminal support conversation.");
         builder.AppendLine("Preserve context from earlier turns and build on what is already known.");
+        if (request.SupportsManagedHomeLabOperations) builder.AppendLine(HomeLabTerminalProtocol.Instructions);
         builder.AppendLine("Do not ask the user to paste large terminal output manually back into chat. If fresh evidence is needed, propose the single next command and assume the interface can run it through a private command channel and return its structured result.");
         builder.AppendLine("Do not say 'if you want I can', 'you could try', or similar hedging. State the next fix, check, or command directly.");
         builder.AppendLine("When a command is appropriate, include exactly one fenced bash block. The interface handles execution and feeds the result back automatically.");
@@ -368,7 +370,10 @@ public sealed partial class TerminalAiAssistantService(
         var fencedCommands = SuggestedCommandPattern().Matches(assistantText);
         foreach (Match match in fencedCommands)
         {
-            var command = ExtractLikelyCommand(match.Groups[1].Value);
+            var block = match.Groups[1].Value.Trim();
+            if (HomeLabTerminalProtocol.IsManagedCommand(block))
+                return HomeLabTerminalProtocol.TryParse(block, out _, out _) ? block : string.Empty;
+            var command = ExtractLikelyCommand(block);
             if (!string.IsNullOrWhiteSpace(command))
             {
                 return command;

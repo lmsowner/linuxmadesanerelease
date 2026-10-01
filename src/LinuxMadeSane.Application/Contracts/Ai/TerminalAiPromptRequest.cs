@@ -28,4 +28,6 @@ public sealed class TerminalAiPromptRequest
     public string ActiveGoal { get; set; } = string.Empty;
 
     public bool AllowInternetResearch { get; set; }
+
+    public bool SupportsManagedHomeLabOperations { get; set; }
 }

@@ -203,7 +203,8 @@ public sealed record ApplyHomeLabPromptRecipeToolRequest(
     string PromptRecipeId,
     string ListenAddress,
     string OutboundRoute,
-    Guid? VpnGatewayInstallationId = null) : IAiToolRequest;
+    Guid? VpnGatewayInstallationId = null,
+    IReadOnlyDictionary<string, string>? StoragePaths = null) : IAiToolRequest;
 
 public sealed record ApplyHomeLabPromptRecipeToolResponse(
     string PromptRecipeId,
@@ -243,7 +244,8 @@ public sealed record HomeLabAiInstallation(
     int? ForwardedPort,
     string PortForwardingDetail,
     IReadOnlyList<HomeLabAiEndpoint>? Endpoints = null,
-    IReadOnlyList<string>? Environment = null);
+    IReadOnlyList<string>? Environment = null,
+    bool IsExternallyManaged = false);
 
 public sealed record HomeLabAiEndpoint(
     string ServiceId,

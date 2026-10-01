@@ -22,7 +22,7 @@ public static class HomeLabRecipeNetworkSelection
         var lan = available.Where(IsLan).ToArray();
         if (lan.Length == 1) return lan[0];
         var defaults = lan.Where(item => item.HasGateway).ToArray();
-        return defaults.Length == 1 ? defaults[0] : null;
+        return defaults.Length == 1 ? defaults[0] : lan.Length == 0 ? available.FirstOrDefault(item => item.Address == "127.0.0.1") : null;
     }
 
     public static string DescribeDirectRoute(IEnumerable<HomeLabRecipeListenInterface> interfaces)

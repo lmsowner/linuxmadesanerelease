@@ -18,8 +18,8 @@
 @inject IEdgeGatewayService EdgeGatewayService
 @inject IHomeLabPromptRecipeProvider PromptRecipeProvider
 @inject IServiceScopeFactory ServiceScopeFactory
-@inject IAiThreadService AiThreadService
-@inject IAiChatService AiChatService
+@inject HomeLabTerminalTaskLauncher TerminalTaskLauncher
+@using System.Text.Json
 @inject NavigationManager Navigation
 @inject IJSRuntime JSRuntime
 
@@ -28,7 +28,7 @@
 <div class="page-shell home-lab-page">
     <UiHeroPanel Eyebrow="Home Lab"
                   Title="Home Lab"
-                  Description="Set up services with guided prompts, manage their Docker containers, and troubleshoot each container with AI."
+                  Description="Set up recipes and repair Docker containers with terminal AI."
                   Compact="true">
         <Actions>
             <UiCommandButton Label="@(backgroundRefreshInProgress ? "Refreshing..." : "Refresh")"
@@ -589,7 +589,7 @@
                                                 @if (!selectedInstallation.IsExternallyManaged)
                                                 {
                                                 <div class="home-lab-config-footer">
-                                                    <span class="meta-text">Saving recreates the container with these values. Use AI Help if an edited container does not start.</span>
+                                                    <span class="meta-text">Saving recreates the container with these values. Use Terminal AI if an edited container does not start.</span>
                                                     <div class="home-lab-action-row">
                                                         @if (selectedDetails.HasCustomSettings)
                                                         {
@@ -689,7 +689,7 @@
                     <div>
                         <p class="eyebrow">@(IsDockerManagerMode ? "Docker manager ownership" : "Managed Docker")</p>
                         <h2>Installed containers</h2>
-                        <p class="meta-text">@(IsDockerManagerMode ? "Your Docker manager owns every HomeLab container. LMS shows status and saved settings but no longer installs or changes containers." : "Use AI Help on a container to inspect its health, LMS Caddy route, dependencies, and Docker networking, then approve a repair if one is needed.")</p>
+                        <p class="meta-text">@(IsDockerManagerMode ? "Your Docker manager owns every HomeLab container. LMS shows status and saved settings but no longer installs or changes containers." : "Use Terminal AI on a container to inspect its health, LMS Caddy route, dependencies, and Docker networking, then approve a repair if one is needed.")</p>
                     </div>
                     @if (!IsDockerManagerMode)
                     {
@@ -759,7 +759,7 @@
                                                      Variant="UiButtonVariant.ActionSubtle"
                                                      Disabled="@busy"
                                                      OnClick="() => RepairGroupAsync(group)" />
-                                    <UiCommandButton Label="AI Repair"
+                                    <UiCommandButton Label="Repair with terminal AI"
                                                      Title="Open one AI troubleshooting conversation for the whole group"
                                                      Glyph="UiIconGlyph.Ai"
                                                      Variant="UiButtonVariant.PrimaryMuted"
@@ -817,7 +817,7 @@
                                                              Rel="noopener"
                                                              referrerpolicy="@(installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) ? "no-referrer" : null)" />
                                         }
-                                        <UiCommandButton Label="AI Help"
+                                        <UiCommandButton Label="Terminal AI"
                                                          Title="Open a troubleshooting chat for this Docker container"
                                                          Glyph="UiIconGlyph.Ai"
                                                          Variant="UiButtonVariant.PrimaryMuted"
@@ -936,8 +936,8 @@
                                     <div>
                                         <dt>What LMS will do</dt>
                                         <dd>@(selectedRecipe.RequiresPlanning
-                                            ? "Open a guided AI plan, collect the choices this setup needs, and identify what LMS can deploy safely."
-                                            : "Open a guided AI task, inspect the current HomeLab, confirm your requirements, and deploy the supported stack.")</dd>
+                                            ? "Open terminal AI to plan the choices this setup needs."
+                                            : "Open terminal AI to inspect Home Lab and deploy this stack using your settings.")</dd>
                                     </div>
                                     <div>
                                         <dt>Network</dt>
@@ -1023,6 +1023,12 @@
                                     <span>I will manage all HomeLab containers in this Docker manager. After it is installed and verified, LMS will hand over every container, including the manager, and stop all container lifecycle changes and new installs.</span>
                                 </label>
                             }
+                            <div class="home-lab-recipe-network-grid" aria-label="Recipe storage paths">
+                                @foreach (var role in storagePaths.Keys.Where(role => role == HomeLabFilesRole || selectedRecipe.AppIds.Any(id => HomeLabCatalog.GetApp(id).Volumes.Any(volume => volume.SharedRole == role))).ToArray())
+                                {
+                                    <label>@role folder <input class="ui-control-input" @bind="storagePaths[role]" /></label>
+                                }
+                            </div>
                             <label for="home-lab-recipe-prompt">Base recipe prompt</label>
                             <textarea id="home-lab-recipe-prompt"
                                       class="ui-control-textarea"
@@ -1035,7 +1041,7 @@
                                                  Variant="UiButtonVariant.ActionSubtle"
                                                  Disabled="@(startingPromptRecipeId is not null)"
                                                  OnClick="ResetPromptRecipeDraft" />
-                                <UiCommandButton Label="Go"
+                                <UiCommandButton Label="Open terminal AI"
                                                  Glyph="UiIconGlyph.Ai"
                                                  Variant="UiButtonVariant.PrimaryMuted"
                                                  Disabled="@(IsDockerManagerMode || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft) || string.IsNullOrWhiteSpace(selectedPromptListenAddress) || string.IsNullOrWhiteSpace(selectedPromptOutboundRoute) || (IsDockerManagerRecipe(selectedRecipe) && !dockerManagerHandoffAccepted))"
@@ -1055,7 +1061,7 @@
                                       @bind="customPrompt"
                                       @bind:event="oninput"
                                       placeholder="For example: WordPress, a database, and a database administration tool"></textarea>
-                            <UiCommandButton Label="Go"
+                            <UiCommandButton Label="Open terminal AI"
                                              Glyph="UiIconGlyph.Ai"
                                              Variant="UiButtonVariant.PrimaryMuted"
                                                          Disabled="@(IsDockerManagerMode || busy || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(customPrompt))"
@@ -1124,11 +1130,6 @@
 
         </TabControl>
     }
-    <div class="callout warning home-lab-ai-requirement">
-        <strong>Home Lab AI needs a capable provider</strong>
-        <p>Use an enabled hosted provider or a properly resourced self-hosted model server with reliable tool calling, long context, and multi-step reasoning. A small local model running on Raspberry Pi-class hardware is not suitable for Home Lab setup, repairs, or troubleshooting.</p>
-        <a href="/ai">Configure or check AI providers</a>
-    </div>
 </div>
 
 @code {
@@ -1409,6 +1410,7 @@
                         item.GetIPProperties().GatewayAddresses.Any(gateway => gateway.Address.AddressFamily == AddressFamily.InterNetwork && !gateway.Address.Equals(IPAddress.Any)),
                         item.NetworkInterfaceType == NetworkInterfaceType.Tunnel,
                         item.Name.Contains("tailscale", StringComparison.OrdinalIgnoreCase) || item.Description.Contains("tailscale", StringComparison.OrdinalIgnoreCase))))
+                .Append(new HomeLabRecipeListenInterface("Localhost (this host only)", "127.0.0.1"))
                 .Distinct()
                 .OrderBy(item => item.InterfaceName, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(item => item.Address, StringComparer.OrdinalIgnoreCase)
@@ -1416,7 +1418,7 @@
         }
         catch
         {
-            return [];
+            return [new HomeLabRecipeListenInterface("Localhost (this host only)", "127.0.0.1")];
         }
     }
 
@@ -1978,83 +1980,47 @@
             return;
         }
 
-        var selectedGatewayName = selectedPromptVpnGatewayId is { } gatewayId
-            ? InstalledVpnGateways.FirstOrDefault(gateway => gateway.Id == gatewayId)?.DisplayName
-            : null;
-
-        await StartAiPromptAsync(
-            promptRecipe.Id,
-            promptRecipe.Name,
-            HomeLabPromptRecipeCatalog.BuildRecipePrompt(
-                promptRecipe,
-                recipePromptDraft,
-                RecipeListenInterfaces.First(item => item.Address == selectedPromptListenAddress).InterfaceName,
-                selectedPromptListenAddress,
-                selectedPromptOutboundRoute.StartsWith("vpn:", StringComparison.OrdinalIgnoreCase) ? "vpn" : "direct",
-                selectedPromptVpnGatewayId,
-                selectedGatewayName));
-    }
-
-    private async Task StartCustomPromptAsync()
-    {
-        if (string.IsNullOrWhiteSpace(customPrompt))
+        var deployment = new
         {
-            return;
-        }
-
-        await StartAiPromptAsync("custom", "Custom setup", HomeLabPromptRecipeCatalog.BuildCustomPrompt(customPrompt));
+            promptRecipeId = promptRecipe.Id,
+            listenAddress = selectedPromptListenAddress,
+            outboundRoute = selectedPromptVpnGatewayId.HasValue ? "vpn" : "direct",
+            vpnGatewayInstallationId = selectedPromptVpnGatewayId,
+            storagePaths
+        };
+        await StartAiPromptAsync(promptRecipe.Id, promptRecipe.Name,
+            $"Set up this recipe using the regular terminal agent.\nUser requirements: {recipePromptDraft}\nChosen deployment settings: {JsonSerializer.Serialize(deployment)}\nRecipe: {JsonSerializer.Serialize(new { promptRecipe.Id, promptRecipe.Name, promptRecipe.AppIds, promptRecipe.VpnRoutedAppIds, promptRecipe.RequiresPlanning, promptRecipe.TechnicalGuidance, promptRecipe.Connectivity })}\n" +
+            (promptRecipe.RequiresPlanning ? "This is a planning recipe. Explain what is supported and ask for the missing choices before proposing a deployment." : "Inspect first, then deploy the supported recipe through LMS. Verify the actual client endpoint. If it fails, diagnose and fix the cause using logs and config rather than repeating repair."));
     }
 
-    private async Task StartContainerHelpAsync(HomeLabAppInstallation installation)
-    {
-        await StartAiPromptAsync(
-            $"help-{installation.Id}",
-            $"Help with {installation.DisplayName}",
-            HomeLabPromptRecipeCatalog.BuildTroubleshootingPrompt(installation));
-    }
+    private Task StartCustomPromptAsync() => string.IsNullOrWhiteSpace(customPrompt)
+        ? Task.CompletedTask
+        : StartAiPromptAsync("custom", "Custom setup", $"Plan and set up these services: {customPrompt}\nUse the supported recipe catalog and LMS-managed operations where appropriate. Explain unsupported requirements before changing anything.\nSupported recipes: {JsonSerializer.Serialize(promptRecipes.Select(recipe => new { recipe.Id, recipe.Name, recipe.AppIds, recipe.RequiresPlanning }))}");
 
-    private async Task StartGroupRepairHelpAsync(HomeLabInstallationGroup group)
-    {
-        await StartAiPromptAsync(
-            $"repair-group-{group.Key}",
-            $"Repair {group.Name}",
-            HomeLabPromptRecipeCatalog.BuildGroupTroubleshootingPrompt(group.Name, group.Installations));
-    }
+    private Task StartContainerHelpAsync(HomeLabAppInstallation installation) =>
+        StartAiPromptAsync($"help-{installation.Id}", $"Repair {installation.DisplayName}",
+            $"Diagnose and repair this container. Inspect its current state, logs, network and config. If managed repair fails, investigate the cause and apply a focused fix. Verify the actual service endpoint.\nContainer context: {JsonSerializer.Serialize(installation)}");
+
+    private Task StartGroupRepairHelpAsync(HomeLabInstallationGroup group) =>
+        StartAiPromptAsync($"repair-group-{group.Key}", $"Repair {group.Name}",
+            $"Diagnose and repair this whole stack, including dependencies and networking. Verify the requested services after each fix.\nStack: {group.Name}\nContainers: {JsonSerializer.Serialize(group.Installations)}");
 
     private async Task StartAiPromptAsync(string promptId, string title, string prompt)
     {
-        if (startingPromptRecipeId is not null)
-        {
-            return;
-        }
-
+        if (startingPromptRecipeId is not null) return;
         startingPromptRecipeId = promptId;
         message = string.Empty;
         error = false;
         try
         {
-            var context = await AiThreadService.GetEditorAsync();
-            if (string.IsNullOrWhiteSpace(context.Editor.ProviderKey))
-            {
-                throw new InvalidOperationException("Configure an AI provider before starting a Home Lab AI task.");
-            }
-
-            context.Editor.Title = $"Home Lab · {title}";
-            var threadId = await AiThreadService.SaveThreadAsync(context.Editor);
-            await AiChatService.SendUserMessageAsync(
-                threadId,
-                new AiChatMessageComposer { Content = prompt });
-            Navigation.NavigateTo($"/home-lab/assist/{threadId}");
+            Navigation.NavigateTo(await TerminalTaskLauncher.OpenAsync(title, prompt));
         }
         catch (Exception exception)
         {
             message = exception.Message;
             error = true;
         }
-        finally
-        {
-            startingPromptRecipeId = null;
-        }
+        finally { startingPromptRecipeId = null; }
     }
 
     private async Task InstallAsync(HomeLabAppManifest app)
@@ -2897,7 +2863,7 @@
             SetMessage(
                 failed == 0
                     ? $"Repaired {results.Count} installation{(results.Count == 1 ? string.Empty : "s")} in {group.Name}."
-                    : $"Repaired {results.Count - failed} of {results.Count} installations in {group.Name}. Review the remaining degraded items or use AI Repair.",
+                    : $"Repaired {results.Count - failed} of {results.Count} installations in {group.Name}. Review the remaining degraded items or use Repair with terminal AI.",
                 failed > 0);
         });
     }

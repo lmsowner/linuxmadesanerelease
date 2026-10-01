@@ -283,6 +283,7 @@
                          @onpointerdown="@(args => OnAiSplitterPointerDownAsync(args))"
                          @onpointerdown:preventDefault="true"></div>
                     <TerminalAiPanel Tab="tab"
+                                                                     WriteManagedOperationOutput="@(text => WriteHomeLabOutputAsync(tab, text))"
                                      @ref="terminalAiPanel"
                                      RunCommand="@((string commandText, CancellationToken cancellationToken) => RunCommandAsync(commandText, cancellationToken))" />
                 }
@@ -403,7 +404,7 @@
 
         if (AutoConnect &&
             !autoConnectIssued &&
-            tab is { SessionId: null, IsBusy: false })
+            tab is { SessionId: null, IsBusy: false, IsHomeLabTask: false })
         {
             autoConnectIssued = true;
             await ConnectAsync();
@@ -977,6 +978,14 @@
         return InvokeAsync(StateHasChanged);
     }
 
+    private async Task WriteHomeLabOutputAsync(TerminalTabState target, string text)
+    {
+        target.HomeLabOperationOutput = (target.HomeLabOperationOutput + text.Replace("\r\n", "\n").Replace("\n", "\r\n"));
+        if (target.HomeLabOperationOutput.Length > 100000) target.HomeLabOperationOutput = target.HomeLabOperationOutput[^100000..];
+        target.HomeLabOutputRevision++;
+        await WriteSnapshotAsync();
+    }
+
     private async Task WriteSnapshotAsync()
     {
         if (!terminalInitialized || tab is null)
@@ -985,8 +994,8 @@
         }
 
         var snapshot = tab.Snapshot;
-        var output = snapshot?.Output ?? string.Empty;
-        var outputRevision = snapshot?.OutputRevision ?? 0;
+        var output = (snapshot?.Output ?? string.Empty) + tab.HomeLabOperationOutput;
+        var outputRevision = (snapshot?.OutputRevision ?? 0) + tab.HomeLabOutputRevision;
         var renderedRevision = renderedOutputRevisions.GetValueOrDefault(tab.Id, -1);
         if (outputRevision == renderedRevision)
         {

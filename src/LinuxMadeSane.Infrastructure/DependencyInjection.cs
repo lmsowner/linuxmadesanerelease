@@ -128,6 +128,7 @@ public static class DependencyInjection
         services.AddScoped<IAiToolRegistry, LinuxMadeSaneAiToolRegistry>();
         services.AddScoped<IAiSafeChangeService, AiSafeChangeService>();
         services.AddScoped<IAiToolBridge, LinuxMadeSaneAiToolBridge>();
+        services.AddScoped<IHomeLabTerminalOperations>(provider => (IHomeLabTerminalOperations)provider.GetRequiredService<IAiToolBridge>());
         services.AddSingleton<ILmsConnectClientFeature, DisabledLmsConnectClientFeature>();
         services.AddSingleton<IAiApprovalPolicyService, AiApprovalPolicyService>();
         services.AddScoped<IAiProviderCapabilityService, AiProviderCapabilityService>();

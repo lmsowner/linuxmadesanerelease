@@ -141,6 +141,8 @@ public class Program
         builder.Services.AddSingleton<IDesktopAssistantLaunchTicketIssuer>(serviceProvider =>
             serviceProvider.GetRequiredService<DesktopAssistantLaunchTicketStore>());
         builder.Services.AddSingleton<TerminalWorkspaceRegistry>();
+        builder.Services.AddScoped<HomeLabTerminalTaskLauncher>();
+        builder.Services.AddScoped<HomeLabTerminalCommandService>();
         builder.Services.AddSingleton<FileBrowserWorkspaceRegistry>();
         builder.Services.AddSingleton<FileActionQueueService>();
         builder.Services.AddSingleton<BrowserFileTransferService>();

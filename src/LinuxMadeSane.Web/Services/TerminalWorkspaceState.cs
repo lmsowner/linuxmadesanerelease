@@ -439,6 +439,13 @@ public sealed class TerminalTabState
 
     public bool IsAiPanelOpen { get; set; }
 
+    public bool IsHomeLabTask { get; set; }
+    public string HomeLabOperationOutput { get; set; } = string.Empty;
+    public long HomeLabOutputRevision { get; set; }
+    public string HomeLabTaskTitle { get; set; } = string.Empty;
+    public string? PendingAiTaskPrompt { get; set; }
+    public bool StartPendingAiTask { get; set; }
+
     public TerminalAiAccessMode AiAccessMode { get; set; } = TerminalAiAccessMode.Agent;
 
     public Guid? AiCommandApprovalSessionId { get; set; }

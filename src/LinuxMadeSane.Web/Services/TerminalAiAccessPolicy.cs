@@ -3,6 +3,8 @@
 
 using LinuxMadeSane.Application.Contracts.Ai;
 
+using LinuxMadeSane.Application.Contracts.HomeLab;
+
 namespace LinuxMadeSane.Web.Services;
 
 public static class TerminalAiAccessPolicy
@@ -12,7 +14,8 @@ public static class TerminalAiAccessPolicy
         string commandText,
         bool sessionApprovalGranted)
     {
-        if (TerminalAiCommandGuard.TryValidateForInvestigation(commandText, out _))
+        if (HomeLabTerminalProtocol.TryParse(commandText, out var managed, out _) && managed!.IsReadOnly ||
+            TerminalAiCommandGuard.TryValidateForInvestigation(commandText, out _))
         {
             return TerminalAiCommandDisposition.Run;
         }

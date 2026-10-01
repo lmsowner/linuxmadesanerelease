@@ -4,6 +4,8 @@
 @implements IAsyncDisposable
 @using System.Text.RegularExpressions
 @using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Contracts.HomeLab
+@using LinuxMadeSane.Core.Models.Ai
 @using LinuxMadeSane.Application.Contracts.Ai
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Application.Services
@@ -17,8 +19,13 @@
 @inject ITerminalAiAssistantService TerminalAiAssistantService
 @inject ITerminalAiCommandDaemon TerminalAiCommandDaemon
 @inject IJSRuntime JSRuntime
+@inject IServiceScopeFactory HomeLabScopeFactory
 
 <section class="surface-card terminal-ai-panel">
+    @if (SupportsManagedHomeLabOperations)
+    {
+        <div class="terminal-ai-section"><strong>@Tab.HomeLabTaskTitle</strong><p class="meta-text">Managed operations run through LMS. Connect the terminal for shell diagnostics.</p></div>
+    }
     @if (!string.IsNullOrWhiteSpace(panelInfo))
     {
         <div class="callout warning">@panelInfo</div>
@@ -50,7 +57,7 @@
                 <strong>@GetAccessModeLabel(Tab.AiAccessMode)</strong>
                 @if (HasAgentSessionApproval)
                 {
-                    <UiPill Tone="UiPillTone.Success">Allowed for this session</UiPill>
+                    <UiPill Tone="UiPillTone.Success">@(SupportsManagedHomeLabOperations ? "Allowed for this task" : "Allowed for this session")</UiPill>
                 }
             </div>
             <span>@GetAccessModeDescription(Tab.AiAccessMode)</span>
@@ -143,11 +150,11 @@
                 <UiCommandButton Label="Allow once"
                                  Glyph="UiIconGlyph.Run"
                                  OnClick="AllowPendingCommandOnceAsync" />
-                <UiCommandButton Label="Allow for session"
+                <UiCommandButton Label="@(SupportsManagedHomeLabOperations ? "Allow for task" : "Allow for session")"
                                  Title="Run this and all later AI commands in this terminal session without asking again."
                                  Glyph="UiIconGlyph.Run"
                                  Variant="UiButtonVariant.ActionSubtle"
-                                 Disabled="@(!Tab.SessionId.HasValue)"
+                                 Disabled="@(!SupportsManagedHomeLabOperations && !Tab.SessionId.HasValue)"
                                  OnClick="AllowPendingCommandsForSessionAsync" />
                 <UiCommandButton Label="Stop"
                                  Glyph="UiIconGlyph.Clear"
@@ -333,6 +340,9 @@
     [Parameter]
     public int AgentCommandLimit { get; set; } = DefaultMaxAgentCommands;
 
+    [Parameter]
+    public Func<string, Task>? WriteManagedOperationOutput { get; set; }
+
     private string promptText = string.Empty;
     private string panelInfo = string.Empty;
     private string panelError = string.Empty;
@@ -376,14 +386,17 @@
         RegexOptions.Compiled);
 
     private bool isBusy => isSendingPrompt || isRunningAgent;
+    private bool SupportsManagedHomeLabOperations => Tab.IsHomeLabTask && AiLocalMachine.IsLocalMachine(Tab.HostId);
+    private Guid? ApprovalScopeId => Tab.SessionId ?? (SupportsManagedHomeLabOperations ? Tab.Id : null);
     private bool HasAgentSessionApproval =>
         Tab.AiAccessMode == TerminalAiAccessMode.Agent &&
-        Tab.SessionId.HasValue &&
-        Tab.AiCommandApprovalSessionId == Tab.SessionId;
+        ApprovalScopeId.HasValue &&
+        Tab.AiCommandApprovalSessionId == ApprovalScopeId;
     private bool HostUsesPublicKeyAuthentication =>
         ManagedHostAuthenticationPolicy.UsesPublicKeyAuthentication(Tab.PrimaryAuthenticationType) ||
         ManagedHostAuthenticationPolicy.UsesPublicKeyAuthentication(Tab.FallbackAuthenticationType);
     private bool ShouldShowHostAuthAdvice =>
+        !SupportsManagedHomeLabOperations &&
         !publicKeySetupSaved &&
         ManagedHostAuthenticationPolicy.UsesPassword(Tab.PrimaryAuthenticationType) &&
         !HostUsesPublicKeyAuthentication;
@@ -449,7 +462,7 @@ Selected terminal content:
             return;
         }
 
-        if (!Tab.IsSessionActive && Tab.AiAccessMode != TerminalAiAccessMode.ReadOnly)
+        if (!Tab.IsSessionActive && !SupportsManagedHomeLabOperations && Tab.AiAccessMode != TerminalAiAccessMode.ReadOnly)
         {
             panelError = "Connect the terminal before asking the AI to make changes.";
             return;
@@ -471,6 +484,14 @@ Selected terminal content:
         {
             var commandCount = 0;
             var recoveryTurns = 0;
+
+            if (SupportsManagedHomeLabOperations)
+            {
+                agentStatus = "Inspecting Home Lab...";
+                await InvokeAsync(StateHasChanged);
+                var inspection = await ExecuteSuggestedCommandAsync("lms-home-lab inspect", cancellationToken);
+                latestStructuredCommandOutput = TerminalAiCommandEvidenceFormatter.Format(inspection);
+            }
 
             var commandLimit = Math.Clamp(AgentCommandLimit, 1, 32);
             while (commandCount < commandLimit)
@@ -597,9 +618,15 @@ Selected terminal content:
 
     private async Task<bool> EnsureCommandAllowedAsync(string commandText)
     {
-        if (!Tab.IsSessionActive)
+        var managed = HomeLabTerminalProtocol.IsManagedCommand(commandText);
+        if (managed && (!SupportsManagedHomeLabOperations || !HomeLabTerminalProtocol.TryParse(commandText, out _, out _)))
         {
-            agentStatus = "Connect the terminal before the AI can run a command.";
+            agentStatus = "Use one valid managed operation in a local Home Lab task.";
+            return false;
+        }
+        if (!managed && !Tab.IsSessionActive)
+        {
+            agentStatus = "Connect this terminal for shell diagnostics. Managed Home Lab operations can run without SSH.";
             return false;
         }
 
@@ -655,9 +682,9 @@ Selected terminal content:
 
     private Task AllowPendingCommandsForSessionAsync()
     {
-        if (Tab.SessionId.HasValue)
+        if (ApprovalScopeId.HasValue)
         {
-            Tab.AiCommandApprovalSessionId = Tab.SessionId;
+            Tab.AiCommandApprovalSessionId = ApprovalScopeId;
             pendingApprovalSource?.TrySetResult(true);
         }
 
@@ -728,6 +755,12 @@ Selected terminal content:
             }
         }
 
+        if (Tab.StartPendingAiTask && !isBusy)
+        {
+            Tab.StartPendingAiTask = false;
+            await StartAgentPromptAsync(promptText);
+        }
+
         var currentEntryCount = RecentEntries.Count;
         if (currentEntryCount == renderedEntryCount)
         {
@@ -779,6 +812,11 @@ Selected terminal content:
             ResetPublicKeySetupState();
         }
 
+        if (Tab.PendingAiTaskPrompt is { } pendingPrompt)
+        {
+            promptText = pendingPrompt;
+            Tab.PendingAiTaskPrompt = null;
+        }
         StartProviderContextLoad();
         return Task.CompletedTask;
     }
@@ -822,7 +860,8 @@ Selected terminal content:
                 StructuredCommandOutput = latestStructuredCommandOutput,
                 Request = requestText,
                 ActiveGoal = activeAgentGoal,
-                AllowInternetResearch = Tab.AllowInternetResearch
+                AllowInternetResearch = Tab.AllowInternetResearch,
+                SupportsManagedHomeLabOperations = SupportsManagedHomeLabOperations
             },
             cancellationToken);
         EnsureCurrentTerminalContext(requestTab, requestSessionId, username, cancellationToken);
@@ -1092,6 +1131,16 @@ Selected terminal content:
         CommandExecutionInput? standardInput = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (HomeLabTerminalProtocol.IsManagedCommand(commandText))
+        {
+            if (!SupportsManagedHomeLabOperations) throw new InvalidOperationException("This terminal is not a local Home Lab task.");
+            var managedTab = Tab;
+            using var scope = HomeLabScopeFactory.CreateScope();
+            var managedResult = await scope.ServiceProvider.GetRequiredService<HomeLabTerminalCommandService>().ExecuteAsync(managedTab, commandText, cancellationToken);
+            if (WriteManagedOperationOutput is not null)
+                await WriteManagedOperationOutput($"$ {commandText}\n{managedResult.StandardOutput}\n{managedResult.StandardError}\n[exit {managedResult.ExitCode}]\n");
+            return managedResult;
+        }
         if (!Tab.SessionId.HasValue || !Tab.IsSessionActive)
         {
             throw new TerminalSessionUnavailableException(

@@ -5147,15 +5147,14 @@ public sealed class HomeLabService(
     private static string ResolveConfiguredListenAddress(HomeLabInstallationEntity installation) =>
         DeserializeDictionary(installation.ConfigurationJson).GetValueOrDefault("listen-address") ?? "0.0.0.0";
 
-    private static string ValidateListenAddress(string listenAddress)
+    internal static string ValidateListenAddress(string listenAddress)
     {
         var normalized = listenAddress?.Trim() ?? string.Empty;
         if (!IPAddress.TryParse(normalized, out var parsed) ||
             parsed.AddressFamily != AddressFamily.InterNetwork ||
-            IPAddress.IsLoopback(parsed) ||
-            !OnDemandAppSourceBinding.GetSources().Any(source => source.Address == normalized))
+            (normalized != "127.0.0.1" && !OnDemandAppSourceBinding.GetSources().Any(source => source.Address == normalized)))
         {
-            throw new InvalidOperationException("Choose a current, active non-loopback IPv4 address for client connections.");
+            throw new InvalidOperationException("Choose localhost (127.0.0.1) or a current, active IPv4 address for client connections.");
         }
 
         return normalized;
