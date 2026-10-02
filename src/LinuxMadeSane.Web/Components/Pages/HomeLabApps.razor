@@ -783,7 +783,7 @@
                             @foreach (var installation in group.Installations)
                             {
                                 var app = GetApp(installation.AppId);
-                                <div class="home-lab-app-row">
+                                <div class="home-lab-app-row" @key="installation.Id">
                                     <div class="home-lab-app-name">
                                         <strong>@installation.DisplayName</strong>
                                         <span>@app.Description</span>
@@ -791,17 +791,13 @@
                                     <div class="home-lab-network-compact">
                                         @if (app.SupportsVpnGateway)
                                         {
-                                            <select class="ui-control-input home-lab-route-select"
-                                                    aria-label="Internet route for @installation.DisplayName"
-                                                    value="@GetRouteSelection(installation)"
-                                                    disabled="@busy"
-                                                    @onchange="eventArgs => ChangeSummaryRouteAsync(installation, eventArgs.Value?.ToString())">
-                                                <option value="direct" disabled="@app.RequiresVpnGateway">Direct (no VPN)</option>
-                                                @foreach (var gateway in InstalledVpnGateways)
-                                                {
-                                                    <option value="@gateway.Id">@gateway.DisplayName</option>
-                                                }
-                                            </select>
+                                            <HomeLabRouteSelector @key="installation.Id"
+                                                                  NetworkMode="@installation.NetworkMode"
+                                                                  DisplayName="@installation.DisplayName"
+                                                                  Gateways="@InstalledVpnGateways"
+                                                                  RequiresVpnGateway="@app.RequiresVpnGateway"
+                                                                  Busy="@busy"
+                                                                  ValueChanged="selection => ChangeSummaryRouteAsync(installation, selection)" />
                                             <UiPill Tone="@GetCompactNetworkTone(installation)">@GetCompactNetworkState(installation)</UiPill>
                                         }
                                         else if (IsVpnGateway(installation))
@@ -2477,11 +2473,6 @@
                 ? UiPillTone.Neutral
                 : UiPillTone.Failure;
     }
-
-    private string GetRouteSelection(HomeLabAppInstallation installation) =>
-        GetGatewayIdFromNetworkMode(installation.NetworkMode) is { Length: > 0 } gatewayId
-            ? gatewayId
-            : "direct";
 
     private async Task ChangeSummaryRouteAsync(HomeLabAppInstallation installation, string? selection)
     {

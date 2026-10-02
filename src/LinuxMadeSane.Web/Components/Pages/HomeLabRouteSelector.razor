@@ -1,0 +1,58 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@using LinuxMadeSane.Core.Models.HomeLab
+
+<select class="ui-control-input home-lab-route-select"
+        @key="(NetworkMode, optionSetKey, selectionRevision)"
+        aria-label="Internet route for @DisplayName"
+        value="@SelectedValue"
+        disabled="@Busy"
+        @onchange="ChangeRouteAsync">
+    @if (SelectedValue == "unavailable")
+    {
+        <option value="unavailable" selected disabled>Configured VPN gateway unavailable</option>
+    }
+    <option value="direct" selected="@(SelectedValue == "direct")" disabled="@RequiresVpnGateway">Direct (no VPN)</option>
+    @foreach (var gateway in gateways)
+    {
+        <option @key="gateway.Id" value="@gateway.Id" selected="@(SelectedValue == gateway.Id.ToString())">@gateway.DisplayName</option>
+    }
+</select>
+
+@code {
+    [Parameter] public string NetworkMode { get; set; } = string.Empty;
+    [Parameter] public string DisplayName { get; set; } = string.Empty;
+    [Parameter] public IEnumerable<HomeLabAppInstallation> Gateways { get; set; } = [];
+    [Parameter] public bool RequiresVpnGateway { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    private HomeLabAppInstallation[] gateways = [];
+    private string optionSetKey = string.Empty;
+    private long selectionRevision;
+
+    private string SelectedValue => NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
+        ? gateways.FirstOrDefault(gateway => gateway.ContainerName.Equals(NetworkMode["container:".Length..], StringComparison.OrdinalIgnoreCase))?.Id.ToString() ?? "unavailable"
+        : "direct";
+
+    protected override void OnParametersSet()
+    {
+        gateways = Gateways.ToArray();
+        // Native selects can retain a different option after their option list
+        // changes while the value attribute stays the same. Rebuild the control
+        // from the saved route, not from its former position in the list.
+        optionSetKey = string.Join("|", gateways.Select(gateway => $"{gateway.Id}:{gateway.DisplayName}"));
+    }
+
+    private async Task ChangeRouteAsync(ChangeEventArgs args)
+    {
+        if (Busy) return;
+        selectionRevision++;
+        var value = args.Value?.ToString() ?? string.Empty;
+        if (value == SelectedValue) return;
+        if (value != "direct" && !gateways.Any(gateway => gateway.Id.ToString() == value)) return;
+        if (value == "direct" && RequiresVpnGateway) return;
+        // Reapply the authoritative route after success or failure. Until the
+        // parent finishes changing Docker networking, the saved route still wins.
+        await ValueChanged.InvokeAsync(value);
+    }
+}
