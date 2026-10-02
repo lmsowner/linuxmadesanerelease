@@ -32,4 +32,7 @@ public sealed record ApplicationUpdateStatus(
     DateTimeOffset? LastCheckedAtUtc,
     DateTimeOffset? LastInstallStartedAtUtc,
     DateTimeOffset? LastInstallCompletedAtUtc,
-    IReadOnlyList<string> LogLines);
+    IReadOnlyList<string> LogLines)
+{
+    public string Channel { get; init; } = "stable";
+}

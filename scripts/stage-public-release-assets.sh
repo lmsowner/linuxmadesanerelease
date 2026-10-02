@@ -119,6 +119,17 @@ stage_edition() {
   local destination_dir="$3"
   local label="$4"
 
+  if [[ "$edition" == "community" && -d "$destination_dir" ]]; then
+    for runtime in $RUNTIMES; do
+      local existing_name="${source_prefix}-${APP_VERSION}-${runtime}.tar.gz"
+      cmp -s "$PACKAGE_DIR/$existing_name" "$destination_dir/$existing_name" || lms_die "published CE versions are immutable; use a fresh VERSION"
+    done
+    return 0
+  fi
+  local final_destination="$destination_dir"
+  if [[ "$edition" == "community" ]]; then
+    destination_dir="${destination_dir}.staging-$$"
+  fi
   lms_reset_dir "$destination_dir"
   chmod 2775 "$destination_dir"
 
@@ -173,6 +184,10 @@ stage_edition() {
     printf '}\n'
   } > "$manifest_path"
 
+  if [[ "$edition" == "community" ]]; then
+    mv "$destination_dir" "$final_destination"
+    destination_dir="$final_destination"
+  fi
   lms_log "$label release assets staged for public website"
   printf 'version: %s\nedition: %s\npath: %s\nchecksums: %s\nmanifest: %s\n' \
     "$APP_VERSION" "$edition" "$destination_dir" "$checksum_path" "$manifest_path"
@@ -182,7 +197,7 @@ staged_any=false
 
 if stage_enabled community; then
   stage_edition "community" "linux-made-sane-ce" "$COMMUNITY_ASSET_DIR" "Community"
-  prune_edition_releases "$COMMUNITY_RELEASE_ROOT" "$APP_VERSION" "Community"
+  python3 "$SCRIPT_DIR/ce-release-channels.py" publish-development --root "$COMMUNITY_RELEASE_ROOT" --version "$APP_VERSION"
   staged_any=true
 fi
 

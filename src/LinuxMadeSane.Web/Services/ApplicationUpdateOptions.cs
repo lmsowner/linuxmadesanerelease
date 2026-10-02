@@ -5,6 +5,8 @@ namespace LinuxMadeSane.Web.Services;
 
 public sealed class ApplicationUpdateOptions
 {
+    public string Channel { get; set; } = "stable";
+
     public bool Enabled { get; set; } = true;
 
     public string ManifestUrl { get; set; } = "https://www.linuxmadesane.com/api/downloads/manifest";

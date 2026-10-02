@@ -107,6 +107,19 @@
                             <UiPill Tone="@GetLmsStateTone()">@GetLmsStateLabel()</UiPill>
                         </div>
 
+                        @if (lmsStatus.Edition == "community")
+                        {
+                            <div class="updates-action-row">
+                                <UiComboboxField TValue="string" Label="CE update channel" @bind-Value="selectedReleaseChannel" Disabled="@IsLmsBusy"
+                                                 Helper="Stable receives only releases explicitly approved as stable. Development receives the latest tested builds. Switching never downgrades the installed version.">
+                                    <option value="stable">Stable</option>
+                                    <option value="development">Development</option>
+                                </UiComboboxField>
+                                <UiCommandButton Label="Save update channel" OnClick="SaveReleaseChannelAsync" Disabled="@(IsLmsBusy || selectedReleaseChannel == lmsStatus.Channel)" />
+                            </div>
+                            @if (!string.IsNullOrWhiteSpace(channelMessage)) { <p class="meta-text" role="status">@channelMessage</p> }
+                        }
+
                         <div class="update-metric-grid">
                             <ServiceMetricComponent TagName="div" Label="Running" Value="@lmsStatus.CurrentVersion" />
                             <ServiceMetricComponent TagName="div" Label="Latest" Value="@lmsStatus.LatestVersion" />
@@ -680,6 +693,8 @@
 
     private string activeTab = "server";
     private ApplicationUpdateStatus lmsStatus = null!;
+    private string selectedReleaseChannel = "stable";
+    private string? channelMessage;
     private HostSystemUpdateSnapshot hostSnapshot = null!;
     private ScheduleEditorModel scheduleEditor = new();
     private CancellationTokenSource? pollingCancellationTokenSource;
@@ -731,6 +746,7 @@
     protected override async Task OnInitializedAsync()
     {
         lmsStatus = LmsUpdateService.GetStatus();
+        selectedReleaseChannel = lmsStatus.Channel;
         hostSnapshot = HostUpdateService.GetSnapshot();
         scheduleEditor = ScheduleEditorModel.From(hostSnapshot.Schedule);
         pollingCancellationTokenSource = new CancellationTokenSource();
@@ -814,6 +830,16 @@
         }
 
         return Task.CompletedTask;
+    }
+
+    private async Task SaveReleaseChannelAsync()
+    {
+        try
+        {
+            lmsStatus = await LmsUpdateService.SelectChannelAsync(selectedReleaseChannel);
+            channelMessage = $"{lmsStatus.Channel} updates selected and saved. The installed version has not changed.";
+        }
+        catch (Exception ex) { channelMessage = ex.Message; selectedReleaseChannel = LmsUpdateService.GetStatus().Channel; }
     }
 
     private async Task CheckLmsAsync()

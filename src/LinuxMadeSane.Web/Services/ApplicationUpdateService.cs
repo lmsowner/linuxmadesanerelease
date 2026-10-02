@@ -11,20 +11,35 @@ namespace LinuxMadeSane.Web.Services;
 public sealed class ApplicationUpdateService(
     HttpClient httpClient,
     IOptionsMonitor<ApplicationUpdateOptions> optionsMonitor,
-    ILogger<ApplicationUpdateService> logger)
+    ILogger<ApplicationUpdateService> logger,
+    ApplicationReleaseChannel? channelStore = null)
 {
     private const int MaxLogLines = 180;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly SemaphoreSlim operationLock = new(1, 1);
     private readonly object syncRoot = new();
+    private string releaseChannel = channelStore?.Read(optionsMonitor.CurrentValue.Channel) ?? ApplicationReleaseChannel.Normalize(optionsMonitor.CurrentValue.Channel);
     private ApplicationUpdateStatus status = BuildInitialStatus(optionsMonitor.CurrentValue);
 
     public ApplicationUpdateStatus GetStatus()
     {
         lock (syncRoot)
         {
-            return status with { LogLines = status.LogLines.ToArray() };
+            return status with { LogLines = status.LogLines.ToArray(), Channel = releaseChannel };
         }
+    }
+
+    public async Task<ApplicationUpdateStatus> SelectChannelAsync(string channel, CancellationToken cancellationToken = default)
+    {
+        channel = ApplicationReleaseChannel.Normalize(channel);
+        if (!await operationLock.WaitAsync(0, cancellationToken)) throw new InvalidOperationException("Wait for the current update operation to finish.");
+        try
+        {
+            if (channelStore is not null) await channelStore.SaveAsync(channel, cancellationToken);
+            releaseChannel = channel;
+            return await CheckForUpdatesCoreAsync(cancellationToken);
+        }
+        finally { operationLock.Release(); }
     }
 
     public async Task<ApplicationUpdateStatus> CheckForUpdatesAsync(CancellationToken cancellationToken = default)
@@ -171,7 +186,7 @@ public sealed class ApplicationUpdateService(
     private async Task<ApplicationUpdateStatus> CheckForUpdatesCoreAsync(CancellationToken cancellationToken)
     {
         var options = optionsMonitor.CurrentValue;
-        var manifestUrl = NormalizeAbsoluteUrl(options.ManifestUrl, "https://www.linuxmadesane.com/api/downloads/manifest");
+        var manifestUrl = ApplicationReleaseChannel.Url(NormalizeAbsoluteUrl(options.ManifestUrl, "https://www.linuxmadesane.com/api/downloads/manifest"), releaseChannel);
         var installScriptUrl = NormalizeAbsoluteUrl(options.InstallScriptUrl, "https://www.linuxmadesane.com/install.sh");
         var edition = NormalizeEdition(options.Edition);
         var rid = NormalizeRid(options.Rid);
@@ -205,18 +220,20 @@ public sealed class ApplicationUpdateService(
                 throw new InvalidOperationException("The release manifest was empty.");
             }
 
+            if (manifest.Channel is not null && manifest.Channel != releaseChannel)
+                throw new InvalidOperationException("The release server returned a different update channel. Try the update check again.");
             var latestVersion = ResolveLatestVersion(manifest, edition);
             var matchingAsset = ResolveMatchingAsset(manifest, edition, latestVersion, rid);
-            var isAvailable = ApplicationUpdateVersionComparer.IsNewer(latestVersion, currentVersion);
+            var isAvailable = matchingAsset is not null && ApplicationUpdateVersionComparer.IsNewer(latestVersion, currentVersion);
             var checkedAtUtc = DateTimeOffset.UtcNow;
 
             SetStatus(current => current with
             {
                 State = isAvailable ? ApplicationUpdateState.UpdateAvailable : ApplicationUpdateState.UpToDate,
-                Summary = isAvailable
+                Summary = string.IsNullOrWhiteSpace(latestVersion) ? $"No {releaseChannel} CE release has been approved yet." : isAvailable
                     ? $"Linux Made Sane {latestVersion} is available."
                     : $"Linux Made Sane is current at {currentVersion}.",
-                Detail = matchingAsset is null
+                Detail = string.IsNullOrWhiteSpace(latestVersion) ? "Your installed LMS remains unchanged. You can opt into development updates." : matchingAsset is null
                     ? $"No {edition} {rid} tarball is listed in the release manifest yet."
                     : $"{matchingAsset.FileName} · {FormatBytes(matchingAsset.SizeBytes)} · sha256 {matchingAsset.Sha256}",
                 CurrentVersion = currentVersion,
@@ -280,6 +297,11 @@ public sealed class ApplicationUpdateService(
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
+        if (NormalizeEdition(options.Edition) == "community")
+        {
+            process.StartInfo.Environment["LMS_CHANNEL"] = releaseChannel;
+            process.StartInfo.Environment["LMS_VERSION"] = GetStatus().LatestVersion;
+        }
         process.StartInfo.ArgumentList.Add("-lc");
         process.StartInfo.ArgumentList.Add(commandText);
         process.OutputDataReceived += (_, args) => HandleProcessOutput(args.Data, false);
@@ -390,7 +412,7 @@ public sealed class ApplicationUpdateService(
         var isRoot = OperatingSystem.IsLinux() && Environment.UserName.Equals("root", StringComparison.OrdinalIgnoreCase);
         if (OperatingSystem.IsLinux() && IsInstalledUpdateHelperCurrent(helperPath))
         {
-            var helperCommand = $"{ShellQuote(helperPath)} --background";
+            var helperCommand = $"{ShellQuote(helperPath)} --background --channel {ShellQuote(releaseChannel)} --version {ShellQuote(GetStatus().LatestVersion)}";
             return new ApplicationUpdateCommand(
                 isRoot ? helperCommand : $"sudo -n {helperCommand}",
                 true);
@@ -401,7 +423,7 @@ public sealed class ApplicationUpdateService(
             AppendLog($"Installed update helper at {helperPath} is stale; using the current public installer handoff.");
         }
 
-        var installScriptUrl = NormalizeAbsoluteUrl(options.InstallScriptUrl, "https://www.linuxmadesane.com/install.sh");
+        var installScriptUrl = ApplicationReleaseChannel.Url(NormalizeAbsoluteUrl(options.InstallScriptUrl, "https://www.linuxmadesane.com/install.sh"), releaseChannel, GetStatus().LatestVersion == "unknown" ? null : GetStatus().LatestVersion);
         if (OperatingSystem.IsLinux() &&
             Directory.Exists("/run/systemd/system") &&
             (File.Exists("/usr/bin/systemd-run") || File.Exists("/bin/systemd-run")))
@@ -475,7 +497,8 @@ public sealed class ApplicationUpdateService(
         try
         {
             var helper = File.ReadAllText(helperPath);
-            return helper.Contains("PRESERVES_LMS_STATE_PATHS=true", StringComparison.Ordinal) &&
+            return helper.Contains("SUPPORTS_RELEASE_CHANNELS=true", StringComparison.Ordinal) &&
+                   helper.Contains("PRESERVES_LMS_STATE_PATHS=true", StringComparison.Ordinal) &&
                    helper.Contains("LMS_INSTALL_SECOND_STAGE=1", StringComparison.Ordinal) &&
                    helper.Contains("LMS_DATABASE_CONNECTION_STRING", StringComparison.Ordinal) &&
                    helper.Contains("LMS_DATA_PROTECTION_KEY_DIRECTORY", StringComparison.Ordinal) &&
@@ -636,7 +659,7 @@ public sealed class ApplicationUpdateService(
             ? manifest.LatestProVersion
             : manifest.LatestCommunityVersion;
 
-        return string.IsNullOrWhiteSpace(latest) ? manifest.LatestVersion : latest.Trim();
+        return !string.IsNullOrWhiteSpace(manifest.Channel) ? (latest ?? "").Trim() : string.IsNullOrWhiteSpace(latest) ? manifest.LatestVersion : latest.Trim();
     }
 
     private static ReleaseAssetDto? ResolveMatchingAsset(
@@ -700,7 +723,8 @@ public sealed class ApplicationUpdateService(
         string LatestCommunityVersion,
         string LatestProVersion,
         IReadOnlyList<ReleaseAssetDto> Community,
-        IReadOnlyList<ReleaseAssetDto> Pro);
+        IReadOnlyList<ReleaseAssetDto> Pro)
+    { public string? Channel { get; init; } }
 
     private sealed record ReleaseAssetDto(
         string Edition,

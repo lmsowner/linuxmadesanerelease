@@ -1053,6 +1053,9 @@ set -euo pipefail
 INSTALL_URL="\${LMS_INSTALL_URL:-$base_url/install.sh}"
 SOURCE="\${LMS_SOURCE:-lms-auto-update}"
 PRESERVES_LMS_STATE_PATHS=true
+SUPPORTS_RELEASE_CHANNELS=true
+CHANNEL="\${LMS_CHANNEL:-${LMS_CHANNEL:-stable}}"
+TARGET_VERSION="\${LMS_VERSION:-}"
 INSTALL_ROOT="\${LMS_INSTALL_ROOT:-$install_root}"
 DATA_ROOT="\${LMS_DATA_ROOT:-$data_root}"
 CONFIG_ROOT="\${LMS_CONFIG_ROOT:-$config_root}"
@@ -1072,8 +1075,11 @@ fi
 
 BACKGROUND=false
 INSTALL_ARGS=()
-for argument in "\$@"; do
+while [[ "\$#" -gt 0 ]]; do
+  argument="\$1"; shift
   case "\$argument" in
+    --channel) CHANNEL="\$1"; shift ;;
+    --version) TARGET_VERSION="\$1"; shift ;;
     --background|--detached|--no-wait)
       BACKGROUND=true
       ;;
@@ -1091,6 +1097,13 @@ for argument in "\$@"; do
   esac
 done
 
+case "\$CHANNEL" in stable|development) ;; *) echo "Invalid release channel" >&2; exit 1 ;; esac
+INSTALL_URL="\${INSTALL_URL%%\?*}?channel=\$CHANNEL"
+if [[ -n "\$TARGET_VERSION" ]]; then
+  [[ "\$TARGET_VERSION" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]] || exit 1
+  INSTALL_URL="\$INSTALL_URL&version=\$TARGET_VERSION"
+fi
+
 if [[ -z "\${LMS_UPDATE_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
   UNIT_NAME="linux-made-sane-self-update-\$(date -u +%Y%m%d%H%M%S)"
   SYSTEMD_RUN_ARGS=(
@@ -1106,6 +1119,8 @@ if [[ -z "\${LMS_UPDATE_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&
     env \
       LMS_UPDATE_DETACHED=1 \
       LMS_INSTALL_URL="\$INSTALL_URL" \
+      LMS_CHANNEL="\$CHANNEL" \
+      LMS_VERSION="\$TARGET_VERSION" \
       LMS_SOURCE="\$SOURCE" \
       LMS_BASE_URL="$base_url" \
       LMS_INSTALL_ROOT="\$INSTALL_ROOT" \
@@ -1191,6 +1206,8 @@ perform_self_update() {
 
   if ! curl -fsSL "\$INSTALL_URL" | env \
   LMS_INSTALL_SECOND_STAGE=1 \
+  LMS_CHANNEL="\$CHANNEL" \
+  LMS_VERSION="\$TARGET_VERSION" \
   LMS_SOURCE="\$SOURCE" \
   LMS_BASE_URL="$base_url" \
   LMS_INSTALL_ROOT="\$INSTALL_ROOT" \

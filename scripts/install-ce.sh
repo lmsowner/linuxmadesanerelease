@@ -29,6 +29,7 @@ RUNNER_USER="${RUNNER_USER:-linuxmadesane-runner}"
 RUNNER_GROUP="${RUNNER_GROUP:-linuxmadesane-runner}"
 RUNNER_HOME="${RUNNER_HOME:-/var/lib/linuxmadesane/runner}"
 RUNNER_WORKSPACE="${RUNNER_WORKSPACE:-${RUNNER_HOME}/workspace}"
+LMS_CHANNEL="${LMS_CHANNEL:-stable}"
 LMS_BASE_URL="${LMS_BASE_URL:-https://www.linuxmadesane.com}"
 UPDATE_HELPER_PATH="${UPDATE_HELPER_PATH:-/usr/local/sbin/linux-made-sane-update}"
 LMS_DATABASE_CONNECTION_STRING="${LMS_DATABASE_CONNECTION_STRING:-}"
@@ -44,6 +45,7 @@ DESKTOP_HELPER_LAUNCHER_PATH="${DESKTOP_HELPER_LAUNCHER_PATH:-/usr/local/lib/lin
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --channel) LMS_CHANNEL="$2"; shift 2 ;;
     --artifact) ARTIFACT_PATH="$2"; shift 2 ;;
     --install-root) INSTALL_ROOT="$2"; shift 2 ;;
     --data-root) DATA_ROOT="$2"; shift 2 ;;
@@ -60,6 +62,8 @@ while [[ $# -gt 0 ]]; do
     *) lms_die "unknown argument: $1" ;;
   esac
 done
+
+case "$LMS_CHANNEL" in stable|development) ;; *) lms_die "choose stable or development" ;; esac
 
 DESKTOP_HELPER_LOCAL_LMS_URL="${DESKTOP_HELPER_LOCAL_LMS_URL:-http://127.0.0.1:${SERVICE_PORT}/desktop-assistant}"
 
@@ -197,6 +201,7 @@ lms_write_env_file \
   "ApplicationUpdates__ManifestUrl=${LMS_BASE_URL}/api/downloads/manifest" \
   "ApplicationUpdates__InstallScriptUrl=${LMS_BASE_URL}/install.sh" \
   "ApplicationUpdates__Edition=community" \
+  "ApplicationUpdates__Channel=${LMS_CHANNEL}" \
   "ApplicationUpdates__Rid=linux-x64" \
   "ApplicationUpdates__CheckIntervalMinutes=360" \
   "ApplicationUpdates__InstallAutomatically=false" \

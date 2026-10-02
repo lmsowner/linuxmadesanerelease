@@ -42,8 +42,10 @@ public sealed record LmsLatestVersionCheck(string Version, string Failure)
 public sealed class LmsHostUpdateAvailabilityService(
     HttpClient httpClient,
     IOptionsMonitor<ApplicationUpdateOptions> optionsMonitor,
-    ILogger<LmsHostUpdateAvailabilityService> logger)
+    ILogger<LmsHostUpdateAvailabilityService> logger,
+    ApplicationUpdateService? localUpdates = null)
 {
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> hostChannels = new();
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan ManifestTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan HealthProbeTimeout = TimeSpan.FromSeconds(4);
@@ -140,6 +142,14 @@ public sealed class LmsHostUpdateAvailabilityService(
             ? LinuxMadeSaneBuildVersion.GetCurrent(typeof(Program).Assembly)
             : await ProbeRemoteInstalledVersionAsync(host, cancellationToken);
 
+        var channel = AiLocalMachine.IsLocalMachine(host.Id)
+            ? localUpdates?.GetStatus().Channel ?? "stable"
+            : hostChannels.GetValueOrDefault(host.Id, "stable");
+        if (channel == "development")
+        {
+            try { latestVersionCheck = new LmsLatestVersionCheck(await GetLatestVersionAsync(cancellationToken, channel), ""); }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested) { latestVersionCheck = new LmsLatestVersionCheck("", SimplifyFailureMessage(ex)); }
+        }
         return BuildAvailability(
             host.Id,
             installedVersion,
@@ -188,7 +198,7 @@ public sealed class LmsHostUpdateAvailabilityService(
             detail);
     }
 
-    private async Task<string> GetLatestVersionAsync(CancellationToken cancellationToken)
+    private async Task<string> GetLatestVersionAsync(CancellationToken cancellationToken, string channel = "stable")
     {
         var manifestUrl = NormalizeAbsoluteUrl(
             optionsMonitor.CurrentValue.ManifestUrl,
@@ -197,7 +207,7 @@ public sealed class LmsHostUpdateAvailabilityService(
         using var requestCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         requestCts.CancelAfter(ManifestTimeout);
 
-        using var response = await httpClient.GetAsync(manifestUrl, requestCts.Token);
+        using var response = await httpClient.GetAsync(ApplicationReleaseChannel.Url(manifestUrl, channel), requestCts.Token);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(requestCts.Token);
         var manifest = await JsonSerializer.DeserializeAsync<ReleaseManifestDto>(stream, JsonOptions, requestCts.Token);
@@ -206,10 +216,9 @@ public sealed class LmsHostUpdateAvailabilityService(
             throw new InvalidOperationException("The release manifest was empty.");
         }
 
-        return FirstNonBlank(
-            manifest.LatestVersion,
+        return (manifest.Channel is not null ? manifest.LatestCommunityVersion : FirstNonBlank(
             manifest.LatestCommunityVersion,
-            manifest.LatestProVersion) ?? throw new InvalidOperationException("The release manifest did not include a latest version.");
+            manifest.LatestVersion)) ?? throw new InvalidOperationException("The release manifest did not include a latest version.");
     }
 
     private async Task<string> ProbeRemoteInstalledVersionAsync(
@@ -232,6 +241,9 @@ public sealed class LmsHostUpdateAvailabilityService(
                 var version = TryReadHealthVersion(content);
                 if (!string.IsNullOrWhiteSpace(version))
                 {
+                    using var health = JsonDocument.Parse(content);
+                    var channel = ReadJsonString(health.RootElement, "releaseChannel");
+                    hostChannels[host.Id] = channel == "development" ? "development" : "stable";
                     return version;
                 }
             }
@@ -348,5 +360,8 @@ public sealed class LmsHostUpdateAvailabilityService(
     private sealed record ReleaseManifestDto(
         string LatestVersion,
         string LatestCommunityVersion,
-        string LatestProVersion);
+        string LatestProVersion)
+    {
+        public string? Channel { get; init; }
+    }
 }

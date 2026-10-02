@@ -168,7 +168,10 @@ public class Program
             new ApplicationUpdateService(
                 provider.GetRequiredService<IHttpClientFactory>().CreateClient("ApplicationUpdates"),
                 provider.GetRequiredService<Microsoft.Extensions.Options.IOptionsMonitor<ApplicationUpdateOptions>>(),
-                provider.GetRequiredService<ILogger<ApplicationUpdateService>>()));
+                provider.GetRequiredService<ILogger<ApplicationUpdateService>>(),
+                new ApplicationReleaseChannel(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(
+                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(builder.Configuration.GetConnectionString("LinuxMadeSane") ?? "Data Source=data/linuxmadesane.db").DataSource,
+                    builder.Environment.ContentRootPath))!, "update-channel.json"))));
         builder.Services.AddHttpClient<LmsHostUpdateAvailabilityService>()
             .ConfigurePrimaryHttpMessageHandler(static () => new HttpClientHandler
             {
@@ -420,12 +423,13 @@ public class Program
                 requiresAuthentication
             });
         });
-        app.MapGet("/healthz", () => Results.Json(new
+        app.MapGet("/healthz", (ApplicationUpdateService updates) => Results.Json(new
         {
             status = "ok",
             product = "linux-made-sane",
             name = "Linux Made Sane",
-            version = ResolveProductVersion()
+            version = ResolveProductVersion(),
+            releaseChannel = updates.GetStatus().Channel
         }));
         app.MapGet("/on-demand-apps/open", (
             HttpContext context,

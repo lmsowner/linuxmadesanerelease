@@ -51,7 +51,7 @@ private_source_commit="$(tr -d '\r\n' < "$CHECKOUT_ROOT/PRIVATE-SOURCE-COMMIT" 2
   die "invalid VERSION in $source_commit: $version"
 
 latest_version="$(
-  curl -fsS --max-time 30 "$PUBLIC_BASE_URL/api/downloads/manifest" 2>/dev/null |
+  curl -fsS --max-time 30 "$PUBLIC_BASE_URL/api/downloads/manifest?channel=development" 2>/dev/null |
     python3 -c 'import json,sys; print(json.load(sys.stdin).get("latestCommunityVersion", ""))' 2>/dev/null || true
 )"
 live_manifest="$COMMUNITY_RELEASE_ROOT/$version/release-manifest-$version.json"
@@ -110,7 +110,7 @@ KEEP_ONLY_LATEST_PUBLIC_SITE_RELEASE=true \
 
 expected_size="$(wc -c < "$artifact" | tr -d ' ')"
 expected_sha="$(sha256sum "$artifact" | awk '{print $1}')"
-public_manifest="$(curl -fsS --retry 6 --retry-delay 2 --max-time 30 "$PUBLIC_BASE_URL/api/downloads/manifest")"
+public_manifest="$(curl -fsS --retry 6 --retry-delay 2 --max-time 30 "$PUBLIC_BASE_URL/api/downloads/manifest?channel=development")"
 PUBLIC_MANIFEST="$public_manifest" python3 - "$version" "$expected_size" "$expected_sha" <<'PY'
 import json
 import os

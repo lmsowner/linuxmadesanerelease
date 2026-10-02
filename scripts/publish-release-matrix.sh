@@ -59,8 +59,17 @@ cleanup_old_release_outputs() {
 
   lms_log "Cleaning old generated release packages and staging output for $EDITIONS"
   local edition stage_directory
+  stable_version=""
+  local channel_root="${COMMUNITY_RELEASE_ROOT:-$REPO_ROOT/artifacts/public-site/community}"
+  if [[ -f "$channel_root/channels.json" ]]; then
+    stable_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("stable") or "")' "$channel_root/channels.json")"
+  fi
   for edition in $EDITIONS; do
-    find "$PACKAGE_DIR" -maxdepth 1 -type f -name "linux-made-sane-${edition}-*.tar.gz" -delete
+    if [[ "$edition" == "ce" && -n "$stable_version" ]]; then
+      find "$PACKAGE_DIR" -maxdepth 1 -type f -name 'linux-made-sane-ce-*.tar.gz' ! -name "linux-made-sane-ce-${stable_version}-linux-x64.tar.gz" -delete
+    else
+      find "$PACKAGE_DIR" -maxdepth 1 -type f -name "linux-made-sane-${edition}-*.tar.gz" -delete
+    fi
     if [[ -d "$REPO_ROOT/artifacts/publish" ]]; then
       find "$REPO_ROOT/artifacts/publish" -mindepth 1 -maxdepth 1 -type d -name "linux-made-sane-${edition}-*" -exec rm -rf {} +
     fi
@@ -69,11 +78,11 @@ cleanup_old_release_outputs() {
       ce) stage_directory="$REPO_ROOT/artifacts/public-site/community" ;;
       pro) stage_directory="$REPO_ROOT/artifacts/public-site/pro" ;;
     esac
-    if [[ -n "$stage_directory" && -d "$stage_directory" ]]; then
+    if [[ "$edition" != "ce" && -n "$stage_directory" && -d "$stage_directory" ]]; then
       find "$stage_directory" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
     fi
   done
-  find "$PACKAGE_DIR" -maxdepth 1 -type f \( -name 'release-manifest-*.json' -o -name 'SHA256SUMS' \) -delete
+  find "$PACKAGE_DIR" -maxdepth 1 -type f \( -name 'release-manifest-*.json' -o -name 'SHA256SUMS' \) ! -name "release-manifest-${stable_version}.json" -delete
 }
 
 edition_runtimes() {
@@ -154,6 +163,9 @@ for edition in $EDITIONS; do
 done
 
 : > "$CHECKSUM_PATH"
+if [[ -n "${stable_version:-}" && -f "$PACKAGE_DIR/linux-made-sane-ce-${stable_version}-linux-x64.tar.gz" ]]; then
+  (cd "$PACKAGE_DIR" && sha256sum "linux-made-sane-ce-${stable_version}-linux-x64.tar.gz") >> "$CHECKSUM_PATH"
+fi
 for index in "${!artifacts[@]}"; do
   printf '%s  %s\n' "${artifact_sha256[$index]}" "$(basename "${artifacts[$index]}")" >> "$CHECKSUM_PATH"
 done
