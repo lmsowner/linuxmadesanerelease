@@ -989,6 +989,63 @@ public sealed class HomeLabService(
         dbContext.ChangeTracker.Clear();
     }
 
+    private const string VpnEditorSettingsKey = "lms-vpn-editor-settings";
+
+    public async Task<HomeLabVpnGatewayConfiguration> GetVpnGatewayConfigurationAsync(Guid installationId, CancellationToken cancellationToken = default)
+    {
+        var gateway = await dbContext.HomeLabInstallations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == installationId, cancellationToken)
+            ?? throw new InvalidOperationException("The VPN Gateway installation was not found.");
+        if (!gateway.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The selected installation is not a VPN Gateway.");
+        EnsureLmsOwns(gateway);
+        var values = DeserializeDictionary(gateway.ConfigurationJson);
+        var references = DeserializeDictionary(gateway.SecretConfigurationJson);
+        var secrets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var secretFields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["FILE:/gluetun/wireguard/wg0.conf"] = "vpn-config",
+            ["FILE:/gluetun/custom.conf"] = "vpn-config",
+            ["WIREGUARD_PRIVATE_KEY"] = "wireguard-private-key",
+            ["WIREGUARD_PRESHARED_KEY"] = "wireguard-preshared-key",
+            ["OPENVPN_USER"] = "openvpn-username",
+            ["OPENVPN_PASSWORD"] = "openvpn-password"
+        };
+        foreach (var reference in references)
+        {
+            if (!secretFields.TryGetValue(reference.Key, out var field)) continue;
+            var value = await secretStore.ResolveSecretAsync(reference.Value, cancellationToken);
+            if (string.IsNullOrEmpty(value))
+                throw new InvalidOperationException("The saved VPN configuration could not be loaded from the secret store.");
+            secrets[field] = value;
+        }
+        var pasted = secrets.ContainsKey("vpn-config");
+        var protocol = values.GetValueOrDefault("VPN_TYPE", "wireguard");
+        var provider = values.GetValueOrDefault("VPN_SERVICE_PROVIDER", "custom");
+        if (provider.Equals("custom", StringComparison.OrdinalIgnoreCase))
+            provider = values.GetValueOrDefault("VPN_PORT_FORWARDING_PROVIDER", "custom");
+        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["configuration-mode"] = pasted ? "Paste provider config" : "Guided",
+            ["protocol"] = protocol.Equals("openvpn", StringComparison.OrdinalIgnoreCase) ? "OpenVPN" : "WireGuard",
+            ["provider"] = provider.ToLowerInvariant() switch
+            {
+                "protonvpn" => "ProtonVPN", "nordvpn" => "NordVPN", "mullvad" => "Mullvad", "surfshark" => "Surfshark",
+                "private internet access" => "Private Internet Access",
+                _ => pasted ? "Custom provider configuration" : "Custom WireGuard"
+            },
+            ["port-forwarding"] = values.GetValueOrDefault("VPN_PORT_FORWARDING", "off").Equals("on", StringComparison.OrdinalIgnoreCase)
+                ? HomeLabVpnPortForwardingPlan.RequiredSelection : HomeLabVpnPortForwardingPlan.OffSelection
+        };
+        foreach (var mapping in new[] { ("SERVER_COUNTRIES", "server-countries"), ("WIREGUARD_ADDRESSES", "wireguard-addresses"),
+                     ("WIREGUARD_PUBLIC_KEY", "wireguard-public-key"), ("WIREGUARD_ENDPOINT_IP", "wireguard-endpoint-ip"), ("WIREGUARD_ENDPOINT_PORT", "wireguard-endpoint-port") })
+            if (values.TryGetValue(mapping.Item1, out var value)) fields[mapping.Item2] = value;
+        if (values.TryGetValue(VpnEditorSettingsKey, out var savedSettings))
+            foreach (var field in DeserializeDictionary(savedSettings)) fields[field.Key] = field.Value;
+        fields["gateway-name"] = gateway.DisplayName;
+        return new HomeLabVpnGatewayConfiguration(fields, secrets);
+    }
+
     public async Task<HomeLabOperationResult> ReconfigureVpnGatewayAsync(
         Guid installationId,
         IReadOnlyDictionary<string, string> configuration,
@@ -5445,6 +5502,9 @@ public sealed class HomeLabService(
             var setupMode = supplied.TryGetValue("configuration-mode", out var suppliedMode) && !string.IsNullOrWhiteSpace(suppliedMode)
                 ? suppliedMode.Trim()
                 : "Paste provider config";
+            values[VpnEditorSettingsKey] = JsonSerializer.Serialize(
+                supplied.Where(item => app.ConfigurationSchema.Any(field => !field.Secret && field.Id.Equals(item.Key, StringComparison.OrdinalIgnoreCase)))
+                    .ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase), JsonOptions);
             var protocol = RequiredValue(supplied, "protocol", "Choose a VPN protocol.");
             var protocolValue = protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase) ? "wireguard" :
                 protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase) ? "openvpn" :
@@ -5916,6 +5976,7 @@ public sealed class HomeLabService(
         key.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("listen-address", StringComparison.OrdinalIgnoreCase) ||
         key.Equals("gateway-name", StringComparison.OrdinalIgnoreCase) ||
+        key.Equals(VpnEditorSettingsKey, StringComparison.OrdinalIgnoreCase) ||
         key.StartsWith("lms-container-backup-", StringComparison.OrdinalIgnoreCase) ||
         key.Equals(ManagementOwnerKey, StringComparison.OrdinalIgnoreCase) ||
         key.Equals(ComposeDraftKey, StringComparison.OrdinalIgnoreCase) ||

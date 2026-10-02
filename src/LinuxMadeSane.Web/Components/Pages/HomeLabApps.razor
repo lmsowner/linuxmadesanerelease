@@ -2617,33 +2617,32 @@
         secretConfigurationValues.Clear();
     }
 
-    private void BeginVpnReconfiguration()
+    private Task BeginVpnReconfiguration() => selectedInstallation is { } gateway
+        ? BeginVpnReconfiguration(gateway) : Task.CompletedTask;
+
+    private async Task BeginVpnReconfiguration(HomeLabAppInstallation gateway)
     {
-        if (selectedInstallation is not { } gateway || !gateway.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        if (busy || !IsVpnGateway(gateway)) return;
+        busy = true;
+        SetMessage("Loading saved VPN settings…", false);
+        try
         {
-            return;
+            var saved = await HomeLabService.GetVpnGatewayConfigurationAsync(gateway.Id);
+            configurationValues.Clear();
+            secretConfigurationValues.Clear();
+            foreach (var field in saved.Configuration) configurationValues[field.Key] = field.Value;
+            foreach (var field in saved.SecretConfiguration) secretConfigurationValues[field.Key] = field.Value;
+            configuringTargetGroup = null;
+            configuringInstallation = gateway;
+            configuringApp = GetApp("vpn-gateway");
+            CloseDetails();
+            SetMessage("Saved VPN settings loaded. Edit the existing configuration below.", false);
         }
-
-        BeginVpnReconfiguration(gateway);
-    }
-
-    private void BeginVpnReconfiguration(HomeLabAppInstallation gateway)
-    {
-        if (!gateway.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        catch (Exception exception)
         {
-            return;
+            SetMessage(DescribeException(exception), true);
         }
-
-        configuringInstallation = gateway;
-        configuringApp = GetApp("vpn-gateway");
-        configurationValues.Clear();
-        secretConfigurationValues.Clear();
-        configurationValues["gateway-name"] = gateway.DisplayName;
-        configurationValues["configuration-mode"] = "Paste provider config";
-        configurationValues["provider"] = "ProtonVPN";
-        configurationValues["protocol"] = "WireGuard";
-        configurationValues["port-forwarding"] = HomeLabVpnPortForwardingPlan.RequiredSelection;
-        CloseDetails();
+        finally { busy = false; }
     }
 
     private void BeginGatewayRename(HomeLabAppInstallation gateway)
@@ -2770,7 +2769,10 @@
         if (!field.Id.Equals("port-forwarding", StringComparison.OrdinalIgnoreCase) ||
             HomeLabVpnPortForwardingPlan.SupportsAutomaticPortForwarding(GetConfigurationValue("provider")))
         {
-            return field.Options ?? [];
+            var options = field.Options ?? [];
+            var current = GetConfigurationValue(field.Id);
+            return field.Id.Equals("provider", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(current) && !options.Contains(current)
+                ? options.Concat([current]) : options;
         }
 
         return [HomeLabVpnPortForwardingPlan.OffSelection];
@@ -2910,7 +2912,7 @@
                 BeginGatewayRename(installation);
                 break;
             case "vpn-settings":
-                BeginVpnReconfiguration(installation);
+                await BeginVpnReconfiguration(installation);
                 break;
             case "remove":
                 pendingRemoval = installation;

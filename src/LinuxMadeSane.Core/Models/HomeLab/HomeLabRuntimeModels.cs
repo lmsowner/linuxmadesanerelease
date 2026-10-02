@@ -153,3 +153,7 @@ public sealed record HomeLabNetworkSecurity(
     string? PortForwardingStatus = null,
     int? ForwardedPort = null,
     string? PortForwardingDetail = null);
+
+public sealed record HomeLabVpnGatewayConfiguration(
+    IReadOnlyDictionary<string, string> Configuration,
+    IReadOnlyDictionary<string, string> SecretConfiguration);
