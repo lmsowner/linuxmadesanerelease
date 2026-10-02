@@ -370,6 +370,7 @@
     }
 </div>
 
+<div class="local-credentials-dialog-host">
 <UiModal IsOpen="@isLocalCredentialsOpen"
          Title="Credentials"
          Subtitle="@localUserAccessEditor.UserName"
@@ -377,7 +378,7 @@
          CloseOnBackdrop="false"
          OnClose="CloseLocalCredentialsAsync">
     <ChildContent>
-        @if (!string.IsNullOrWhiteSpace(localCredentialsMessage))
+        @if (!credentialChangesKept && !string.IsNullOrWhiteSpace(localCredentialsMessage))
         {
             <p class="callout @localCredentialsMessageTone">@localCredentialsMessage</p>
         }
@@ -385,32 +386,72 @@
         @if (credentialTrial is not null)
         {
             <UserCredentialTrialWatch Trial="@credentialTrial" IsBusy="@(isSavingLocalUserAccess || isResettingLocalPassword)" OnExpired="OnCredentialTrialExpiredAsync" />
-            <div class="callout warning" role="status">
-                <strong>Login test active until @credentialTrial.ExpiresAtUtc.ToLocalTime().ToString("HH:mm:ss")</strong>
-                <p>Keep this window open. From a new terminal on your device, connect as @credentialTrial.UserName using the proposed credentials. LMS checks for a fresh successful SSH login before keeping the change.</p>
-                <p>If the test fails, you close this dialog, or the two-minute deadline expires, the previous credentials and SSH settings return automatically. Existing SSH sessions stay open.</p>
-                <div class="toolbar-row">
-                    <UiCommandButton Label="Check login and keep" Glyph="UiIconGlyph.Save" Disabled="@isSavingLocalUserAccess" OnClick="ConfirmCredentialTrialAsync" />
-                    <UiCommandButton Label="Revert now" Disabled="@isSavingLocalUserAccess" OnClick="RevertCredentialTrialAsync" />
+            <UserSshLoginTest Trial="@credentialTrial" IsBusy="@isSavingLocalUserAccess" ShowActions="false" />
+            @if (credentialTrial.ChangesPassword && HasVisibleLocalPassword())
+            {
+                <div class="local-password-action-row">
+                    <input class="ui-control-input" aria-label="New password for this login test" type="text" value="@GetVisibleLocalPasswordValue()" readonly />
+                    <UiCommandButton Label="Copy new password" OnClick="CopyPendingLocalPasswordAsync" />
                 </div>
-            </div>
+            }
         }
-
+        else if (credentialChangesKept)
+        {
+            <div class="callout success" role="status"><strong>Login verified for @localUserAccessEditor.UserName.</strong><p>Your changes are kept. You can close this dialog.</p></div>
+        }
+        else
+        {
         <EditForm id="local-user-credentials-form" Model="@localUserAccessEditor" OnValidSubmit="SaveLocalUserAccessAsync" class="stack-form remote-access-modal-form">
             <DataAnnotationsValidator />
 
             <div class="surface-subcard local-credentials-section">
                 <div class="local-credentials-section-header">
                     <div>
-                        <h3>Password</h3>
-                        <p class="meta-text">Try a new password for two minutes. Keep it only after a fresh login succeeds; otherwise the old password returns.</p>
+                        <h3>1. Choose SSH login options</h3>
+                        <p class="meta-text">Choose password, key, either method, or require both for this Linux user.</p>
+                    </div>
+                </div>
+
+                <div class="field-row local-ssh-row">
+                    <UiComboboxField TValue="RemoteAccessSshAuthenticationMode"
+                                   @bind-Value="localUserAccessEditor.SshAuthenticationMode"
+                                   Label="SSH login mode" Disabled="@(credentialTrial is not null || isSavingLocalUserAccess || isResettingLocalPassword)"
+                                   Helper="@BuildSshModeHelperText(localUserAccessEditor.SshAuthenticationMode)">
+                        @foreach (var mode in Enum.GetValues<RemoteAccessSshAuthenticationMode>())
+                        {
+                            <option value="@mode">@GetSshModeLabel(mode)</option>
+                        }
+                    </UiComboboxField>
+
+                    <UiFileDropzone Label="Import a public key" Compact="true"
+                                    Helper="Choose a .pub file, or paste the public key below."
+                                    PrimaryText="Choose or drop .pub files"
+                                    SecondaryText=""
+                                    Accept=".pub,.txt"
+                                    Multiple="true"
+                                    Class="local-credentials-dropzone"
+                                    OnChange="HandleLocalUserKeyImportAsync" />
+                </div>
+
+                <UiTextAreaField @bind-Value="localUserAccessEditor.AuthorizedKeyEntries"
+                                 Label="Public keys / certificate entries" Disabled="@(credentialTrial is not null || isSavingLocalUserAccess || isResettingLocalPassword)"
+                                 Helper="@BuildAuthorizedKeyHelperText(localUserAccessEditor.SshAuthenticationMode)"
+                                 Rows="2"
+                                 InputClass="local-ssh-key-textarea" />
+                <SshPublicKeySetupGuide UserName="@localUserAccessEditor.UserName" />
+            </div>
+            <details class="surface-subcard local-credentials-section local-password-options">
+                <summary>Change password (optional)</summary>
+                <div class="local-credentials-section-header">
+                    <div>
+                        <h3>New account password</h3>
+                        <p class="meta-text">Start a two-minute login test with a replacement password.</p>
                     </div>
                     <span class="status-pill neutral">@FormatTimestamp(GetPasswordChangedAtUtcForSelectedUser(), "Not changed yet")</span>
                 </div>
 
                 <div class="local-password-field">
                     <label for="local-user-password-display">
-                        <span>@GetLocalPasswordLabel()</span>
                         <span class="meta-text">@GetLocalPasswordHelperText()</span>
                     </label>
 
@@ -442,60 +483,37 @@
                     </div>
                 </div>
 
-            </div>
+            </details>
 
-            <div class="surface-subcard local-credentials-section">
-                <div class="local-credentials-section-header">
-                    <div>
-                        <h3>SSH login</h3>
-                        <p class="meta-text">Choose password, key, either method, or require both for this Linux user.</p>
-                    </div>
-                </div>
-
-                <div class="field-row local-ssh-row">
-                    <UiComboboxField TValue="RemoteAccessSshAuthenticationMode"
-                                   @bind-Value="localUserAccessEditor.SshAuthenticationMode"
-                                   Label="SSH login mode" Disabled="@(credentialTrial is not null || isSavingLocalUserAccess || isResettingLocalPassword)"
-                                   Helper="@BuildSshModeHelperText(localUserAccessEditor.SshAuthenticationMode)">
-                        @foreach (var mode in Enum.GetValues<RemoteAccessSshAuthenticationMode>())
-                        {
-                            <option value="@mode">@GetSshModeLabel(mode)</option>
-                        }
-                    </UiComboboxField>
-
-                    <UiFileDropzone Label="Import public keys or certificate files"
-                                    Helper="Append one or more OpenSSH public keys, `-cert.pub` files, or `cert-authority` entries."
-                                    PrimaryText="Drag &amp; drop your file here"
-                                    SecondaryText="or click to choose OpenSSH public keys or certificate entries"
-                                    Accept=".pub,.txt"
-                                    Multiple="true"
-                                    Class="local-credentials-dropzone"
-                                    OnChange="HandleLocalUserKeyImportAsync" />
-                </div>
-
-                <SshPublicKeySetupGuide UserName="@localUserAccessEditor.UserName" />
-
-                <UiTextAreaField @bind-Value="localUserAccessEditor.AuthorizedKeyEntries"
-                                 Label="Public keys / certificate entries" Disabled="@(credentialTrial is not null || isSavingLocalUserAccess || isResettingLocalPassword)"
-                                 Helper="@BuildAuthorizedKeyHelperText(localUserAccessEditor.SshAuthenticationMode)"
-                                 Rows="5"
-                                 InputClass="local-ssh-key-textarea" />
-            </div>
+            <p class="meta-text local-credentials-next-step"><strong>Next:</strong> start the test, log in from PowerShell or Terminal on your own PC / Mac / Linux computer, then check the login and keep the change.</p>
         </EditForm>
+        }
     </ChildContent>
     <Footer>
-        <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="CloseLocalCredentialsAsync" />
-        <UiCommandButton Label="@(isSavingLocalUserAccess ? "Starting test..." : "Try SSH access")"
-                         Glyph="UiIconGlyph.Save"
-                         Variant="UiButtonVariant.PrimaryMuted"
-                         Type="submit"
-                         Disabled="@(isSavingLocalUserAccess || credentialTrial is not null)"
-                         form="local-user-credentials-form" />
+        @if (credentialTrial is not null)
+        {
+            <UiCommandButton Label="Revert" Variant="UiButtonVariant.Ghost" Disabled="@isSavingLocalUserAccess" OnClick="RevertCredentialTrialAsync" />
+            <UiCommandButton Label="Check login and keep" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.PrimaryMuted" Disabled="@isSavingLocalUserAccess" OnClick="ConfirmCredentialTrialAsync" />
+        }
+        else if (credentialChangesKept)
+        {
+            <UiCommandButton Label="Change options" Variant="UiButtonVariant.Ghost" OnClick="EditCredentialOptions" />
+            <UiCommandButton Label="Done" Variant="UiButtonVariant.PrimaryMuted" OnClick="CloseLocalCredentialsAsync" />
+        }
+        else
+        {
+            <UiCommandButton Label="Cancel" Variant="UiButtonVariant.Ghost" OnClick="CloseLocalCredentialsAsync" />
+            <UiCommandButton Label="@(isSavingLocalUserAccess ? "Starting test..." : "Start 2-minute login test")"
+                             Variant="UiButtonVariant.PrimaryMuted" Type="submit" Disabled="@(isSavingLocalUserAccess || isResettingLocalPassword)" form="local-user-credentials-form" />
+        }
     </Footer>
 </UiModal>
+</div>
 
 @code {
     private UserCredentialTrial? credentialTrial;
+    private bool credentialChangesKept;
+    private void EditCredentialOptions() { credentialChangesKept = false; localCredentialsMessage = string.Empty; }
 
     private static readonly HashSet<string> CommonWorkingGroups = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -636,6 +654,7 @@
             return;
         }
         credentialTrial = activeTrial;
+        credentialChangesKept = false;
         localUserAccessEditor = await ShareService.GetLocalUserAccessEditorAsync(user.Id);
         if (activeTrial?.ProposedMode is { } proposedMode)
         {
@@ -740,7 +759,8 @@
         {
             await CredentialTrials.ConfirmAsync(credentialTrial.Id);
             credentialTrial = null;
-            localCredentialsMessage = "Fresh SSH login verified. The new credentials and login settings are now kept.";
+            credentialChangesKept = true;
+            localCredentialsMessage = string.Empty;
             localCredentialsMessageTone = "success";
             await LoadAsync();
         }

@@ -10,6 +10,7 @@ public sealed record UserCredentialTrial(Guid Id, Guid UserId, string UserName, 
 {
     public RemoteAccessSshAuthenticationMode? ProposedMode { get; init; }
     public string? ProposedPublicKeys { get; init; }
+    public int? SshPort { get; init; }
 }
 
 public interface IUserCredentialTrialService

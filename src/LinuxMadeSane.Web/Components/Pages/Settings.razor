@@ -22,7 +22,7 @@
 @inject ITrustedNetworkAccessService TrustedNetworkAccessService
 @inject TrustedNetworkAccessTrialService NetworkAccessTrialService
 @inject IFirewallManagementService FirewallService
-@inject IMailRelayService MailRelayService
+@inject IMailRelayStore MailRelayStore
 @inject PasskeyAuthenticationService PasskeyAuthenticationService
 @inject NavigationManager Navigation
 @inject IHttpContextAccessor HttpContextAccessor
@@ -1405,7 +1405,6 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
     private TrustedNetworkEntryEditor networkEditor = new();
     private SecurityUserEditor userEditor = new();
     private SecurityMessagingSettingsEditor messagingEditor = new();
-    private MailRelayDashboardViewModel? mailRelayDashboard;
     private IReadOnlyList<MailRelayDomain> configuredMailRelayDomains = [];
     private string selectedMailRelayDomain = string.Empty;
     private FirewallAllowRuleEditor firewallEditor = new();
@@ -1591,8 +1590,8 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         page = await SecuritySettingsService.GetPageAsync();
         await LoadCurrentUserPasskeysAsync();
         messagingEditor = await SecuritySettingsService.GetMessagingEditorAsync();
-        mailRelayDashboard = await MailRelayService.GetDashboardAsync();
-        configuredMailRelayDomains = mailRelayDashboard.Domains.Where(domain => domain.Enabled).ToArray();
+        // This page needs saved domains, not Mail Relay's live Cloudflare/DNS/SMTP preflight.
+        configuredMailRelayDomains = (await MailRelayStore.ListDomainsAsync()).Where(domain => domain.Enabled).ToArray();
         selectedMailRelayDomain = configuredMailRelayDomains.FirstOrDefault(domain =>
             messagingEditor.SenderAddress.EndsWith($"@{domain.DomainName}", StringComparison.OrdinalIgnoreCase))?.DomainName
             ?? configuredMailRelayDomains.FirstOrDefault()?.DomainName

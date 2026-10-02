@@ -55,34 +55,25 @@
                 </tbody>
             </table>
         </div>
-        @if (review is not null)
-        {
-            <section class="surface-subcard stack-list">
-                <h4>@review.User.UserName · @Label(review.Editor.SshAuthenticationMode)</h4>
-                <SshPublicKeySetupGuide UserName="@review.User.UserName" />
-                <UiTextAreaField Label="Public keys" Helper="Optional for password or key. Key-only and both-required modes need a public key. Keep private keys on the user's device."
-                                 Value="@review.Editor.AuthorizedKeyEntries" ValueChanged="SetReviewKeys" ValueExpression="@(() => review.Editor.AuthorizedKeyEntries)"
-                                 Rows="3" Disabled="@(busy || trial is not null || review.Protected)" />
-                @if (trial is null)
-                {
-                    <div class="toolbar-row">
-                        <UiCommandButton Label="Test this change" Disabled="@(busy || !CanAdminister || review.Protected)" OnClick="StartReviewTrialAsync" />
-                        <UiCommandButton Label="Skip / next staged user" Disabled="@busy" OnClick="SkipReview" />
-                    </div>
-                }
-            </section>
-        }
         @if (trial is not null)
         {
             <UserCredentialTrialWatch Trial="@trial" IsBusy="@busy" OnExpired="OnTrialExpiredAsync" />
-            <div class="callout warning" role="status">
-                <strong>Testing @trial.UserName until @trial.ExpiresAtUtc.ToLocalTime().ToString("HH:mm:ss")</strong>
-                <p>Open a new SSH connection from that user's device using the proposed method. LMS verifies a fresh successful login before keeping it. Unconfirmed changes revert after two minutes, even if LMS stops.</p>
+            <section class="surface-subcard"><UserSshLoginTest Trial="@trial" IsBusy="@busy" OnKeep="ConfirmAsync" OnRevert="RevertAsync" /></section>
+        }
+        else if (review is not null)
+        {
+            <section class="surface-subcard stack-list">
+                <h4>@review.User.UserName · @Label(review.Editor.SshAuthenticationMode)</h4>
+                <UiTextAreaField Label="Public keys" Helper="Use the .pub file for the private key on the user's computer."
+                                 Value="@review.Editor.AuthorizedKeyEntries" ValueChanged="SetReviewKeys" ValueExpression="@(() => review.Editor.AuthorizedKeyEntries)"
+                                 Rows="2" Disabled="@(busy || review.Protected)" />
+                <SshPublicKeySetupGuide UserName="@review.User.UserName" />
+                <p class="meta-text">After starting, log in from the user's own PC / Mac / Linux device, then check the login and keep the change.</p>
                 <div class="toolbar-row">
-                    <UiCommandButton Label="Check login and keep" Disabled="@busy" OnClick="ConfirmAsync" />
-                    <UiCommandButton Label="Revert this user" Disabled="@busy" OnClick="RevertAsync" />
+                    <UiCommandButton Label="Start 2-minute login test" Disabled="@(busy || !CanAdminister || review.Protected)" OnClick="StartReviewTrialAsync" />
+                    <UiCommandButton Label="Skip / next staged user" Disabled="@busy" OnClick="SkipReview" />
                 </div>
-            </div>
+            </section>
         }
         @if (DraftCount > 0 && review is null && trial is null)
         {

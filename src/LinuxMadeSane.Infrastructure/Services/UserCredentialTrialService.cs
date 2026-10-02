@@ -148,17 +148,21 @@ public sealed class UserCredentialTrialService(IServiceScopeFactory scopes, SshA
                 await PersistAsync(recovery, cancellationToken);
                 active = recovery;
                 liveChangesStarted = true;
+                Dictionary<string, string>? effectivePolicy = null;
                 if (editor is not null)
                 {
                     await ControlAsync(scope, "apply", recovery, new {
                         configuration = LocalUserAccessSystemService.BuildSshdConfig([desired!]) + "\nMatch all\n",
                         publicKeys = desired!.AuthorizedKeyEntries + "\n" }, cancellationToken);
-                    RequireEffectiveMode(await ReadEffectiveAsync(scope, user.UserName, cancellationToken), desired!);
+                    effectivePolicy = await ReadEffectiveAsync(scope, user.UserName, cancellationToken);
+                    RequireEffectiveMode(effectivePolicy, desired!);
                 }
                 if (newPassword is not null)
                     await ControlAsync(scope, "password", recovery, new { password = newPassword }, cancellationToken);
                 // Ignore journal entries recorded before all proposed credentials were installed.
-                recovery = recovery with { Trial = trial with { StartedAtUtc = clock.GetUtcNow() } };
+                effectivePolicy ??= await ReadEffectiveAsync(scope, user.UserName, cancellationToken);
+                recovery = recovery with { Trial = trial with { StartedAtUtc = clock.GetUtcNow(),
+                    SshPort = int.TryParse(effectivePolicy.GetValueOrDefault("port"), out var port) ? port : null } };
                 await PersistAsync(recovery, cancellationToken);
                 active = recovery;
                 return recovery.Trial;

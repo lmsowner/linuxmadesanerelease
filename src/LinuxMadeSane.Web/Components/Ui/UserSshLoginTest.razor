@@ -1,0 +1,99 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@implements IDisposable
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+
+<section class="ssh-login-test" aria-labelledby="@headingId">
+    <div class="ssh-login-test-heading">
+        <div><p class="eyebrow">Step 2 of 3 · test on your device</p><h3 id="@headingId">Log in from your own computer</h3></div>
+        <span class="status-pill warning" role="timer">@RemainingTime to confirm</span>
+    </div>
+    <p>Open <strong>PowerShell on Windows</strong> or <strong>Terminal on macOS / Linux</strong> on the computer you connect from. Start a <strong>new SSH connection</strong> as <strong>@Trial.UserName</strong>.</p>
+    <p class="meta-text">Use your own device, rather than the terminal inside LMS. Keep your current SSH session open.</p>
+    @if (Trial.ProposedMode == RemoteAccessSshAuthenticationMode.PasswordOrKey && !Trial.ChangesPassword)
+    {
+        <div class="toolbar-row" aria-label="Choose one login method to test">
+            <span class="meta-text">Test either method:</span>
+            <button type="button" class="glass-button @(!testWithKey ? "glass-button-primary" : "glass-button-ghost")" aria-pressed="@(!testWithKey)" @onclick="@(() => testWithKey = false)">Password</button>
+            <button type="button" class="glass-button @(testWithKey ? "glass-button-primary" : "glass-button-ghost")" aria-pressed="@testWithKey" @onclick="@(() => testWithKey = true)">Key</button>
+        </div>
+    }
+    @if (UsesKey)
+    {
+        <UiTextField Label="Private key file on your computer" @bind-Value="privateKeyPath" Placeholder="~/.ssh/your_private_key"
+                     Helper="Use the private file that matches the .pub key you added. Do not use the .pub file or paste the private key here." />
+    }
+    <div class="ssh-login-test-command">
+        <pre><code>@ConnectionCommand</code></pre>
+        <UiCommandButton Label="Copy command" Glyph="UiIconGlyph.Copy" Disabled="@(!CanCopyCommand)" OnClick="CopyCommandAsync" />
+    </div>
+    @if (UsesKey)
+    {
+        <p class="meta-text">A prompt for the key's passphrase unlocks it on your device.@(Trial.ProposedMode == RemoteAccessSshAuthenticationMode.PasswordAndKey ? " This policy also requires the Linux account password." : " Key login does not require the Linux account password. If it asks for that, the key may have been rejected.")</p>
+    }
+    else
+    {
+        <p class="meta-text">Enter @(Trial.ChangesPassword ? "the new password shown below" : "this Linux account's password") when SSH asks.</p>
+    }
+    <details class="ssh-login-test-address">
+        <summary>SSH host or port different?</summary>
+        <div class="field-row">
+            <UiTextField Label="SSH server" @bind-Value="host" />
+            <UiNumberField TValue="int" Label="SSH port" @bind-Value="port" min="1" max="65535" />
+        </div>
+    </details>
+    <div class="ssh-login-test-confirm">
+        <strong>Step 3 · once the new SSH session opens, check the login and keep this change.</strong>
+        <p class="meta-text">LMS verifies the login. If it fails or you run out of time, the previous settings return automatically.</p>
+        @if (ShowActions)
+        {
+            <div class="toolbar-row">
+                <UiCommandButton Label="Check login and keep" Variant="UiButtonVariant.PrimaryMuted" Disabled="@IsBusy" OnClick="OnKeep" />
+                <UiCommandButton Label="Revert" Disabled="@IsBusy" OnClick="OnRevert" />
+            </div>
+        }
+    </div>
+    @if (!string.IsNullOrWhiteSpace(copyMessage)) { <p class="meta-text" role="status">@copyMessage</p> }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public UserCredentialTrial Trial { get; set; } = null!;
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter] public bool ShowActions { get; set; } = true;
+    [Parameter] public EventCallback OnKeep { get; set; }
+    [Parameter] public EventCallback OnRevert { get; set; }
+    private readonly string headingId = "ssh-device-test-" + Guid.NewGuid().ToString("N");
+    private readonly CancellationTokenSource lifetime = new();
+    private bool testWithKey;
+    private string privateKeyPath = "";
+    private string host = "";
+    private int port;
+    private string? copyMessage;
+    private bool UsesKey => Trial.ProposedMode == RemoteAccessSshAuthenticationMode.PasswordAndKey ||
+        !Trial.ChangesPassword && (Trial.ProposedMode == RemoteAccessSshAuthenticationMode.KeyOnly || testWithKey);
+    private string RemainingTime { get { var remaining = TimeSpan.FromSeconds(Math.Max(0, Math.Ceiling((Trial.ExpiresAtUtc - DateTimeOffset.UtcNow).TotalSeconds))); return $"{(int)remaining.TotalMinutes}:{remaining.Seconds:00}"; } }
+    private bool CanCopyCommand => port is > 0 and <= 65535 && SafeArgument(host) && (!UsesKey || SafeArgument(privateKeyPath));
+    private string ConnectionCommand => $"ssh -p {(port > 0 ? port.ToString() : "YOUR_SSH_PORT")} " +
+        (UsesKey ? $"-o IdentitiesOnly=yes -i \"{(SafeArgument(privateKeyPath) ? privateKeyPath.Trim() : "YOUR_PRIVATE_KEY_FILE")}\" " +
+            (Trial.ProposedMode == RemoteAccessSshAuthenticationMode.PasswordAndKey ? "" : "-o PasswordAuthentication=no -o KbdInteractiveAuthentication=no ")
+            : "-o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive ") +
+        $"\"{Trial.UserName}@{(SafeArgument(host) ? host.Trim() : "YOUR_SSH_HOST")}\"";
+    private static bool SafeArgument(string value) => !string.IsNullOrWhiteSpace(value) && !value.Any(ch => ch is '"' or '$' or '`' or '\r' or '\n' or '\0');
+    protected override void OnInitialized() { host = new Uri(Navigation.Uri).Host; port = Trial.SshPort ?? 0; }
+    protected override void OnAfterRender(bool firstRender) { if (firstRender) _ = TickAsync(); }
+    private async Task TickAsync()
+    {
+        try { while (!lifetime.IsCancellationRequested) { await Task.Delay(1000, lifetime.Token); await InvokeAsync(StateHasChanged); } }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+    }
+    private async Task CopyCommandAsync()
+    {
+        if (!CanCopyCommand) return;
+        try { await JS.InvokeVoidAsync("navigator.clipboard.writeText", ConnectionCommand); copyMessage = "Command copied. Run it on your own computer."; }
+        catch (JSException) { copyMessage = "Select and copy the command above."; }
+    }
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
+}

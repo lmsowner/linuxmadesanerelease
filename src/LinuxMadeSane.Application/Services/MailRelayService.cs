@@ -19,15 +19,11 @@ public sealed class MailRelayService(
 {
     public async Task<MailRelayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default)
     {
-        var configurationTask = store.GetConfigurationAsync(cancellationToken);
-        var domainsTask = store.ListDomainsAsync(cancellationToken);
-        var clientsTask = store.ListClientsAsync(cancellationToken);
-        var preflightTask = preflightService.InspectAsync(false, cancellationToken: cancellationToken);
-
-        await Task.WhenAll(configurationTask, domainsTask, clientsTask, preflightTask);
-
-        var configuration = await configurationTask;
-        var preflight = await preflightTask;
+        // These stores share one scoped DbContext; overlapping reads fail on a cold/slow connection.
+        var configuration = await store.GetConfigurationAsync(cancellationToken);
+        var domains = await store.ListDomainsAsync(cancellationToken);
+        var clients = await store.ListClientsAsync(cancellationToken);
+        var preflight = await preflightService.InspectAsync(false, cancellationToken: cancellationToken);
         var status = configuration is null
             ? MailRelayOperationalStatus.NotConfigured
             : configuration.Enabled
@@ -46,8 +42,8 @@ public sealed class MailRelayService(
             status,
             summary,
             configuration,
-            await domainsTask,
-            await clientsTask,
+            domains,
+            clients,
             preflight);
     }
 
