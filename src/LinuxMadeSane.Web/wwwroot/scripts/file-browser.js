@@ -22,10 +22,14 @@ window.lmsFileBrowser = (() => {
         const down = event => {
             const surface = event.target.closest("[data-marquee-surface]");
             if (!surface || event.button !== 0 || event.pointerType === "touch" || element.dataset.selectionBusy === "true"
-                || event.target.closest("input,button,a,label,select,textarea,thead,[data-file-path],.file-browser-thumbnail-parent")) return;
+                || event.target.closest("input,button,a,label,select,textarea,thead,.file-browser-thumbnail-parent")) return;
             const rect = surface.getBoundingClientRect();
             // Ignore scrollbars.
             if (event.clientX >= rect.left + surface.clientWidth || event.clientY >= rect.top + surface.clientHeight) return;
+            // Claim the gesture before the browser starts native text/image selection.
+            // A press without a drag still reaches the normal item click handler.
+            event.preventDefault();
+            surface.classList.add("marquee-dragging");
             const entries = [...surface.querySelectorAll("[data-file-path]")];
             gesture = { surface, entries, path: element.dataset.selectionPath, pointerId: event.pointerId,
                 x: event.clientX, y: event.clientY, toggle: event.ctrlKey || event.metaKey, add: event.shiftKey,
@@ -87,9 +91,12 @@ window.lmsFileBrowser = (() => {
             }
             cleanup();
         };
+        const preventNativeDrag = event => { if (gesture) event.preventDefault(); };
         const click = event => { if (suppressClick) { event.preventDefault(); event.stopImmediatePropagation(); } };
         element.addEventListener("pointerdown", down);
         element.addEventListener("click", click, true);
+        element.addEventListener("selectstart", preventNativeDrag, true);
+        element.addEventListener("dragstart", preventNativeDrag, true);
         window.addEventListener("pointermove", move, { passive: false });
         window.addEventListener("pointerup", finish);
         window.addEventListener("pointercancel", cancel);
@@ -98,6 +105,8 @@ window.lmsFileBrowser = (() => {
             cancel();
             element.removeEventListener("pointerdown", down);
             element.removeEventListener("click", click, true);
+            element.removeEventListener("selectstart", preventNativeDrag, true);
+            element.removeEventListener("dragstart", preventNativeDrag, true);
             window.removeEventListener("pointermove", move);
             window.removeEventListener("pointerup", finish);
             window.removeEventListener("pointercancel", cancel);
