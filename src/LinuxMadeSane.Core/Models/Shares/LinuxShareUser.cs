@@ -13,4 +13,7 @@ public sealed record LinuxShareUser(
     IReadOnlyList<string> SupplementaryGroups,
     string HomeDirectory,
     string LoginShell,
-    bool IsEnabled);
+    bool IsEnabled)
+{
+    public LinuxMadeSane.Core.Enums.LocalUserSudoMode? SudoMode { get; init; }
+}

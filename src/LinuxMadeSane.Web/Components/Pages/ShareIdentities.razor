@@ -66,6 +66,7 @@
                                                 <th>ID</th>
                                                 <th>Group</th>
                                                 <th>Access</th>
+                                                <th>Sudo</th>
                                                 <th></th>
                                             </tr>
                                         </thead>
@@ -78,6 +79,7 @@
                                                     <td>@FormatUserId(user)</td>
                                                     <td>@RenderGroupChips(GetUserGroups(user))</td>
                                                     <td><span class="status-pill @(user.IsEnabled ? "success" : "warning")">@FormatLoginState(user)</span></td>
+                                                    <td>@FormatSudoMode(user.SudoMode)</td>
                                                     <td class="actions-cell">
                                                         <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.Action" OnClick="@(() => EditUserAsync(user.Id))" />
                                                         <UiCommandButton Label="Credentials" Glyph="UiIconGlyph.Connection" Variant="UiButtonVariant.Action" OnClick="@(() => BeginLocalCredentialsAsync(user))" />
@@ -114,8 +116,20 @@
 
                                         <UiCheckboxField @bind-Value="userEditor.IsEnabled" Label="Enabled" Compact="true" />
 
+                                        <UiComboboxField TValue="LocalUserSudoMode?" @bind-Value="userEditor.SudoMode" Label="Administrator (sudo) access"
+                                                         Helper="Controls sudo su and sudo commands. Passwordless sudo grants full administrator access without an account password.">
+                                            <option value="">Keep host / group policy</option>
+                                            <option value="@LocalUserSudoMode.None">No sudo access</option>
+                                            <option value="@LocalUserSudoMode.PasswordRequired">Sudo with account password</option>
+                                            <option value="@LocalUserSudoMode.Passwordless">Sudo without a password</option>
+                                        </UiComboboxField>
+                                        @if (userEditor.IsSshKeyOnly && userEditor.SudoMode != LocalUserSudoMode.None)
+                                        {
+                                            <p class="meta-text"><strong>Key-only administrator:</strong> choose “Sudo without a password” if this account has no Linux password. Your SSH key gets you logged in; this option lets you run sudo su afterwards.</p>
+                                        }
+
                                         <UiIdentityTokenPicker Title="Group memberships"
-                                                               Helper="Click working groups to add or remove them. Selected groups stay visible as pills."
+                                                               Helper="Choose extra groups here. Administrator membership is controlled by the sudo option above."
                                                                SearchPlaceholder="Search working groups"
                                                                EmptySelectionText="No extra groups selected"
                                                                EmptyResultsText="No groups match that search."
@@ -511,6 +525,13 @@
 </div>
 
 @code {
+    private static string FormatSudoMode(LocalUserSudoMode? mode) => mode switch
+    {
+        LocalUserSudoMode.None => "No sudo access",
+        LocalUserSudoMode.PasswordRequired => "Account password",
+        LocalUserSudoMode.Passwordless => "No password",
+        _ => "Host / group policy"
+    };
     private UserCredentialTrial? credentialTrial;
     private bool credentialChangesKept;
     private void EditCredentialOptions() { credentialChangesKept = false; localCredentialsMessage = string.Empty; }
@@ -589,6 +610,7 @@
     private async Task CreateNewUserAsync()
     {
         userEditor = await ShareService.GetUserEditorAsync(null);
+        userEditor.SudoMode = LocalUserSudoMode.None;
         selectedUserId = null;
         userEditorVisible = true;
         activeTab = UsersTabValue;
@@ -1031,6 +1053,7 @@
 
     private IReadOnlyList<UiIdentityTokenPickerItem> GetMembershipGroupPickerItems() =>
         GetPickableGroups()
+            .Where(group => group.GroupName is not "sudo" and not "wheel")
             .Select(group => new UiIdentityTokenPickerItem(
                 group.GroupName,
                 group.GroupName,
@@ -1048,7 +1071,7 @@
             .ToArray();
 
     private IReadOnlyList<string> GetSelectedSupplementaryGroups() =>
-        ParseCsv(userEditor.SupplementaryGroupsCsv);
+        ParseCsv(userEditor.SupplementaryGroupsCsv).Where(group => group is not "sudo" and not "wheel").ToArray();
 
     private Task ToggleSupplementaryGroupAsync(string groupName)
     {
@@ -1230,7 +1253,7 @@
         RemoteAccessSshAuthenticationMode.Password => "SSH accepts a password only for this user.",
         RemoteAccessSshAuthenticationMode.PasswordOrKey => "Sign in with this Linux username and either its password or an installed public key. You do not need both.",
         RemoteAccessSshAuthenticationMode.PasswordAndKey => "SSH requires both a password and imported public-key or certificate-authority material.",
-        RemoteAccessSshAuthenticationMode.KeyOnly => "SSH rejects passwords and only accepts imported public-key or certificate-authority material.",
+        RemoteAccessSshAuthenticationMode.KeyOnly => "SSH uses your key only. For passwordless sudo su, choose Sudo without a password in the Users editor.",
         _ => string.Empty
     };
 

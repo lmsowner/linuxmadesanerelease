@@ -190,6 +190,15 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
     public async Task<IReadOnlyList<LinuxShareUser>> ListUsersAsync(CancellationToken cancellationToken = default)
     {
         var groups = await ReadSystemGroupEntriesAsync(cancellationToken);
+        var sudoPolicies = await commandRunner.RunAsync(new LinuxCommandRequest("python3",
+            ["-c", LocalUserSudoPolicy.Script, "list"], true, TimeSpan.FromSeconds(10), "Read LMS managed sudo options"), false, cancellationToken);
+        if (sudoPolicies.ExitCode != 0) throw new InvalidOperationException("Could not read the managed sudo options.");
+        var sudoModes = new Dictionary<string, LocalUserSudoMode>(StringComparer.Ordinal);
+        foreach (var line in sudoPolicies.StandardOutput.Split('\n'))
+        {
+            var fields = line.Trim().Split('\t');
+            if (fields.Length == 2 && Enum.TryParse<LocalUserSudoMode>(fields[1], out var mode)) sudoModes[fields[0]] = mode;
+        }
         var primaryGroupByGid = groups
             .GroupBy(group => group.Gid)
             .ToDictionary(group => group.Key, group => group.First().GroupName);
@@ -223,7 +232,12 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
                     supplementaryGroups,
                     user.HomeDirectory,
                     user.LoginShell,
-                    !IsNonInteractiveShell(user.LoginShell));
+                    !IsNonInteractiveShell(user.LoginShell))
+                {
+                    SudoMode = sudoModes.TryGetValue(user.UserName, out var sudoMode) ? sudoMode :
+                        supplementaryGroups.Append(primaryGroup).Any(group => group is "sudo" or "wheel")
+                            ? null : LocalUserSudoMode.None
+                };
             })
             .OrderByDescending(user => IsLikelyHumanUser(user))
             .ThenBy(user => user.UserName, StringComparer.OrdinalIgnoreCase)
@@ -259,9 +273,24 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
+        if (user.SudoMode is { } selectedSudoMode)
+        {
+            if (!Enum.IsDefined(selectedSudoMode)) throw new InvalidOperationException("Invalid sudo access option.");
+            if (selectedSudoMode == LocalUserSudoMode.None && primaryGroup is "sudo" or "wheel")
+                throw new InvalidOperationException("Change the primary group before removing sudo access.");
+            // The explicit sudo choice owns administrator membership; other groups are retained.
+            supplementaryGroups = supplementaryGroups.Where(group => group is not "sudo" and not "wheel").ToArray();
+            await RunRequiredCommandAsync("visudo", ["-c"], "Validate sudo configuration before saving this user", true, cancellationToken);
+        }
+
         var existingUser = await GetUserAsync(user.Id, cancellationToken) ??
                            (await ListUsersAsync(cancellationToken))
                            .FirstOrDefault(existing => existing.UserName.Equals(normalizedUserName, StringComparison.OrdinalIgnoreCase));
+
+        if (user.SudoMode is not null && existingUser?.Uid == 0)
+            throw new InvalidOperationException("Root sudo settings cannot be changed here.");
+        if (user.SudoMode is not null && existingUser is not null)
+            supplementaryGroups = supplementaryGroups.Concat(existingUser.SupplementaryGroups.Where(group => group is "sudo" or "wheel")).Distinct().ToArray();
 
         if (existingUser is null)
         {
@@ -300,7 +329,7 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
                 cancellationToken);
         }
 
-        if (supplementaryGroups.Length > 0)
+        if (supplementaryGroups.Length > 0 || existingUser is not null)
         {
             await RunRequiredCommandAsync(
                 "usermod",
@@ -316,6 +345,10 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
             user.IsEnabled ? $"Unlock Linux user {normalizedUserName}" : $"Lock Linux user {normalizedUserName}",
             requiresSudo: true,
             cancellationToken);
+
+        if (user.SudoMode is { } sudoMode)
+            await RunRequiredCommandAsync("python3", ["-c", LocalUserSudoPolicy.Script, "apply", normalizedUserName, sudoMode.ToString()],
+                $"Set sudo access for {normalizedUserName}", requiresSudo: true, cancellationToken);
     }
 
     public async Task DeleteUserAsync(Guid id, CancellationToken cancellationToken = default)
@@ -332,6 +365,8 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
             $"Delete Linux user {user.UserName}",
             requiresSudo: true,
             cancellationToken);
+        await RunRequiredCommandAsync("python3", ["-c", LocalUserSudoPolicy.Script, "apply", user.UserName, "delete"],
+            $"Remove managed sudo access for {user.UserName}", requiresSudo: true, cancellationToken);
     }
 
     public async Task<IReadOnlyList<LocalUserAccessPolicy>> ListUserAccessPoliciesAsync(CancellationToken cancellationToken = default)

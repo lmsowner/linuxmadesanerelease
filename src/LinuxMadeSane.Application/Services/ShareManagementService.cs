@@ -177,7 +177,10 @@ public sealed class ShareManagementService(
         }
 
         var user = await shareDataService.GetUserAsync(id.Value, cancellationToken);
-        return user is null ? new UserEditor { Id = id } : MapEditor(user);
+        if (user is null) return new UserEditor { Id = id };
+        var editor = MapEditor(user);
+        editor.IsSshKeyOnly = (await shareDataService.GetUserAccessPolicyAsync(user.UserName, cancellationToken))?.SshAuthenticationMode == RemoteAccessSshAuthenticationMode.KeyOnly;
+        return editor;
     }
 
     public async Task<Guid> SaveUserAsync(UserEditor editor, CancellationToken cancellationToken = default)
@@ -194,7 +197,7 @@ public sealed class ShareManagementService(
             ParseCsv(editor.SupplementaryGroupsCsv),
             DefaultIfWhiteSpace(editor.HomeDirectory, $"/home/{userName}"),
             DefaultIfWhiteSpace(editor.LoginShell, "/bin/bash"),
-            editor.IsEnabled);
+            editor.IsEnabled) { SudoMode = editor.SudoMode };
 
         await shareDataService.SaveUserAsync(user, cancellationToken);
         return userId;
@@ -893,7 +896,8 @@ public sealed class ShareManagementService(
             SupplementaryGroupsCsv = string.Join(", ", user.SupplementaryGroups),
             HomeDirectory = user.HomeDirectory,
             LoginShell = user.LoginShell,
-            IsEnabled = user.IsEnabled
+            IsEnabled = user.IsEnabled,
+            SudoMode = user.SudoMode
         };
 
     private static GroupEditor MapEditor(LinuxShareGroup group) =>

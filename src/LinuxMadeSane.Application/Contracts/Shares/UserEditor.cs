@@ -23,4 +23,6 @@ public sealed class UserEditor
     public string LoginShell { get; set; } = string.Empty;
 
     public bool IsEnabled { get; set; } = true;
+    public LinuxMadeSane.Core.Enums.LocalUserSudoMode? SudoMode { get; set; }
+    public bool IsSshKeyOnly { get; set; }
 }
