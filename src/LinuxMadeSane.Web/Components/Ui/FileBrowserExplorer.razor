@@ -4,10 +4,10 @@
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models
 @using LinuxMadeSane.Web.Services
-@implements IDisposable
+@implements IAsyncDisposable
 @inject IJSRuntime JSRuntime
 
-<section class="surface-card file-browser-shell">
+<section class="surface-card file-browser-shell" @ref="marqueeElement" data-selection-path="@CurrentPath" data-selection-busy="@IsBusy.ToString().ToLowerInvariant()">
     @if (HeaderContent is not null)
     {
         <div class="file-browser-header-slot">
@@ -157,7 +157,7 @@
                                 </div>
                                 @if (!IsThumbnailView)
                                 {
-                                    <div class="table-shell file-browser-table-shell"
+                                    <div data-marquee-surface="true" class="table-shell file-browser-table-shell"
                                          @oncontextmenu="RequestCurrentDirectoryContextMenuAsync"
                                          @oncontextmenu:preventDefault="true"
                                          @oncontextmenu:stopPropagation="true">
@@ -253,7 +253,7 @@
                                                 var isBlockedFolder = IsBlockedFolder(item);
                                                 var isSelected = IsItemSelected(item);
 
-                                                <tr class="interactive-row @(SelectedItem == item || isSelected ? "interactive-row-selected" : null) @(isBlockedFolder ? "interactive-row-blocked" : null)"
+                                                <tr data-file-path="@NormalizePath(item.FullPath)" data-file-selected="@isSelected.ToString().ToLowerInvariant()" class="interactive-row @(SelectedItem == item || isSelected ? "interactive-row-selected" : null) @(isBlockedFolder ? "interactive-row-blocked" : null)"
                                                     @onclick="@(() => ActivateItemAsync(item))"
                                                     @oncontextmenu="@((MouseEventArgs args) => RequestItemContextMenuAsync(args, item))"
                                                     @oncontextmenu:preventDefault="true"
@@ -352,7 +352,7 @@
                                 }
                                 else
                                 {
-                                    <div class="file-browser-thumbnail-shell"
+                                    <div data-marquee-surface="true" class="file-browser-thumbnail-shell"
                                          style="@GetThumbnailGridStyle()"
                                          @oncontextmenu="RequestCurrentDirectoryContextMenuAsync"
                                          @oncontextmenu:preventDefault="true"
@@ -396,7 +396,7 @@
                                                 var isBlockedFolder = IsBlockedFolder(item);
                                                 var isSelected = IsItemSelected(item);
 
-                                                <div @key="item.FullPath"
+                                                <div data-file-path="@NormalizePath(item.FullPath)" data-file-selected="@isSelected.ToString().ToLowerInvariant()" @key="item.FullPath"
                                                      class="file-browser-thumbnail-card @(SelectedItem == item || isSelected ? "selected" : null) @(isBlockedFolder ? "blocked" : null)"
                                                      role="button"
                                                      tabindex="0"
@@ -593,6 +593,7 @@
     [Parameter] public EventCallback RefreshRequested { get; set; }
     [Parameter] public EventCallback GoUpRequested { get; set; }
     [Parameter] public EventCallback<(bool Selected, IReadOnlyList<SftpItem> Items)> SelectAllRequested { get; set; }
+    [Parameter] public EventCallback<IReadOnlyList<string>> MarqueeSelectionChanged { get; set; }
     [Parameter] public EventCallback<SftpItem> ItemSelected { get; set; }
     [Parameter] public EventCallback<(SftpItem Item, bool Selected)> ItemSelectionToggled { get; set; }
     [Parameter] public EventCallback<string> NavigateRequested { get; set; }
@@ -628,8 +629,25 @@
     private bool showPermissionsColumn;
     private FileBrowserDisplayMode displayMode = FileBrowserDisplayMode.List;
     private int thumbnailSizePx = 156;
+    private ElementReference marqueeElement;
     private ElementReference detailLayoutElement;
     private DotNetObjectReference<FileBrowserExplorer>? detailPanelInteropReference;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        detailPanelInteropReference ??= DotNetObjectReference.Create(this);
+        await JSRuntime.InvokeVoidAsync("lmsFileBrowser.watchMarquee", marqueeElement, detailPanelInteropReference);
+    }
+
+    [JSInvokable]
+    public Task OnMarqueeSelectionChangedAsync(string path, string[] paths)
+    {
+        if (IsBusy || !string.Equals(path, CurrentPath, StringComparison.Ordinal)) return Task.CompletedTask;
+        var visible = VisibleItems.Select(item => NormalizePath(item.FullPath)).ToHashSet(StringComparer.Ordinal);
+        var selected = SelectedPaths.Where(value => !visible.Contains(value)).Concat(paths.Where(visible.Contains))
+            .Distinct(StringComparer.Ordinal).ToArray();
+        return MarqueeSelectionChanged.InvokeAsync(selected);
+    }
 
     private Task RefreshAsync() =>
         RefreshRequested.HasDelegate ? RefreshRequested.InvokeAsync() : Task.CompletedTask;
@@ -1173,8 +1191,11 @@
         }
     </div>;
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        try { await JSRuntime.InvokeVoidAsync("lmsFileBrowser.disposeMarquee", marqueeElement); }
+        catch (JSDisconnectedException) { }
+
         detailPanelInteropReference?.Dispose();
         detailPanelInteropReference = null;
     }

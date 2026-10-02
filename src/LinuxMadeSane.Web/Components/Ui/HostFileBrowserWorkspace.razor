@@ -116,6 +116,7 @@ else
                                  NavigateRequested="NavigateToPathAsync"
                                  ToggleDirectoryRequested="ToggleDirectoryAsync"
                                  ItemSelectionToggled="ToggleItemSelectionAsync"
+                                 MarqueeSelectionChanged="ApplyMarqueeSelectionAsync"
                                  ItemSelected="SelectItem"
                                  ContextMenuRequested="OpenContextMenuAsync"
                                  FolderSizeRequested="CalculateFolderSizeAsync"
@@ -975,6 +976,26 @@ else
             </ChildContent>
         </UiModal>
 
+        <UiModal IsOpen="@showCreateFolderModal" Title="New folder" Subtitle="@createFolderParentPath"
+                 Class="host-file-rename-modal" OnClose="CloseCreateFolderModalAsync">
+            <ChildContent>
+                <form class="host-file-rename-layout" @onsubmit="ConfirmCreateFolderAsync" @onsubmit:preventDefault="true">
+                    <UiTextField Label="Folder name" Helper="Create a folder inside the destination shown above."
+                                 Value="@createFolderName" ValueChanged="SetCreateFolderNameAsync"
+                                 ValueExpression="@(() => createFolderName)" Disabled="@isCreatingFolder" Compact="true" />
+                    @if (!string.IsNullOrWhiteSpace(createFolderError))
+                    {
+                        <p class="callout error" role="alert">@createFolderError</p>
+                    }
+                    <div class="toolbar-row host-file-rename-actions">
+                        <UiCommandButton Label="Cancel" Disabled="@isCreatingFolder" OnClick="CloseCreateFolderModalAsync" />
+                        <UiCommandButton Label="@(isCreatingFolder ? "Creating..." : "Create")" Type="submit"
+                                         Glyph="UiIconGlyph.NewFolder" Disabled="@isCreatingFolder" />
+                    </div>
+                </form>
+            </ChildContent>
+        </UiModal>
+
         <UiModal IsOpen="@showRenameItemModal"
                  Title="@RenameItemTitle"
                  Subtitle="@RenameItemSubtitle"
@@ -1207,6 +1228,11 @@ else
     private bool showShareMappingModal;
     private bool showOwnershipPermissionsModal;
     private bool showDeleteConfirmModal;
+    private bool showCreateFolderModal;
+    private bool isCreatingFolder;
+    private string createFolderParentPath = string.Empty;
+    private string createFolderName = string.Empty;
+    private string? createFolderError;
     private bool showRenameItemModal;
     private bool showRenameShortcutModal;
     private bool showFileSearchDialog;
@@ -1543,6 +1569,7 @@ else
         ownershipPermissionsTargetItem = null;
         ownershipPermissionsTargetItems = Array.Empty<SftpItem>();
         showFileSearchDialog = false;
+        showCreateFolderModal = false;
         showRenameItemModal = false;
         showRenameShortcutModal = false;
         fileSearchResponse = null;
@@ -3843,61 +3870,95 @@ else
             ? Task.CompletedTask
             : OpenRenameItemDialogAsync(contextMenuRequest.Item);
 
-    private async Task CreateFolderAsync(string destinationDirectoryPath)
+    private Task CreateFolderAsync(string destinationDirectoryPath)
     {
-        if (browser is null || isBusy)
-        {
-            return;
-        }
-
+        if (browser is null || isBusy) return Task.CompletedTask;
+        createFolderParentPath = ResolveBrowserPath(destinationDirectoryPath);
+        createFolderName = "New folder";
+        createFolderError = null;
+        showCreateFolderModal = true;
         DismissContextMenu();
-        ClearOperationMessage();
+        return Task.CompletedTask;
+    }
 
-        var folderName = await JSRuntime.InvokeAsync<string?>("prompt", "Folder name", "New folder");
-        if (string.IsNullOrWhiteSpace(folderName))
+    private Task SetCreateFolderNameAsync(string? value)
+    {
+        createFolderName = value ?? string.Empty;
+        createFolderError = null;
+        return Task.CompletedTask;
+    }
+
+    private Task CloseCreateFolderModalAsync()
+    {
+        if (!isCreatingFolder) showCreateFolderModal = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmCreateFolderAsync()
+    {
+        if (browser is null || isBusy || isCreatingFolder) return;
+        if (!TryNormalizeLeafName(createFolderName, out var name, out var error))
         {
+            createFolderError = error;
             return;
         }
-
-        if (!TryNormalizeLeafName(folderName, out var normalizedName, out var validationMessage))
-        {
-            SetOperationMessage(validationMessage, "warning");
-            return;
-        }
-
-        var normalizedDestinationDirectoryPath = ResolveBrowserPath(destinationDirectoryPath);
-        var destinationPath = CombineBrowserPath(normalizedDestinationDirectoryPath, normalizedName);
-
+        var destinationPath = CombineBrowserPath(createFolderParentPath, name);
+        isCreatingFolder = true;
         isBusy = true;
-        SetOperationMessage($"Creating folder {normalizedName}...", "info");
+        createFolderError = null;
         await InvokeAsync(StateHasChanged);
-
         try
         {
+            var siblings = await ListItemsForPathAsync(createFolderParentPath);
+            if (siblings.Any(item => string.Equals(ResolveBrowserPath(item.FullPath), destinationPath, StringComparison.Ordinal)))
+                throw new IOException("A file or folder with that name already exists. Choose another name.");
             await CreateDirectoryAsync(destinationPath);
-
-            if (string.Equals(normalizedDestinationDirectoryPath, currentPath, StringComparison.Ordinal))
-            {
-                await RefreshCurrentListingPreserveSelectionAsync(destinationPath);
-                selectedPaths.Clear();
-                selectedPaths.Add(destinationPath);
-            }
-            else
-            {
-                QueueDirectoryTreeRefresh(currentPath);
-            }
-
-            SetOperationMessage($"Created folder {normalizedName}.", "success");
         }
         catch (Exception exception)
         {
-            SetOperationMessage($"Create folder failed: {exception.Message}", "error");
+            createFolderError = $"Could not create folder: {exception.Message}";
+            isCreatingFolder = false;
+            isBusy = false;
+            return;
+        }
+        showCreateFolderModal = false;
+        try
+        {
+            directoryItemCache.Clear();
+            if (string.Equals(createFolderParentPath, currentPath, StringComparison.Ordinal))
+            {
+                items = await ListItemsForPathAsync(currentPath);
+                directoryItemCache[currentPath] = items;
+                selectedPaths.Clear();
+                selectedPaths.Add(destinationPath);
+                selectedItem = FindItemByPath(items, destinationPath);
+                await ExpandCurrentBranchAsync(currentPath);
+                RebuildDirectoryTree();
+            }
+            else QueueDirectoryTreeRefresh(createFolderParentPath);
+            SetOperationMessage($"Created folder {name}.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetOperationMessage($"Created folder {name}, but could not refresh the listing: {exception.Message}. Use Refresh to reload it.", "warning");
         }
         finally
         {
+            isCreatingFolder = false;
             isBusy = false;
-            await InvokeAsync(StateHasChanged);
         }
+    }
+
+    private Task ApplyMarqueeSelectionAsync(IReadOnlyList<string> paths)
+    {
+        if (isBusy) return Task.CompletedTask;
+        var available = items.Select(item => ResolveBrowserPath(item.FullPath)).ToHashSet(StringComparer.Ordinal);
+        selectedPaths.Clear();
+        foreach (var path in paths.Where(available.Contains)) selectedPaths.Add(path);
+        selectedItem = null;
+        ResetPreviewState(keepPanelOpen: previewPanelOpen);
+        PersistDetachedBrowserState();
+        return Task.CompletedTask;
     }
 
     private Task SetRenameEntryNameAsync(string? value)

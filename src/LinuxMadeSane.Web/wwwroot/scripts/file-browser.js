@@ -2,6 +2,109 @@
  * Licensed under the Business Source License 1.1. See LICENSE for details. */
 
 window.lmsFileBrowser = (() => {
+    const marqueeWatchers = new WeakMap();
+
+    function disposeMarquee(element) {
+        marqueeWatchers.get(element)?.();
+        marqueeWatchers.delete(element);
+    }
+
+    function watchMarquee(element, dotNetReference) {
+        if (!element || marqueeWatchers.has(element)) return;
+        let gesture = null;
+        let suppressClick = false;
+        const cleanup = () => {
+            if (!gesture) return;
+            gesture.box?.remove();
+            gesture.surface.classList.remove("marquee-dragging");
+            gesture = null;
+        };
+        const down = event => {
+            const surface = event.target.closest("[data-marquee-surface]");
+            if (!surface || event.button !== 0 || event.pointerType === "touch" || element.dataset.selectionBusy === "true"
+                || event.target.closest("input,button,a,label,select,textarea,thead,[data-file-path],.file-browser-thumbnail-parent")) return;
+            const rect = surface.getBoundingClientRect();
+            // Ignore scrollbars.
+            if (event.clientX >= rect.left + surface.clientWidth || event.clientY >= rect.top + surface.clientHeight) return;
+            const entries = [...surface.querySelectorAll("[data-file-path]")];
+            gesture = { surface, entries, path: element.dataset.selectionPath, pointerId: event.pointerId,
+                x: event.clientX, y: event.clientY, toggle: event.ctrlKey || event.metaKey, add: event.shiftKey,
+                initial: new Set(entries.filter(row => row.dataset.fileSelected === "true").map(row => row.dataset.filePath)),
+                selected: new Set(), moved: false };
+        };
+        const move = event => {
+            const g = gesture;
+            if (!g || event.pointerId !== g.pointerId) return;
+            if (!g.moved && Math.hypot(event.clientX - g.x, event.clientY - g.y) < 4) return;
+            g.moved = true;
+            event.preventDefault();
+            if (!g.box) {
+                g.box = document.createElement("div");
+                g.box.className = "file-browser-marquee";
+                Object.assign(g.box.style, { position: "fixed", pointerEvents: "none", zIndex: "9999",
+                    border: "1px solid var(--accent, #668cff)", background: "rgba(102,140,255,.15)", borderRadius: "3px" });
+                document.body.appendChild(g.box);
+                g.surface.classList.add("marquee-dragging");
+            }
+            const bounds = g.surface.getBoundingClientRect();
+            const x = Math.max(bounds.left, Math.min(event.clientX, bounds.right));
+            const y = Math.max(bounds.top, Math.min(event.clientY, bounds.bottom));
+            const left = Math.min(g.x, x), right = Math.max(g.x, x), top = Math.min(g.y, y), bottom = Math.max(g.y, y);
+            Object.assign(g.box.style, { left: `${left}px`, top: `${top}px`, width: `${right-left}px`, height: `${bottom-top}px` });
+            g.selected = new Set(g.toggle || g.add ? g.initial : []);
+            for (const row of g.entries) {
+                const rect = row.getBoundingClientRect();
+                const hit = rect.left < right && rect.right > left && rect.top < bottom && rect.bottom > top;
+                const path = row.dataset.filePath;
+                if (hit) {
+                    if (g.toggle && g.initial.has(path)) g.selected.delete(path);
+                    else g.selected.add(path);
+                }
+                const selected = g.selected.has(path);
+                row.classList.toggle("interactive-row-selected", selected);
+                row.classList.toggle("selected", selected);
+                const checkbox = row.querySelector('input[type="checkbox"]');
+                if (checkbox) checkbox.checked = selected;
+            }
+        };
+        const finish = event => {
+            const g = gesture;
+            if (!g || event.pointerId !== g.pointerId) return;
+            if (g.moved) {
+                suppressClick = true;
+                dotNetReference.invokeMethodAsync("OnMarqueeSelectionChangedAsync", g.path, [...g.selected]).catch(() => {});
+                setTimeout(() => { suppressClick = false; }, 0);
+            }
+            cleanup();
+        };
+        const cancel = () => {
+            if (gesture) for (const row of gesture.entries) {
+                const selected = gesture.initial.has(row.dataset.filePath);
+                row.classList.toggle("interactive-row-selected", selected);
+                row.classList.toggle("selected", selected);
+                const checkbox = row.querySelector('input[type="checkbox"]');
+                if (checkbox) checkbox.checked = selected;
+            }
+            cleanup();
+        };
+        const click = event => { if (suppressClick) { event.preventDefault(); event.stopImmediatePropagation(); } };
+        element.addEventListener("pointerdown", down);
+        element.addEventListener("click", click, true);
+        window.addEventListener("pointermove", move, { passive: false });
+        window.addEventListener("pointerup", finish);
+        window.addEventListener("pointercancel", cancel);
+        window.addEventListener("blur", cancel);
+        marqueeWatchers.set(element, () => {
+            cancel();
+            element.removeEventListener("pointerdown", down);
+            element.removeEventListener("click", click, true);
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", finish);
+            window.removeEventListener("pointercancel", cancel);
+            window.removeEventListener("blur", cancel);
+        });
+    }
+
     const scrollWatchers = new WeakMap();
     const keyWatchers = new WeakMap();
     const uploadSelections = new Map();
@@ -806,6 +909,8 @@ window.lmsFileBrowser = (() => {
     window.addEventListener("lms-theme-change", refreshOpenLayoutSurfaces);
 
     return {
+        watchMarquee,
+        disposeMarquee,
         watchSuggestionScroll,
         disposeSuggestionScroll,
         watchSuggestionKeys,
