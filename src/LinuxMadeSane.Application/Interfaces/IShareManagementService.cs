@@ -28,6 +28,7 @@ public interface IShareManagementService
     Task<UserEditor> GetUserEditorAsync(Guid? id, CancellationToken cancellationToken = default);
 
     Task<Guid> SaveUserAsync(UserEditor editor, CancellationToken cancellationToken = default);
+    Task SaveUserSudoAsync(Guid userId, LocalUserSudoMode mode, CancellationToken cancellationToken = default);
 
     Task DeleteUserAsync(Guid id, CancellationToken cancellationToken = default);
 

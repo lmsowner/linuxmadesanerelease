@@ -126,8 +126,10 @@ public sealed class UserCredentialTrialService(IServiceScopeFactory scopes, SshA
                 editor.AuthorizedKeyEntries.Trim(), clock.GetUtcNow(), old?.PasswordChangedAtUtc);
             if (newPassword is not null)
             {
-                var effective = await ReadEffectiveAsync(scope, user.UserName, cancellationToken);
-                if (effective.GetValueOrDefault("passwordauthentication") != "yes")
+                var passwordAllowed = editor is not null
+                    ? editor.SshAuthenticationMode != RemoteAccessSshAuthenticationMode.KeyOnly
+                    : (await ReadEffectiveAsync(scope, user.UserName, cancellationToken)).GetValueOrDefault("passwordauthentication") == "yes";
+                if (!passwordAllowed)
                     throw new InvalidOperationException("This user does not accept SSH passwords. Test a password-capable SSH login mode first. The password has not changed.");
                 desired = (desired ?? new LocalUserAccessPolicy(user.UserName, false, RemoteAccessSshAuthenticationMode.Password, "", clock.GetUtcNow(), null))
                     with { PasswordChangedAtUtc = clock.GetUtcNow() };

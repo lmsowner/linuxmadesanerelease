@@ -206,6 +206,12 @@ public sealed class ShareManagementService(
     public Task DeleteUserAsync(Guid id, CancellationToken cancellationToken = default) =>
         shareDataService.DeleteUserAsync(id, cancellationToken);
 
+    public async Task SaveUserSudoAsync(Guid userId, LocalUserSudoMode mode, CancellationToken cancellationToken = default)
+    {
+        var user = await GetRequiredUserAsync(userId, cancellationToken);
+        await shareDataService.SaveUserSudoAsync(user.UserName, mode, cancellationToken);
+    }
+
     public async Task<LocalUserAccessEditor> GetLocalUserAccessEditorAsync(Guid userId, CancellationToken cancellationToken = default)
     {
         var user = await GetRequiredUserAsync(userId, cancellationToken);

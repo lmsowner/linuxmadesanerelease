@@ -369,6 +369,13 @@ public sealed class SqliteLinuxShareModuleDataService : ILinuxShareModuleDataSer
             $"Remove managed sudo access for {user.UserName}", requiresSudo: true, cancellationToken);
     }
 
+    public async Task SaveUserSudoAsync(string userName, LocalUserSudoMode mode, CancellationToken cancellationToken = default)
+    {
+        if (!Enum.IsDefined(mode)) throw new InvalidOperationException("Invalid sudo access option.");
+        await RunRequiredCommandAsync("python3", ["-c", LocalUserSudoPolicy.Script, "apply", userName, mode.ToString()],
+            $"Save sudo access for {userName}", requiresSudo: true, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<LocalUserAccessPolicy>> ListUserAccessPoliciesAsync(CancellationToken cancellationToken = default)
     {
         var items = await dbContext.LocalUserAccessPolicies

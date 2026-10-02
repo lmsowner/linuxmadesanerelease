@@ -21,6 +21,8 @@ public interface ILinuxShareModuleDataService
     Task<LinuxShareUser?> GetUserAsync(Guid id, CancellationToken cancellationToken = default);
 
     Task SaveUserAsync(LinuxShareUser user, CancellationToken cancellationToken = default);
+    Task SaveUserSudoAsync(string userName, LocalUserSudoMode mode, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Sudo access management is not supported by this host.");
 
     Task DeleteUserAsync(Guid id, CancellationToken cancellationToken = default);
 

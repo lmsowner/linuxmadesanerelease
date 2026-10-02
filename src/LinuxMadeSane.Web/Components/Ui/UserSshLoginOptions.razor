@@ -11,9 +11,9 @@
 <section class="surface-subcard stack-list">
     <div class="stack-tight">
         <h3>User SSH login options</h3>
-        <p class="meta-text">Dropdowns stage changes. Test each user before keeping the new policy. Server key-only enforcement and authenticator protection still apply.</p>
+        <p class="meta-text">Choose a login option, then open Edit login &amp; sudo. Apply the SSH settings, log in from your own computer, and verify the login to save them. Sudo has its own Save button.</p>
     </div>
-    @if (!string.IsNullOrWhiteSpace(message))
+    @if (review is null && trial is null && !string.IsNullOrWhiteSpace(message))
     {
         <p class="callout @tone" role="status">@message</p>
     }
@@ -48,36 +48,76 @@
                                     @ModeOptions()
                                 </UiCombobox></td>
                             <td>@row.KeyCount</td>
-                            <td><UiCommandButton Label="@(row.Staged ? "Review & test" : "Keys / details")" Disabled="@(busy || trial is not null)"
+                            <td><UiCommandButton Label="Edit login & sudo" Disabled="@(busy || trial is not null)"
                                                  OnClick="@(() => ReviewRow(row))" /></td>
                         </tr>
                     }
                 </tbody>
             </table>
         </div>
-        @if (trial is not null)
-        {
-            <UserCredentialTrialWatch Trial="@trial" IsBusy="@busy" OnExpired="OnTrialExpiredAsync" />
-            <section class="surface-subcard"><UserSshLoginTest Trial="@trial" IsBusy="@busy" OnKeep="ConfirmAsync" OnRevert="RevertAsync" /></section>
-        }
-        else if (review is not null)
-        {
-            <section class="surface-subcard stack-list">
-                <h4>@review.User.UserName · @Label(review.Editor.SshAuthenticationMode)</h4>
-                <UiTextAreaField Label="Public keys" Helper="Use the .pub file for the private key on the user's computer."
-                                 Value="@review.Editor.AuthorizedKeyEntries" ValueChanged="SetReviewKeys" ValueExpression="@(() => review.Editor.AuthorizedKeyEntries)"
-                                 Rows="2" Disabled="@(busy || review.Protected)" />
-                <SshPublicKeySetupGuide UserName="@review.User.UserName" />
-                <p class="meta-text">After starting, log in from the user's own PC / Mac / Linux device, then check the login and keep the change.</p>
-                <div class="toolbar-row">
-                    <UiCommandButton Label="Start 2-minute login test" Disabled="@(busy || !CanAdminister || review.Protected)" OnClick="StartReviewTrialAsync" />
-                    <UiCommandButton Label="Skip / next staged user" Disabled="@busy" OnClick="SkipReview" />
-                </div>
-            </section>
-        }
+        <div class="ssh-user-dialog-host">
+            <UiModal IsOpen="@(review is not null || trial is not null)" Title="Edit login and sudo" Subtitle="@(trial?.UserName ?? review?.User.UserName)"
+                     Class="ssh-user-access-modal" OnClose="CloseReviewAsync">
+                <ChildContent>
+                    @if (!string.IsNullOrWhiteSpace(message)) { <p class="callout @tone" role="status">@message</p> }
+                    @if (trial is not null)
+                    {
+                        <UserCredentialTrialWatch Trial="@trial" IsBusy="@busy" OnExpired="OnTrialExpiredAsync" />
+                        <UserSshLoginTest Trial="@trial" IsBusy="@busy" ShowActions="false" />
+                    }
+                    else if (review is not null)
+                    {
+                        <div class="stack-list">
+                            <UiComboboxField TValue="RemoteAccessSshAuthenticationMode" Label="SSH login method" Value="@review.Editor.SshAuthenticationMode"
+                                             ValueChanged="@((RemoteAccessSshAuthenticationMode mode) => StageRow(review, mode))"
+                                             Disabled="@(busy || !CanAdminister || review.Protected)">@ModeOptions()</UiComboboxField>
+                            @if (review.PasswordLocked && review.Editor.SshAuthenticationMode != RemoteAccessSshAuthenticationMode.KeyOnly)
+                            {
+                                <p class="callout warning">This account's password is locked. Set a new account password below to enable the selected password login method.</p>
+                            }
+                            <UiTextAreaField Label="SSH public keys" Helper="Paste the .pub key that matches the private key on your computer."
+                                             Value="@review.Editor.AuthorizedKeyEntries" ValueChanged="SetReviewKeys" ValueExpression="@(() => review.Editor.AuthorizedKeyEntries)"
+                                             Rows="2" InputClass="ssh-user-key-input" Disabled="@(busy || review.Protected || !CanAdminister)" />
+                            <SshPublicKeySetupGuide UserName="@review.User.UserName" />
+                            @if (review.Editor.SshAuthenticationMode != RemoteAccessSshAuthenticationMode.KeyOnly)
+                            {
+                                <UiTextField Label="New account password" Type="password" Autocomplete="new-password" @bind-Value="newPassword"
+                                             Helper="At least 14 characters. Leave blank to keep the existing password; required if the password is locked."
+                                             Disabled="@(busy || review.Protected || !CanAdminister)" />
+                            }
+                            <p class="meta-text"><strong>Save SSH settings:</strong> click Apply SSH settings and test login below. Open a new SSH session from your own PC / Mac / Linux computer, then click Verify login and save. Unconfirmed changes revert after two minutes.</p>
+                            <div class="surface-subcard stack-tight">
+                                <UiComboboxField TValue="LocalUserSudoMode?" Label="Administrator (sudo) access" @bind-Value="sudoMode" Disabled="@(busy || !CanAdminister)">
+                                    <option value="">Keep host / group policy</option>
+                                    <option value="@LocalUserSudoMode.None">No sudo access</option>
+                                    <option value="@LocalUserSudoMode.PasswordRequired">Sudo with account password</option>
+                                    <option value="@LocalUserSudoMode.Passwordless">Sudo without a password</option>
+                                </UiComboboxField>
+                                <p class="meta-text">For a key-only administrator with no account password, choose <strong>Sudo without a password</strong>. This grants full administrator access.</p>
+                                <UiCommandButton Label="Save sudo access" Disabled="@(busy || !CanAdminister || sudoMode is null)" OnClick="SaveSudoAsync" />
+                                @if (!string.IsNullOrWhiteSpace(sudoMessage)) { <p class="callout @sudoTone" role="status">@sudoMessage</p> }
+                            </div>
+                        </div>
+                    }
+                </ChildContent>
+                <Footer>
+                    @if (trial is not null)
+                    {
+                        <UiCommandButton Label="Revert SSH changes" Disabled="@busy" OnClick="RevertAsync" />
+                        <UiCommandButton Label="Verify login and save" Variant="UiButtonVariant.PrimaryMuted" Disabled="@busy" OnClick="ConfirmAsync" />
+                    }
+                    else
+                    {
+                        <UiCommandButton Label="@(sshSaved ? "Done" : "Cancel")" Disabled="@busy" OnClick="CloseReviewAsync" />
+                        <UiCommandButton Label="Apply SSH settings and test login" Variant="UiButtonVariant.PrimaryMuted" Disabled="@(busy || !CanAdminister || review?.Protected != false)" OnClick="StartReviewTrialAsync" />
+                        @if (sshSaved && rows.Any(row => row.Staged && row != review)) { <UiCommandButton Label="Edit next staged user" Disabled="@busy" OnClick="NextReview" /> }
+                    }
+                </Footer>
+            </UiModal>
+        </div>
         @if (DraftCount > 0 && review is null && trial is null)
         {
-            <UiCommandButton Label="Review staged changes" OnClick="NextReview" Disabled="@(busy || !CanAdminister)" />
+            <UiCommandButton Label="Edit staged login changes" OnClick="NextReview" Disabled="@(busy || !CanAdminister)" />
         }
     }
 </section>
@@ -92,6 +132,11 @@
     private UserCredentialTrial? trial;
     private bool loading = true;
     private bool busy;
+    private bool sshSaved;
+    private string newPassword = "";
+    private LocalUserSudoMode? sudoMode;
+    private string? sudoMessage;
+    private string sudoTone = "info";
     private string? message;
     private string tone = "info";
     private int DraftCount => rows.Count(row => row.Staged);
@@ -120,6 +165,7 @@
             }
             trial = await Trials.GetActiveTrialAsync();
             review = rows.FirstOrDefault(row => row.User.Id == trial?.UserId) ?? rows.FirstOrDefault(row => row.User.UserName == InitialUserName);
+            sudoMode = review?.User.SudoMode;
             if (trial?.ProposedMode is { } proposedMode && review is not null)
             {
                 review.Editor.SshAuthenticationMode = proposedMode;
@@ -133,23 +179,29 @@
 
     private void SelectAll(bool value) { selected.Clear(); if (value) foreach (var row in rows.Where(row => !row.Protected)) selected.Add(row.User.Id); }
     private void SelectRow(Guid id, bool value) { if (value) selected.Add(id); else selected.Remove(id); }
-    private void StageRow(Row row, RemoteAccessSshAuthenticationMode mode) { if (row.Protected) return; row.Editor.SshAuthenticationMode = mode; row.Staged = true; }
+    private void StageRow(Row row, RemoteAccessSshAuthenticationMode mode) { if (row.Protected) return; row.Editor.SshAuthenticationMode = mode; row.Staged = true; sshSaved = false; if (mode == RemoteAccessSshAuthenticationMode.KeyOnly) newPassword = ""; }
     private void StageSelected() { foreach (var row in rows.Where(row => selected.Contains(row.User.Id))) StageRow(row, bulkMode); }
-    private void ReviewRow(Row row) { review = row; message = null; }
+    private void ReviewRow(Row row) { review = row; sudoMode = row.User.SudoMode; sudoMessage = null; newPassword = ""; sshSaved = false; message = null; }
     private void SetReviewKeys(string? value) { if (review is not null && !review.Protected) { review.Editor.AuthorizedKeyEntries = value ?? ""; review.Staged = true; } }
-    private void SkipReview() { review?.ResetDraft(); NextReview(); }
     private void NextReview()
     {
         var previous = review;
         review = rows.Where(row => row.Staged && row != previous).OrderBy(row => row.User.UserName).FirstOrDefault();
         if (review is null && previous?.Staged == true) review = previous;
+        if (review is not null) ReviewRow(review);
     }
 
     private async Task StartReviewTrialAsync()
     {
         if (!CanAdminister || review is null) return;
         busy = true;
-        try { trial = await Trials.StartTrialAsync(review.User.Id, review.Editor); message = null; }
+        try
+        {
+            if (review.PasswordLocked && review.Editor.SshAuthenticationMode != RemoteAccessSshAuthenticationMode.KeyOnly && string.IsNullOrWhiteSpace(newPassword))
+                throw new InvalidOperationException("Set a new account password before applying a password login method to this locked account.");
+            trial = await Trials.StartTrialAsync(review.User.Id, review.Editor, string.IsNullOrEmpty(newPassword) ? null : newPassword);
+            message = null;
+        }
         catch (Exception ex) { message = ex.Message; tone = "error"; }
         finally { busy = false; }
     }
@@ -162,9 +214,9 @@
         {
             await Trials.ConfirmAsync(trial.Id);
             var row = rows.FirstOrDefault(row => row.User.Id == trial.UserId);
-            if (row is not null) row.KeepDraft();
+            if (row is not null) { row.KeepDraft(); if (trial.ChangesPassword) row.PasswordLocked = false; }
             message = $"Fresh login verified for {trial.UserName}. Change kept."; tone = "success";
-            trial = null; NextReview();
+            trial = null; newPassword = ""; sshSaved = true;
         }
         catch (Exception ex) { message = ex.Message; tone = "error"; }
         finally { busy = false; }
@@ -180,7 +232,7 @@
             if (active?.Id == trial.Id) await Trials.RevertAsync(trial.Id);
             message = $"Previous login settings restored for {trial.UserName}."; tone = "info";
             rows.FirstOrDefault(row => row.User.Id == trial.UserId)?.ResetDraft();
-            trial = null; NextReview();
+            trial = null; newPassword = "";
         }
         catch (Exception ex) { message = ex.Message; tone = "error"; }
         finally { busy = false; }
@@ -191,8 +243,32 @@
         if (trial is null || busy) return Task.CompletedTask;
         rows.FirstOrDefault(row => row.User.Id == trial.UserId)?.ResetDraft();
         message = $"The unconfirmed test for {trial.UserName} ended. Previous login settings were restored.";
-        tone = "info"; trial = null; NextReview();
+        tone = "info"; trial = null; newPassword = "";
         return Task.CompletedTask;
+    }
+
+    private async Task SaveSudoAsync()
+    {
+        if (!CanAdminister || review is null || sudoMode is not { } mode || busy) return;
+        busy = true;
+        try
+        {
+            if (mode == LocalUserSudoMode.PasswordRequired && review.PasswordLocked)
+                throw new InvalidOperationException("This account's password is locked. Choose Sudo without a password, or apply and verify a new account password first.");
+            await Shares.SaveUserSudoAsync(review.User.Id, mode);
+            review.User = review.User with { SudoMode = mode };
+            sudoMessage = $"Sudo access saved for {review.User.UserName}. SSH login changes are saved separately using the button below.";
+            sudoTone = "success";
+        }
+        catch (Exception ex) { sudoMessage = ex.Message; sudoTone = "error"; }
+        finally { busy = false; }
+    }
+
+    private async Task CloseReviewAsync()
+    {
+        if (busy) return;
+        if (trial is not null) { await RevertAsync(); if (trial is not null) return; }
+        review?.ResetDraft(); review = null; newPassword = ""; sudoMessage = null;
     }
 
     private static string Label(RemoteAccessSshAuthenticationMode mode) => mode switch
@@ -210,16 +286,16 @@
     </text>;
     private sealed class Row(LinuxShareUser user, LocalUserAccessEditor editor, string label, int keys, bool locked, bool protectedPolicy)
     {
-        public LinuxShareUser User { get; } = user;
+        public LinuxShareUser User { get; set; } = user;
         public LocalUserAccessEditor Editor { get; } = editor;
         public string CurrentLabel { get; set; } = label;
-        public int KeyCount { get; } = keys;
-        public bool PasswordLocked { get; } = locked;
+        public int KeyCount { get; private set; } = keys;
+        public bool PasswordLocked { get; set; } = locked;
         public bool Protected { get; } = protectedPolicy;
         public bool Staged { get; set; }
         private RemoteAccessSshAuthenticationMode currentMode = editor.SshAuthenticationMode;
         private string currentKeys = editor.AuthorizedKeyEntries;
         public void ResetDraft() { Editor.SshAuthenticationMode = currentMode; Editor.AuthorizedKeyEntries = currentKeys; Staged = false; }
-        public void KeepDraft() { currentMode = Editor.SshAuthenticationMode; currentKeys = Editor.AuthorizedKeyEntries; CurrentLabel = Label(currentMode); Staged = false; }
+        public void KeepDraft() { currentMode = Editor.SshAuthenticationMode; currentKeys = Editor.AuthorizedKeyEntries; CurrentLabel = Label(currentMode); KeyCount = currentKeys.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Count(line => !line.TrimStart().StartsWith('#')); Staged = false; }
     }
 }
