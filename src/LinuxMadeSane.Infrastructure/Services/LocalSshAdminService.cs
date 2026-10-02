@@ -10,6 +10,7 @@ using LinuxMadeSane.Application.Contracts.Security;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Application.Services;
 using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.RdpOptimizer;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -157,13 +158,18 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
         CancellationToken cancellationToken = default)
     {
         await operationGate.WaitAsync(cancellationToken);
+        var configurationGateHeld = false;
         try
         {
+            await UserCredentialTrialService.ConfigurationGate.WaitAsync(cancellationToken);
+            configurationGateHeld = true;
             if (activeRecovery is not null)
             {
                 throw new InvalidOperationException("Keep or revert the current SSH test before making another SSH change.");
             }
 
+            if (File.Exists(Path.Combine(storageSettings.DirectoryPath, "pending-user-credentials-trial.json")))
+                throw new InvalidOperationException("Keep or revert the user login test before changing SSH server settings.");
             var overview = await ReadOverviewAsync(cancellationToken);
             var plan = BuildHardeningPlan(editor, overview, verifiedUserName);
             if (!plan.CanApply)
@@ -204,6 +210,7 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
         }
         finally
         {
+            if (configurationGateHeld) UserCredentialTrialService.ConfigurationGate.Release();
             operationGate.Release();
         }
     }
@@ -612,7 +619,7 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
             ReadBool("allowagentforwarding", true),
             Read("allowtcpforwarding", "yes") is not "no",
             ReadInt("maxauthtries", 6),
-            ParseDurationSeconds(Read("logingracetime", "120"), 120));
+            ParseDurationSeconds(Read("logingracetime", "120"), 120)) { AuthenticationMethods = Read("authenticationmethods", "any") };
 
         string Read(string key, string fallback) =>
             values.TryGetValue(key, out var entries) && entries.Count > 0 ? entries[0] : fallback;
@@ -640,6 +647,8 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
         builder.AppendLine($"PubkeyAuthentication {YesNo(normalized.PublicKeyAuthentication)}");
         builder.AppendLine($"KbdInteractiveAuthentication {YesNo(normalized.KeyboardInteractiveAuthentication)}");
         builder.AppendLine($"UsePAM {YesNo(normalized.UsePam)}");
+        if (normalized.LoginAuthenticationMode is { } loginMode)
+            builder.AppendLine($"AuthenticationMethods {BuildAuthenticationMethods(loginMode, normalized.KeyboardInteractiveAuthentication)}");
         builder.AppendLine("PermitEmptyPasswords no");
         builder.AppendLine($"X11Forwarding {YesNo(normalized.X11Forwarding)}");
         builder.AppendLine($"AllowAgentForwarding {YesNo(normalized.AllowAgentForwarding)}");
@@ -758,6 +767,9 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
             $"Existing SSH sessions remain open and the old settings return after {trialDuration.TotalMinutes:0} minutes unless you keep the change."
         };
 
+        if (normalized.LoginAuthenticationMode is { } loginMode)
+            AddChange(overview.EffectiveSettings.AuthenticationMethods != BuildAuthenticationMethods(loginMode, normalized.KeyboardInteractiveAuthentication),
+                $"Set server login requirement to {loginMode}.");
         AddChange(overview.EffectiveSettings.Ports.FirstOrDefault(22) != normalized.Port, $"Listen on TCP port {normalized.Port}.");
         AddChange(IsRootLoginAllowed(overview.EffectiveSettings.PermitRootLogin) != normalized.PermitRootLogin,
             normalized.PermitRootLogin ? "Allow direct root login." : "Block direct root login.");
@@ -780,7 +792,7 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
         AddChange(overview.EffectiveSettings.LoginGraceTimeSeconds != normalized.LoginGraceTimeSeconds,
             $"Close incomplete logins after {normalized.LoginGraceTimeSeconds} seconds.");
 
-        var requiresVerifiedKey = !normalized.PasswordAuthentication;
+        var requiresVerifiedKey = !normalized.PasswordAuthentication || normalized.LoginAuthenticationMode == RemoteAccessSshAuthenticationMode.PasswordAndKey;
         if (requiresVerifiedKey)
         {
             var verified = !string.IsNullOrWhiteSpace(verifiedUserName) && HasFreshVerifiedLogin(verifiedUserName, null);
@@ -908,7 +920,7 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
                 userSshContext.PublicKeyAuthentication,
                 userSshContext.AuthenticationMethods,
                 values.Length > 0 && values[0] == "1",
-                values.Length > 1 && values[1] == "1"));
+                values.Length > 1 && values[1] == "1") { IsPasswordAuthenticationEnabled = userSshContext.PasswordAuthentication });
         }
 
         return users.OrderBy(user => user.UserName == Environment.UserName ? 0 : user.UserName == "root" ? 2 : 1)
@@ -1019,7 +1031,7 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
             var blob = Convert.FromBase64String(parts[typeIndex + 1]);
             var fingerprint = "SHA256:" + Convert.ToBase64String(SHA256.HashData(blob)).TrimEnd('=');
             var comment = typeIndex + 2 < parts.Length ? string.Join(' ', parts[(typeIndex + 2)..]) : "No comment";
-            key = new SshAuthorizedKeyViewModel(parts[typeIndex], fingerprint, comment);
+            key = new SshAuthorizedKeyViewModel(parts[typeIndex], fingerprint, comment) { AuthorizedKeyEntry = line.Trim() };
             return true;
         }
         catch (FormatException)
@@ -1569,6 +1581,15 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
             dryRun: false,
             cancellationToken);
 
+    internal static string BuildAuthenticationMethods(RemoteAccessSshAuthenticationMode mode, bool interactive) => mode switch
+    {
+        RemoteAccessSshAuthenticationMode.Password => interactive ? "password keyboard-interactive" : "password",
+        RemoteAccessSshAuthenticationMode.KeyOnly => "publickey",
+        RemoteAccessSshAuthenticationMode.PasswordAndKey => interactive ? "publickey,password publickey,keyboard-interactive" : "publickey,password",
+        RemoteAccessSshAuthenticationMode.PasswordOrKey => interactive ? "publickey password keyboard-interactive" : "publickey password",
+        _ => throw new InvalidOperationException("Unsupported SSH login policy.")
+    };
+
     private static SshHardeningEditor NormalizeEditor(SshHardeningEditor editor)
     {
         ArgumentNullException.ThrowIfNull(editor);
@@ -1587,12 +1608,15 @@ public sealed class LocalSshAdminService : ISshAdminService, IHostedService, IDi
             throw new InvalidOperationException("Login time must be from 10 to 120 seconds.");
         }
 
+        if (editor.LoginAuthenticationMode is { } mode && !Enum.IsDefined(mode))
+            throw new InvalidOperationException("Choose a supported server login policy.");
         return new SshHardeningEditor
         {
+            LoginAuthenticationMode = editor.LoginAuthenticationMode,
             Port = editor.Port,
             PermitRootLogin = editor.PermitRootLogin,
-            PasswordAuthentication = editor.PasswordAuthentication,
-            PublicKeyAuthentication = editor.PublicKeyAuthentication,
+            PasswordAuthentication = editor.LoginAuthenticationMode is { } selectedMode ? selectedMode != RemoteAccessSshAuthenticationMode.KeyOnly : editor.PasswordAuthentication,
+            PublicKeyAuthentication = editor.LoginAuthenticationMode is { } selectedKeyMode ? selectedKeyMode != RemoteAccessSshAuthenticationMode.Password : editor.PublicKeyAuthentication,
             KeyboardInteractiveAuthentication = editor.KeyboardInteractiveAuthentication,
             UsePam = editor.UsePam,
             X11Forwarding = editor.X11Forwarding,

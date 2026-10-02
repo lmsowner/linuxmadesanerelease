@@ -6,6 +6,7 @@
 @using LinuxMadeSane.Application.Contracts.Shares
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Models.Shares
+@inject IUserCredentialTrialService CredentialTrials
 @inject IShareManagementService ShareService
 @inject IJSRuntime JSRuntime
 
@@ -376,9 +377,23 @@
          CloseOnBackdrop="false"
          OnClose="CloseLocalCredentialsAsync">
     <ChildContent>
-        @if (localCredentialsMessageTone == "error" && !string.IsNullOrWhiteSpace(localCredentialsMessage))
+        @if (!string.IsNullOrWhiteSpace(localCredentialsMessage))
         {
-            <p class="callout error">@localCredentialsMessage</p>
+            <p class="callout @localCredentialsMessageTone">@localCredentialsMessage</p>
+        }
+
+        @if (credentialTrial is not null)
+        {
+            <UserCredentialTrialWatch Trial="@credentialTrial" IsBusy="@(isSavingLocalUserAccess || isResettingLocalPassword)" OnExpired="OnCredentialTrialExpiredAsync" />
+            <div class="callout warning" role="status">
+                <strong>Login test active until @credentialTrial.ExpiresAtUtc.ToLocalTime().ToString("HH:mm:ss")</strong>
+                <p>Keep this window open. From a new terminal on your device, connect as @credentialTrial.UserName using the proposed credentials. LMS checks for a fresh successful SSH login before keeping the change.</p>
+                <p>If the test fails, you close this dialog, or the two-minute deadline expires, the previous credentials and SSH settings return automatically. Existing SSH sessions stay open.</p>
+                <div class="toolbar-row">
+                    <UiCommandButton Label="Check login and keep" Glyph="UiIconGlyph.Save" Disabled="@isSavingLocalUserAccess" OnClick="ConfirmCredentialTrialAsync" />
+                    <UiCommandButton Label="Revert now" Disabled="@isSavingLocalUserAccess" OnClick="RevertCredentialTrialAsync" />
+                </div>
+            </div>
         }
 
         <EditForm id="local-user-credentials-form" Model="@localUserAccessEditor" OnValidSubmit="SaveLocalUserAccessAsync" class="stack-form remote-access-modal-form">
@@ -388,7 +403,7 @@
                 <div class="local-credentials-section-header">
                     <div>
                         <h3>Password</h3>
-                        <p class="meta-text">Linux Made Sane only changes the password when you click <strong>Change password</strong>.</p>
+                        <p class="meta-text">Try a new password for two minutes. Keep it only after a fresh login succeeds; otherwise the old password returns.</p>
                     </div>
                     <span class="status-pill neutral">@FormatTimestamp(GetPasswordChangedAtUtcForSelectedUser(), "Not changed yet")</span>
                 </div>
@@ -419,10 +434,10 @@
                             }
                         </div>
 
-                        <UiCommandButton Label="@(isResettingLocalPassword ? "Changing..." : "Change password")"
+                        <UiCommandButton Label="@(isResettingLocalPassword ? "Starting test..." : "Try new password")"
                                          Glyph="UiIconGlyph.Save"
                                          Variant="UiButtonVariant.PrimaryMuted"
-                                         Disabled="@isResettingLocalPassword"
+                                         Disabled="@(isResettingLocalPassword || credentialTrial is not null)"
                                          OnClick="ResetLocalUserPasswordAsync" />
                     </div>
                 </div>
@@ -440,7 +455,7 @@
                 <div class="field-row local-ssh-row">
                     <UiComboboxField TValue="RemoteAccessSshAuthenticationMode"
                                    @bind-Value="localUserAccessEditor.SshAuthenticationMode"
-                                   Label="SSH login mode"
+                                   Label="SSH login mode" Disabled="@(credentialTrial is not null || isSavingLocalUserAccess || isResettingLocalPassword)"
                                    Helper="@BuildSshModeHelperText(localUserAccessEditor.SshAuthenticationMode)">
                         @foreach (var mode in Enum.GetValues<RemoteAccessSshAuthenticationMode>())
                         {
@@ -461,7 +476,7 @@
                 <SshPublicKeySetupGuide UserName="@localUserAccessEditor.UserName" />
 
                 <UiTextAreaField @bind-Value="localUserAccessEditor.AuthorizedKeyEntries"
-                                 Label="Public keys / certificate entries"
+                                 Label="Public keys / certificate entries" Disabled="@(credentialTrial is not null || isSavingLocalUserAccess || isResettingLocalPassword)"
                                  Helper="@BuildAuthorizedKeyHelperText(localUserAccessEditor.SshAuthenticationMode)"
                                  Rows="5"
                                  InputClass="local-ssh-key-textarea" />
@@ -470,16 +485,18 @@
     </ChildContent>
     <Footer>
         <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="CloseLocalCredentialsAsync" />
-        <UiCommandButton Label="@(isSavingLocalUserAccess ? "Saving..." : "Save SSH access")"
+        <UiCommandButton Label="@(isSavingLocalUserAccess ? "Starting test..." : "Try SSH access")"
                          Glyph="UiIconGlyph.Save"
                          Variant="UiButtonVariant.PrimaryMuted"
                          Type="submit"
-                         Disabled="@isSavingLocalUserAccess"
+                         Disabled="@(isSavingLocalUserAccess || credentialTrial is not null)"
                          form="local-user-credentials-form" />
     </Footer>
 </UiModal>
 
 @code {
+    private UserCredentialTrial? credentialTrial;
+
     private static readonly HashSet<string> CommonWorkingGroups = new(StringComparer.OrdinalIgnoreCase)
     {
         "sudo",
@@ -612,7 +629,19 @@
 
     private async Task BeginLocalCredentialsAsync(LinuxShareUser user)
     {
+        var activeTrial = await CredentialTrials.GetActiveTrialAsync();
+        if (activeTrial is not null && activeTrial.UserId != user.Id)
+        {
+            SetUserStatus($"Finish the login test for {activeTrial.UserName} first.", "warning");
+            return;
+        }
+        credentialTrial = activeTrial;
         localUserAccessEditor = await ShareService.GetLocalUserAccessEditorAsync(user.Id);
+        if (activeTrial?.ProposedMode is { } proposedMode)
+        {
+            localUserAccessEditor.SshAuthenticationMode = proposedMode;
+            localUserAccessEditor.AuthorizedKeyEntries = activeTrial.ProposedPublicKeys ?? "";
+        }
         selectedLocalAccessUserId = user.Id;
         localPasswordResetModel = await ShareService.BuildLocalUserPasswordResetAsync(user.Id);
         revealedLocalPassword = string.Empty;
@@ -621,8 +650,22 @@
         localCredentialsMessageTone = "info";
     }
 
-    private Task CloseLocalCredentialsAsync()
+    private async Task CloseLocalCredentialsAsync()
     {
+        if (credentialTrial is not null)
+        {
+            try
+            {
+                var activeTrial = await CredentialTrials.GetActiveTrialAsync();
+                if (activeTrial?.Id == credentialTrial.Id) await CredentialTrials.RevertAsync(credentialTrial.Id);
+                credentialTrial = null;
+            }
+            catch (Exception exception)
+            {
+                localCredentialsMessage = $"Could not restore previous login settings: {exception.Message}";
+                return;
+            }
+        }
         isLocalCredentialsOpen = false;
         isSavingLocalUserAccess = false;
         isResettingLocalPassword = false;
@@ -632,11 +675,12 @@
         revealedLocalPassword = string.Empty;
         localCredentialsMessage = string.Empty;
         localCredentialsMessageTone = "info";
-        return Task.CompletedTask;
+
     }
 
     private async Task HandleLocalUserKeyImportAsync(InputFileChangeEventArgs args)
     {
+        if (credentialTrial is not null || isSavingLocalUserAccess || isResettingLocalPassword) return;
         try
         {
             localUserAccessEditor.AuthorizedKeyEntries = await AppendImportedAuthorizedKeysAsync(localUserAccessEditor.AuthorizedKeyEntries, args);
@@ -662,8 +706,7 @@
 
         try
         {
-            await ShareService.SaveLocalUserAccessAsync(selectedLocalAccessUserId.Value, localUserAccessEditor);
-            await LoadAsync();
+            credentialTrial = await CredentialTrials.StartTrialAsync(selectedLocalAccessUserId.Value, localUserAccessEditor);
             localCredentialsMessage = string.Empty;
             localCredentialsMessageTone = "info";
         }
@@ -678,11 +721,56 @@
         }
     }
 
+    private async Task OnCredentialTrialExpiredAsync()
+    {
+        if (credentialTrial is null || isSavingLocalUserAccess || isResettingLocalPassword) return;
+        credentialTrial = null;
+        revealedLocalPassword = string.Empty;
+        localCredentialsMessage = "The unconfirmed login test ended. Previous credentials and SSH settings were restored.";
+        localCredentialsMessageTone = "info";
+        if (selectedLocalAccessUserId is { } id) localUserAccessEditor = await ShareService.GetLocalUserAccessEditorAsync(id);
+        await LoadAsync();
+    }
+
+    private async Task ConfirmCredentialTrialAsync()
+    {
+        if (credentialTrial is null) return;
+        isSavingLocalUserAccess = true;
+        try
+        {
+            await CredentialTrials.ConfirmAsync(credentialTrial.Id);
+            credentialTrial = null;
+            localCredentialsMessage = "Fresh SSH login verified. The new credentials and login settings are now kept.";
+            localCredentialsMessageTone = "success";
+            await LoadAsync();
+        }
+        catch (Exception exception) { localCredentialsMessage = exception.Message; localCredentialsMessageTone = "error"; }
+        finally { isSavingLocalUserAccess = false; }
+    }
+
+    private async Task RevertCredentialTrialAsync()
+    {
+        if (credentialTrial is null) return;
+        isSavingLocalUserAccess = true;
+        try
+        {
+            var activeTrial = await CredentialTrials.GetActiveTrialAsync();
+            if (activeTrial?.Id == credentialTrial.Id) await CredentialTrials.RevertAsync(credentialTrial.Id);
+            credentialTrial = null;
+            revealedLocalPassword = string.Empty;
+            localCredentialsMessage = "Previous credentials and SSH settings restored.";
+            if (selectedLocalAccessUserId is { } userId) localUserAccessEditor = await ShareService.GetLocalUserAccessEditorAsync(userId);
+            await LoadAsync();
+        }
+        catch (Exception exception) { localCredentialsMessage = exception.Message; localCredentialsMessageTone = "error"; }
+        finally { isSavingLocalUserAccess = false; }
+    }
+
     private async Task CopyPendingLocalPasswordAsync()
     {
         if (string.IsNullOrWhiteSpace(revealedLocalPassword))
         {
-            localCredentialsMessage = "Change the password first, then copy the generated password.";
+            localCredentialsMessage = "Start a password test first, then copy the proposed password.";
             localCredentialsMessageTone = "error";
             return;
         }
@@ -715,8 +803,7 @@
         try
         {
             var passwordReset = await ShareService.BuildLocalUserPasswordResetAsync(localPasswordResetModel.UserId);
-            await ShareService.ResetLocalUserPasswordAsync(passwordReset.UserId, passwordReset.SuggestedPassword);
-            await LoadAsync();
+            credentialTrial = await CredentialTrials.StartTrialAsync(passwordReset.UserId, null, passwordReset.SuggestedPassword);
             localPasswordResetModel = passwordReset;
             revealedLocalPassword = passwordReset.SuggestedPassword;
             localCredentialsMessage = string.Empty;
@@ -1130,7 +1217,7 @@
     private static string BuildAuthorizedKeyHelperText(RemoteAccessSshAuthenticationMode mode) => mode switch
     {
         RemoteAccessSshAuthenticationMode.Password => "Optional. Paste OpenSSH public keys or cert-authority entries if you want this user ready for certificate / key login later.",
-        RemoteAccessSshAuthenticationMode.PasswordOrKey => "Required to enable both choices. Paste or import a public key; password login remains available.",
+        RemoteAccessSshAuthenticationMode.PasswordOrKey => "Optional. Password login works without a key. Paste or import a public key to enable key login too.",
         RemoteAccessSshAuthenticationMode.PasswordAndKey => "Required. Paste one or more OpenSSH public keys or cert-authority entries for the certificate / key step.",
         RemoteAccessSshAuthenticationMode.KeyOnly => "Required. Paste one or more OpenSSH public keys or cert-authority entries because passwords will be rejected.",
         _ => string.Empty
@@ -1148,7 +1235,7 @@
     private string GetLocalPasswordHelperText() =>
         HasVisibleLocalPassword()
             ? "Copy this now if you need it. Linux Made Sane will not show the existing password before it is changed."
-            : "Current password stays hidden. Click Change password to rotate it immediately and reveal the new password so you can copy it.";
+            : "Current password stays hidden. Click Try new password to test a replacement and reveal the new password so you can copy it.";
 
     private string GetLocalPasswordPlaceholder() =>
         HasVisibleLocalPassword() ? string.Empty : "Current password hidden";

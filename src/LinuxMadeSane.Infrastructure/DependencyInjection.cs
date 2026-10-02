@@ -180,6 +180,9 @@ public static class DependencyInjection
             serviceProvider.GetRequiredService<LocalUfwFirewallService>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LocalUfwFirewallService>());
         services.AddSingleton<IPortForwardingService, LocalSocatPortForwardingService>();
+        services.AddSingleton<UserCredentialTrialService>();
+        services.AddSingleton<IUserCredentialTrialService>(provider => provider.GetRequiredService<UserCredentialTrialService>());
+        services.AddHostedService(provider => provider.GetRequiredService<UserCredentialTrialService>());
         services.AddSingleton<LocalSshAdminService>();
         services.AddSingleton<ISshAdminService>(serviceProvider => serviceProvider.GetRequiredService<LocalSshAdminService>());
         services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LocalSshAdminService>());

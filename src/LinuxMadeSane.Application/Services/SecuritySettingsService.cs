@@ -804,7 +804,7 @@ public sealed class SecuritySettingsService(
 
     private static void ValidateAuthorizedKeys(RemoteAccessSshAuthenticationMode mode, string authorizedKeyEntries)
     {
-        if (mode is not RemoteAccessSshAuthenticationMode.Password &&
+        if (mode is RemoteAccessSshAuthenticationMode.KeyOnly or RemoteAccessSshAuthenticationMode.PasswordAndKey &&
             string.IsNullOrWhiteSpace(authorizedKeyEntries))
         {
             throw new InvalidOperationException("Key-based SSH modes require at least one imported OpenSSH public key or certificate-authority entry.");

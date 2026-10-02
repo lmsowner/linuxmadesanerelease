@@ -3,6 +3,7 @@
 
 @implements IDisposable
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
 @inject ISshAdminService SshAdminService
 @inject IJSRuntime JSRuntime
 
@@ -121,6 +122,11 @@
                 </button>
             }
         </nav>
+
+        @if (activeSection == UserLoginSection)
+        {
+            <UserSshLoginOptions CanAdminister="@CanChangeSsh" InitialUserName="@SelectedUserName" />
+        }
 
         @if (activeSection == KeysSection)
         {
@@ -260,8 +266,17 @@
                         <UiNumberField TValue="int" @bind-Value="hardeningEditor.LoginGraceTimeSeconds" Label="Time to finish login (seconds)" Helper="Slow or abandoned logins are closed after this time." min="10" max="120" />
                     </div>
                     <div class="ssh-admin-toggle-grid">
-                        <UiCheckboxField @bind-Value="hardeningEditor.PublicKeyAuthentication" Label="Allow public-key login" Helper="Keep this on. A device proves it owns the private half of an installed public key." Card="true" />
-                        <UiCheckboxField @bind-Value="hardeningEditor.PasswordAuthentication" Label="Allow Linux passwords" Helper="Keep this temporarily while onboarding. LMS blocks turning it off until a key login is verified." Card="true" />
+                        <UiComboboxField TValue="RemoteAccessSshAuthenticationMode?" Value="@hardeningEditor.LoginAuthenticationMode"
+                                         ValueChanged="SetServerLoginModeAsync" ValueExpression="@(() => hardeningEditor.LoginAuthenticationMode)"
+                                         Label="Default SSH login options" Helper="Every login uses a Linux username. Choose password, key, either, or require both. Per-user rules can set their own policy; server-wide key-only enforcement and authenticator rules remain protected.">
+                            <option value="">Choose a login policy</option>
+                            <option value="@RemoteAccessSshAuthenticationMode.Password">Password only</option>
+                            <option value="@RemoteAccessSshAuthenticationMode.KeyOnly">Key only</option>
+                            <option value="@RemoteAccessSshAuthenticationMode.PasswordOrKey">Password or key (either accepted)</option>
+                            <option value="@RemoteAccessSshAuthenticationMode.PasswordAndKey">Password and key (both required)</option>
+                        </UiComboboxField>
+                        <UiCheckboxField @bind-Value="hardeningEditor.PublicKeyAuthentication" Label="Allow public-key login" Helper="Keep this on. A device proves it owns the private half of an installed public key." Card="true" Disabled="true" />
+                        <UiCheckboxField @bind-Value="hardeningEditor.PasswordAuthentication" Label="Allow Linux passwords" Helper="Keep this temporarily while onboarding. LMS blocks turning it off until a key login is verified." Card="true" Disabled="true" />
                         <UiCheckboxField @bind-Value="hardeningEditor.PermitRootLogin" Label="Allow direct root login" Helper="Usually leave off. Sign in with a named user and use sudo when administration is needed." Card="true" />
                         <UiCheckboxField @bind-Value="hardeningEditor.KeyboardInteractiveAuthentication" Label="Allow keyboard-interactive login" Helper="Leave off unless another PAM-based login method needs it. LMS enables it only for managed authenticator users." Card="true" />
                         <UiCheckboxField @bind-Value="hardeningEditor.UsePam" Label="Use Linux PAM account checks" Helper="Keep this on for normal account policy and the optional authenticator workflow." Card="true" />
@@ -440,6 +455,7 @@
 
     private const string KeysSection = "keys";
     private const string HardeningSection = "hardening";
+    private const string UserLoginSection = "user-login";
     private const string AuthenticatorSection = "authenticator";
     private const string GuideSection = "guide";
     private const string WindowsPlatform = "windows";
@@ -450,7 +466,8 @@
     private static readonly (string Value, string Step, string Label)[] WorkflowItems =
     [
         (KeysSection, "1", "Set up a key"),
-        (HardeningSection, "2", "Harden server"),
+        (HardeningSection, "2", "Server login & hardening"),
+        (UserLoginSection, "User", "User login options"),
         (AuthenticatorSection, "3", "Add authenticator"),
         (GuideSection, "?", "Terminology & recovery")
     ];
@@ -916,8 +933,26 @@
         SetStatus(copied ? message : "Clipboard access was blocked. Select the text and copy it manually.", copied ? "success" : "warning");
     }
 
+    private Task SetServerLoginModeAsync(RemoteAccessSshAuthenticationMode? mode)
+    {
+        hardeningEditor.LoginAuthenticationMode = mode;
+        if (mode is not null)
+        {
+            hardeningEditor.PasswordAuthentication = mode != RemoteAccessSshAuthenticationMode.KeyOnly;
+            hardeningEditor.PublicKeyAuthentication = mode != RemoteAccessSshAuthenticationMode.Password;
+        }
+        hardeningPlan = null;
+        return Task.CompletedTask;
+    }
+
     private static SshHardeningEditor BuildEditor(SshEffectiveSettings settings) => new()
     {
+        LoginAuthenticationMode = settings.AuthenticationMethods.Contains("publickey,password", StringComparison.Ordinal)
+            ? RemoteAccessSshAuthenticationMode.PasswordAndKey
+            : !settings.PasswordAuthentication ? RemoteAccessSshAuthenticationMode.KeyOnly
+            : !settings.PublicKeyAuthentication ? RemoteAccessSshAuthenticationMode.Password
+            : settings.AuthenticationMethods is "any" or "publickey password" or "publickey password keyboard-interactive"
+                ? RemoteAccessSshAuthenticationMode.PasswordOrKey : null,
         Port = settings.Ports.FirstOrDefault(22),
         PermitRootLogin = settings.PermitRootLogin == "yes",
         PasswordAuthentication = settings.PasswordAuthentication,

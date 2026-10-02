@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.ComponentModel.DataAnnotations;
+using LinuxMadeSane.Core.Enums;
 
 namespace LinuxMadeSane.Application.Contracts.Security;
 
@@ -37,7 +38,10 @@ public sealed record SshEffectiveSettings(
     bool AllowAgentForwarding,
     bool AllowTcpForwarding,
     int MaxAuthTries,
-    int LoginGraceTimeSeconds);
+    int LoginGraceTimeSeconds)
+{
+    public string AuthenticationMethods { get; init; } = "any";
+}
 
 public sealed record SshHostKeyViewModel(
     string Algorithm,
@@ -55,12 +59,18 @@ public sealed record SshLocalUserViewModel(
     bool IsPublicKeyAuthenticationEnabled,
     string AuthenticationMethods,
     bool HasAuthenticator,
-    bool IsAuthenticatorRequired);
+    bool IsAuthenticatorRequired)
+{
+    public bool IsPasswordAuthenticationEnabled { get; init; } = true;
+}
 
 public sealed record SshAuthorizedKeyViewModel(
     string Algorithm,
     string FingerprintSha256,
-    string Comment);
+    string Comment)
+{
+    public string AuthorizedKeyEntry { get; init; } = string.Empty;
+}
 
 public sealed record SshSettingAssessment(
     string Label,
@@ -77,6 +87,8 @@ public enum SshAssessmentTone
 
 public sealed class SshHardeningEditor
 {
+    public RemoteAccessSshAuthenticationMode? LoginAuthenticationMode { get; set; }
+
     [Range(1, 65535)]
     public int Port { get; set; } = 22;
 

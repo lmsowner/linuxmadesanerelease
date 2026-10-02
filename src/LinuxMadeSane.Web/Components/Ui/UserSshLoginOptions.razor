@@ -1,0 +1,234 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Contracts.Shares
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.Shares
+@inject IShareManagementService Shares
+@inject ISshAdminService SshAdmin
+@inject IUserCredentialTrialService Trials
+
+<section class="surface-subcard stack-list">
+    <div class="stack-tight">
+        <h3>User SSH login options</h3>
+        <p class="meta-text">Dropdowns stage changes. Test each user before keeping the new policy. Server key-only enforcement and authenticator protection still apply.</p>
+    </div>
+    @if (!string.IsNullOrWhiteSpace(message))
+    {
+        <p class="callout @tone" role="status">@message</p>
+    }
+    @if (loading)
+    {
+        <p class="meta-text">Loading users and effective SSH login options...</p>
+    }
+    else
+    {
+        <div class="toolbar-row">
+            <UiComboboxField TValue="RemoteAccessSshAuthenticationMode" @bind-Value="bulkMode" Label="Choice for selected users" Disabled="@(busy || trial is not null)">
+                @ModeOptions()
+            </UiComboboxField>
+            <UiCommandButton Label="Stage for selected" Disabled="@(selected.Count == 0 || busy || trial is not null || !CanAdminister)" OnClick="StageSelected" />
+            <span class="meta-text">@DraftCount change(s) staged · @selected.Count selected</span>
+        </div>
+        <div class="table-shell">
+            <table>
+                <thead><tr><th><UiCompactCheckbox Label="Select all users" Value="@(rows.Count > 0 && selected.Count == rows.Count(row => !row.Protected))"
+                                                            ValueChanged="SelectAll" Disabled="@(busy || trial is not null)" /></th><th>Linux user</th><th>Current SSH policy</th><th>Proposed login option</th><th>Keys</th><th></th></tr></thead>
+                <tbody>
+                    @foreach (var row in rows)
+                    {
+                        <tr @key="row.User.Id">
+                            <td><UiCompactCheckbox Label="@($"Select {row.User.UserName}")" Value="@selected.Contains(row.User.Id)"
+                                                   ValueChanged="@((bool value) => SelectRow(row.User.Id, value))" Disabled="@(busy || trial is not null || row.Protected)" /></td>
+                            <td><strong>@row.User.UserName</strong>@if (row.PasswordLocked) { <span class="meta-text"> · password locked</span> }</td>
+                            <td>@row.CurrentLabel</td>
+                            <td><UiCombobox TValue="RemoteAccessSshAuthenticationMode" Value="@row.Editor.SshAuthenticationMode"
+                                            ValueChanged="@((RemoteAccessSshAuthenticationMode mode) => StageRow(row, mode))"
+                                            ValueExpression="@(() => row.Editor.SshAuthenticationMode)" Disabled="@(busy || trial is not null || !CanAdminister || row.Protected)">
+                                    @ModeOptions()
+                                </UiCombobox></td>
+                            <td>@row.KeyCount</td>
+                            <td><UiCommandButton Label="@(row.Staged ? "Review & test" : "Keys / details")" Disabled="@(busy || trial is not null)"
+                                                 OnClick="@(() => ReviewRow(row))" /></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        @if (review is not null)
+        {
+            <section class="surface-subcard stack-list">
+                <h4>@review.User.UserName · @Label(review.Editor.SshAuthenticationMode)</h4>
+                <SshPublicKeySetupGuide UserName="@review.User.UserName" />
+                <UiTextAreaField Label="Public keys" Helper="Optional for password or key. Key-only and both-required modes need a public key. Keep private keys on the user's device."
+                                 Value="@review.Editor.AuthorizedKeyEntries" ValueChanged="SetReviewKeys" ValueExpression="@(() => review.Editor.AuthorizedKeyEntries)"
+                                 Rows="3" Disabled="@(busy || trial is not null || review.Protected)" />
+                @if (trial is null)
+                {
+                    <div class="toolbar-row">
+                        <UiCommandButton Label="Test this change" Disabled="@(busy || !CanAdminister || review.Protected)" OnClick="StartReviewTrialAsync" />
+                        <UiCommandButton Label="Skip / next staged user" Disabled="@busy" OnClick="SkipReview" />
+                    </div>
+                }
+            </section>
+        }
+        @if (trial is not null)
+        {
+            <UserCredentialTrialWatch Trial="@trial" IsBusy="@busy" OnExpired="OnTrialExpiredAsync" />
+            <div class="callout warning" role="status">
+                <strong>Testing @trial.UserName until @trial.ExpiresAtUtc.ToLocalTime().ToString("HH:mm:ss")</strong>
+                <p>Open a new SSH connection from that user's device using the proposed method. LMS verifies a fresh successful login before keeping it. Unconfirmed changes revert after two minutes, even if LMS stops.</p>
+                <div class="toolbar-row">
+                    <UiCommandButton Label="Check login and keep" Disabled="@busy" OnClick="ConfirmAsync" />
+                    <UiCommandButton Label="Revert this user" Disabled="@busy" OnClick="RevertAsync" />
+                </div>
+            </div>
+        }
+        @if (DraftCount > 0 && review is null && trial is null)
+        {
+            <UiCommandButton Label="Review staged changes" OnClick="NextReview" Disabled="@(busy || !CanAdminister)" />
+        }
+    }
+</section>
+
+@code {
+    [Parameter] public bool CanAdminister { get; set; }
+    [Parameter] public string? InitialUserName { get; set; }
+    private readonly List<Row> rows = [];
+    private readonly HashSet<Guid> selected = [];
+    private RemoteAccessSshAuthenticationMode bulkMode = RemoteAccessSshAuthenticationMode.PasswordOrKey;
+    private Row? review;
+    private UserCredentialTrial? trial;
+    private bool loading = true;
+    private bool busy;
+    private string? message;
+    private string tone = "info";
+    private int DraftCount => rows.Count(row => row.Staged);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var users = await Shares.GetUsersGroupsManagerAsync();
+            var overview = await SshAdmin.GetOverviewAsync();
+            foreach (var account in overview.Users)
+            {
+                var user = users.Users.FirstOrDefault(user => user.UserName == account.UserName);
+                if (user is null) continue;
+                var editor = await Shares.GetLocalUserAccessEditorAsync(user.Id);
+                var effectiveMode = account.AuthenticationMethods.Contains("publickey,password", StringComparison.Ordinal)
+                    ? RemoteAccessSshAuthenticationMode.PasswordAndKey
+                    : account.AuthenticationMethods == "publickey" ? RemoteAccessSshAuthenticationMode.KeyOnly
+                    : !account.IsPasswordAuthenticationEnabled ? RemoteAccessSshAuthenticationMode.KeyOnly
+                    : !account.IsPublicKeyAuthenticationEnabled ? RemoteAccessSshAuthenticationMode.Password
+                    : RemoteAccessSshAuthenticationMode.PasswordOrKey;
+                editor.SshAuthenticationMode = effectiveMode;
+                if (string.IsNullOrWhiteSpace(editor.AuthorizedKeyEntries))
+                    editor.AuthorizedKeyEntries = string.Join(Environment.NewLine, account.AuthorizedKeys.Select(key => key.AuthorizedKeyEntry));
+                rows.Add(new Row(user, editor, account.IsAuthenticatorRequired ? "Key + authenticator (protected)" : Label(effectiveMode), account.AuthorizedKeyCount, account.IsLocked, account.IsAuthenticatorRequired));
+            }
+            trial = await Trials.GetActiveTrialAsync();
+            review = rows.FirstOrDefault(row => row.User.Id == trial?.UserId) ?? rows.FirstOrDefault(row => row.User.UserName == InitialUserName);
+            if (trial?.ProposedMode is { } proposedMode && review is not null)
+            {
+                review.Editor.SshAuthenticationMode = proposedMode;
+                review.Editor.AuthorizedKeyEntries = trial.ProposedPublicKeys ?? "";
+                review.Staged = true;
+            }
+        }
+        catch (Exception ex) { message = ex.Message; tone = "error"; }
+        finally { loading = false; }
+    }
+
+    private void SelectAll(bool value) { selected.Clear(); if (value) foreach (var row in rows.Where(row => !row.Protected)) selected.Add(row.User.Id); }
+    private void SelectRow(Guid id, bool value) { if (value) selected.Add(id); else selected.Remove(id); }
+    private void StageRow(Row row, RemoteAccessSshAuthenticationMode mode) { if (row.Protected) return; row.Editor.SshAuthenticationMode = mode; row.Staged = true; }
+    private void StageSelected() { foreach (var row in rows.Where(row => selected.Contains(row.User.Id))) StageRow(row, bulkMode); }
+    private void ReviewRow(Row row) { review = row; message = null; }
+    private void SetReviewKeys(string? value) { if (review is not null && !review.Protected) { review.Editor.AuthorizedKeyEntries = value ?? ""; review.Staged = true; } }
+    private void SkipReview() { review?.ResetDraft(); NextReview(); }
+    private void NextReview()
+    {
+        var previous = review;
+        review = rows.Where(row => row.Staged && row != previous).OrderBy(row => row.User.UserName).FirstOrDefault();
+        if (review is null && previous?.Staged == true) review = previous;
+    }
+
+    private async Task StartReviewTrialAsync()
+    {
+        if (!CanAdminister || review is null) return;
+        busy = true;
+        try { trial = await Trials.StartTrialAsync(review.User.Id, review.Editor); message = null; }
+        catch (Exception ex) { message = ex.Message; tone = "error"; }
+        finally { busy = false; }
+    }
+
+    private async Task ConfirmAsync()
+    {
+        if (trial is null) return;
+        busy = true;
+        try
+        {
+            await Trials.ConfirmAsync(trial.Id);
+            var row = rows.FirstOrDefault(row => row.User.Id == trial.UserId);
+            if (row is not null) row.KeepDraft();
+            message = $"Fresh login verified for {trial.UserName}. Change kept."; tone = "success";
+            trial = null; NextReview();
+        }
+        catch (Exception ex) { message = ex.Message; tone = "error"; }
+        finally { busy = false; }
+    }
+
+    private async Task RevertAsync()
+    {
+        if (trial is null) return;
+        busy = true;
+        try
+        {
+            var active = await Trials.GetActiveTrialAsync();
+            if (active?.Id == trial.Id) await Trials.RevertAsync(trial.Id);
+            message = $"Previous login settings restored for {trial.UserName}."; tone = "info";
+            rows.FirstOrDefault(row => row.User.Id == trial.UserId)?.ResetDraft();
+            trial = null; NextReview();
+        }
+        catch (Exception ex) { message = ex.Message; tone = "error"; }
+        finally { busy = false; }
+    }
+
+    private Task OnTrialExpiredAsync()
+    {
+        if (trial is null || busy) return Task.CompletedTask;
+        rows.FirstOrDefault(row => row.User.Id == trial.UserId)?.ResetDraft();
+        message = $"The unconfirmed test for {trial.UserName} ended. Previous login settings were restored.";
+        tone = "info"; trial = null; NextReview();
+        return Task.CompletedTask;
+    }
+
+    private static string Label(RemoteAccessSshAuthenticationMode mode) => mode switch
+    {
+        RemoteAccessSshAuthenticationMode.Password => "Password only",
+        RemoteAccessSshAuthenticationMode.KeyOnly => "Key only",
+        RemoteAccessSshAuthenticationMode.PasswordAndKey => "Password and key (both required)",
+        _ => "Password or key (either accepted)"
+    };
+    private static RenderFragment ModeOptions() => @<text>
+        <option value="@RemoteAccessSshAuthenticationMode.Password">Password only</option>
+        <option value="@RemoteAccessSshAuthenticationMode.KeyOnly">Key only</option>
+        <option value="@RemoteAccessSshAuthenticationMode.PasswordOrKey">Password or key (either accepted)</option>
+        <option value="@RemoteAccessSshAuthenticationMode.PasswordAndKey">Password and key (both required)</option>
+    </text>;
+    private sealed class Row(LinuxShareUser user, LocalUserAccessEditor editor, string label, int keys, bool locked, bool protectedPolicy)
+    {
+        public LinuxShareUser User { get; } = user;
+        public LocalUserAccessEditor Editor { get; } = editor;
+        public string CurrentLabel { get; set; } = label;
+        public int KeyCount { get; } = keys;
+        public bool PasswordLocked { get; } = locked;
+        public bool Protected { get; } = protectedPolicy;
+        public bool Staged { get; set; }
+        private RemoteAccessSshAuthenticationMode currentMode = editor.SshAuthenticationMode;
+        private string currentKeys = editor.AuthorizedKeyEntries;
+        public void ResetDraft() { Editor.SshAuthenticationMode = currentMode; Editor.AuthorizedKeyEntries = currentKeys; Staged = false; }
+        public void KeepDraft() { currentMode = Editor.SshAuthenticationMode; currentKeys = Editor.AuthorizedKeyEntries; CurrentLabel = Label(currentMode); Staged = false; }
+    }
+}

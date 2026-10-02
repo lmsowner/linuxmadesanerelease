@@ -31,9 +31,17 @@ public sealed class LocalUserAccessSystemService(ILinuxCommandRunner commandRunn
         {
             await EnsureManagedDirectoriesAsync(cancellationToken);
             await ClearManagedAuthorizedKeysDirectoryAsync(cancellationToken);
+            var clearOverrides = await commandRunner.RunAsync(new LinuxCommandRequest("bash",
+                ["-lc", "rm -f /etc/ssh/sshd_config.d/00-linuxmadesane-user-*.conf"], true, CommandTimeout,
+                "Refresh managed per-user SSH policy files"), false, cancellationToken);
+            if (clearOverrides.ExitCode != 0) throw new InvalidOperationException("Could not refresh managed per-user SSH policies.");
 
             foreach (var policy in normalizedPolicies)
             {
+                await InstallManagedTextAsync(tempDirectory, $"{policy.UserName}.conf",
+                    BuildSshdConfig([policy]) + "\nMatch all\n", "600",
+                    $"{ManagedConfigDirectory}/00-linuxmadesane-user-{policy.UserName}.conf",
+                    $"Install SSH login policy for {policy.UserName}", "Could not install user SSH policy", cancellationToken);
                 if (string.IsNullOrWhiteSpace(policy.AuthorizedKeyEntries))
                 {
                     continue;
@@ -112,7 +120,7 @@ public sealed class LocalUserAccessSystemService(ILinuxCommandRunner commandRunn
 
     public async Task ResetPasswordAsync(string userName, string newPassword, CancellationToken cancellationToken = default)
     {
-        var normalizedUserName = userName.Trim().ToLowerInvariant();
+        var normalizedUserName = userName.Trim();
         var command = Environment.UserName.Equals("root", StringComparison.OrdinalIgnoreCase)
             ? ("chpasswd", Array.Empty<string>())
             : ("sudo", new[] { "-n", "chpasswd" });
@@ -226,7 +234,7 @@ public sealed class LocalUserAccessSystemService(ILinuxCommandRunner commandRunn
         }
     }
 
-    private static string BuildSshdConfig(IReadOnlyList<LocalUserAccessPolicy> policies)
+    internal static string BuildSshdConfig(IReadOnlyList<LocalUserAccessPolicy> policies)
     {
         var builder = new StringBuilder();
         builder.AppendLine("# Managed by Linux Made Sane.");
@@ -243,6 +251,7 @@ public sealed class LocalUserAccessSystemService(ILinuxCommandRunner commandRunn
                     builder.AppendLine("    PubkeyAuthentication no");
                     builder.AppendLine("    PasswordAuthentication yes");
                     builder.AppendLine("    KbdInteractiveAuthentication yes");
+                    builder.AppendLine("    AuthenticationMethods password keyboard-interactive");
                     break;
                 case RemoteAccessSshAuthenticationMode.PasswordOrKey:
                     builder.AppendLine($"    AuthorizedKeysFile {ManagedAuthorizedKeysDirectory}/%u");
