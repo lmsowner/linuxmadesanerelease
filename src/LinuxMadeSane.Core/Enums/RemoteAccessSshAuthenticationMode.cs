@@ -7,5 +7,6 @@ public enum RemoteAccessSshAuthenticationMode
 {
     Password = 0,
     PasswordAndKey = 1,
-    KeyOnly = 2
+    KeyOnly = 2,
+    PasswordOrKey = 3
 }

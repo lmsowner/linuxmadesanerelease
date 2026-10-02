@@ -280,6 +280,13 @@ public sealed class LocalRemoteAccessSystemService(
                     builder.AppendLine("    PasswordAuthentication yes");
                     builder.AppendLine("    KbdInteractiveAuthentication yes");
                     break;
+                case RemoteAccessSshAuthenticationMode.PasswordOrKey:
+                    builder.AppendLine($"    AuthorizedKeysFile {ManagedAuthorizedKeysDirectory}/%u");
+                    builder.AppendLine("    PubkeyAuthentication yes");
+                    builder.AppendLine("    PasswordAuthentication yes");
+                    builder.AppendLine("    KbdInteractiveAuthentication yes");
+                    builder.AppendLine("    AuthenticationMethods publickey password keyboard-interactive");
+                    break;
                 case RemoteAccessSshAuthenticationMode.PasswordAndKey:
                     builder.AppendLine($"    AuthorizedKeysFile {ManagedAuthorizedKeysDirectory}/%u");
                     builder.AppendLine("    PubkeyAuthentication yes");

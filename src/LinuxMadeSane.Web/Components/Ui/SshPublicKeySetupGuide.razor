@@ -1,0 +1,62 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@inject IJSRuntime JSRuntime
+
+<details class="ssh-key-setup-guide">
+    <summary>Set up a key on your device</summary>
+    <div class="stack-list ssh-key-setup-body">
+        <p>Generate the key on the computer you will connect from. Keep the <strong>private key</strong> there; share only the <strong>.pub public key</strong> with LMS.</p>
+        <div class="toolbar-row" aria-label="Your device's operating system">
+            @foreach (var platform in Platforms)
+            {
+                <button type="button" class="glass-button @(selectedPlatform == platform ? "glass-button-primary" : "glass-button-ghost")"
+                        aria-pressed="@(selectedPlatform == platform)" @onclick="@(() => selectedPlatform = platform)">@platform</button>
+            }
+        </div>
+        @if (selectedPlatform == "SSH app")
+        {
+            <ol>
+                <li>Create an Ed25519 key pair in your SSH app and protect it with a passphrase or the device's secure storage.</li>
+                <li>Export the OpenSSH public key, normally one line starting with <code>ssh-ed25519</code>.</li>
+                <li>Paste that line below or import its <code>.pub</code> file. Never upload the private key.</li>
+            </ol>
+        }
+        else
+        {
+            <p>Open @(selectedPlatform == "Windows" ? "PowerShell" : "Terminal") as your normal user on your own device. Run each line:</p>
+            <pre><code>@KeyGenerationCommands</code></pre>
+            <UiCommandButton Label="Copy commands" Glyph="UiIconGlyph.Copy" OnClick="CopyCommandsAsync" />
+            <p class="meta-text">Choose a passphrase when prompted. If this key file already exists, keep it and display its .pub file using the final command instead of overwriting it.</p>
+        }
+        <p>Paste the complete public key line below or import the <code>.pub</code> file. Choose <strong>Key only</strong>, <strong>Password or key</strong>, or <strong>Password and key (both required)</strong>, then click <strong>Save SSH access</strong>.</p>
+        @if (selectedPlatform != "SSH app")
+        {
+            <pre><code>@ConnectionCommand</code></pre>
+            <p class="meta-text">Replace YOUR_SSH_HOST with the SSH server's hostname or IP. Add <code>-p PORT</code> if its SSH port is not 22.</p>
+        }
+        <p class="meta-text">Connect from your device using this Linux username and the SSH server's hostname/IP and port. The key's passphrase unlocks your local private key; a password login uses the Linux user's password.</p>
+        @if (!string.IsNullOrWhiteSpace(copyStatus))
+        {
+            <p class="meta-text" role="status">@copyStatus</p>
+        }
+    </div>
+</details>
+
+@code {
+    [Parameter] public string UserName { get; set; } = "username";
+    private string ConnectionCommand => selectedPlatform == "Windows"
+        ? $"ssh -i \"$env:USERPROFILE\\.ssh\\id_ed25519_lms\" {UserName}@YOUR_SSH_HOST"
+        : $"ssh -i ~/.ssh/id_ed25519_lms {UserName}@YOUR_SSH_HOST";
+    private static readonly string[] Platforms = ["Windows", "macOS", "Linux", "SSH app"];
+    private string selectedPlatform = "Windows";
+    private string? copyStatus;
+    private string KeyGenerationCommands => selectedPlatform == "Windows"
+        ? "New-Item -ItemType Directory -Force \"$env:USERPROFILE\\.ssh\" | Out-Null\n$key = \"$env:USERPROFILE\\.ssh\\id_ed25519_lms\"\nssh-keygen -t ed25519 -a 64 -f $key\nGet-Content \"$key.pub\""
+        : "mkdir -p ~/.ssh\nssh-keygen -t ed25519 -a 64 -f ~/.ssh/id_ed25519_lms\ncat ~/.ssh/id_ed25519_lms.pub";
+
+    private async Task CopyCommandsAsync()
+    {
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", KeyGenerationCommands);
+        copyStatus = copied ? "Commands copied. Run them on your own device." : "Select the commands and copy them manually.";
+    }
+}
