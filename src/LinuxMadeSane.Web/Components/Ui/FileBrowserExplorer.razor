@@ -629,6 +629,7 @@
     private bool showPermissionsColumn;
     private FileBrowserDisplayMode displayMode = FileBrowserDisplayMode.List;
     private int thumbnailSizePx = 156;
+    private bool marqueeRegistered;
     private ElementReference marqueeElement;
     private ElementReference detailLayoutElement;
     private DotNetObjectReference<FileBrowserExplorer>? detailPanelInteropReference;
@@ -637,6 +638,7 @@
     {
         detailPanelInteropReference ??= DotNetObjectReference.Create(this);
         await JSRuntime.InvokeVoidAsync("lmsFileBrowser.watchMarquee", marqueeElement, detailPanelInteropReference);
+        marqueeRegistered = true;
     }
 
     [JSInvokable]
@@ -1193,8 +1195,11 @@
 
     public async ValueTask DisposeAsync()
     {
-        try { await JSRuntime.InvokeVoidAsync("lmsFileBrowser.disposeMarquee", marqueeElement); }
-        catch (JSDisconnectedException) { }
+        if (marqueeRegistered)
+        {
+            try { await JSRuntime.InvokeVoidAsync("lmsFileBrowser.disposeMarquee", marqueeElement); }
+            catch (JSDisconnectedException) { }
+        }
 
         detailPanelInteropReference?.Dispose();
         detailPanelInteropReference = null;
