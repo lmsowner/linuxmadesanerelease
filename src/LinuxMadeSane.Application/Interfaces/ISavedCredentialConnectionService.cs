@@ -9,6 +9,7 @@ public interface ISavedCredentialConnectionService
     Task<SavedConnectionCredentialSummary> UseExistingKeyAsync(Guid userId, SavedConnectionCredentialEditor editor, Guid keyId, CancellationToken token = default);
     Task<SavedConnectionCredentialSummary> InstallExistingKeyAsync(Guid userId, SavedConnectionCredentialEditor editor, Guid keyId, CancellationToken token = default);
     Task<SavedConnectionCredentialSummary> SetUpKeyAsync(Guid userId, SavedConnectionCredentialEditor editor, CancellationToken token = default);
+    Task<SavedConnectionCredentialSummary> UseManagedHostKeyAsync(Guid userId, SavedConnectionCredentialEditor editor, Guid hostId, bool installIfNeeded, CancellationToken token = default);
 }
 
 public interface ISavedCredentialConnectionTransport

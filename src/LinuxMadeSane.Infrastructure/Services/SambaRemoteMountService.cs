@@ -524,9 +524,8 @@ internal sealed class SambaRemoteMountService(
             return true;
         }
 
-        var normalizedPath = localMountPath.Trim();
-        var currentMount = (await ReadCurrentMountsAsync(cancellationToken))
-            .FirstOrDefault(mount => mount.LocalMountPath.Equals(normalizedPath, StringComparison.OrdinalIgnoreCase));
+        var currentMount = NetworkMountSelection.FindDisconnectableNetworkMount(
+            await ReadCurrentMountsAsync(cancellationToken), localMountPath);
 
         if (currentMount is null)
         {

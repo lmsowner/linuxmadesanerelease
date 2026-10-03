@@ -18,6 +18,7 @@
 @using Microsoft.AspNetCore.Components.Authorization
 @implements IAsyncDisposable
 @inject IManagedHostService HostService
+@inject ILogger<HostFileBrowserWorkspace> Logger
 @inject IShareManagementService ShareService
 @inject IFileBrowserShortcutService FileBrowserShortcutService
 @inject IUserManagedHostCredentialProfileService CredentialProfileService
@@ -93,6 +94,7 @@ else
                                  CurrentPath="@currentPath"
                                  BlockedDirectoryPaths="@blockedDirectoryPaths"
                                  Items="@items"
+                                 MountPointPaths="@mountPointPaths"
                                  DirectoryNodes="@directoryNodes"
                                  SelectedPaths="@selectedPaths"
                                  SelectedItem="@selectedItem"
@@ -564,6 +566,10 @@ else
                 }
                 <UiContextMenuButton Label="Share folder" Title="Create or adjust an LMS Samba share for this local folder" Glyph="UiIconGlyph.FolderOpen" OnClick="OpenShareFolderFromContextMenuAsync" Disabled="@(!CanOpenShareFolderFromContextMenu || isBusy)" />
                 <UiContextMenuButton Label="Add network mount" Title="Map an SMB/CIFS share onto this LMS server" Glyph="UiIconGlyph.NetworkMount" OnClick="OpenShareMappingFromContextMenuAsync" Disabled="@(!CanOpenShareMappingFromContextMenu || isBusy)" />
+                @if (contextNetworkMount is not null)
+                {
+                    <UiContextMenuButton Label="Unmount network share" Glyph="UiIconGlyph.Disconnect" OnClick="OpenUnmountDialogAsync" Disabled="@isBusy" />
+                }
                 <UiContextMenuButton Label="Owner / permissions" Title="Review or change owner, group, and octal permissions for this item" Glyph="UiIconGlyph.Edit" OnClick="OpenOwnershipPermissionsFromContextMenuAsync" Disabled="@(!CanOpenOwnershipPermissionsFromContextMenu || isBusy)" />
                 <UiContextMenuButton Label="Rename" Glyph="UiIconGlyph.Edit" OnClick="RenameFromContextMenuAsync" Disabled="@(!CanRenameContextTarget || isBusy)" />
                 <div class="host-file-context-submenu">
@@ -908,6 +914,21 @@ else
                               OnCreateMount="CreateShareMappingAsync" />
         </UiModal>
 
+        <UiModal IsOpen="@(unmountTarget is not null)" Title="Unmount network share" Subtitle="@unmountTarget?.LocalMountPath" OnClose="CloseUnmountDialogAsync">
+            <ChildContent>
+                <p>Disconnect <strong>@unmountTarget?.SourcePath</strong> from <strong>@unmountTarget?.LocalMountPath</strong>?</p>
+                <p class="meta-text">Files on the server and saved connection settings are kept. Permanent mounts may reconnect when the host restarts.</p>
+                @if (!string.IsNullOrWhiteSpace(unmountError))
+                {
+                    <p class="callout error">@unmountError</p>
+                }
+                <div class="toolbar-row">
+                    <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@isUnmounting" OnClick="CloseUnmountDialogAsync" />
+                    <UiCommandButton Label="@(isUnmounting ? "Unmounting..." : "Unmount")" Glyph="UiIconGlyph.Disconnect" Disabled="@isUnmounting" OnClick="ConfirmUnmountAsync" />
+                </div>
+            </ChildContent>
+        </UiModal>
+
         <UiModal IsOpen="@showDeleteConfirmModal"
                  Title="@DeleteConfirmTitle"
                  Subtitle="@DeleteConfirmSubtitle"
@@ -1187,6 +1208,11 @@ else
     private readonly HashSet<string> selectedPaths = new(StringComparer.Ordinal);
     private string accessDeniedPath = string.Empty;
     private FileBrowserContextMenuRequest? contextMenuRequest;
+    private IReadOnlySet<string> mountPointPaths = new HashSet<string>(StringComparer.Ordinal);
+    private CurrentSystemMount? contextNetworkMount;
+    private CurrentSystemMount? unmountTarget;
+    private bool isUnmounting;
+    private string unmountError = string.Empty;
     private FileBrowserShortcut? shortcutContextShortcut;
     private SftpItem? ownershipPermissionsTargetItem;
     private IReadOnlyList<SftpItem> ownershipPermissionsTargetItems = Array.Empty<SftpItem>();
@@ -2044,6 +2070,7 @@ else
             }
 
             items = nextItems;
+            await RefreshMountPointPathsAsync();
             currentPath = normalizedPath;
             directoryItemCache[currentPath] = items;
             selectedItem = null;
@@ -2970,9 +2997,87 @@ else
             selectedItem = FindItemByPath(items, normalizedTargetPath) ?? selectedItem;
         }
 
+        contextNetworkMount = null;
+        StateHasChanged();
+        if (IsLocalBrowser && request.IsDirectory)
+        {
+            try
+            {
+                var mounts = await ShareService.GetNetworkShareMountExplorerAsync(runDiscovery: false);
+                if (contextMenuRequest?.TargetPath == normalizedTargetPath)
+                {
+                    contextNetworkMount = NetworkMountSelection.FindDisconnectableNetworkMount(mounts.CurrentMounts, normalizedTargetPath);
+                    StateHasChanged();
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.LogWarning(exception, "Could not read network mounts for the file browser context menu");
+            }
+        }
         if (ShowConnectAsContextMenu)
         {
             await LoadCredentialProfilesAsync();
+        }
+    }
+
+    private async Task RefreshMountPointPathsAsync()
+    {
+        mountPointPaths = new HashSet<string>(StringComparer.Ordinal);
+        if (!IsLocalBrowser) return;
+        try
+        {
+            var mounts = await ShareService.GetNetworkShareMountExplorerAsync(runDiscovery: false);
+            mountPointPaths = mounts.CurrentMounts.Select(mount => NormalizeBrowserPath(mount.LocalMountPath)).ToHashSet(StringComparer.Ordinal);
+        }
+        catch (Exception exception)
+        {
+            Logger.LogWarning(exception, "Could not read file browser mount points");
+        }
+    }
+
+    private Task OpenUnmountDialogAsync()
+    {
+        unmountTarget = contextNetworkMount;
+        unmountError = string.Empty;
+        DismissContextMenu();
+        return Task.CompletedTask;
+    }
+
+    private Task CloseUnmountDialogAsync()
+    {
+        if (!isUnmounting) unmountTarget = null;
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmUnmountAsync()
+    {
+        if (unmountTarget is null || isUnmounting || !IsLocalBrowser) return;
+        var mount = unmountTarget;
+        isUnmounting = true;
+        unmountError = string.Empty;
+        try
+        {
+            if (!await ShareService.DisconnectCurrentRemoteMountAsync(mount.LocalMountPath))
+            {
+                unmountError = "This network share is no longer mounted. Refresh the file list.";
+                return;
+            }
+            ownedTemporaryMountPaths.Remove(mount.LocalMountPath);
+            unmountTarget = null;
+            if (currentPath == mount.LocalMountPath || currentPath.StartsWith(mount.LocalMountPath.TrimEnd('/') + "/", StringComparison.Ordinal))
+                await NavigateToPathAsync(Path.GetDirectoryName(mount.LocalMountPath.TrimEnd('/')) ?? "/");
+            else
+                await RefreshCurrentPathAsync();
+            SetOperationMessage($"Unmounted {mount.LocalMountPath}.", "success");
+        }
+        catch (Exception exception)
+        {
+            unmountError = $"Could not unmount the network share: {exception.Message}";
+        }
+        finally
+        {
+            isUnmounting = false;
         }
     }
 

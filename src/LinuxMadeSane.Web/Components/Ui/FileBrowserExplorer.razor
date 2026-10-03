@@ -267,7 +267,7 @@
                                                     </td>
                                                     <td>
                                                         <span class="entry-name">
-                                                            <span class="file-browser-item-icon @GetItemIconClass(item.ItemType)" aria-hidden="true">@RenderItemIcon(item.ItemType, isExpandedFolder: false)</span>
+                                                            <span class="file-browser-item-icon @GetItemIconClass(item.ItemType)" aria-hidden="true">@RenderEntryIcon(item)</span>
                                                             @if (isBlockedFolder)
                                                             {
                                                                 <span class="file-browser-warning-icon" aria-hidden="true" title="Not accessible">@RenderBlockedIcon()</span>
@@ -415,7 +415,7 @@
                                                                            Disabled="@IsBusy" />
                                                     </span>
                                                     <div class="file-browser-thumbnail-media">
-                                                        <span class="file-browser-thumbnail-fallback @GetItemIconClass(item.ItemType)" aria-hidden="true">@RenderItemIcon(item.ItemType, isExpandedFolder: false)</span>
+                                                        <span class="file-browser-thumbnail-fallback @GetItemIconClass(item.ItemType)" aria-hidden="true">@RenderEntryIcon(item)</span>
                                                         @if (ThumbnailContent is not null && item.ItemType is SftpItemType.File or SftpItemType.Link)
                                                         {
                                                             @ThumbnailContent(item)
@@ -587,6 +587,7 @@
     [Parameter] public int DetailPanelSizePx { get; set; } = 520;
     [Parameter] public bool SidebarCollapsed { get; set; }
     [Parameter] public bool DetailPanelFocused { get; set; }
+    [Parameter] public IReadOnlySet<string> MountPointPaths { get; set; } = new HashSet<string>(StringComparer.Ordinal);
     [Parameter] public IReadOnlyDictionary<string, long> FolderSizes { get; set; } = new Dictionary<string, long>(StringComparer.Ordinal);
     [Parameter] public IReadOnlyDictionary<string, long> FolderSizeProgress { get; set; } = new Dictionary<string, long>(StringComparer.Ordinal);
     [Parameter] public IReadOnlySet<string> LoadingFolderSizes { get; set; } = new HashSet<string>(StringComparer.Ordinal);
@@ -1125,6 +1126,17 @@
             string.Equals(NormalizePath(item.FullPath), selectedPath, StringComparison.Ordinal));
     }
 
+    private bool IsMountPoint(string path) => MountPointPaths.Contains(NormalizePath(path));
+
+    private RenderFragment RenderEntryIcon(SftpItem item) => IsMountPoint(item.FullPath)
+        ? RenderMountIcon() : RenderItemIcon(item.ItemType, false);
+
+    private static RenderFragment RenderMountIcon() => @<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" data-mount-point="true">
+        <title>Mount point</title>
+        <path d="M4 5h5l2 2h9v9H4Z" />
+        <path d="M12 16v4M5 20h14M5 19v2M19 19v2" />
+    </svg>;
+
     private static RenderFragment RenderItemIcon(SftpItemType type, bool isExpandedFolder) => type switch
     {
         SftpItemType.Folder => RenderFolderIcon(isExpandedFolder),
@@ -1173,7 +1185,7 @@
                     type="button"
                     @onclick="@(() => NavigateToPathAsync(node.Path))"
                     disabled="@IsBusy">
-                <span class="file-browser-item-icon file-browser-item-icon-folder" aria-hidden="true">@RenderItemIcon(SftpItemType.Folder, node.IsExpanded || node.IsCurrent)</span>
+                <span class="file-browser-item-icon file-browser-item-icon-folder" aria-hidden="true">@(IsMountPoint(node.Path) ? RenderMountIcon() : RenderFolderIcon(node.IsExpanded || node.IsCurrent))</span>
                 @if (node.IsBlocked)
                 {
                     <span class="file-browser-warning-icon" aria-hidden="true" title="Not accessible">@RenderBlockedIcon()</span>
