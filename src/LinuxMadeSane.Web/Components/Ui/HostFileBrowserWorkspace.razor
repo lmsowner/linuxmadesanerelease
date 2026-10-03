@@ -539,6 +539,16 @@ else
                  @onclick:stopPropagation="true"
                  @oncontextmenu:preventDefault="true"
                  @oncontextmenu:stopPropagation="true">
+                @if (ShowConnectAsContextMenu)
+                {
+                    <TerminalConnectAsMenu HostDefaultLabel="@BuildHostDefaultProfileLabel()"
+                                           FixedPositionSubmenu="true"
+                                           SavedUsers="@credentialProfiles"
+                                           Disabled="@isBusy"
+                                           ConnectionRequested="ConnectAsProfileFromContextMenuAsync"
+                                           AddUserRequested="@(() => OpenConnectionUsersAsync(true))"
+                                           ManageUsersRequested="@(() => OpenConnectionUsersAsync(false))" />
+                }
                 <UiContextMenuButton Label="Copy" Glyph="UiIconGlyph.Copy" OnClick="CopyFromContextMenuAsync" Disabled="@(!CanCopyOrCutContextTarget || isBusy)" />
                 <UiContextMenuButton Label="Cut" Glyph="UiIconGlyph.Cut" OnClick="CutFromContextMenuAsync" Disabled="@(!CanCopyOrCutContextTarget || isBusy)" />
                 <UiContextMenuButton Label="Paste" Glyph="UiIconGlyph.Paste" OnClick="PasteFromContextMenuAsync" Disabled="@(!CanPasteIntoContextTarget || isBusy)" />
@@ -552,38 +562,6 @@ else
                                      Glyph="UiIconGlyph.Lock"
                                      OnClick="ToggleSudoAccessFromContextMenuAsync"
                                      Disabled="@isBusy" />
-                @if (ShowConnectAsContextMenu)
-                {
-                    <div class="host-file-context-submenu">
-                        <button class="ui-context-menu-button host-file-context-submenu-trigger"
-                                type="button"
-                                title="Connect this browser using another Linux account"
-                                aria-haspopup="menu"
-                                aria-expanded="false"
-                                disabled="@isBusy">
-                            <span class="ui-context-menu-button-icon" aria-hidden="true">
-                                <UiGlyphIcon Glyph="UiIconGlyph.User" />
-                            </span>
-                            <span class="ui-context-menu-button-label">Connect as...</span>
-                            <span class="host-file-context-submenu-arrow" aria-hidden="true">›</span>
-                        </button>
-                        <div class="host-file-context-submenu-panel" role="menu">
-                            <UiContextMenuButton Label="@BuildHostDefaultProfileLabel()"
-                                                 Glyph="UiIconGlyph.Key"
-                                                 OnClick="@(() => ConnectAsProfileFromContextMenuAsync(ConnectionProfileSelectionKeys.HostDefault))" />
-                            @if (credentialProfiles.Count > 0)
-                            {
-                                <div class="host-file-context-submenu-divider"></div>
-                                @foreach (var profile in credentialProfiles)
-                                {
-                                    <UiContextMenuButton Label="@FormatCredentialProfileOption(profile)"
-                                                         Glyph="UiIconGlyph.User"
-                                                         OnClick="@(() => ConnectAsProfileFromContextMenuAsync(ConnectionProfileSelectionKeys.Saved(profile.Id)))" />
-                                }
-                            }
-                        </div>
-                    </div>
-                }
                 @if (CanCreateShortcutFromContextMenu)
                 {
                     <UiContextMenuButton Label="Create shortcut" Glyph="UiIconGlyph.FolderClosed" OnClick="CreateShortcutFromContextMenuAsync" Disabled="@isBusy" />
@@ -1119,7 +1097,17 @@ else
 
 <ShareRemovalConfirmation @ref="shareRemovalConfirmation" />
 
+<ConnectionUsersDialog @ref="connectionUsersDialog" Changed="LoadCredentialProfilesAsync" />
+
 @code {
+    private ConnectionUsersDialog? connectionUsersDialog;
+    private async Task OpenConnectionUsersAsync(bool add)
+    {
+        DismissContextMenu();
+        if (userId.HasValue && browser is not null && connectionUsersDialog is not null)
+            await connectionUsersDialog.ShowAsync(userId.Value, browser.Host.Id, add);
+    }
+
     private ShareRemovalConfirmation shareRemovalConfirmation = default!;
     [Parameter] public Guid? HostId { get; set; }
     [Parameter] public string? RootPath { get; set; }

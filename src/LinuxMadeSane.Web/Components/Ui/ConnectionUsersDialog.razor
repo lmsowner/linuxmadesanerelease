@@ -1,0 +1,114 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models
+@inject IUserManagedHostCredentialProfileService Profiles
+@inject IUserManagedHostCredentialProfileStore ProfileStore
+
+<UiModal IsOpen="open" Title="Manage saved connection users" Subtitle="Saved logins for this host. Changes here do not change Linux accounts or disconnect existing sessions." Class="connection-users-modal" OnClose="Close">
+    <ChildContent>
+        @if (!string.IsNullOrEmpty(message))
+        {
+            <div class="callout @tone" role="status">@message</div>
+        }
+        <div class="connection-users-list">
+            @if (users.Count == 0)
+            {
+                <p>No saved connection users for this host.</p>
+            }
+            @foreach (var user in users)
+            {
+                <div class="connection-users-row">
+                    <div><strong>@user.Name</strong><span>@user.Username</span></div>
+                    <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Class="credential-command" Disabled="busy" OnClick="@(() => Edit(user))" />
+                    <UiCommandButton Label="@(pendingRemoval == user.Id ? "Confirm removal" : "Remove")" Glyph="UiIconGlyph.Delete" Class="credential-command" Disabled="busy" OnClick="@(() => RemoveAsync(user))" />
+                </div>
+            }
+        </div>
+        <UiCommandButton Label="Add connection user" Glyph="UiIconGlyph.Plus" Class="credential-command" Disabled="busy" OnClick="Add" />
+        @if (editor is not null)
+        {
+            <div class="connection-users-editor">
+                <strong>@(editor.Id.HasValue ? "Edit saved connection user" : "New connection user")</strong>
+                <div class="connection-users-fields">
+                    <UiTextField Label="Saved name" @bind-Value="editor.Name" Compact="true" Disabled="busy" />
+                    <UiTextField Label="Username" @bind-Value="editor.Username" Compact="true" Disabled="busy" />
+                    <UiTextField Label="Password" @bind-Value="editor.Password" Type="password" Compact="true" Disabled="busy" Autocomplete="new-password" Helper="@(editor.HasStoredPassword ? "Saved password retained unless replaced." : null)" />
+                    <UiTextField Label="Key passphrase" @bind-Value="editor.PrivateKeyPassphrase" Type="password" Compact="true" Disabled="busy" Autocomplete="new-password" Helper="@(editor.HasStoredPrivateKeyPassphrase ? "Saved passphrase retained unless replaced." : null)" />
+                </div>
+                <UiTextAreaField Label="Private key" @bind-Value="editor.PrivateKey" Rows="3" Compact="true" Disabled="busy" Helper="@(editor.HasStoredPrivateKey ? "Saved key retained unless replaced." : "Use a password or a private key for SSH authentication.")" />
+                <div class="toolbar-row">
+                    <UiCommandButton Label="Save connection user" Glyph="UiIconGlyph.Save" Class="credential-command" Disabled="busy" OnClick="SaveAsync" />
+                    <UiCommandButton Label="Cancel edit" Glyph="UiIconGlyph.Clear" Class="credential-command" Disabled="busy" OnClick="CancelEdit" />
+                </div>
+            </div>
+        }
+        <p class="muted connection-users-note">Logins from the central credential store are managed in Security &amp; Networking → Credentials.</p>
+    </ChildContent>
+</UiModal>
+
+@code {
+    [Parameter] public EventCallback Changed { get; set; }
+    private bool open, busy;
+    private Guid userId, hostId;
+    private Guid? pendingRemoval;
+    private IReadOnlyList<UserManagedHostCredentialProfile> users = [];
+    private UserManagedHostCredentialProfileEditor? editor;
+    private string message = string.Empty, tone = "info";
+
+    public async Task ShowAsync(Guid owner, Guid host, bool add = false)
+    {
+        userId = owner; hostId = host; editor = null; pendingRemoval = null; message = string.Empty;
+        open = true;
+        try { users = await ProfileStore.ListAsync(userId, hostId); if (add) Add(); }
+        catch (Exception ex) { message = ex.Message; tone = "error"; }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void Close() { if (busy) return; open = false; editor = null; pendingRemoval = null; }
+    private void CancelEdit() { editor = null; message = string.Empty; }
+    private void Add() { pendingRemoval = null; message = string.Empty; editor = new() { UserId = userId, ManagedHostId = hostId }; }
+    private void Edit(UserManagedHostCredentialProfile user)
+    {
+        pendingRemoval = null; message = string.Empty;
+        editor = new() { Id = user.Id, UserId = userId, ManagedHostId = hostId, Name = user.Name, Username = user.Username,
+            HasStoredPassword = !string.IsNullOrWhiteSpace(user.PasswordSecretReference),
+            HasStoredPrivateKey = !string.IsNullOrWhiteSpace(user.PrivateKeySecretReference),
+            HasStoredPrivateKeyPassphrase = !string.IsNullOrWhiteSpace(user.PrivateKeyPassphraseSecretReference) };
+    }
+    private async Task SaveAsync()
+    {
+        if (busy || editor is null) return;
+        busy = true;
+        try
+        {
+            await Profiles.SaveAsync(editor); editor = null;
+            users = await ProfileStore.ListAsync(userId, hostId);
+            message = "Connection user saved."; tone = "success";
+            await Changed.InvokeAsync();
+        }
+        catch (Exception ex) { message = ex.Message; tone = "error"; }
+        finally { busy = false; }
+    }
+    private async Task RemoveAsync(UserManagedHostCredentialProfile user)
+    {
+        if (busy) return;
+        if (pendingRemoval != user.Id)
+        {
+            pendingRemoval = user.Id; message = $"Remove saved login {user.Name}? Click Confirm removal. The Linux account and current sessions will remain."; tone = "warning"; return;
+        }
+        busy = true;
+        try
+        {
+            await Profiles.DeleteAsync(userId, hostId, user.Id);
+            if (editor?.Id == user.Id) editor = null;
+            pendingRemoval = null; users = await ProfileStore.ListAsync(userId, hostId);
+            message = "Saved connection user removed."; tone = "success";
+            await Changed.InvokeAsync();
+        }
+        catch (Exception ex) { message = ex.Message; tone = "error"; }
+        finally { busy = false; }
+    }
+}
