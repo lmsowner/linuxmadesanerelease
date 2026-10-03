@@ -6,6 +6,8 @@ namespace LinuxMadeSane.Application.Interfaces;
 public interface ISavedCredentialConnectionService
 {
     Task TestAsync(Guid userId, SavedConnectionCredentialEditor editor, CancellationToken token = default);
+    Task<SavedConnectionCredentialSummary> UseExistingKeyAsync(Guid userId, SavedConnectionCredentialEditor editor, Guid keyId, CancellationToken token = default);
+    Task<SavedConnectionCredentialSummary> InstallExistingKeyAsync(Guid userId, SavedConnectionCredentialEditor editor, Guid keyId, CancellationToken token = default);
     Task<SavedConnectionCredentialSummary> SetUpKeyAsync(Guid userId, SavedConnectionCredentialEditor editor, CancellationToken token = default);
 }
 

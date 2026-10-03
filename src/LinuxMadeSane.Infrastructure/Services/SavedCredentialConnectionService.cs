@@ -32,6 +32,51 @@ public sealed class SavedCredentialConnectionService(ISavedConnectionCredentialS
         return await store.SaveAsync(userId, replacement, token);
     }
 
+    public async Task<SavedConnectionCredentialSummary> UseExistingKeyAsync(Guid userId, SavedConnectionCredentialEditor editor, Guid keyId, CancellationToken token = default)
+    {
+        var (_, key, connection) = await ResolveKeyAsync(userId, editor, keyId, token);
+        await transport.TestAsync(connection, token);
+        return await SaveKeyScopeAsync(userId, key, connection, token);
+    }
+
+    public async Task<SavedConnectionCredentialSummary> InstallExistingKeyAsync(Guid userId, SavedConnectionCredentialEditor editor, Guid keyId, CancellationToken token = default)
+    {
+        var (password, key, connection) = await ResolveKeyAsync(userId, editor, keyId, token);
+        await transport.TestAsync(password, token);
+        // Prefer a key already accepted by the account. Do not append it again.
+        try { await transport.TestAsync(connection, token); }
+        catch (Renci.SshNet.Common.SshAuthenticationException)
+        {
+            await transport.InstallPublicKeyAsync(password, key.Summary.PublicKey, token);
+            await transport.TestAsync(connection, token);
+        }
+        return await SaveKeyScopeAsync(userId, key, connection, token);
+    }
+
+    private async Task<(SavedConnectionCredentialEditor, SavedConnectionCredential, SavedConnectionCredentialEditor)> ResolveKeyAsync(
+        Guid userId, SavedConnectionCredentialEditor editor, Guid keyId, CancellationToken token)
+    {
+        var password = await ResolveAsync(userId, editor, token);
+        var key = await store.ResolveAsync(userId, keyId, token) ?? throw new InvalidOperationException("Saved key not found.");
+        if (!SavedCredentialKeySuggestions.Matches(key.Summary, password) || string.IsNullOrWhiteSpace(key.PrivateKey) || string.IsNullOrWhiteSpace(key.Summary.PublicKey))
+            throw new InvalidOperationException("Choose a saved key for this server and account, or an unrestricted reusable key.");
+        return (password, key, new SavedConnectionCredentialEditor
+        {
+            Name = password.Name.Length > 74 ? password.Name[..74] + " (key)" : password.Name + " (key)",
+            Kind = ConnectionCredentialKind.SshKeyPair, Server = password.Server, Port = password.Port,
+            Username = password.Username, PrivateKey = key.PrivateKey, PublicKey = key.Summary.PublicKey, Passphrase = key.Passphrase
+        });
+    }
+
+    private async Task<SavedConnectionCredentialSummary> SaveKeyScopeAsync(Guid userId, SavedConnectionCredential key,
+        SavedConnectionCredentialEditor connection, CancellationToken token)
+    {
+        if (!string.IsNullOrWhiteSpace(key.Summary.Server) && !string.IsNullOrWhiteSpace(key.Summary.Username)) return key.Summary;
+        // Keep the reusable credential intact and store the tested server/account
+        // binding so selecting it in a connection form also fills those details.
+        return await store.SaveAsync(userId, connection, token);
+    }
+
     private async Task<SavedConnectionCredentialEditor> ResolveAsync(Guid userId, SavedConnectionCredentialEditor editor, CancellationToken token)
     {
         if (await access.GetAuthenticatedUserIdAsync(token) != userId)
