@@ -16,12 +16,12 @@ public sealed class SavedConnectionCredentialService(LinuxMadeSaneDbContext db, 
     public async Task<IReadOnlyList<SavedConnectionCredentialSummary>> ListAsync(Guid userId, CancellationToken token = default)
     {
         await Authorize(userId, null, token);
-        return (await db.SavedConnectionCredentials.AsNoTracking().Where(x => x.UserId == userId).OrderBy(x => x.Name).ToArrayAsync(token)).Select(Summary).ToArray();
+        return (await db.SavedConnectionCredentials.AsNoTracking().OrderBy(x => x.Name).ToArrayAsync(token)).Select(Summary).ToArray();
     }
     public async Task<IReadOnlyList<SavedCredentialAudit>> AuditAsync(Guid userId, CancellationToken token = default)
     {
         await Authorize(userId, null, token);
-        return (await db.SavedCredentialAudits.FromSqlInterpolated($"SELECT * FROM saved_credential_audit WHERE ActorUserId = {userId} ORDER BY OccurredAtUtc DESC LIMIT 50")
+        return (await db.SavedCredentialAudits.FromSqlInterpolated($"SELECT * FROM saved_credential_audit ORDER BY OccurredAtUtc DESC LIMIT 50")
             .AsNoTracking().ToArrayAsync(token)).Select(x => new SavedCredentialAudit(x.CredentialId, x.Action, x.OccurredAtUtc)).ToArray();
     }
     private SavedCredentialAuditEntity Record(Guid? actor, Guid? credentialId, string action)
@@ -36,14 +36,14 @@ public sealed class SavedConnectionCredentialService(LinuxMadeSaneDbContext db, 
         if (actor is null || actor != owner)
         {
             Record(actor, id, "Access denied"); await db.SaveChangesAsync(token);
-            throw new UnauthorizedAccessException("Sign in to your LMS account over HTTPS to use saved credentials.");
+            throw new UnauthorizedAccessException("This session is not authorised to use the LMS credential store.");
         }
     }
 
     public async Task<SavedConnectionCredential?> ResolveAsync(Guid userId, Guid id, CancellationToken token = default)
     {
         await Authorize(userId, id, token);
-        var item = await db.SavedConnectionCredentials.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.UserId == userId, token);
+        var item = await db.SavedConnectionCredentials.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, token);
         if (item is null) { Record(userId,id,"Not found"); await db.SaveChangesAsync(token); return null; }
         var resolved = new SavedConnectionCredential(Summary(item), await Read(item.PasswordReference, token), await Read(item.PrivateKeyReference, token), await Read(item.PassphraseReference, token));
         Record(userId,id,"Used"); await db.SaveChangesAsync(token);
@@ -53,8 +53,7 @@ public sealed class SavedConnectionCredentialService(LinuxMadeSaneDbContext db, 
     public async Task<SavedConnectionCredentialSummary> SaveAsync(Guid userId, SavedConnectionCredentialEditor editor, CancellationToken token = default)
     {
         await Authorize(userId, editor.Id, token);
-        if (userId == Guid.Empty) throw new InvalidOperationException("An LMS account is required to save credentials.");
-        var existing = editor.Id.HasValue ? await db.SavedConnectionCredentials.AsNoTracking().SingleOrDefaultAsync(x => x.Id == editor.Id && x.UserId == userId, token) : null;
+        var existing = editor.Id.HasValue ? await db.SavedConnectionCredentials.AsNoTracking().SingleOrDefaultAsync(x => x.Id == editor.Id, token) : null;
         if (editor.Id.HasValue && existing is null) throw new InvalidOperationException("Credential not found.");
         if (existing is not null && existing.Kind != editor.Kind) throw new InvalidOperationException("Create a new credential to change its type.");
         var name = editor.Name.Trim(); var server = editor.Server.Trim(); var username = editor.Username.Trim();
@@ -83,7 +82,7 @@ public sealed class SavedConnectionCredentialService(LinuxMadeSaneDbContext db, 
             catch { throw new InvalidOperationException("The private key or passphrase is invalid."); }
         }
         else if (password.Length == 0) throw new InvalidOperationException("Enter a password.");
-        var item = new SavedConnectionCredentialEntity { Id = existing?.Id ?? Guid.NewGuid(), UserId = userId, Name = name, Kind = editor.Kind, Server = server,
+        var item = new SavedConnectionCredentialEntity { Id = existing?.Id ?? Guid.NewGuid(), UserId = existing?.UserId ?? userId, Name = name, Kind = editor.Kind, Server = server,
             Port = editor.Kind == ConnectionCredentialKind.Smb ? 445 : editor.Port, Username = username, Domain = editor.Kind == ConnectionCredentialKind.Smb ? editor.Domain.Trim() : "",
             PublicKey = publicKey, CreatedAtUtc = existing?.CreatedAtUtc ?? DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow };
         var created = new List<string>();
@@ -123,7 +122,7 @@ public sealed class SavedConnectionCredentialService(LinuxMadeSaneDbContext db, 
     public async Task DeleteAsync(Guid userId, Guid id, CancellationToken token = default)
     {
         await Authorize(userId, id, token);
-        var item = await db.SavedConnectionCredentials.SingleOrDefaultAsync(x => x.Id == id && x.UserId == userId, token);
+        var item = await db.SavedConnectionCredentials.SingleOrDefaultAsync(x => x.Id == id, token);
         if (item is null) return;
         db.SavedConnectionCredentials.Remove(item); Record(userId,id,"Deleted"); await db.SaveChangesAsync(token);
         foreach (var reference in References(item)) await secrets.DeleteSecretAsync(reference!, token);

@@ -198,7 +198,8 @@
                                                     }
 
                                                 <div class="terminal-inline-grid">
-                                                    <UiSelectField TValue="string"
+                                                    <SavedCredentialPicker Server="@(hosts.FirstOrDefault(x => x.Id == tab.HostId)?.Hostname)" Port="@(hosts.FirstOrDefault(x => x.Id == tab.HostId)?.Port)" Selected="@((SavedConnectionCredential value) => ApplyCentralCredentialAsync(tab, value))" Disabled="@tab.IsBusy" />
+                        <UiSelectField TValue="string"
                                                                    Label="Identity"
                                                                    Value="@tab.ConnectionProfileKey"
                                                                    ValueChanged="@((string value) => SelectConnectionProfileAsync(tab, value))"
@@ -1805,6 +1806,17 @@
         credentialProfilesByHost.TryGetValue(hostId, out var profiles)
             ? profiles
             : Array.Empty<UserManagedHostCredentialProfileSummary>();
+
+    private Task ApplyCentralCredentialAsync(TerminalTabState tab, SavedConnectionCredential credential)
+    {
+        if (!string.IsNullOrWhiteSpace(credential.Summary.Username)) tab.Username = credential.Summary.Username;
+        tab.ConnectionProfileName = credential.Summary.Name;
+        tab.ConnectionProfileKey = ConnectionProfileSelectionKeys.Custom;
+        tab.PreferStoredCredentials = false;
+        tab.SecretHandle = ConnectionSecretStore.Save(tab.SecretHandle, credential.Password, credential.PrivateKey, credential.Passphrase);
+        tab.ErrorMessage = string.Empty;
+        return Task.CompletedTask;
+    }
 
     private async Task SelectConnectionProfileAsync(TerminalTabState tab, string value)
     {

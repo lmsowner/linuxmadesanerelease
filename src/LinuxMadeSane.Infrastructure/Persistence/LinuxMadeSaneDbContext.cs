@@ -110,7 +110,7 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
             entity.ToTable("saved_connection_credentials");
             entity.HasKey(x => x.Id);
             entity.HasIndex(x => x.UserId);
-            entity.HasOne<SecurityUserEntity>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+            // Host-wide store: UserId records the creator; trusted access uses Guid.Empty.
         });
 
         modelBuilder.Entity<UserManagedHostCredentialProfileEntity>(entity =>

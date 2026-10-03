@@ -53,14 +53,42 @@ public sealed class SqliteDatabaseInitializer(
                 Kind INTEGER NOT NULL, Server TEXT NOT NULL, Port INTEGER NOT NULL,
                 Username TEXT NOT NULL, Domain TEXT NOT NULL, PublicKey TEXT NOT NULL,
                 PasswordReference TEXT NULL, PrivateKeyReference TEXT NULL, PassphraseReference TEXT NULL,
-                CreatedAtUtc TEXT NOT NULL, UpdatedAtUtc TEXT NOT NULL,
-                FOREIGN KEY (UserId) REFERENCES security_users(Id) ON DELETE CASCADE);
+                CreatedAtUtc TEXT NOT NULL, UpdatedAtUtc TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS IX_saved_connection_credentials_UserId ON saved_connection_credentials(UserId);
             CREATE TABLE IF NOT EXISTS saved_credential_audit (
                 Id TEXT NOT NULL PRIMARY KEY, ActorUserId TEXT NULL, CredentialId TEXT NULL,
                 Action TEXT NOT NULL, OccurredAtUtc TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS IX_saved_credential_audit_ActorUserId ON saved_credential_audit(ActorUserId);
             """, cancellationToken);
+        // The first credential-store release tied rows to an LMS login. Preserve
+        // those records while removing that FK so trusted host administrators can save.
+        var connection = dbContext.Database.GetDbConnection();
+        await dbContext.Database.OpenConnectionAsync(cancellationToken);
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_foreign_key_list('saved_connection_credentials')";
+            if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken)) > 0)
+            {
+                await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+                await dbContext.Database.ExecuteSqlRawAsync("""
+                    ALTER TABLE saved_connection_credentials RENAME TO saved_connection_credentials_legacy;
+                    DROP INDEX IF EXISTS IX_saved_connection_credentials_UserId;
+                    CREATE TABLE saved_connection_credentials (
+                        Id TEXT NOT NULL PRIMARY KEY, UserId TEXT NOT NULL, Name TEXT NOT NULL,
+                        Kind INTEGER NOT NULL, Server TEXT NOT NULL, Port INTEGER NOT NULL,
+                        Username TEXT NOT NULL, Domain TEXT NOT NULL, PublicKey TEXT NOT NULL,
+                        PasswordReference TEXT NULL, PrivateKeyReference TEXT NULL, PassphraseReference TEXT NULL,
+                        CreatedAtUtc TEXT NOT NULL, UpdatedAtUtc TEXT NOT NULL);
+                    INSERT INTO saved_connection_credentials
+                        (Id, UserId, Name, Kind, Server, Port, Username, Domain, PublicKey, PasswordReference, PrivateKeyReference, PassphraseReference, CreatedAtUtc, UpdatedAtUtc)
+                    SELECT Id, UserId, Name, Kind, Server, Port, Username, Domain, PublicKey, PasswordReference, PrivateKeyReference, PassphraseReference, CreatedAtUtc, UpdatedAtUtc
+                    FROM saved_connection_credentials_legacy;
+                    DROP TABLE saved_connection_credentials_legacy;
+                    CREATE INDEX IX_saved_connection_credentials_UserId ON saved_connection_credentials(UserId);
+                    """, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+            }
+        }
         await RemoveLegacyScaffoldDataAsync(cancellationToken);
 
         if (!await dbContext.ManagedHosts.AnyAsync(cancellationToken))
