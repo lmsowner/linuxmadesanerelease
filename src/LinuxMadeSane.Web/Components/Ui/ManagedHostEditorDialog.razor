@@ -13,14 +13,14 @@
 
 <UiModal IsOpen="@IsOpen"
          Title="@(IsEditMode ? $"Edit {Editor.Name}" : "Add managed host")"
-         Subtitle="Register a Linux machine with the essentials first. Choose password auth, public-key auth, or both. For public-key auth, paste the client private key here and install the matching public key on the server."
+         Subtitle="Choose saved server credentials, review the host details, then test and save."
          Class="managed-host-editor-modal"
          CloseOnBackdrop="false"
          OnClose="OnClose">
     <ChildContent>
         <EditForm id="@formId" Model="@Editor" OnValidSubmit="HandleSaveAsync" class="managed-host-editor-form">
             <DataAnnotationsValidator />
-            <SavedCredentialPicker Selected="ApplySavedCredentialAsync" Disabled="@(IsBusy || IsTestingConnection)" />
+            <SavedCredentialPicker SavedOnly="true" Cleared="ClearSavedCredentialAsync" Selected="ApplySavedCredentialAsync" Disabled="@(IsBusy || IsTestingConnection)" />
 
             <div class="managed-host-editor-grid managed-host-editor-grid-primary">
                 <UiTextField @bind-Value="Editor.Name"
@@ -69,15 +69,6 @@
                                Compact="true"
                                data-testid="managed-host-port" />
 
-                <UiTextField Value="@Editor.Username"
-                             ValueChanged="HandleUsernameChangedAsync"
-                             ValueExpression="() => Editor.Username"
-                             Label="Username"
-                                 Placeholder="linuxuser"
-                             Class="managed-host-editor-field-username"
-                             Compact="true"
-                             data-testid="managed-host-username" />
-
                 <UiPathAutocompleteField Value="@Editor.DefaultWorkingDirectory"
                                          ValueChanged="HandleWorkingDirectoryChangedAsync"
                                          ValueExpression="() => Editor.DefaultWorkingDirectory"
@@ -89,131 +80,14 @@
                                          Compact="true" />
             </div>
 
-            <section class="managed-host-editor-section surface-subcard">
-                <div class="managed-host-editor-section-header">
-                    <div class="stack-tight">
-                        <strong>Authentication</strong>
-                        <span class="helper-text">Start with the normal login path. Extra auth rules and host notes live in the optional section below.</span>
-                    </div>
-                </div>
-
-                <div class="managed-host-editor-grid managed-host-editor-grid-auth">
-                    <UiComboboxField TValue="AuthenticationType"
-                                   Value="@Editor.PrimaryAuthenticationType"
-                                   ValueChanged="HandlePrimaryAuthenticationTypeChangedAsync"
-                                   ValueExpression="() => Editor.PrimaryAuthenticationType"
-                                   Label="Authentication"
-                                   Class="managed-host-editor-field-auth"
-                                   Helper="Primary SSH login method."
-                                   Compact="true"
-                                   data-testid="managed-host-authentication">
-                        @foreach (var option in PrimaryAuthenticationOptions)
-                        {
-                            <option value="@option">@GetAuthenticationOptionLabel(option)</option>
-                        }
-                    </UiComboboxField>
-
-                    @if (ShouldShowPasswordField)
-                    {
-                        <UiTextField Value="@Editor.Password"
-                                     ValueChanged="HandlePasswordChangedAsync"
-                                     ValueExpression="() => Editor.Password"
-                                     Label="Password"
-                                     Type="password"
-                                     Autocomplete="new-password"
-                                     Helper="@BuildPasswordHelperText()"
-                                     Class="managed-host-editor-field-password"
-                                     Compact="true"
-                                     data-testid="managed-host-password" />
-                    }
-
-                    @if (ShouldShowPrivateKeyField)
-                    {
-                        <UiTextField Value="@Editor.PrivateKeyPassphrase"
-                                     ValueChanged="HandlePrivateKeyPassphraseChangedAsync"
-                                     ValueExpression="() => Editor.PrivateKeyPassphrase"
-                                     Label="Client key passphrase"
-                                     Type="password"
-                                     Autocomplete="new-password"
-                                     Helper="@BuildPrivateKeyPassphraseHelperText()"
-                                     Class="managed-host-editor-field-passphrase"
-                                     Compact="true" />
-                    }
-                </div>
-
-                @if (ShouldShowPrivateKeyField)
-                {
-                    <div class="managed-host-editor-key-toolbar">
-                        <UiComboboxField TValue="SshKeyGenerationProfile"
-                                       @bind-Value="SelectedKeyGenerationProfile"
-                                       Label="Generate as"
-                                       Helper="Ed25519 is the modern default; RSA stays available for older servers."
-                                       Class="managed-host-editor-key-profile"
-                                       Compact="true">
-                            @foreach (var option in Enum.GetValues<SshKeyGenerationProfile>())
-                            {
-                                <option value="@option">@GetKeyGenerationProfileLabel(option)</option>
-                            }
-                        </UiComboboxField>
-
-                        <div class="managed-host-editor-key-actions">
-                            <UiCommandButton Label="Generate private key"
-                                             Glyph="UiIconGlyph.Plus"
-                                             Variant="UiButtonVariant.ActionSubtle"
-                                             Disabled="@(IsBusy || IsTestingConnection)"
-                                             OnClick="HandleGeneratePrivateKeyAsync" />
-                            <UiCommandButton Label="Copy private key"
-                                             Glyph="UiIconGlyph.Copy"
-                                             Variant="UiButtonVariant.ActionSubtle"
-                                             Disabled="@(!CanCopyPrivateKey || IsBusy || IsTestingConnection)"
-                                             OnClick="HandleCopyPrivateKeyAsync" />
-                            <UiCommandButton Label="Copy public key"
-                                             Glyph="UiIconGlyph.Copy"
-                                             Variant="UiButtonVariant.ActionSubtle"
-                                             Disabled="@(!CanCopyGeneratedPublicKey || IsBusy || IsTestingConnection)"
-                                             OnClick="HandleCopyPublicKeyAsync" />
-                        </div>
-                    </div>
-
-                    @if (!string.IsNullOrWhiteSpace(KeyWorkflowMessage))
-                    {
-                        <p class="callout @KeyWorkflowTone managed-host-editor-key-status">@KeyWorkflowMessage</p>
-                    }
-
-                    @if (!string.IsNullOrWhiteSpace(GeneratedPublicKey))
-                    {
-                        <div class="stack-tight">
-                            <label class="terminal-inline-field">
-                                <span>Generated public key</span>
-                                <textarea readonly class="ui-control-input managed-host-editor-slim-textarea">@GeneratedPublicKey</textarea>
-                            </label>
-                            @if (!string.IsNullOrWhiteSpace(GeneratedPublicKeyFingerprint))
-                            {
-                                <span class="meta-text">Fingerprint: @GeneratedPublicKeyFingerprint</span>
-                            }
-                            <span class="helper-text">Install this public key on the server in `~/.ssh/authorized_keys`. Linux Made Sane uses the matching private key below.</span>
-                        </div>
-                    }
-
-                    <UiTextAreaField Value="@Editor.PrivateKey"
-                                     ValueChanged="HandlePrivateKeyChangedAsync"
-                                     ValueExpression="() => Editor.PrivateKey"
-                                     Label="Client private key"
-                                     Rows="4"
-                                     Helper="@BuildPrivateKeyHelperText()"
-                                     Compact="true"
-                                     InputClass="managed-host-editor-slim-textarea" />
-                }
-                else if (HasStoredLegacyKeyMaterial)
-                {
-                    <p class="callout warning managed-host-editor-key-status">
-                        Stored public-key credentials exist for this host, but the selected auth mode does not currently use them. Switch to `Public key` or `Password + public key` to replace them, or clear them below.
-                    </p>
-                }
-            </section>
+            @if (!string.IsNullOrWhiteSpace(Editor.Username))
+            {
+                <p class="meta-text">Login: <strong>@Editor.Username</strong> · @GetAuthenticationOptionLabel(Editor.PrimaryAuthenticationType)@(selectedCredentialId.HasValue ? " · from saved credentials" : " · existing host login")</p>
+            }
+            @if (!string.IsNullOrWhiteSpace(credentialNotice)) { <p class="callout info">@credentialNotice</p> }
 
             <details class="managed-host-editor-advanced">
-                <summary>Optional platform, fallback auth, and notes</summary>
+                <summary>Optional platform and host notes</summary>
 
                 <div class="managed-host-editor-grid managed-host-editor-grid-advanced">
                     <UiTextField @bind-Value="Editor.Platform"
@@ -244,45 +118,6 @@
                         }
                     </UiComboboxField>
 
-                    <UiComboboxField TValue="AuthenticationType?"
-                                   Value="@Editor.FallbackAuthenticationType"
-                                   ValueChanged="HandleFallbackAuthenticationTypeChangedAsync"
-                                   ValueExpression="() => Editor.FallbackAuthenticationType"
-                                   Label="Fallback authentication"
-                                   Helper="Only needed when SSH may fall back to a second auth method."
-                                   Compact="true">
-                        <option value="">None</option>
-                        @foreach (var option in FallbackAuthenticationOptions)
-                        {
-                            <option value="@option">@GetAuthenticationOptionLabel(option)</option>
-                        }
-                    </UiComboboxField>
-                </div>
-
-                <div class="managed-host-editor-toggle-row">
-                    <UiCheckboxField @bind-Value="Editor.UseKeyboardInteractiveFallback"
-                                     Label="Keyboard-interactive fallback"
-                                     Helper="Useful when sudo or OTP prompts appear after login."
-                                     Compact="true"
-                                     Card="true" />
-
-                    @if (ShowClearStoredPasswordOption)
-                    {
-                        <UiCheckboxField @bind-Value="Editor.ClearStoredPassword"
-                                         Label="Clear stored password"
-                                         Helper="Remove the existing saved password on save."
-                                         Compact="true"
-                                         Card="true" />
-                    }
-
-                    @if (ShowClearStoredKeyMaterialOption)
-                    {
-                        <UiCheckboxField @bind-Value="ClearStoredKeyMaterial"
-                                         Label="Clear legacy SSH key material"
-                                         Helper="Remove the old stored key material on save."
-                                         Compact="true"
-                                         Card="true" />
-                    }
                 </div>
 
                 <UiTextAreaField @bind-Value="Editor.Description"
@@ -311,6 +146,7 @@
                 <UiCommandButton Label="@(IsTestingConnection ? "Testing..." : "Test connection")"
                                  Glyph="UiIconGlyph.Connect"
                                  Variant="UiButtonVariant.ActionSubtle"
+                                 Disabled="@(IsBusy || IsTestingConnection || !HasConnectionCredentials)"
                                  OnClick="HandleTestConnectionAsync" />
                 <UiCommandButton Label="Close"
                                  Glyph="UiIconGlyph.Clear"
@@ -319,7 +155,7 @@
                                  OnClick="OnClose" />
                 <UiCommandButton Label="@(IsBusy ? "Saving..." : "Save host")"
                                  Glyph="UiIconGlyph.Save"
-                                 Disabled="@(IsBusy || IsTestingConnection)"
+                                 Disabled="@(IsBusy || IsTestingConnection || !HasConnectionCredentials)"
                                  Type="submit"
                                  form="@formId" />
             </div>
@@ -434,11 +270,34 @@
 </UiModal>
 
 @code {
+    private Guid? selectedCredentialId;
+    private string? credentialNotice;
+    private string originalUsername = "";
+    private AuthenticationType originalAuthentication;
+    private AuthenticationType? originalFallback;
+    private bool HasConnectionCredentials => IsEditMode || selectedCredentialId.HasValue && !string.IsNullOrWhiteSpace(Editor.Username);
+    private Task ClearSavedCredentialAsync()
+    {
+        selectedCredentialId = null;
+        credentialNotice = null;
+        Editor.Password = ""; Editor.PrivateKey = ""; Editor.PrivateKeyPassphrase = "";
+        Editor.Username = IsEditMode ? originalUsername : "";
+        Editor.PrimaryAuthenticationType = originalAuthentication;
+        Editor.FallbackAuthenticationType = originalFallback;
+        Editor.ClearStoredPassword = false; Editor.ClearStoredPrivateKey = false; Editor.ClearStoredPrivateKeyPassphrase = false;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
     private Task ApplySavedCredentialAsync(SavedConnectionCredential credential)
     {
         var saved = credential.Summary;
+        selectedCredentialId = saved.Id;
+        credentialNotice = string.IsNullOrWhiteSpace(saved.Username) && !IsEditMode ? "Add a username to this entry in Manage saved credentials before using it for a new host." : null;
         if (!string.IsNullOrWhiteSpace(saved.Server)) { Editor.Hostname = saved.Server; Editor.Port = saved.Port; }
         if (!string.IsNullOrWhiteSpace(saved.Username)) Editor.Username = saved.Username;
+        else if (!IsEditMode) Editor.Username = "";
+        if (workingDirectoryFollowsUserHome) Editor.DefaultWorkingDirectory = SuggestedHomeDirectory;
         Editor.Password = credential.Password;
         Editor.PrivateKey = credential.PrivateKey;
         Editor.PrivateKeyPassphrase = credential.Passphrase;
@@ -448,6 +307,7 @@
         Editor.ClearStoredPrivateKey = !saved.HasPrivateKey;
         Editor.ClearStoredPrivateKeyPassphrase = !saved.HasPassphrase;
         if (string.IsNullOrWhiteSpace(Editor.Name)) Editor.Name = saved.Name;
+        ClearConnectionTestState();
         return Task.CompletedTask;
     }
 
@@ -557,6 +417,11 @@
         }
 
         observedEditor = Editor;
+        originalUsername = Editor.Username;
+        originalAuthentication = Editor.PrimaryAuthenticationType;
+        originalFallback = Editor.FallbackAuthenticationType;
+        selectedCredentialId = null;
+        credentialNotice = null;
         workingDirectoryFollowsUserHome = IsFollowingSuggestedHome(Editor.DefaultWorkingDirectory);
         KeyWorkflowMessage = null;
         KeyWorkflowTone = "info";
@@ -710,7 +575,7 @@
 
     private async Task HandleTestConnectionAsync()
     {
-        if (IsTestingConnection)
+        if (IsTestingConnection || !HasConnectionCredentials)
         {
             return;
         }
@@ -890,8 +755,8 @@
         }
 
         HostDiscoveryMessage = host.IsLinuxMadeSaneHost
-            ? $"Using {host.Target} as an LMS host. Review the username and auth details, then save the host."
-            : $"Using {host.Target}. Review the username and auth details, then save the host.";
+            ? $"Using {host.Target} as an LMS host. Choose a saved credential entry, then test and save the host."
+            : $"Using {host.Target}. Choose a saved credential entry, then test and save the host.";
         HostDiscoveryTone = "success";
         ShowHostLookupDialog = false;
         ClearConnectionTestState();
@@ -903,7 +768,7 @@
             ? "LMS host"
             : $"LMS {host.LinuxMadeSaneVersion}";
 
-    private Task HandleSaveAsync() => OnSave.InvokeAsync();
+    private Task HandleSaveAsync() => HasConnectionCredentials ? OnSave.InvokeAsync() : Task.CompletedTask;
 
     private IReadOnlyList<string> BuildWorkingDirectorySuggestions()
     {

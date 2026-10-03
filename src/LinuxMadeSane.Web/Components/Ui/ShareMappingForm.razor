@@ -7,89 +7,29 @@
 @inject IShareManagementService ShareService
 
 <div class="share-mapping-form">
-    <SavedCredentialPicker SmbOnly="true" Selected="ApplySavedCredentialAsync" Disabled="@IsBusy" />
-    <section class="share-mapping-route">
-        <span class="share-mapping-route-icon" aria-hidden="true">
-            <UiGlyphIcon Glyph="UiIconGlyph.NetworkMount" />
-        </span>
-        <div class="share-mapping-route-copy">
+    <SavedCredentialPicker SmbOnly="true" SavedOnly="true" Selected="ApplySavedCredentialAsync" Cleared="ClearSavedCredentialAsync" Disabled="@IsBusy" />
+    <section class="share-mapping-route" aria-label="Mount mapping">
+        <div class="share-mapping-endpoint">
+            <span>From · remote server / share / subfolder</span>
             <strong>@RemoteSummary</strong>
-            <span>@LocalSummary</span>
+        </div>
+        <span class="share-mapping-direction" aria-hidden="true">→</span>
+        <div class="share-mapping-endpoint">
+            <span>To · local folder on LMS</span>
+            <strong>@(string.IsNullOrWhiteSpace(Editor.LocalMountPath) ? "Choose a local folder" : Editor.LocalMountPath)</strong>
         </div>
     </section>
 
-    @if (HasRemoteSource)
-    {
-        <section class="share-mapping-source">
-            <div class="share-mapping-source-card">
-                <span class="share-mapping-source-label">@SourceLabel</span>
-                <strong>//@Editor.Target.Trim()/@Editor.ShareName.Trim()@(string.IsNullOrWhiteSpace(Editor.RemotePath) ? string.Empty : $"/{Editor.RemotePath.Trim('/')}")</strong>
-                <span>@SourceHelper</span>
-            </div>
-            <details class="share-mapping-source-edit">
-                <summary>Change source</summary>
-                <div class="share-mapping-grid">
-                    <UiTextField Label="Machine"
-                                 Helper="Required. Hostname, mDNS name, or IP address."
-                                 Value="@Editor.Target"
-                                 ValueChanged="SetTargetAsync"
-                                 ValueExpression="@(() => Editor.Target)"
-                                 Compact="true"
-                                 Class="@RequiredFieldClass(Editor.Target)"
-                                 Placeholder="freenas.local" />
-
-                    <div class="share-mapping-share-entry">
-                        <UiTextField Label="Share"
-                                     Helper="Required. SMB share name."
-                                     Value="@Editor.ShareName"
-                                     ValueChanged="SetShareNameAsync"
-                                     ValueExpression="@(() => Editor.ShareName)"
-                                     Compact="true"
-                                     Class="@ShareFieldClass"
-                                     Placeholder="media" />
-                        @if (EnableRemoteShareDiscovery)
-                        {
-                            <UiCommandButton Label="@(isBrowsingRemoteShares ? "Loading shares..." : "Find shares")"
-                                             Glyph="UiIconGlyph.Search"
-                                             Disabled="@(!CanBrowseRemoteShares)"
-                                             OnClick="BrowseRemoteSharesAsync" />
-                        }
-                    </div>
-                </div>
-            </details>
-        </section>
-    }
-    else
-    {
-        <div class="share-mapping-grid">
-            <UiTextField Label="Machine"
-                         Helper="Required. Hostname, mDNS name, or IP address."
-                         Value="@Editor.Target"
-                         ValueChanged="SetTargetAsync"
-                         ValueExpression="@(() => Editor.Target)"
-                         Compact="true"
-                         Class="@RequiredFieldClass(Editor.Target)"
-                         Placeholder="freenas.local" />
-
-            <div class="share-mapping-share-entry">
-                <UiTextField Label="Share"
-                             Helper="Required. SMB share name."
-                             Value="@Editor.ShareName"
-                             ValueChanged="SetShareNameAsync"
-                             ValueExpression="@(() => Editor.ShareName)"
-                             Compact="true"
-                             Class="@ShareFieldClass"
-                             Placeholder="media" />
-                @if (EnableRemoteShareDiscovery)
-                {
-                    <UiCommandButton Label="@(isBrowsingRemoteShares ? "Loading shares..." : "Find shares")"
-                                     Glyph="UiIconGlyph.Search"
-                                     Disabled="@(!CanBrowseRemoteShares)"
-                                     OnClick="BrowseRemoteSharesAsync" />
-                }
-            </div>
-        </div>
-    }
+    <div class="share-mapping-share-entry">
+        <UiTextField Label="Remote SMB share" Helper="Share name on the server selected above."
+                     Value="@Editor.ShareName" ValueChanged="SetShareNameAsync" ValueExpression="@(() => Editor.ShareName)"
+                     Compact="true" Class="@ShareFieldClass" Placeholder="media" Disabled="@(IsBusy || selectedCredentialId is null)" />
+        @if (EnableRemoteShareDiscovery)
+        {
+            <UiCommandButton Label="@(isBrowsingRemoteShares ? "Loading shares..." : "Find shares")"
+                             Glyph="UiIconGlyph.Search" Disabled="@(!CanBrowseRemoteShares)" OnClick="BrowseRemoteSharesAsync" />
+        }
+    </div>
 
     @if (EnableRemoteShareDiscovery && RemoteShares.Count > 0)
     {
@@ -118,8 +58,8 @@
         <section class="share-mapping-remote-browser">
             <div class="share-mapping-section-header">
                 <div>
-                    <strong>Remote folder</strong>
-                    <span>Enter or choose a folder inside this share. Leave / to mount the entire share.</span>
+                    <strong>Subfolder inside the remote share</strong>
+                    <span>/ maps the whole share. Otherwise, only this subfolder is mapped.</span>
                 </div>
             </div>
             <UiPathCombobox Value="@RemotePathInput"
@@ -138,44 +78,11 @@
         </section>
     }
 
-    <div class="share-mapping-grid">
-        <UiTextField Label="Username"
-                     Helper="Optional. Leave blank for guest/anonymous access."
-                     Value="@Editor.UserName"
-                     ValueChanged="SetUserNameAsync"
-                     ValueExpression="@(() => Editor.UserName)"
-                     Compact="true"
-                     Placeholder="optional"
-                     Autocomplete="username" />
-
-        <UiTextField Label="Password"
-                     Helper="@ResolvedPasswordHelper"
-                     Value="@Editor.Password"
-                     ValueChanged="SetPasswordAsync"
-                     ValueExpression="@(() => Editor.Password)"
-                     Compact="true"
-                     Type="password"
-                     Placeholder="@(Editor.HasSavedPassword && Editor.KeepSavedPassword ? "Saved password kept" : "optional")"
-                     Autocomplete="current-password" />
-    </div>
-
-    <UiTextField Label="Domain / workgroup" Helper="Optional. Used for share discovery and mounting." @bind-Value="Editor.Domain" Compact="true" />
-
-    @if (ShowSavedPasswordToggle && Editor.HasSavedPassword)
-    {
-        <UiCheckboxField Value="@Editor.KeepSavedPassword"
-                         ValueChanged="SetKeepSavedPasswordAsync"
-                         ValueExpression="@(() => Editor.KeepSavedPassword)"
-                         Label="Keep saved password"
-                         Compact="true"
-                         Helper="Leave this on to keep the current saved password. Type a new password to replace it." />
-    }
-
     <section class="share-mapping-location">
         <div class="share-mapping-section-header">
             <div>
-                <strong>Mount location</strong>
-                <span>@LocationAdvice</span>
+                <strong>Local folder on LMS</strong>
+                <span>The remote contents appear here. Existing local contents are hidden while mounted.</span>
             </div>
             @if (ShowPersistenceToggle)
             {
@@ -187,7 +94,31 @@
             }
         </div>
 
-        <div class="share-mapping-grid share-mapping-grid-location">
+        <div class="share-mapping-local-target">
+            <UiTextField Label="Local mount folder"
+                         Helper="Absolute path on this LMS server."
+                         Value="@Editor.LocalMountPath"
+                         ValueChanged="SetLocalMountPathAsync"
+                         ValueExpression="@(() => Editor.LocalMountPath)"
+                         Compact="true"
+                         Class="@MountPathFieldClass" />
+        </div>
+
+        @if (CanBrowseTargetFolders)
+        {
+            <div class="toolbar-row share-mapping-folder-actions">
+                <UiCommandButton Label="Browse target folders"
+                                 Glyph="UiIconGlyph.FolderOpen"
+                                 Variant="UiButtonVariant.Ghost"
+                                 OnClick="OpenTargetFolderBrowser" />
+            </div>
+        }
+
+    </section>
+
+    <details class="share-mapping-advanced">
+        <summary>Advanced mount options · path presets and Linux permissions</summary>
+        <div class="share-mapping-grid">
             <UiComboboxField TValue="ShareMappingMountLocation"
                            Label="Path preset"
                            Value="@selectedLocation"
@@ -214,27 +145,7 @@
                              Compact="true" />
             }
 
-            <UiTextField Label="LMS mount path"
-                         Helper="@MountPathHelper"
-                         Value="@Editor.LocalMountPath"
-                         ValueChanged="SetLocalMountPathAsync"
-                         ValueExpression="@(() => Editor.LocalMountPath)"
-                         Compact="true"
-                         Class="@MountPathFieldClass" />
         </div>
-
-        @if (CanBrowseTargetFolders)
-        {
-            <div class="toolbar-row share-mapping-folder-actions">
-                <UiCommandButton Label="Browse target folders"
-                                 Glyph="UiIconGlyph.FolderOpen"
-                                 Variant="UiButtonVariant.Ghost"
-                                 OnClick="OpenTargetFolderBrowser" />
-            </div>
-        }
-
-    </section>
-
     <section class="share-mapping-location">
         <div class="share-mapping-section-header">
             <div>
@@ -271,6 +182,8 @@
                          Placeholder="0777" />
         </div>
     </section>
+
+    </details>
 
     @if (!string.IsNullOrWhiteSpace(StatusMessage))
     {
@@ -322,10 +235,23 @@
     [Parameter] public Guid? FolderPickerHostId { get; set; }
     [Parameter] public EventCallback<bool> OnCreateMount { get; set; }
 
+    private Guid? selectedCredentialId;
+
+    private Task ClearSavedCredentialAsync()
+    {
+        selectedCredentialId = null;
+        Editor.Target = ""; Editor.UserName = ""; Editor.Password = ""; Editor.Domain = "";
+        Editor.ShareName = ""; Editor.KeepSavedPassword = false;
+        ResetRemoteShareBrowseState();
+        return Task.CompletedTask;
+    }
+
     private Task ApplySavedCredentialAsync(SavedConnectionCredential credential)
     {
         var saved = credential.Summary;
+        selectedCredentialId = saved.Id;
         var sameServer = Editor.Target.Trim().Equals(saved.Server, StringComparison.OrdinalIgnoreCase);
+        if (!sameServer) Editor.ShareName = "";
         Editor.Target = saved.Server;
         Editor.UserName = saved.Username;
         Editor.Password = credential.Password;
@@ -354,6 +280,7 @@
     private bool CanBrowseRemoteShares => EnableRemoteShareDiscovery &&
                                           !IsBusy &&
                                           !isBrowsingRemoteShares &&
+                                          selectedCredentialId.HasValue &&
                                           !string.IsNullOrWhiteSpace(Editor.Target);
     private IReadOnlyList<RemoteSambaShare> RemoteShares => remoteShareBrowseResult?.Shares
         .Where(share => share.IsMountable)
@@ -375,7 +302,7 @@
     private string MountPathFieldClass => $"share-mapping-mount-path {RequiredFieldClass(Editor.LocalMountPath)}";
     private string RemoteSummary =>
         string.IsNullOrWhiteSpace(Editor.Target) || string.IsNullOrWhiteSpace(Editor.ShareName)
-            ? "Map an SMB/CIFS share onto this LMS server"
+            ? "Choose a saved server and its share"
             : $"//{Editor.Target.Trim()}/{Editor.ShareName.Trim()}{(string.IsNullOrWhiteSpace(Editor.RemotePath) ? string.Empty : $"/{Editor.RemotePath.Trim('/')}")}";
 
     private string LocalSummary =>
@@ -414,6 +341,7 @@
 
     private bool CanSubmit =>
         CanCreateMounts &&
+        selectedCredentialId.HasValue &&
         !IsBusy &&
         !string.IsNullOrWhiteSpace(Editor.Target) &&
         !string.IsNullOrWhiteSpace(Editor.ShareName) &&
@@ -427,6 +355,7 @@
         if (!ReferenceEquals(Editor, trackedEditor))
         {
             trackedEditor = Editor;
+            selectedCredentialId = null;
             localUserName = string.IsNullOrWhiteSpace(LocalUserName)
                 ? ResolveDefaultLocalUserName()
                 : LocalUserName.Trim();
