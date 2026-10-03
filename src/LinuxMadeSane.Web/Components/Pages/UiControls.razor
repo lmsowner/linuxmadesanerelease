@@ -1,0 +1,264 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@page "/ui-controls"
+@rendermode InteractiveServer
+@using System.ComponentModel.DataAnnotations
+
+<PageTitle>UI Controls | Linux Made Sane</PageTitle>
+<div class="control-catalogue">
+    <UiHeroPanel Title="UI controls" Description="A working reference of the controls and patterns used throughout LMS. Compare their size, spacing, labels and behaviour before standardising them." Compact="true">
+        <Actions><UiCommandButton Label="Reset examples" Glyph="UiIconGlyph.Refresh" OnClick="Reset" /></Actions>
+    </UiHeroPanel>
+    <section class="surface-card catalogue-index">
+        <UiFilterInput @bind-Value="filter" Placeholder="Find controls: buttons, dropdowns, validation, dialogs..." AriaLabel="Find UI controls" />
+        <nav aria-label="Control groups" class="catalogue-links">
+            @foreach (var group in Groups.Where(g => Matches(g))) { <a href="@($"#{group.Id}")">@group.Title</a> }
+        </nav>
+        <p class="meta-text">Examples use sample data. Buttons update the status below; they do not change hosts, credentials, files or services. The live display toolbar is labelled separately.</p>
+        <p role="status" aria-live="polite" class="catalogue-feedback">@feedback</p>
+        @if (!Groups.Any(Matches)) { <p>No matching controls. Clear the filter to see all examples.</p> }
+    </section>
+
+    @if (Visible("buttons"))
+    {
+        <section id="buttons" class="surface-card catalogue-section">
+            <h2>Buttons and actions</h2><p class="meta-text">UiButton · UiCommandButton · CompactUIButton · UiIconButton · UiContextMenuButton · UiNavButton</p>
+            <div class="catalogue-button-grid">
+                @foreach (var variant in Enum.GetValues<UiButtonVariant>())
+                {
+                    <article class="catalogue-example"><h3>UiButton / @variant</h3><div class="catalogue-row">
+                        @foreach (var size in Enum.GetValues<UiButtonSize>())
+                        { <UiButton Variant="variant" Size="size" OnClick="Clicked">@size</UiButton> }
+                        <UiButton Variant="variant" Disabled="true">Disabled</UiButton>
+                    </div></article>
+                }
+            </div>
+            <div class="catalogue-example"><h3>Action controls side by side</h3><div class="catalogue-row">
+                <UiCommandButton Label="Command" Glyph="UiIconGlyph.Save" OnClick="Clicked" />
+                <UiCommandButton Label="Text only" HideIcon="true" OnClick="Clicked" />
+                <CompactUIButton Label="Compact button" Glyph="UiIconGlyph.Edit" OnClick="Clicked" />
+                <UiCommandButton Class="credential-command" Label="Credential action" Glyph="UiIconGlyph.Key" OnClick="Clicked" />
+                <UiIconButton Label="Icon button" Glyph="UiIconGlyph.Refresh" OnClick="Clicked" />
+                <UiIconButton Label="Disabled icon button" Glyph="UiIconGlyph.Delete" Disabled="true" />
+                <UiButton Href="/ui-controls#buttons" Variant="UiButtonVariant.Secondary">Link button</UiButton>
+            </div></div>
+            <div class="catalogue-example"><h3>Compact row actions / existing CSS pattern</h3><div class="row-action-cluster catalogue-row">
+                <UiCommandButton Label="Test credentials" Glyph="UiIconGlyph.Connection" OnClick="Clicked" />
+                <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" OnClick="Clicked" />
+                <UiCommandButton Label="Delete" Glyph="UiIconGlyph.Delete" OnClick="Clicked" />
+            </div></div>
+            <div class="catalogue-grid">
+                <div class="catalogue-example"><h3>UiContextMenuButton</h3><div class="catalogue-menu">
+                    <UiContextMenuButton Label="Open" Glyph="UiIconGlyph.FolderOpen" OnClick="Clicked" />
+                    <UiContextMenuButton Label="Delete" Glyph="UiIconGlyph.Delete" Danger="true" OnClick="Clicked" />
+                    <UiContextMenuButton Label="Unavailable" Disabled="true" />
+                </div></div>
+                <div class="catalogue-example"><h3>UiNavButton / standard and compact</h3><UiNavButton Label="UI controls" Href="/ui-controls" IconName="UiIconName.Palette" /><UiNavButton Label="UI controls (compact)" Href="/ui-controls" IconName="UiIconName.Palette" Compact="true" /></div>
+            </div>
+        </section>
+    }
+
+    @if (Visible("fields"))
+    {
+        <section id="fields" class="surface-card catalogue-section">
+            <h2>Text, numbers and validation</h2><p class="meta-text">UiField · UiLabelText · UiTextField · UiNumberField · UiTextAreaField · UiLockedTextField · UiFilterInput</p>
+            <EditForm Model="form" @key="form" OnValidSubmit="ValidForm">
+                <DataAnnotationsValidator />
+                <div class="catalogue-grid">
+                    <UiTextField Label="Standard text / UiTextField" @bind-Value="form.Text" Helper="A helper line under the label." />
+                    <UiTextField Label="Compact text" @bind-Value="form.CompactText" Compact="true" />
+                    <UiTextField Label="Inline text" @bind-Value="form.InlineText" Inline="true" />
+                    <UiTextField Label="Password" Type="password" @bind-Value="form.Password" Autocomplete="new-password" Compact="true" />
+                    <UiTextField Label="Read-only text" @bind-Value="form.ReadOnlyText" readonly Compact="true" />
+                    <UiTextField Label="Disabled text" @bind-Value="form.ReadOnlyText" Disabled="true" Compact="true" />
+                    <UiNumberField TValue="int" Label="Number / UiNumberField" @bind-Value="form.Number" min="1" max="65535" Compact="true" />
+                    <UiLockedTextField Label="Locked field / unlock to edit" @bind-Value="form.LockedText" Locked="locked" OnLockClick="ToggleLock" SaveButtonType="button" Compact="true" />
+                    <UiTextAreaField Label="Multiline / UiTextAreaField" @bind-Value="form.Notes" Rows="3" />
+                    <UiTextAreaField Label="Read-only multiline" @bind-Value="form.Notes" Rows="3" readonly />
+                    <UiTextField Label="Required name / validation example" @bind-Value="form.RequiredName" Helper="Leave blank and click Validate example to see the error." Compact="true" />
+                    <UiField Label="UiField + UiLabelText" Helper="Shared field wrapper with custom content."><UiLabelText>Read-only field content</UiLabelText></UiField>
+                </div>
+                <ValidationSummary />
+                <UiCommandButton Label="Validate example" Glyph="UiIconGlyph.Analyze" Type="submit" />
+            </EditForm>
+            <UiFilterInput @bind-Value="exampleFilter" Placeholder="Filter input example" AriaLabel="Example filter" />
+        </section>
+    }
+
+    @if (Visible("selection"))
+    {
+        <section id="selection" class="surface-card catalogue-section">
+            <h2>Dropdowns and selection</h2><p class="meta-text">UiSelect · UiSelectField · UiCombobox · UiComboboxField · UiMultiSelect · UiIdentityTokenPicker</p>
+            <div class="catalogue-grid">
+                <UiSelectField TValue="string" Label="UiSelectField / standard" @bind-Value="selection"><option value="one">First option</option><option value="two">Second option</option></UiSelectField>
+                <UiSelectField TValue="string" Label="UiSelectField / compact" @bind-Value="selection" Compact="true"><option value="one">First option</option><option value="two">Second option</option></UiSelectField>
+                <UiComboboxField TValue="string" Label="UiComboboxField" @bind-Value="selection" Compact="true"><option value="one">First option</option><option value="two">Second option</option></UiComboboxField>
+                <UiComboboxField TValue="string" Label="Disabled dropdown" @bind-Value="selection" Disabled="true" Compact="true"><option value="one">First option</option><option value="two">Second option</option></UiComboboxField>
+                <UiField Label="UiSelect / base control"><UiSelect TValue="string" @bind-Value="selection" aria-label="Base select"><option value="one">First option</option><option value="two">Second option</option></UiSelect></UiField>
+                <UiField Label="UiCombobox / base control"><UiCombobox TValue="string" @bind-Value="selection" aria-label="Base combobox"><option value="one">First option</option><option value="two">Second option</option></UiCombobox></UiField>
+                <UiMultiSelect Label="UiMultiSelect" Items="identityItems" @bind-Value="multiSelection" HelperText="Search and select multiple sample items." />
+                <UiIdentityTokenPicker Title="UiIdentityTokenPicker" Items="identityItems" SelectedValues="selectedIdentities" OnToggle="ToggleIdentity" OnRemove="ToggleIdentity" Glyph="UiIconGlyph.User" />
+            </div>
+            <p class="meta-text">Selected dropdown value: @selection</p>
+        </section>
+    }
+
+    @if (Visible("toggles"))
+    {
+        <section id="toggles" class="surface-card catalogue-section">
+            <h2>Checkboxes, switches and native inputs</h2><p class="meta-text">UiCheckboxField · UiCompactCheckbox · UiSwitchField · native radio, date, range and colour inputs</p>
+            <div class="catalogue-grid">
+                <UiCheckboxField Label="Standard checkbox" @bind-Value="checkedValue" Helper="Checkbox with helper text." />
+                <UiCheckboxField Label="Compact checkbox" @bind-Value="checkedValue" Compact="true" />
+                <UiCheckboxField Label="Card checkbox" @bind-Value="checkedValue" Card="true" Helper="Larger selectable card." />
+                <UiCheckboxField Label="Disabled checkbox" Value="true" ValueExpression="@(() => checkedValue)" Disabled="true" />
+                <UiField Label="UiCompactCheckbox / icon only"><UiCompactCheckbox Label="Compact checkbox example" @bind-Value="checkedValue" /></UiField>
+                <UiSwitchField Label="UiSwitchField" @bind-Value="switchValue" />
+                <UiSwitchField Label="Disabled switch" Value="true" Disabled="true" />
+                <fieldset><legend>Radio buttons</legend>@foreach (var value in new[] { "Password", "Key", "Either" }) { <label class="catalogue-radio"><input type="radio" name="catalogue-auth" checked="@(radioValue == value)" @onchange="() => radioValue = value" /> @value</label> }</fieldset>
+                <label class="catalogue-native">Date<input type="date" @bind="dateValue" /></label>
+                <label class="catalogue-native">Range / @rangeValue<input type="range" min="0" max="100" @bind="rangeValue" @bind:event="oninput" /></label>
+                <label class="catalogue-native">Colour<input type="color" @bind="colorValue" /></label>
+            </div>
+        </section>
+    }
+
+    @if (Visible("specialised"))
+    {
+        <section id="specialised" class="surface-card catalogue-section">
+            <h2>Paths, network addresses and uploads</h2><p class="meta-text">UiPathCombobox · UiPathAutocompleteField · UiNetworkInterfaceIpPicker · UiCurrentClientIpButton · UiFileDropzone · UiTextCodeEditor · UiQrCode</p>
+            <div class="catalogue-grid">
+                <UiField Label="UiPathCombobox"><UiPathCombobox @bind-Value="path" Suggestions="paths" AriaLabel="Example path combobox" /></UiField>
+                <UiPathAutocompleteField Label="UiPathAutocompleteField" @bind-Value="path" Suggestions="paths" Compact="true" />
+                <UiNetworkInterfaceIpPicker Label="UiNetworkInterfaceIpPicker" Value="networkValue" ValueChanged="@((string value) => networkValue = value)" Helper="Reads the host's interfaces; selection is only a page example." />
+                <div class="catalogue-example"><h3>UiCurrentClientIpButton</h3><UiCurrentClientIpButton OnSelected="ClientIpSelected" /></div>
+                <UiFileDropzone @key="resetKey" MaxFileCount="int.MaxValue" Label="UiFileDropzone" SecondaryText="Preview file names only. Nothing is uploaded or saved." OnChange="FilesSelected" />
+                <UiField Label="Native file picker / InputFile"><InputFile @key="resetKey" OnChange="FilesSelected" multiple aria-label="Sample file picker" /></UiField>
+                <div class="catalogue-example"><h3>UiQrCode</h3><UiQrCode Payload="LMS UI controls example" Caption="Sample text QR code" /></div>
+            </div>
+            <h3>UiTextCodeEditor</h3><UiTextCodeEditor @bind-Value="code" AriaLabel="Example code editor" />
+            <p class="meta-text">@fileMessage</p>
+            <div class="catalogue-grid">
+                <div class="catalogue-example"><h3>Native audio controls</h3><audio controls aria-label="Example audio player"></audio><p class="meta-text">Empty player state used by media previews.</p></div>
+                <div class="catalogue-example"><h3>Native video controls</h3><video controls aria-label="Example video player" width="320" height="180"></video><p class="meta-text">Empty player state used by media previews.</p></div>
+            </div>
+        </section>
+    }
+
+    @if (Visible("feedback"))
+    {
+        <section id="feedback" class="surface-card catalogue-section">
+            <h2>Status, notifications and loading</h2><p class="meta-text">UiPill · InfoPill · ServiceMetricComponent · UiPageLoader · callout styles</p>
+            <div class="catalogue-row">@foreach (var tone in Enum.GetValues<UiPillTone>()) { <UiPill Tone="tone">@tone</UiPill> }</div>
+            <div class="catalogue-grid"><InfoPill Eyebrow="InfoPill" Title="Example information" Text="Sample description" Meta="Additional detail" /><ServiceMetricComponent Label="Sample CPU" Value="23%" Meta="ServiceMetricComponent" Tone="UiPillTone.Success" /></div>
+            @foreach (var tone in new[] { "info", "success", "warning", "error" }) { <p class="callout @tone">@tone: example status message.</p> }
+            <label class="catalogue-native">Native progress<progress max="100" value="rangeValue">@rangeValue%</progress></label>
+            <div class="catalogue-row"><UiCommandButton Label="Show loading banner" Glyph="UiIconGlyph.Refresh" OnClick="StartLoading" /><UiCheckboxField Label="Simulate load failure" @bind-Value="failLoading" Compact="true" /></div>
+            @if (showLoader) { <UiPageLoader @key="loaderKey" Message="Loading sample controls..." OnLoad="LoadExampleAsync" /> }
+        </section>
+    }
+
+    @if (Visible("containers"))
+    {
+        <section id="containers" class="surface-card catalogue-section">
+            <h2>Panels, tabs, disclosure and tables</h2><p class="meta-text">UiPanel · UiHeroPanel · TabControl / TabPage · details / summary · table and row actions</p>
+            <div class="catalogue-grid"><UiPanel><h3>UiPanel / Surface</h3><p>Standard surface panel.</p></UiPanel><UiPanel Compact="true"><h3>UiPanel / compact</h3><p>Compact panel spacing.</p></UiPanel><UiPanel Kind="UiPanelKind.Hero"><h3>UiPanel / Hero</h3><p>Hero surface treatment.</p></UiPanel><UiHeroPanel Title="UiHeroPanel" Description="Page heading and action area." Compact="true" /></div>
+            <TabControl @bind-ActiveValue="activeTab"><TabPage Value="first" Title="First tab"><p>First tab content.</p></TabPage><TabPage Value="second" Title="Second tab"><p>Second tab content.</p></TabPage><TabPage Value="disabled" Title="Disabled tab" Disabled="true" /></TabControl>
+            <details><summary>Additional settings / native disclosure</summary><p>Collapsed optional content example.</p></details>
+            <nav aria-label="Sample breadcrumb" class="catalogue-links"><a href="/ui-controls">UI controls</a><span aria-hidden="true">/</span><span>Example table</span></nav>
+            <div class="table-scroll"><table><caption>Sample table with status and row actions</caption><thead><tr><th>Name</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+                @foreach (var name in new[] { "Example host", "Example service" }) { <tr><td>@name</td><td><UiPill Tone="UiPillTone.Success">Ready</UiPill></td><td><div class="row-action-cluster"><UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" OnClick="Clicked" /><UiCommandButton Label="Delete" Glyph="UiIconGlyph.Delete" OnClick="Clicked" /></div></td></tr> }
+            </tbody></table></div>
+            <p class="meta-text">Empty state example: No entries yet. Add an entry to get started.</p>
+        </section>
+    }
+
+    @if (Visible("dialogs"))
+    {
+        <section id="dialogs" class="surface-card catalogue-section">
+            <h2>Dialogs</h2><p class="meta-text">UiModal / standard, confirmation, draggable and resizable</p>
+            <div class="catalogue-row"><UiCommandButton Label="Open standard dialog" Glyph="UiIconGlyph.PopOut" OnClick="OpenStandardModal" /><UiCommandButton Label="Open confirmation" Glyph="UiIconGlyph.Delete" OnClick="OpenConfirmationModal" /><UiCommandButton Label="Open movable dialog" Glyph="UiIconGlyph.PopOut" OnClick="OpenMovableModal" /></div>
+        </section>
+    }
+
+    @if (Visible("display"))
+    {
+        <section id="display" class="surface-card catalogue-section">
+            <h2>Display preferences and icons</h2><p class="meta-text">UiThemePalettePicker · UiFontScalePicker · UiThemeModeToggle · UiDisplayPreferenceToolbar · UiGlyphIcon · UiIcon</p>
+            <div class="catalogue-row"><UiThemePalettePicker @bind-Value="palette" /><UiFontScalePicker @bind-Value="fontScale" /><UiThemeModeToggle @bind-Value="darkMode" /></div>
+            <p class="meta-text">Standalone examples above only change page values: @palette, @fontScale%, @(darkMode ? "dark" : "light"). Use LMS's normal display toolbar to review the catalogue in another theme.</p>
+            <UiCommandButton Label="Show live display toolbar" Glyph="UiIconGlyph.Focus" OnClick="() => showDisplayToolbar = !showDisplayToolbar" />
+            @if (showDisplayToolbar) { <p class="meta-text">This is the real UiDisplayPreferenceToolbar. Changes here apply and save your display preferences.</p><UiDisplayPreferenceToolbar /> }
+            <details><summary>All action icons / UiGlyphIcon</summary><div class="catalogue-icons">@foreach (var glyph in Enum.GetValues<UiIconGlyph>()) { <div><UiGlyphIcon Glyph="glyph" /><span>@glyph</span></div> }</div></details>
+            <details><summary>All navigation and display icons / UiIcon</summary><div class="catalogue-icons">@foreach (var icon in Enum.GetValues<UiIconName>()) { <div><UiIcon Name="icon" /><span>@icon</span></div> }</div></details>
+        </section>
+    }
+</div>
+
+<UiModal IsOpen="@(modalKind is not null)" Title="@(modalKind == "confirmation" ? "Confirm example action?" : "Example dialog")" Subtitle="UI demonstration with sample content." Draggable="@(modalKind == "movable")" Resizable="@(modalKind == "movable")" OnClose="CloseModal">
+    <ChildContent><p>@(modalKind == "confirmation" ? "This example action only updates the page status. Nothing is deleted." : "Review spacing, controls, scrolling and keyboard focus in this dialog.")</p><UiTextField Label="Example dialog field" @bind-Value="dialogText" Compact="true" /></ChildContent>
+    <Footer><UiCommandButton Label="@(modalKind == "confirmation" ? "Confirm example" : "Done")" Glyph="UiIconGlyph.Save" OnClick="ConfirmModal" /><UiCommandButton Label="Cancel" HideIcon="true" OnClick="CloseModal" /></Footer>
+</UiModal>
+
+@code {
+    private sealed record Group(string Id, string Title, string Keywords);
+    private static readonly Group[] Groups = [
+        new("buttons", "Buttons", "UiButton UiCommandButton CompactUIButton UiIconButton UiContextMenuButton UiNavButton actions sizes disabled"),
+        new("fields", "Fields", "UiField UiLabelText UiTextField UiNumberField UiTextAreaField UiLockedTextField UiFilterInput text numbers validation password readonly"),
+        new("selection", "Selection", "UiSelect UiSelectField UiCombobox UiComboboxField UiMultiSelect UiIdentityTokenPicker dropdown tokens"),
+        new("toggles", "Toggles", "UiCheckboxField UiCompactCheckbox UiSwitchField checkbox radio date range colour native"),
+        new("specialised", "Paths & uploads", "UiPathCombobox UiPathAutocompleteField UiNetworkInterfaceIpPicker UiCurrentClientIpButton UiFileDropzone UiTextCodeEditor UiQrCode files network audio video media InputFile"),
+        new("feedback", "Status & loading", "UiPill InfoPill ServiceMetricComponent UiPageLoader progress callout alerts notifications"),
+        new("containers", "Layout", "UiPanel UiHeroPanel TabControl TabPage tables details summary disclosure breadcrumb empty state"),
+        new("dialogs", "Dialogs", "UiModal modal confirmation draggable resizable"),
+        new("display", "Display & icons", "UiThemePalettePicker UiFontScalePicker UiThemeModeToggle UiDisplayPreferenceToolbar UiGlyphIcon UiIcon theme")];
+    private bool Matches(Group g) => string.IsNullOrWhiteSpace(filter) || (g.Title + " " + g.Keywords).Contains(filter.Trim(), StringComparison.OrdinalIgnoreCase);
+    private bool Visible(string id) => Matches(Groups.First(g => g.Id == id));
+    private string? filter, exampleFilter, dialogText, modalKind;
+    private string feedback = "Ready. Try a control to see its behaviour.";
+    private DemoForm form = new();
+    private string? selection = "one", path = "/srv/media", code = "# Example configuration\nserver: example.local\nport: 22\n";
+    private string multiSelection = "alex", networkValue = "127.0.0.1", palette = "smooth-grey", radioValue = "Password", colorValue = "#4679bd";
+    private int fontScale = 100, rangeValue = 35, loaderKey, resetKey;
+    private bool checkedValue = true, switchValue, locked = true, darkMode, showLoader, failLoading, showDisplayToolbar;
+    private string? activeTab = "first";
+    private DateTime dateValue = new(2026, 10, 3);
+    private string fileMessage = "No sample files selected.";
+    private readonly IReadOnlyList<string> paths = ["/srv/media", "/srv/backups", "/home/example"];
+    private readonly IReadOnlyList<UiIdentityTokenPickerItem> identityItems = [new("alex", "Alex", "Example account"), new("sam", "Sam", "Example account"), new("admins", "Administrators", "Example group")];
+    private List<string> selectedIdentities = ["alex"];
+    private void Clicked() => feedback = "Example action clicked. No application settings changed.";
+    private void ValidForm() => feedback = "Example validation passed. Nothing saved.";
+    private void ToggleLock() => locked = !locked;
+    private void ToggleIdentity(string key) { if (!selectedIdentities.Remove(key)) selectedIdentities.Add(key); }
+    private void ClientIpSelected(string value) => feedback = $"Current client address example: {value}";
+    private void FilesSelected(InputFileChangeEventArgs args) => fileMessage = "Selected: " + string.Join(", ", args.GetMultipleFiles(int.MaxValue).Take(10).Select(f => f.Name)) + ". Nothing uploaded.";
+    private void StartLoading() { showLoader = true; loaderKey++; }
+    private async Task LoadExampleAsync() { await Task.Delay(1200); if (failLoading) throw new InvalidOperationException("Simulated example failure. Clear the checkbox and try again."); showLoader = false; feedback = "Example loading completed."; }
+    private void OpenStandardModal() => modalKind = "standard";
+    private void OpenConfirmationModal() => modalKind = "confirmation";
+    private void OpenMovableModal() => modalKind = "movable";
+    private void CloseModal() => modalKind = null;
+    private void ConfirmModal() { Clicked(); CloseModal(); }
+    private void Reset()
+    {
+        resetKey++; form = new(); filter = exampleFilter = dialogText = modalKind = null; selection = "one"; path = "/srv/media";
+        code = "# Example configuration\nserver: example.local\nport: 22\n"; multiSelection = "alex"; selectedIdentities = ["alex"];
+        checkedValue = locked = true; switchValue = darkMode = showLoader = failLoading = showDisplayToolbar = false;
+        networkValue = "127.0.0.1"; palette = "smooth-grey"; fontScale = 100; rangeValue = 35; radioValue = "Password";
+        colorValue = "#4679bd"; dateValue = new(2026, 10, 3); activeTab = "first"; fileMessage = "No sample files selected.";
+        feedback = "Examples reset. Application settings are unchanged.";
+    }
+    private sealed class DemoForm
+    {
+        public string? Text { get; set; } = "Example text";
+        public string? CompactText { get; set; } = "Compact example";
+        public string? InlineText { get; set; } = "Inline example";
+        public string? Password { get; set; } = "example-only";
+        public string? ReadOnlyText { get; set; } = "Read-only example";
+        public string? LockedText { get; set; } = "Unlock to edit";
+        public string? Notes { get; set; } = "Example multiline text.\nA second line.";
+        [Range(1, 65535)] public int Number { get; set; } = 22;
+        [Required(ErrorMessage = "Enter an example name.")] public string? RequiredName { get; set; }
+    }
+}
