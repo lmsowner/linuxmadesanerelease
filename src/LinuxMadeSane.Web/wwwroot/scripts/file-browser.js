@@ -22,7 +22,7 @@ window.lmsFileBrowser = (() => {
         const down = event => {
             const surface = event.target.closest("[data-marquee-surface]");
             if (!surface || event.button !== 0 || event.pointerType === "touch" || element.dataset.selectionBusy === "true"
-                || event.target.closest("input,button,a,label,select,textarea,thead,.file-browser-thumbnail-parent")) return;
+                || event.target.closest("input,button,a,label,select,textarea,thead")) return;
             const rect = surface.getBoundingClientRect();
             // Ignore scrollbars.
             if (event.clientX >= rect.left + surface.clientWidth || event.clientY >= rect.top + surface.clientHeight) return;
@@ -93,7 +93,7 @@ window.lmsFileBrowser = (() => {
         };
         const preventNativeDrag = event => { if (gesture) event.preventDefault(); };
         const click = event => { if (suppressClick) { event.preventDefault(); event.stopImmediatePropagation(); } };
-        element.addEventListener("pointerdown", down);
+        element.addEventListener("pointerdown", down, true);
         element.addEventListener("click", click, true);
         element.addEventListener("selectstart", preventNativeDrag, true);
         element.addEventListener("dragstart", preventNativeDrag, true);
@@ -103,7 +103,7 @@ window.lmsFileBrowser = (() => {
         window.addEventListener("blur", cancel);
         marqueeWatchers.set(element, () => {
             cancel();
-            element.removeEventListener("pointerdown", down);
+            element.removeEventListener("pointerdown", down, true);
             element.removeEventListener("click", click, true);
             element.removeEventListener("selectstart", preventNativeDrag, true);
             element.removeEventListener("dragstart", preventNativeDrag, true);
