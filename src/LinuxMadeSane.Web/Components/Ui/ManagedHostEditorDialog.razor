@@ -20,7 +20,7 @@
     <ChildContent>
         <EditForm id="@formId" Model="@Editor" OnValidSubmit="HandleSaveAsync" class="managed-host-editor-form">
             <DataAnnotationsValidator />
-            <SavedCredentialPicker SavedOnly="true" Cleared="ClearSavedCredentialAsync" Selected="ApplySavedCredentialAsync" Disabled="@(IsBusy || IsTestingConnection)" />
+            <SavedCredentialPicker @ref="credentialPicker" ShowAddButton="true" AddRequested="OpenCredentialEditorAsync" SavedOnly="true" Cleared="ClearSavedCredentialAsync" Selected="ApplySavedCredentialAsync" Disabled="@(IsBusy || IsTestingConnection)" />
 
             <div class="managed-host-editor-grid managed-host-editor-grid-primary">
                 <UiTextField @bind-Value="Editor.Name"
@@ -69,15 +69,6 @@
                                Compact="true"
                                data-testid="managed-host-port" />
 
-                <UiPathAutocompleteField Value="@Editor.DefaultWorkingDirectory"
-                                         ValueChanged="HandleWorkingDirectoryChangedAsync"
-                                         ValueExpression="() => Editor.DefaultWorkingDirectory"
-                                         Label="Working directory"
-                                         Placeholder="@SuggestedHomeDirectory"
-                                         Helper="Defaults to the SSH user's home."
-                                         Suggestions="@WorkingDirectorySuggestions"
-                                         Class="managed-host-editor-field-workdir"
-                                         Compact="true" />
             </div>
 
             @if (!string.IsNullOrWhiteSpace(Editor.Username))
@@ -87,9 +78,19 @@
             @if (!string.IsNullOrWhiteSpace(credentialNotice)) { <p class="callout info">@credentialNotice</p> }
 
             <details class="managed-host-editor-advanced">
-                <summary>Optional platform and host notes</summary>
+                <summary>Additional settings</summary>
 
                 <div class="managed-host-editor-grid managed-host-editor-grid-advanced">
+                <UiPathAutocompleteField Value="@Editor.DefaultWorkingDirectory"
+                                         ValueChanged="HandleWorkingDirectoryChangedAsync"
+                                         ValueExpression="() => Editor.DefaultWorkingDirectory"
+                                         Label="Working directory"
+                                         Placeholder="@SuggestedHomeDirectory"
+                                         Helper="Defaults to this user's home directory. Change it only when you need a different starting folder."
+                                         Suggestions="@WorkingDirectorySuggestions"
+                                         Class="managed-host-editor-field-workdir"
+                                         Compact="true" />
+
                     <UiTextField @bind-Value="Editor.Platform"
                                  Label="Platform"
                                  Placeholder="Ubuntu 24.04 LTS"
@@ -162,6 +163,8 @@
         </div>
     </Footer>
 </UiModal>
+
+<SavedCredentialsPanel @ref="credentialEditor" EditorOnly="true" SshOnly="true" Saved="SelectCreatedCredentialAsync" />
 
 <UiModal IsOpen="@ShowHostLookupDialog"
          Title="Find SSH or LMS host"
@@ -270,6 +273,11 @@
 </UiModal>
 
 @code {
+    private SavedCredentialPicker? credentialPicker;
+    private SavedCredentialsPanel? credentialEditor;
+    private Task OpenCredentialEditorAsync() => credentialEditor?.OpenCreateAsync(Editor.Name, Editor.Hostname, Editor.Port) ?? Task.CompletedTask;
+    private Task SelectCreatedCredentialAsync(SavedConnectionCredentialSummary saved) => credentialPicker?.SelectCreatedAsync(saved.Id) ?? Task.CompletedTask;
+
     private Guid? selectedCredentialId;
     private string? credentialNotice;
     private string originalUsername = "";
