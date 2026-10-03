@@ -14,9 +14,10 @@ public sealed class ConnectionProfileUserResolver(ISecurityUserStore securityUse
         CancellationToken cancellationToken = default)
     {
         var userIdValue = principal?.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (Guid.TryParse(userIdValue, out var userId))
+        if (principal?.Identity?.IsAuthenticated == true && Guid.TryParse(userIdValue, out var userId))
         {
-            return await securityUserStore.GetAsync(userId, cancellationToken);
+            var user = await securityUserStore.GetAsync(userId, cancellationToken);
+            return user?.IsEnabled == true ? user : null;
         }
 
         if (principal?.Identity?.IsAuthenticated == true)
@@ -24,11 +25,7 @@ public sealed class ConnectionProfileUserResolver(ISecurityUserStore securityUse
             return null;
         }
 
-        var users = await securityUserStore.ListAsync(cancellationToken);
-        return users
-            .Where(user => user.IsEnabled)
-            .OrderBy(user => user.CreatedAtUtc)
-            .ThenBy(user => user.Email, StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+        // Trusted-network access is not an authenticated credential-store identity.
+        return null;
     }
 }

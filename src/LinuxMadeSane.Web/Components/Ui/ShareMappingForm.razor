@@ -7,6 +7,7 @@
 @inject IShareManagementService ShareService
 
 <div class="share-mapping-form">
+    <SavedCredentialPicker SmbOnly="true" Selected="ApplySavedCredentialAsync" Disabled="@IsBusy" />
     <section class="share-mapping-route">
         <span class="share-mapping-route-icon" aria-hidden="true">
             <UiGlyphIcon Glyph="UiIconGlyph.NetworkMount" />
@@ -112,13 +113,13 @@
         <p class="callout error share-mapping-share-error">@remoteShareBrowseError</p>
     }
 
-    @if (EnableRemoteShareDiscovery && remoteShareBrowseResult is not null && !string.IsNullOrWhiteSpace(Editor.ShareName))
+    @if (HasRemoteSource)
     {
         <section class="share-mapping-remote-browser">
             <div class="share-mapping-section-header">
                 <div>
                     <strong>Remote folder</strong>
-                    <span>Select a folder inside the share using the same path selector as the file browser.</span>
+                    <span>Enter or choose a folder inside this share. Leave / to mount the entire share.</span>
                 </div>
             </div>
             <UiPathCombobox Value="@RemotePathInput"
@@ -157,6 +158,8 @@
                      Placeholder="@(Editor.HasSavedPassword && Editor.KeepSavedPassword ? "Saved password kept" : "optional")"
                      Autocomplete="current-password" />
     </div>
+
+    <UiTextField Label="Domain / workgroup" Helper="Optional. Used for share discovery and mounting." @bind-Value="Editor.Domain" Compact="true" />
 
     @if (ShowSavedPasswordToggle && Editor.HasSavedPassword)
     {
@@ -319,6 +322,20 @@
     [Parameter] public Guid? FolderPickerHostId { get; set; }
     [Parameter] public EventCallback<bool> OnCreateMount { get; set; }
 
+    private Task ApplySavedCredentialAsync(SavedConnectionCredential credential)
+    {
+        var saved = credential.Summary;
+        var sameServer = Editor.Target.Trim().Equals(saved.Server, StringComparison.OrdinalIgnoreCase);
+        Editor.Target = saved.Server;
+        Editor.UserName = saved.Username;
+        Editor.Password = credential.Password;
+        Editor.Domain = saved.Domain;
+        Editor.KeepSavedPassword = false;
+        ResetRemoteShareBrowseState(clearRemotePath: !sameServer);
+        ApplySelectedMountPathIfAutomatic();
+        return Task.CompletedTask;
+    }
+
     private RemoteShareMountEditor? trackedEditor;
     private ShareMappingMountLocation selectedLocation = ShareMappingMountLocation.LmsDefault;
     private string localUserName = string.Empty;
@@ -466,7 +483,7 @@
     private Task SetUserNameAsync(string? value)
     {
         Editor.UserName = value ?? string.Empty;
-        ResetRemoteShareBrowseState();
+        ResetRemoteShareBrowseState(clearRemotePath: false);
         return Task.CompletedTask;
     }
 
@@ -478,7 +495,7 @@
             Editor.KeepSavedPassword = false;
         }
 
-        ResetRemoteShareBrowseState();
+        ResetRemoteShareBrowseState(clearRemotePath: false);
 
         return Task.CompletedTask;
     }
@@ -491,7 +508,7 @@
             Editor.Password = string.Empty;
         }
 
-        ResetRemoteShareBrowseState();
+        ResetRemoteShareBrowseState(clearRemotePath: false);
 
         return Task.CompletedTask;
     }
@@ -514,7 +531,7 @@
                 Target = Editor.Target.Trim(),
                 UserName = Editor.UserName.Trim(),
                 Password = Editor.Password,
-                Domain = string.Empty
+                Domain = Editor.Domain.Trim()
             });
 
             if (RemoteShares.Count == 0 &&
@@ -542,9 +559,12 @@
 
     private async Task SelectRemoteShareAsync(RemoteSambaShare share)
     {
+        if (!Editor.ShareName.Equals(share.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            Editor.RemotePath = string.Empty;
+            remotePathInput = "/";
+        }
         Editor.ShareName = share.Name;
-        Editor.RemotePath = string.Empty;
-        remotePathInput = "/";
         remoteShareBrowseError = null;
         ApplySelectedMountPathIfAutomatic();
         await BrowseRemoteShareFoldersAsync();
@@ -601,7 +621,8 @@
 
     private Task SetRemotePathInputAsync(string? value)
     {
-        remotePathInput = NormalizeRemotePathInput(value);
+        remotePathInput = value ?? "/";
+        Editor.RemotePath = NormalizeRemotePathInput(value).Trim('/');
         return Task.CompletedTask;
     }
 
@@ -625,13 +646,12 @@
     private bool IsSelectedRemoteShare(RemoteSambaShare share) =>
         string.Equals(Editor.ShareName.Trim(), share.Name, StringComparison.OrdinalIgnoreCase);
 
-    private void ResetRemoteShareBrowseState()
+    private void ResetRemoteShareBrowseState(bool clearRemotePath = true)
     {
         remoteShareBrowseResult = null;
         remoteFolderBrowseResult = null;
         remoteShareBrowseError = null;
-        remotePathInput = "/";
-        Editor.RemotePath = string.Empty;
+        if (clearRemotePath) { remotePathInput = "/"; Editor.RemotePath = string.Empty; }
     }
 
     private static string NormalizeRemotePathInput(string? value)

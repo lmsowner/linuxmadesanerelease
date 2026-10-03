@@ -22,6 +22,11 @@ public sealed class SqliteDatabaseInitializer(
     {
         EnsureDatabaseDirectoryExists();
         await dbContext.Database.EnsureCreatedAsync(cancellationToken);
+        if (!OperatingSystem.IsWindows())
+        {
+            var databasePath = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(dbContext.Database.GetConnectionString()).DataSource;
+            if (File.Exists(databasePath)) File.SetUnixFileMode(databasePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
         await EnsureManagedHostColumnsAsync(cancellationToken);
         await EnsureSavedCommandColumnsAsync(cancellationToken);
         await EnsureModuleTablesAsync(cancellationToken);
@@ -42,6 +47,20 @@ public sealed class SqliteDatabaseInitializer(
         await EnsureUserDisplayPreferenceTablesAsync(cancellationToken);
         await EnsureFileBrowserShortcutTablesAsync(cancellationToken);
         await EnsureUserManagedHostCredentialProfileTablesAsync(cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS saved_connection_credentials (
+                Id TEXT NOT NULL PRIMARY KEY, UserId TEXT NOT NULL, Name TEXT NOT NULL,
+                Kind INTEGER NOT NULL, Server TEXT NOT NULL, Port INTEGER NOT NULL,
+                Username TEXT NOT NULL, Domain TEXT NOT NULL, PublicKey TEXT NOT NULL,
+                PasswordReference TEXT NULL, PrivateKeyReference TEXT NULL, PassphraseReference TEXT NULL,
+                CreatedAtUtc TEXT NOT NULL, UpdatedAtUtc TEXT NOT NULL,
+                FOREIGN KEY (UserId) REFERENCES security_users(Id) ON DELETE CASCADE);
+            CREATE INDEX IF NOT EXISTS IX_saved_connection_credentials_UserId ON saved_connection_credentials(UserId);
+            CREATE TABLE IF NOT EXISTS saved_credential_audit (
+                Id TEXT NOT NULL PRIMARY KEY, ActorUserId TEXT NULL, CredentialId TEXT NULL,
+                Action TEXT NOT NULL, OccurredAtUtc TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS IX_saved_credential_audit_ActorUserId ON saved_credential_audit(ActorUserId);
+            """, cancellationToken);
         await RemoveLegacyScaffoldDataAsync(cancellationToken);
 
         if (!await dbContext.ManagedHosts.AnyAsync(cancellationToken))

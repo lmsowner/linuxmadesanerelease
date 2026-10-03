@@ -10,8 +10,15 @@ namespace LinuxMadeSane.Application.Services;
 
 public sealed class UserManagedHostCredentialProfileService(
     IUserManagedHostCredentialProfileStore store,
-    ISecretStore secretStore) : IUserManagedHostCredentialProfileService
+    ISecretStore secretStore,
+    ISavedConnectionCredentialService? savedCredentials = null,
+    IManagedHostStore? hosts = null) : IUserManagedHostCredentialProfileService
 {
+    private static bool MatchesHost(SavedConnectionCredentialSummary credential, ManagedHost host) =>
+        credential.Kind != ConnectionCredentialKind.Smb &&
+        (credential.Kind == ConnectionCredentialKind.SshKeyPair && string.IsNullOrWhiteSpace(credential.Server) ||
+         credential.Server.TrimEnd('.').Equals(host.Hostname.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase) && credential.Port == host.Port);
+
     private const int MaxNameLength = 80;
     private const int MaxUsernameLength = 128;
 
@@ -21,7 +28,17 @@ public sealed class UserManagedHostCredentialProfileService(
         CancellationToken cancellationToken = default)
     {
         var profiles = await store.ListAsync(userId, managedHostId, cancellationToken);
-        return profiles.Select(MapSummary).ToArray();
+        var summaries = profiles.Select(MapSummary).ToList();
+        if (savedCredentials is not null && hosts is not null && await hosts.GetAsync(managedHostId, cancellationToken) is { } host)
+        {
+            try
+            {
+                summaries.AddRange((await savedCredentials.ListAsync(userId, cancellationToken)).Where(x => MatchesHost(x, host))
+                    .Select(x => new UserManagedHostCredentialProfileSummary(x.Id, x.Name + " · credential store", string.IsNullOrWhiteSpace(x.Username) ? host.Username : x.Username, x.HasPassword, x.HasPrivateKey, x.HasPassphrase, x.UpdatedAtUtc)));
+            }
+            catch (UnauthorizedAccessException) { /* No authenticated store identity in this circuit. */ }
+        }
+        return summaries.ToArray();
     }
 
     public async Task<UserManagedHostCredentialProfileCredentials?> ResolveAsync(
@@ -31,10 +48,17 @@ public sealed class UserManagedHostCredentialProfileService(
         CancellationToken cancellationToken = default)
     {
         var profile = await store.GetAsync(profileId, cancellationToken);
-        if (profile is null || profile.UserId != userId || profile.ManagedHostId != managedHostId)
+        if (profile is null)
         {
+            if (savedCredentials is not null && hosts is not null && await hosts.GetAsync(managedHostId, cancellationToken) is { } host)
+            {
+                var summary = (await savedCredentials.ListAsync(userId, cancellationToken)).FirstOrDefault(x => x.Id == profileId && MatchesHost(x, host));
+                if (summary is not null && await savedCredentials.ResolveAsync(userId, profileId, cancellationToken) is { } credential)
+                    return new(profileId, summary.Name, string.IsNullOrWhiteSpace(summary.Username) ? host.Username : summary.Username, credential.Password, credential.PrivateKey, credential.Passphrase);
+            }
             return null;
         }
+        if (profile.UserId != userId || profile.ManagedHostId != managedHostId) return null;
 
         return new UserManagedHostCredentialProfileCredentials(
             profile.Id,
@@ -102,10 +126,13 @@ public sealed class UserManagedHostCredentialProfileService(
         CancellationToken cancellationToken = default)
     {
         var profile = await store.GetAsync(profileId, cancellationToken);
-        if (profile is null || profile.UserId != userId || profile.ManagedHostId != managedHostId)
+        if (profile is null)
         {
+            if (savedCredentials is not null && (await savedCredentials.ListAsync(userId, cancellationToken)).Any(x => x.Id == profileId))
+                throw new InvalidOperationException("Manage this saved credential in Security & Networking → Credentials.");
             return;
         }
+        if (profile.UserId != userId || profile.ManagedHostId != managedHostId) return;
 
         await store.DeleteAsync(profile.Id, cancellationToken);
         await DeleteSecretIfPresentAsync(profile.PasswordSecretReference, cancellationToken);

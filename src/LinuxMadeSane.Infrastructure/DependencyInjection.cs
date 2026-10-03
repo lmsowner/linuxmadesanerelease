@@ -36,6 +36,12 @@ public static class DependencyInjection
             Path.Combine(contentRootPath, "data", "protection-keys"),
             contentRootPath));
         dataProtectionDirectory.Create();
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(dataProtectionDirectory.FullName, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            foreach (var keyFile in dataProtectionDirectory.EnumerateFiles("key-*.xml"))
+                File.SetUnixFileMode(keyFile.FullName, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
 
         var connectionString = BuildSqliteConnectionString(
             configuration.GetConnectionString("LinuxMadeSane") ?? "Data Source=data/linuxmadesane.db",
@@ -120,6 +126,7 @@ public static class DependencyInjection
         services.AddScoped<IAiProviderSettingsStore, SqliteAiProviderSettingsStore>();
         services.AddScoped<IUserDisplayPreferenceStore, SqliteUserDisplayPreferenceStore>();
         services.AddScoped<IFileBrowserShortcutStore, SqliteFileBrowserShortcutStore>();
+        services.AddScoped<ISavedConnectionCredentialService, SavedConnectionCredentialService>();
         services.AddScoped<IUserManagedHostCredentialProfileStore, SqliteUserManagedHostCredentialProfileStore>();
         services.AddScoped<ILocalAiEngineStore, SqliteLocalAiEngineStore>();
         services.AddScoped<IAiProviderRegistry, SqliteAiProviderRegistry>();

@@ -20,6 +20,7 @@
     <ChildContent>
         <EditForm id="@formId" Model="@Editor" OnValidSubmit="HandleSaveAsync" class="managed-host-editor-form">
             <DataAnnotationsValidator />
+            <SavedCredentialPicker Selected="ApplySavedCredentialAsync" Disabled="@(IsBusy || IsTestingConnection)" />
 
             <div class="managed-host-editor-grid managed-host-editor-grid-primary">
                 <UiTextField @bind-Value="Editor.Name"
@@ -433,6 +434,23 @@
 </UiModal>
 
 @code {
+    private Task ApplySavedCredentialAsync(SavedConnectionCredential credential)
+    {
+        var saved = credential.Summary;
+        if (!string.IsNullOrWhiteSpace(saved.Server)) { Editor.Hostname = saved.Server; Editor.Port = saved.Port; }
+        if (!string.IsNullOrWhiteSpace(saved.Username)) Editor.Username = saved.Username;
+        Editor.Password = credential.Password;
+        Editor.PrivateKey = credential.PrivateKey;
+        Editor.PrivateKeyPassphrase = credential.Passphrase;
+        Editor.PrimaryAuthenticationType = saved.HasPrivateKey ? AuthenticationType.PrivateKey : AuthenticationType.Password;
+        Editor.FallbackAuthenticationType = null;
+        Editor.ClearStoredPassword = saved.HasPrivateKey;
+        Editor.ClearStoredPrivateKey = !saved.HasPrivateKey;
+        Editor.ClearStoredPrivateKeyPassphrase = !saved.HasPassphrase;
+        if (string.IsNullOrWhiteSpace(Editor.Name)) Editor.Name = saved.Name;
+        return Task.CompletedTask;
+    }
+
     private readonly string formId = $"managed-host-editor-form-{Guid.NewGuid():N}";
     private ManagedHostEditor? observedEditor;
     private bool workingDirectoryFollowsUserHome = true;

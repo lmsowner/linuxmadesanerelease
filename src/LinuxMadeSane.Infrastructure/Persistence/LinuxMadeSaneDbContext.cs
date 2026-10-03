@@ -46,6 +46,9 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
     public DbSet<AiProviderSettingsEntity> AiProviderSettings => Set<AiProviderSettingsEntity>();
     public DbSet<UserDisplayPreferenceEntity> UserDisplayPreferences => Set<UserDisplayPreferenceEntity>();
     public DbSet<FileBrowserShortcutEntity> FileBrowserShortcuts => Set<FileBrowserShortcutEntity>();
+    public DbSet<SavedCredentialAuditEntity> SavedCredentialAudits => Set<SavedCredentialAuditEntity>();
+    public DbSet<SavedConnectionCredentialEntity> SavedConnectionCredentials => Set<SavedConnectionCredentialEntity>();
+
     public DbSet<UserManagedHostCredentialProfileEntity> UserManagedHostCredentialProfiles => Set<UserManagedHostCredentialProfileEntity>();
     public DbSet<ProtectedSecretEntity> ProtectedSecrets => Set<ProtectedSecretEntity>();
     public DbSet<SecurityUserEntity> SecurityUsers => Set<SecurityUserEntity>();
@@ -94,6 +97,20 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
                 .WithOne(command => command.Host)
                 .HasForeignKey(command => command.HostId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SavedCredentialAuditEntity>(entity =>
+        {
+            entity.ToTable("saved_credential_audit");
+            entity.HasKey(x => x.Id);
+            entity.HasIndex(x => x.ActorUserId);
+        });
+        modelBuilder.Entity<SavedConnectionCredentialEntity>(entity =>
+        {
+            entity.ToTable("saved_connection_credentials");
+            entity.HasKey(x => x.Id);
+            entity.HasIndex(x => x.UserId);
+            entity.HasOne<SecurityUserEntity>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<UserManagedHostCredentialProfileEntity>(entity =>
