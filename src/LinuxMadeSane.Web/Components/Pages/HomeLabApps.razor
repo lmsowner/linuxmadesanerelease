@@ -1085,28 +1085,43 @@
             </TabPage>
 
             <TabPage Value="storage" Title="Storage">
+                @if (!HasHomeLabStorageFolders && workspace.Installations.Count == 0 && !storageSetupRequested)
+                {
+                    <section class="surface-subcard home-lab-storage-panel">
+                        <h2>HomeLab storage has not been set up</h2>
+                        <p class="meta-text">No HomeLab storage folders exist on this box yet. Choose where to keep app files and shared data, then create the folders you need.</p>
+                        <div class="home-lab-action-row">
+                            <UiCommandButton Label="Set up storage" Glyph="UiIconGlyph.NewFolder" Disabled="@busy" OnClick="BeginStorageSetup" />
+                        </div>
+                    </section>
+                }
+                else
+                {
                 <section class="surface-subcard home-lab-storage-panel">
                     <div>
                         <p class="eyebrow">HomeLab app files</p>
-                        <h2>One clear folder for every container</h2>
-                        <p class="meta-text">Each container gets a folder named after the Docker container. Its configuration and shared-data mounts appear inside, so you never need to find a deployment ID.</p>
+                        <h2>@(HasHomeLabStorageFolders ? "One clear folder for every container" : "Create HomeLab storage folders")</h2>
+                        <p class="meta-text">Choose a folder for app files. Create folder prepares it on this box; each installed container will have its own folder inside.</p>
                     </div>
                     <div class="home-lab-storage-row">
                         <label for="storage-home-lab">HomeLab files</label>
                         <input id="storage-home-lab" class="ui-control-input" @bind="storagePaths[HomeLabFilesRole]" placeholder="/mnt/storage/home-lab" />
                         <div class="home-lab-storage-actions">
-                            <UiCommandButton Label="Save" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(HomeLabFilesRole)" />
+                            <UiCommandButton Label="@(Directory.Exists(GetHomeLabFilesRoot()) ? "Save" : "Create folder")" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(HomeLabFilesRole)" />
                             <UiCommandButton Label="Browse all files"
+                                             Disabled="@(busy || !Directory.Exists(GetHomeLabFilesRoot()))"
                                              Glyph="UiIconGlyph.FolderOpen"
                                              Variant="UiButtonVariant.Action"
-                                             Href="@BuildHomeLabFilesUrl()"
+                                             Href="@(Directory.Exists(GetHomeLabFilesRoot()) ? BuildHomeLabFilesUrl() : null)"
                                              Target="@BuildHomeLabFilesPopupName()"
                                              Rel="noopener"
-                                             OnClientPointerDown="@BuildHomeLabFilesPopupPrepareScript()"
-                                             OnClientClick="@BuildHomeLabFilesPopupOpenScript()" />
+                                             OnClientPointerDown="@(Directory.Exists(GetHomeLabFilesRoot()) ? BuildHomeLabFilesPopupPrepareScript() : null)"
+                                             OnClientClick="@(Directory.Exists(GetHomeLabFilesRoot()) ? BuildHomeLabFilesPopupOpenScript() : null)" />
                         </div>
                     </div>
                 </section>
+                @if (workspace.Installations.Count > 0)
+                {
                 <section class="surface-subcard home-lab-storage-panel">
                     <div>
                         <p class="eyebrow">Container storage access</p>
@@ -1122,11 +1137,12 @@
                                          OnClick="ApplyStandardStorageAsync" />
                     </div>
                 </section>
+                }
                 <section class="surface-subcard home-lab-storage-panel">
                     <div>
                         <p class="eyebrow">Shared storage roles</p>
                         <h2>Choose host locations once</h2>
-                        <p class="meta-text">Apps and guided AI setups reuse these paths when mounting shared data into participating containers.</p>
+                        <p class="meta-text">Choose the shared folders you need. Create folder prepares the selected path on this box; installed apps can then use it.</p>
                     </div>
                     <div class="home-lab-storage-grid">
                         @foreach (var role in StorageRoles)
@@ -1134,11 +1150,12 @@
                             <div class="home-lab-storage-row">
                                 <label for="storage-@role">@role</label>
                                 <input id="storage-@role" class="ui-control-input" @bind="storagePaths[role]" placeholder="/mnt/storage/@role" />
-                                <UiCommandButton Label="Save" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(role)" />
+                                <UiCommandButton Label="@(Directory.Exists(storagePaths[role]) ? "Save" : "Create folder")" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(role)" />
                             </div>
                         }
                     </div>
                 </section>
+                }
             </TabPage>
 
         </TabControl>
@@ -1146,6 +1163,10 @@
 </div>
 
 @code {
+    private bool storageSetupRequested;
+    private bool HasHomeLabStorageFolders => storagePaths.Values.Any(Directory.Exists);
+    private void BeginStorageSetup() => storageSetupRequested = true;
+
     private const string HomeLabFilesRole = "home-lab";
     private static readonly string[] StorageRoles = ["downloads", "movies", "tv", "photos"];
     private readonly Dictionary<string, string> storagePaths = new(StringComparer.OrdinalIgnoreCase)
@@ -1772,7 +1793,7 @@
         await RunUiOperationAsync(async () =>
         {
             await HomeLabService.SaveStorageRoleAsync(role, storagePaths[role]);
-            SetMessage($"Storage role '{role}' saved.", false);
+            SetMessage($"Storage folder '{storagePaths[role]}' is ready.", false);
         });
     }
 
