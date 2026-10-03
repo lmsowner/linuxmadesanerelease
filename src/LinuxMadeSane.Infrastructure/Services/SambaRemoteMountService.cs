@@ -47,8 +47,8 @@ internal sealed class SambaRemoteMountService(
             .Select(entity =>
             {
                 var isMounted = currentMounts.Any(mount =>
-                    mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.OrdinalIgnoreCase) ||
-                    mount.SourcePath.Equals(BuildRemoteUncPath(entity.RemoteHost, entity.ShareName), StringComparison.OrdinalIgnoreCase));
+                    mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.Ordinal) &&
+                    mount.SourcePath.Equals(BuildRemoteUncPath(entity.RemoteHost, entity.ShareName, entity.RemotePath), StringComparison.Ordinal));
 
                 return new ManagedRemoteShareMount(
                     entity.Id,
@@ -87,8 +87,7 @@ internal sealed class SambaRemoteMountService(
             .Select(mount => mount with
             {
                 IsManagedByLms = managedEntities.Any(entity =>
-                    mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.OrdinalIgnoreCase) ||
-                    mount.SourcePath.Equals(BuildRemoteUncPath(entity.RemoteHost, entity.ShareName), StringComparison.OrdinalIgnoreCase))
+                    mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.Ordinal))
             })
             .OrderByDescending(mount => mount.IsManagedByLms)
             .ThenByDescending(mount => mount.IsNetworkMount)
@@ -152,7 +151,7 @@ internal sealed class SambaRemoteMountService(
                 cancellationToken);
         }
 
-        var remoteUncPath = BuildRemoteUncPath(remoteHost, shareName);
+        var remoteUncPath = BuildRemoteUncPath(remoteHost, shareName, remotePath);
         var temporaryMountMarker = request.PersistOnServer
             ? null
             : new TemporaryRemoteMountMarker(Guid.NewGuid(), remoteUncPath, localMountPath, DateTimeOffset.UtcNow);
@@ -271,11 +270,10 @@ internal sealed class SambaRemoteMountService(
             throw new InvalidOperationException("The LMS mount path must be an absolute Linux path.");
         }
 
-        var oldRemoteUncPath = BuildRemoteUncPath(entity.RemoteHost, entity.ShareName);
+        var oldRemoteUncPath = BuildRemoteUncPath(entity.RemoteHost, entity.ShareName, entity.RemotePath);
         var currentMounts = await ReadCurrentMountsAsync(cancellationToken);
         var currentMount = currentMounts.FirstOrDefault(mount =>
-            mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.OrdinalIgnoreCase) ||
-            mount.SourcePath.Equals(oldRemoteUncPath, StringComparison.OrdinalIgnoreCase));
+            mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.Ordinal));
 
         if (currentMounts.Any(mount =>
                 !mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.OrdinalIgnoreCase) &&
@@ -304,7 +302,7 @@ internal sealed class SambaRemoteMountService(
         var credentialFilePath = hasCredentials
             ? entity.CredentialFilePath ?? BuildPersistentCredentialFilePath(id)
             : null;
-        var newRemoteUncPath = BuildRemoteUncPath(remoteHost, shareName);
+        var newRemoteUncPath = BuildRemoteUncPath(remoteHost, shareName, remotePath);
         var wasMounted = currentMount is not null;
 
         try
@@ -431,11 +429,13 @@ internal sealed class SambaRemoteMountService(
             return null;
         }
 
-        var remoteUncPath = BuildRemoteUncPath(entity.RemoteHost, entity.ShareName);
+        var remoteUncPath = BuildRemoteUncPath(entity.RemoteHost, entity.ShareName, entity.RemotePath);
         var currentMounts = await ReadCurrentMountsAsync(cancellationToken);
-        if (currentMounts.Any(mount =>
-                mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.OrdinalIgnoreCase) ||
-                mount.SourcePath.Equals(remoteUncPath, StringComparison.OrdinalIgnoreCase)))
+        var currentMount = currentMounts.FirstOrDefault(mount =>
+            mount.LocalMountPath.Equals(entity.LocalMountPath, StringComparison.Ordinal));
+        if (currentMount is not null && !currentMount.SourcePath.Equals(remoteUncPath, StringComparison.Ordinal))
+            throw new InvalidOperationException($"{entity.LocalMountPath} is mounted from {currentMount.SourcePath}, but the saved folder is {remoteUncPath}. Edit the mount to apply the saved folder, or unmount it before reconnecting.");
+        if (currentMount is not null)
         {
             return new RemoteShareMountResult(
                 id,
@@ -452,9 +452,16 @@ internal sealed class SambaRemoteMountService(
             requiresSudo: true,
             cancellationToken);
 
+        var request = new RemoteShareMountRequest(entity.RemoteHost, entity.RemoteAddress, entity.ShareName,
+            entity.LocalMountPath, entity.UserName, null, entity.Domain, true,
+            entity.LocalOwner, entity.FileMode, entity.DirectoryMode, entity.RemotePath);
+        var hasCredentials = !string.IsNullOrWhiteSpace(entity.CredentialFilePath) && File.Exists(entity.CredentialFilePath);
+        var options = BuildPersistentMountOptions(hasCredentials, entity.CredentialFilePath, request);
+        // Upgrade old share-root fstab entries when explicitly reconnecting the saved folder.
+        await WriteOrUpdateFstabAsync(id, remoteUncPath, entity.LocalMountPath, options, cancellationToken);
         await RunRequiredCommandAsync(
             "mount",
-            [entity.LocalMountPath],
+            ["-t", "cifs", remoteUncPath, entity.LocalMountPath, "-o", string.Join(",", options)],
             $"Reconnect LMS mount {entity.LocalMountPath}",
             requiresSudo: true,
             cancellationToken);
@@ -589,6 +596,9 @@ internal sealed class SambaRemoteMountService(
             .ToArray();
     }
 
+    private static string EscapeMountField(string value) => value.Replace("\\", "\\134")
+        .Replace(" ", "\\040").Replace("\t", "\\011").Replace("\n", "\\012").Replace("\r", "\\015");
+
     private async Task WriteOrUpdateFstabAsync(
         Guid mountId,
         string remoteUncPath,
@@ -602,7 +612,7 @@ internal sealed class SambaRemoteMountService(
             .Where(line => !line.Contains(marker, StringComparison.Ordinal))
             .ToList();
 
-        filteredLines.Add($"{remoteUncPath} {localMountPath} cifs {string.Join(",", mountOptions)} 0 0 {marker}");
+        filteredLines.Add($"{EscapeMountField(remoteUncPath)} {EscapeMountField(localMountPath)} cifs {string.Join(",", mountOptions)} 0 0 {marker}");
         await WriteFstabLinesAsync(filteredLines, cancellationToken);
     }
 
@@ -878,12 +888,6 @@ internal sealed class SambaRemoteMountService(
             options.Add("guest");
         }
 
-        var remotePath = NormalizeRemotePath(request.RemotePath);
-        if (remotePath.Length > 0)
-        {
-            options.Add($"prefixpath={remotePath}");
-        }
-
         var localOwner = NormalizeLocalOwner(request.LocalOwner);
         if (!string.IsNullOrWhiteSpace(localOwner))
         {
@@ -956,8 +960,11 @@ internal sealed class SambaRemoteMountService(
         return mode;
     }
 
-    private static string BuildRemoteUncPath(string remoteHost, string shareName) =>
-        $"//{remoteHost.Trim()}/{shareName.Trim()}";
+    private static string BuildRemoteUncPath(string remoteHost, string shareName, string? remotePath = null)
+    {
+        var folder = NormalizeRemotePath(remotePath);
+        return $"//{remoteHost.Trim()}/{shareName.Trim()}" + (folder.Length == 0 ? "" : "/" + folder);
+    }
 
     private static string NormalizeRemotePath(string? value)
     {

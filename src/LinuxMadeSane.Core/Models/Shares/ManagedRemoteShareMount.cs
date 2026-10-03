@@ -19,4 +19,8 @@ public sealed record ManagedRemoteShareMount(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? LastMountedAtUtc,
     string StatusMessage,
-    string RemotePath = "");
+    string RemotePath = "")
+{
+    public string RemoteUncPath => $"//{RemoteHost}/{ShareName}" +
+        (string.IsNullOrWhiteSpace(RemotePath) ? "" : "/" + RemotePath.Trim('/'));
+}
