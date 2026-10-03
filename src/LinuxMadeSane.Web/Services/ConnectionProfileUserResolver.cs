@@ -7,7 +7,8 @@ using LinuxMadeSane.Core.Models;
 
 namespace LinuxMadeSane.Web.Services;
 
-public sealed class ConnectionProfileUserResolver(ISecurityUserStore securityUserStore)
+public sealed class ConnectionProfileUserResolver(ISecurityUserStore securityUserStore,
+    ISavedCredentialAccessContext? accessContext = null)
 {
     public async Task<SecurityUser?> ResolveAsync(
         ClaimsPrincipal? principal,
@@ -25,7 +26,15 @@ public sealed class ConnectionProfileUserResolver(ISecurityUserStore securityUse
             return null;
         }
 
-        // Trusted-network access is not an authenticated credential-store identity.
-        return null;
+        // Legacy Connect As profiles were stored under the first enabled account.
+        // Preserve that ownership only for explicitly verified host-admin access.
+        if (accessContext is null || await accessContext.GetAuthenticatedUserIdAsync(cancellationToken) != Guid.Empty)
+            return null;
+
+        return (await securityUserStore.ListAsync(cancellationToken))
+            .Where(user => user.IsEnabled)
+            .OrderBy(user => user.CreatedAtUtc)
+            .ThenBy(user => user.Email, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
     }
 }

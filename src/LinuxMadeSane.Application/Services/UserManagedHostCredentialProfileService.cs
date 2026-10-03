@@ -12,8 +12,13 @@ public sealed class UserManagedHostCredentialProfileService(
     IUserManagedHostCredentialProfileStore store,
     ISecretStore secretStore,
     ISavedConnectionCredentialService? savedCredentials = null,
-    IManagedHostStore? hosts = null) : IUserManagedHostCredentialProfileService
+    IManagedHostStore? hosts = null,
+    ISavedCredentialAccessContext? accessContext = null) : IUserManagedHostCredentialProfileService
 {
+    private async Task<Guid> GetSavedCredentialOwnerAsync(Guid profileOwner, CancellationToken token) =>
+        accessContext is null ? profileOwner :
+        await accessContext.GetAuthenticatedUserIdAsync(token) ?? throw new UnauthorizedAccessException("Credential access is not authorised.");
+
     private static bool MatchesHost(SavedConnectionCredentialSummary credential, ManagedHost host) =>
         credential.Kind != ConnectionCredentialKind.Smb &&
         (credential.Kind == ConnectionCredentialKind.SshKeyPair && string.IsNullOrWhiteSpace(credential.Server) ||
@@ -33,7 +38,8 @@ public sealed class UserManagedHostCredentialProfileService(
         {
             try
             {
-                summaries.AddRange((await savedCredentials.ListAsync(userId, cancellationToken)).Where(x => MatchesHost(x, host))
+                var credentialOwner = await GetSavedCredentialOwnerAsync(userId, cancellationToken);
+                summaries.AddRange((await savedCredentials.ListAsync(credentialOwner, cancellationToken)).Where(x => MatchesHost(x, host))
                     .Select(x => new UserManagedHostCredentialProfileSummary(x.Id, x.Name + " · credential store", string.IsNullOrWhiteSpace(x.Username) ? host.Username : x.Username, x.HasPassword, x.HasPrivateKey, x.HasPassphrase, x.UpdatedAtUtc)));
             }
             catch (UnauthorizedAccessException) { /* No authenticated store identity in this circuit. */ }
@@ -52,8 +58,9 @@ public sealed class UserManagedHostCredentialProfileService(
         {
             if (savedCredentials is not null && hosts is not null && await hosts.GetAsync(managedHostId, cancellationToken) is { } host)
             {
-                var summary = (await savedCredentials.ListAsync(userId, cancellationToken)).FirstOrDefault(x => x.Id == profileId && MatchesHost(x, host));
-                if (summary is not null && await savedCredentials.ResolveAsync(userId, profileId, cancellationToken) is { } credential)
+                var credentialOwner = await GetSavedCredentialOwnerAsync(userId, cancellationToken);
+                var summary = (await savedCredentials.ListAsync(credentialOwner, cancellationToken)).FirstOrDefault(x => x.Id == profileId && MatchesHost(x, host));
+                if (summary is not null && await savedCredentials.ResolveAsync(credentialOwner, profileId, cancellationToken) is { } credential)
                     return new(profileId, summary.Name, string.IsNullOrWhiteSpace(summary.Username) ? host.Username : summary.Username, credential.Password, credential.PrivateKey, credential.Passphrase);
             }
             return null;
@@ -128,7 +135,7 @@ public sealed class UserManagedHostCredentialProfileService(
         var profile = await store.GetAsync(profileId, cancellationToken);
         if (profile is null)
         {
-            if (savedCredentials is not null && (await savedCredentials.ListAsync(userId, cancellationToken)).Any(x => x.Id == profileId))
+            if (savedCredentials is not null && (await savedCredentials.ListAsync(await GetSavedCredentialOwnerAsync(userId, cancellationToken), cancellationToken)).Any(x => x.Id == profileId))
                 throw new InvalidOperationException("Manage this saved credential in Security & Networking → Credentials.");
             return;
         }
