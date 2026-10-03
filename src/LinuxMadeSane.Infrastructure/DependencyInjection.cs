@@ -127,6 +127,8 @@ public static class DependencyInjection
         services.AddScoped<IUserDisplayPreferenceStore, SqliteUserDisplayPreferenceStore>();
         services.AddScoped<IFileBrowserShortcutStore, SqliteFileBrowserShortcutStore>();
         services.AddScoped<ISavedConnectionCredentialService, SavedConnectionCredentialService>();
+        services.AddScoped<ISavedCredentialConnectionService, SavedCredentialConnectionService>();
+        services.AddScoped<ISavedCredentialConnectionTransport, SavedCredentialConnectionTransport>();
         services.AddScoped<IUserManagedHostCredentialProfileStore, SqliteUserManagedHostCredentialProfileStore>();
         services.AddScoped<ILocalAiEngineStore, SqliteLocalAiEngineStore>();
         services.AddScoped<IAiProviderRegistry, SqliteAiProviderRegistry>();
