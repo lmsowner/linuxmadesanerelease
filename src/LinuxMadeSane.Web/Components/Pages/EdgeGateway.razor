@@ -786,7 +786,7 @@
 
     <UiModal IsOpen="@showRouteModal"
              Title="@routeModalTitle"
-             Subtitle="Save applies the service to Cloudflare and Caddy when enabled."
+             Subtitle="Set the public address, internal destination and who can access this app."
              Class="edge-route-modal"
              OnClose="CloseRouteModal">
         <ChildContent>
@@ -798,8 +798,15 @@
                         <p class="edge-editor-message @(routeEditorIsError ? "error" : "success")">@routeEditorMessage</p>
                     }
 
+                    <section class="edge-editor-section">
+                        <header class="edge-editor-section-header"><h3>Public app</h3><span>Name, public address and access policy</span></header>
                     <div class="edge-form-grid edge-route-main-grid">
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="Display name" Text="A friendly label for this app. It does not change the public address." />
                         <UiTextField @bind-Value="routeEditor.DisplayName" Label="Display name" Compact="true" />
+                        </div>
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="Hostname / subdomain" Text="Enter a short subdomain or a full hostname. The selected domain is appended to a short name." />
                         <UiField Label="Hostname / subdomain" Compact="true">
                             <ChildContent>
                                 <div class="edge-subdomain-field-content">
@@ -829,21 +836,27 @@
                                 <ValidationMessage For="@(() => routeEditor.Hostname)" />
                             </ValidationContent>
                         </UiField>
-                        <UiSelectField TValue="EdgeGatewayAuthMode" @bind-Value="routeEditor.AuthMode" Label="Auth mode" Compact="true">
+                        </div>
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="Access policy" Text="Choose LMS sign-in, email approval, pass-through to the app’s own authentication, or blocked access." />
+                        <UiSelectField TValue="EdgeGatewayAuthMode" @bind-Value="routeEditor.AuthMode" Label="Access policy" Compact="true">
                             @foreach (var mode in AuthModeOptions)
                             {
                                 <option value="@mode">@FormatAuthMode(mode)</option>
                             }
                         </UiSelectField>
+                        </div>
                     </div>
+                    </section>
 
                     @if (routeEditor.AuthMode == EdgeGatewayAuthMode.TemporaryIpApproval)
                     {
-                        <div class="callout ready edge-temporary-approval-warning" role="status">
-                            <strong>Email approval gates this route by source IP</strong>
-                            <span>@TemporaryIpApprovalWarningText</span>
-                        </div>
-                        <div class="edge-form-grid edge-temporary-approval-grid">
+                        <section class="edge-editor-section edge-email-approval-panel">
+                            <header class="edge-editor-section-header">
+                                <h3>Email approval</h3>
+                                <UiFieldInfo Title="Email approval" Text="@TemporaryIpApprovalWarningText" />
+                            </header>
+                            <div class="edge-form-grid edge-temporary-approval-grid">
                             <UiMultiSelect Label="Approval recipients"
                                            HelperText="Optional. Blank sends to route allowed users, then enabled LMS users."
                                            Placeholder="Choose LMS users"
@@ -879,29 +892,44 @@
                                            Compact="true"
                                            min="1"
                                            max="10080" />
-                        </div>
+                            </div>
+                        </section>
                     }
 
+                    <section class="edge-editor-section">
+                        <header class="edge-editor-section-header"><h3>Internal destination</h3><span>The app Edge Gateway connects to</span></header>
                     <div class="edge-form-grid edge-form-grid-target">
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="URL path prefix" Text="Optional public path, such as /app. Leave blank for the whole hostname. LMS strips this prefix before proxying to the destination." />
                         <UiTextField @bind-Value="routeEditor.TargetPathPrefix"
                                      Label="URL path prefix"
-                                     Helper="Optional. /plex makes only hostname/plex route to this backend. LMS strips the prefix before proxying."
-                                     Placeholder="/plex"
+
+                                     Placeholder="Optional: /app"
                                      Compact="true" />
+                        </div>
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="Scheme" Text="Use HTTP unless the internal app itself serves HTTPS. This does not change the public HTTPS address." />
                         <UiSelectField TValue="EdgeGatewayTargetScheme" @bind-Value="routeEditor.TargetScheme" Label="Scheme" Compact="true">
                             <option value="@EdgeGatewayTargetScheme.Http">http</option>
                             <option value="@EdgeGatewayTargetScheme.Https">https</option>
                         </UiSelectField>
-                        <UiTextField @bind-Value="routeEditor.TargetHost" Label="Target IP / host" Placeholder="192.168.1.20" Compact="true" />
+                        </div>
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="Target host" Text="The internal hostname or LAN IP of the app. Use its local address, not the public hostname." />
+                        <UiTextField @bind-Value="routeEditor.TargetHost" Label="Target host" Placeholder="192.168.1.20" Compact="true" />
+                        </div>
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="Port" Text="The port the internal app listens on." />
                         <UiNumberField TValue="int" @bind-Value="routeEditor.TargetPort" Label="Port" Compact="true" />
+                        </div>
                         <div class="edge-target-actions">
-                            <UiCommandButton Label="@(isCheckingRouteTarget ? "Checking..." : "Check Target")"
+                            <UiCommandButton Label="@(isCheckingRouteTarget ? "Checking..." : "Check target")"
                                              Glyph="UiIconGlyph.Analyze"
                                              Variant="UiButtonVariant.Primary"
                                              Class="edge-target-check-button"
                                              Disabled="@isCheckingRouteTarget"
                                              OnClick="CheckRouteTargetAsync" />
-                            <UiCommandButton Label="Find HTTP/S"
+                            <UiCommandButton Label="Find service"
                                              Glyph="UiIconGlyph.Search"
                                              Variant="UiButtonVariant.Ghost"
                                              Class="edge-service-find-button"
@@ -913,6 +941,8 @@
                     {
                         <p class="edge-target-check-message @(routeTargetCheckIsError ? "error" : "success")">@routeTargetCheckMessage</p>
                     }
+
+                    </section>
 
                     <details class="edge-advanced-settings edge-publish-details">
                         <summary>
@@ -945,6 +975,9 @@
                             <span>Advanced settings</span>
                             <small>Allow-lists, source filtering and notes</small>
                         </summary>
+                        <div class="edge-editor-advanced-body">
+                        <section class="edge-editor-section">
+                            <header class="edge-editor-section-header"><h3>Access restrictions</h3><span>Optional limits for this app</span></header>
                         <div class="edge-form-grid edge-form-grid-two">
                             <div class="edge-known-ip-field">
                                 <UiTextAreaField @bind-Value="routeEditor.AllowKnownIps" Label="Known IP allow-list" Helper="Optional IP/CIDR list. Leave blank to allow any source after auth." Rows="3" Compact="true" />
@@ -972,22 +1005,36 @@
                         {
                             <p class="meta-text">IP and user allow-lists apply when the service uses LMS authentication or temporary IP approval. Pass-through delegates access to the backend; blocked services deny every request.</p>
                         }
+                        </section>
+                        <section class="edge-editor-section">
+                            <header class="edge-editor-section-header"><h3>Proxy headers and HTTPS</h3><span>Only change these if the destination needs them</span></header>
                         <div class="edge-proxy-options-grid">
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="Send public Host header" Text="Send the browser-facing hostname upstream instead of the backend host and port." />
                             <UiCheckboxField @bind-Value="routeEditor.UsePublicHostHeader"
                                              Label="Send public Host header"
-                                             Helper="Send the browser-facing hostname upstream instead of the backend host and port."
+
                                              Compact="true"
-                                             Card="true" />
+                                             Card="false" />
+                        </div>
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="Strip X-Forwarded-For" Text="Remove forwarded client IP data before the request reaches the backend." />
                             <UiCheckboxField @bind-Value="routeEditor.StripForwardedFor"
                                              Label="Strip X-Forwarded-For"
-                                             Helper="Remove forwarded client IP data before the request reaches the backend."
+
                                              Compact="true"
-                                             Card="true" />
+                                             Card="false" />
+                        </div>
+                        <div class="edge-editor-field">
+                            <UiFieldInfo Title="Skip upstream TLS verification" Text="For HTTPS backends with self-signed, local, or mismatched certificates." />
                             <UiCheckboxField @bind-Value="routeEditor.SkipUpstreamTlsVerification"
                                              Label="Skip upstream TLS verification"
-                                             Helper="For HTTPS backends with self-signed, local, or mismatched certificates."
+
                                              Compact="true"
-                                             Card="true" />
+                                             Card="false" />
+                        </div>
+                        </div>
+                        </section>
                         </div>
                     </details>
 
