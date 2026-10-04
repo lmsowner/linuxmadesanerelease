@@ -451,6 +451,9 @@
                             {
                                 @if (!sshfsExplorer.Tooling.HasAllRequiredPackages)
                                 {
+                                    <p class="callout info">LMS will automatically install the required SSHFS support when you create a mount.</p>
+                                    <details>
+                                        <summary>SSHFS dependency details</summary>
                                     <section class="surface-card stack-list">
                                         <div class="table-header">
                                             <h2>SSHFS dependency check</h2>
@@ -481,7 +484,7 @@
                                         }
                                         else
                                         {
-                                            <p class="callout warning">Auto-install is unavailable because the LMS local machine is not registered in host inventory.</p>
+                                            <p class="meta-text">LMS will install the missing packages on this machine when creating the mount.</p>
                                         }
 
                                         @if (sshfsToolingInstallResult is not null)
@@ -494,6 +497,7 @@
                                             }
                                         }
                                     </section>
+                                    </details>
                                 }
 
                                 <section class="surface-card stack-list share-list-panel">
@@ -2029,8 +2033,10 @@
         }
 
         isCreatingSshfsMount = true;
-        sshfsStatusMessage = string.Empty;
+        sshfsStatusMessage = "Preparing SSHFS support and creating the mount...";
         sshfsStatusTone = "info";
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
 
         try
         {
@@ -2418,9 +2424,7 @@
     private bool CanCreateRemoteMounts() =>
         explorer?.Tooling.CanCreateRemoteMounts ?? false;
 
-    private bool CanCreateSshfsMounts() =>
-        sshfsExplorer?.Tooling.CanCreateSshfsMounts == true &&
-        GetMountableSshfsHostCandidates().Count > 0;
+    private bool CanCreateSshfsMounts() => GetMountableSshfsHostCandidates().Count > 0;
 
     private bool CanSubmitSshfsMount() =>
         CanCreateSshfsMounts() &&

@@ -549,14 +549,13 @@ public sealed class ShareManagementService(
         SshfsMountEditor editor,
         CancellationToken cancellationToken = default)
     {
-        var tooling = await GetSshfsToolingStatusAsync(cancellationToken);
-        if (!tooling.CanCreateSshfsMounts)
-        {
-            throw new InvalidOperationException(
-                "SSHFS mounts are unavailable until the Ubuntu `sshfs` and `fuse3` packages are installed on this LMS host.");
-        }
+        if (editor.HostId == Guid.Empty || string.IsNullOrWhiteSpace(editor.RemotePath) ||
+            string.IsNullOrWhiteSpace(editor.LocalMountPath) || !Path.IsPathRooted(editor.LocalMountPath))
+            throw new InvalidOperationException("Choose an SSH host, remote folder and absolute local mount folder.");
+        var mountService = GetRequiredSshfsMountService();
+        await EnsureSshfsToolingAsync(cancellationToken);
 
-        return await GetRequiredSshfsMountService().CreateMountAsync(
+        return await mountService.CreateMountAsync(
             new SshfsMountRequest(
                 editor.HostId,
                 editor.RemotePath.Trim(),
@@ -565,10 +564,37 @@ public sealed class ShareManagementService(
             cancellationToken);
     }
 
-    public Task<SshfsMountResult?> ReconnectManagedSshfsMountAsync(
+    public async Task<SshfsMountResult?> ReconnectManagedSshfsMountAsync(
         Guid id,
-        CancellationToken cancellationToken = default) =>
-        GetRequiredSshfsMountService().ReconnectManagedMountAsync(id, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        var mountService = GetRequiredSshfsMountService();
+        await EnsureSshfsToolingAsync(cancellationToken);
+        return await mountService.ReconnectManagedMountAsync(id, cancellationToken);
+    }
+
+    private static readonly SemaphoreSlim SshfsToolingInstallGate = new(1, 1);
+
+    private async Task EnsureSshfsToolingAsync(CancellationToken cancellationToken)
+    {
+        await SshfsToolingInstallGate.WaitAsync(cancellationToken);
+        try
+        {
+            if ((await GetSshfsToolingStatusAsync(cancellationToken)).CanCreateSshfsMounts) return;
+            var result = await InstallMissingSshfsToolingAsync(cancellationToken);
+            if (!result.Success)
+            {
+                var error = result.OperationLogs.FirstOrDefault(log => log.Level == OperationLogLevel.Error);
+                var reason = string.IsNullOrWhiteSpace(error?.StandardError) ? error?.Message : error.StandardError.Trim();
+                if (reason?.Length > 1000) reason = reason[..1000];
+                throw new InvalidOperationException($"LMS could not install SSHFS support on this host. {reason ?? result.StatusMessage} Resolve the package installation error, then retry the mount.");
+            }
+            var installed = await GetSshfsToolingStatusAsync(cancellationToken);
+            if (!installed.CanCreateSshfsMounts)
+                throw new InvalidOperationException($"SSHFS installation finished but these packages are still unavailable: {string.Join(", ", installed.MissingPackageNames)}. Retry after resolving the package installation issue.");
+        }
+        finally { SshfsToolingInstallGate.Release(); }
+    }
 
     public async Task<ShareMountReconnectSummary> ReconnectDisconnectedManagedMountsAsync(
         CancellationToken cancellationToken = default)
@@ -661,17 +687,13 @@ public sealed class ShareManagementService(
     public async Task<ShareToolingInstallResult> InstallMissingSshfsToolingAsync(CancellationToken cancellationToken = default)
     {
         var tooling = await GetSshfsToolingStatusAsync(cancellationToken);
-        if (!tooling.IsLocalHostRegistered || string.IsNullOrWhiteSpace(tooling.LocalHostName))
-        {
-            throw new InvalidOperationException(
-                "Auto-install is unavailable because the LMS local machine is not registered in host inventory.");
-        }
+        var localHostName = tooling.LocalHostName ?? Environment.MachineName;
 
         if (tooling.MissingPackageNames.Count == 0)
         {
             return new ShareToolingInstallResult(
                 true,
-                tooling.LocalHostName,
+                localHostName,
                 "The registered LMS local machine already has SSHFS and FUSE installed.",
                 Array.Empty<string>(),
                 []);
@@ -691,10 +713,10 @@ public sealed class ShareManagementService(
 
         return new ShareToolingInstallResult(
             success,
-            tooling.LocalHostName,
+            localHostName,
             success
-                ? $"Installed {tooling.MissingPackageNames.Count} missing SSHFS package(s) on {tooling.LocalHostName}."
-                : $"SSHFS package installation on {tooling.LocalHostName} needs review. Check the operation log.",
+                ? $"Installed {tooling.MissingPackageNames.Count} missing SSHFS package(s) on {localHostName}."
+                : $"SSHFS package installation on {localHostName} needs review. Check the operation log.",
             tooling.MissingPackageNames,
             logs);
     }
@@ -1113,7 +1135,7 @@ public sealed class ShareManagementService(
         var notes = new List<string>();
         if (!canCreateSshfsMounts)
         {
-            notes.Add("SSHFS mounts stay disabled until `sshfs` and `fuse3` are installed on the LMS host.");
+            notes.Add("LMS automatically installs missing SSHFS and FUSE support when creating or reconnecting a mount.");
         }
 
         notes.Add("Only registered hosts with stored public key authentication are available for SSHFS mounts.");
