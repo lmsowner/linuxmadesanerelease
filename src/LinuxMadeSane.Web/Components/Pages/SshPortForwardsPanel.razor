@@ -1,0 +1,216 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@using LinuxMadeSane.Application.Contracts.Security
+@using LinuxMadeSane.Application.Interfaces
+@implements IAsyncDisposable
+@inject ISshPortForwardService Forwards
+
+<div class="ssh-forwards">
+    <header class="section-heading">
+        <div><h2>SSH forwards</h2><p class="meta-text">Persistent encrypted tunnels, using your saved credentials. Enabled forwards start with LMS and reconnect automatically.</p></div>
+        <div class="toolbar-row"><UiCommandButton Label="Refresh" Glyph="UiIconGlyph.Refresh" OnClick="LoadAsync" Disabled="busy" />
+            <UiCommandButton Label="Add SSH forward" Glyph="UiIconGlyph.Plus" OnClick="NewAsync" Disabled="@(!CanAdminister || busy)" /></div>
+    </header>
+    <SshHelpLink Section="forwards" Label="Help: SSH forwarding and credentials" />
+    @if (!string.IsNullOrWhiteSpace(message)) { <p class="callout @(error ? "error" : "info")" role="status">@message</p> }
+    @if (loading) { <p class="callout info">Loading SSH forwards…</p> }
+    else if (entries.Count == 0)
+    {
+        <div class="surface-subcard ssh-forward-empty"><strong>No SSH forwards yet</strong><p>Bring a remote service onto LMS, expose a local service on an SSH server, or create a SOCKS proxy.</p></div>
+    }
+    else
+    {
+        @foreach (var item in entries)
+        {
+            var rule = item.Forward;
+            <article class="surface-subcard ssh-forward-row" @key="rule.Id">
+                <div class="ssh-forward-heading"><strong>@rule.Name</strong><span class="status-pill @(item.Status.State == "Connected" ? "success" : rule.Enabled ? "warning" : "neutral")">@item.Status.State</span><span class="meta-text">@ModeLabel(rule.Mode)</span></div>
+                @if (rule.Description.Length > 0) { <p class="ssh-forward-notes">@rule.Description</p> }
+                <div class="ssh-forward-path"><span>@(rule.IsRemote ? rule.Server : "LMS")</span><code>@(item.Status.AllocatedListenPort is { } allocated ? Endpoint(rule.ListenAddress, allocated) : Listen(rule))</code><span aria-hidden="true">→</span><span>@(rule.IsSocks ? "SOCKS destination chosen by client" : $"{(rule.IsRemote ? "LMS" : rule.Server)}: {Target(rule)}")</span></div>
+                <p class="meta-text">SSH: @rule.Username@@@rule.Server:@rule.SshPort · @item.Status.Detail</p>
+                <div class="ssh-forward-meta"><span>Reconnects: @item.Status.Restarts</span>
+                    @if (item.Status.ConnectedAtUtc is { } connected) { <span>Connected since @connected.ToLocalTime().ToString("g")</span> }
+                    @if (item.Status.LastFailureAtUtc is { } failed) { <span>Last failure @failed.ToLocalTime().ToString("g")</span> }
+                </div>
+                @if (rule.EdgeGatewayRouteId is not null)
+                {
+                    <div class="ssh-forward-chain"><a href="@rule.PublicUrl" target="_blank" rel="noopener noreferrer">@rule.PublicUrl</a><span>→ Caddy → LMS @Listen(rule) → @rule.Server @Target(rule)</span></div>
+                }
+                <div class="toolbar-row ssh-forward-actions">
+                    <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" OnClick="() => EditAsync(rule)" Disabled="@(!CanAdminister || busy)" />
+                    <UiCommandButton Label="@(rule.Enabled ? "Stop" : "Start")" Glyph="@(rule.Enabled ? UiIconGlyph.Stop : UiIconGlyph.Run)" OnClick="() => ToggleAsync(rule)" Disabled="@(!CanAdminister || busy)" />
+                    <UiCommandButton Label="Restart" Glyph="UiIconGlyph.Restart" OnClick="() => RestartAsync(rule)" Disabled="@(!CanAdminister || busy || !rule.Enabled)" />
+                    @if (rule.EdgeGatewayRouteId is not null)
+                    {
+                        <UiCommandButton Label="Edge Gateway settings" Glyph="UiIconGlyph.Website" Href="/edge-gateway" />
+                        <UiCommandButton Label="Unlink Caddy" Glyph="UiIconGlyph.Disconnect" OnClick="() => Confirm(rule, true)" Disabled="@(!CanAdminister || busy)" />
+                    }
+                    else if (rule.CanLinkCaddy)
+                    { <UiCommandButton Label="Link to Caddy" Glyph="UiIconGlyph.Connection" OnClick="() => OpenCaddy(rule)" Disabled="@(!CanAdminister || busy)" /> }
+                    <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" OnClick="() => Confirm(rule, false)" Disabled="@(!CanAdminister || busy || rule.EdgeGatewayRouteId is not null)" />
+                </div>
+            </article>
+        }
+    }
+
+    <UiModal IsOpen="showEditor" Title="@(editing ? "Edit SSH forward" : "Add SSH forward")" Subtitle="Choose saved credentials, then describe the direction of the connection." Class="ssh-forward-editor" OnClose="CloseEditor">
+        <EditForm Model="editor" OnSubmit="SaveAsync" class="stack-form">
+            @if (error && message is not null) { <p class="callout error" role="alert">@message</p> }
+            <div class="ssh-forward-fields"><UiTextField Label="Name" aria-label="Name" @bind-Value="editor.Name" Compact="true" /><UiTextAreaField Label="Description / notes" aria-label="Description / notes" @bind-Value="editor.Description" Rows="2" /></div>
+            <SavedCredentialPicker @ref="picker" @key="editor.Id" SavedOnly="true" ShowAddButton="true" Disabled="busy" Selected="SelectCredentialAsync" Cleared="ClearCredentialAsync" AddRequested="AddCredentialAsync" />
+            <div class="toolbar-row"><UiCommandButton Label="@(busy ? "Working…" : "Test SSH login")" Glyph="UiIconGlyph.Connect" OnClick="TestLoginAsync" Disabled="@(busy || editor.CredentialId == Guid.Empty)" /></div>
+            @if (loginTestMessage is not null) { <p class="callout info" role="status">@loginTestMessage</p> }
+            <div class="ssh-forward-fields ssh-forward-connection">
+                <UiTextField Label="SSH server" aria-label="SSH server" @bind-Value="editor.Server" readonly="@(selected?.Server.Length > 0)" Compact="true" />
+                <UiTextField Label="SSH username" aria-label="SSH username" @bind-Value="editor.Username" readonly="@(selected?.Username.Length > 0)" Compact="true" />
+                <UiNumberField TValue="int" Label="SSH port" aria-label="SSH port" @bind-Value="editor.SshPort" min="1" max="65535" readonly="@(selected?.Server.Length > 0)" Compact="true" />
+            </div>
+            <UiSelectField TValue="SshForwardMode" Label="Forward type" aria-label="Forward type" @bind-Value="editor.Mode" @bind-Value:after="ModeChanged" Compact="true">
+                <option value="@SshForwardMode.Local">Local — listen on LMS, connect from the SSH server</option>
+                <option value="@SshForwardMode.Remote">Remote — listen on the SSH server, connect from LMS</option>
+                <option value="@SshForwardMode.LocalSocks">Local SOCKS — proxy on LMS, destinations reached by the SSH server</option>
+                <option value="@SshForwardMode.RemoteSocks">Remote SOCKS — proxy on the SSH server, destinations reached by LMS</option>
+            </UiSelectField>
+            <div class="ssh-forward-endpoints">
+                <section class="surface-subcard"><h3>Listen on @(editor.IsRemote ? "the SSH server" : "LMS")</h3>
+                    @if (!editor.IsSocks)
+                    { <UiSelectField TValue="SshForwardEndpointKind" Label="Listener" aria-label="Listener" @bind-Value="editor.ListenKind" Compact="true"><option value="@SshForwardEndpointKind.Tcp">TCP port</option><option value="@SshForwardEndpointKind.UnixSocket">Unix socket</option></UiSelectField> }
+                    @if (editor.ListenKind == SshForwardEndpointKind.Tcp)
+                    {
+                        <UiTextField Label="Listen address" aria-label="Listen address" @bind-Value="editor.ListenAddress" Helper="127.0.0.1 keeps this private to that computer. Use a specific LAN IP or * to allow other clients." Compact="true" />
+                        <UiNumberField TValue="int" Label="@(editor.IsRemote ? "Listen port (0 = server chooses)" : "Listen port")" aria-label="Listen port" @bind-Value="editor.ListenPort" min="@(editor.IsRemote ? 0 : 1)" max="65535" Compact="true" />
+                    }
+                    else { <UiTextField Label="Socket path" aria-label="Socket path" @bind-Value="editor.ListenSocket" Placeholder="/run/my-service.sock" Compact="true" /> }
+                </section>
+                <section class="surface-subcard"><h3>@(editor.IsSocks ? "SOCKS destinations" : $"Connect from {(editor.IsRemote ? "LMS" : "the SSH server")}")</h3>
+                    @if (editor.IsSocks) { <p>Clients choose a destination for each connection using SOCKS4/5. There is no fixed destination port.</p> }
+                    else
+                    {
+                        <UiSelectField TValue="SshForwardEndpointKind" Label="Destination" aria-label="Destination" @bind-Value="editor.TargetKind" Compact="true"><option value="@SshForwardEndpointKind.Tcp">TCP host and port</option><option value="@SshForwardEndpointKind.UnixSocket">Unix socket</option></UiSelectField>
+                        @if (editor.TargetKind == SshForwardEndpointKind.Tcp)
+                        {
+                            <UiTextField Label="Destination host" aria-label="Destination host" @bind-Value="editor.TargetHost" Helper="127.0.0.1 means this side of the tunnel, not your browser's computer." Compact="true" />
+                            <UiNumberField TValue="int" Label="Destination port" aria-label="Destination port" @bind-Value="editor.TargetPort" min="1" max="65535" Compact="true" />
+                        }
+                        else { <UiTextField Label="Destination socket" aria-label="Destination socket" @bind-Value="editor.TargetSocket" Compact="true" /> }
+                    }
+                </section>
+            </div>
+            @if (editor.IsRemote) { <p class="callout info">The SSH server must permit remote forwarding. A non-local remote listener also needs its GatewayPorts policy to allow the requested address.</p> }
+            @if (editor.IsRemote && editor.ListenKind == SshForwardEndpointKind.UnixSocket)
+            { <p class="meta-text">Socket permissions and replacement of a stale listener are controlled by StreamLocalBindMask / StreamLocalBindUnlink on the SSH server.</p> }
+            <details><summary>Additional settings</summary><div class="ssh-forward-fields">
+                <UiNumberField TValue="int" Label="SSH keepalive (seconds)" aria-label="SSH keepalive (seconds)" @bind-Value="editor.KeepAliveSeconds" min="5" max="300" Compact="true" />
+                <UiNumberField TValue="int" Label="Missed replies before disconnect" aria-label="Missed replies before disconnect" @bind-Value="editor.MissedKeepAlives" min="1" max="10" Compact="true" />
+                <UiNumberField TValue="int" Label="Reconnect delay (seconds)" aria-label="Reconnect delay (seconds)" @bind-Value="editor.RetrySeconds" min="1" max="300" Compact="true" />
+                <UiSelectField TValue="string" Label="SSH address family" aria-label="SSH address family" @bind-Value="editor.AddressFamily" Compact="true"><option value="auto">Automatic</option><option value="ipv4">IPv4</option><option value="ipv6">IPv6</option></UiSelectField>
+                <UiTextField Label="Outbound source IP (optional)" aria-label="Outbound source IP (optional)" @bind-Value="editor.OutboundBindAddress" Helper="A local IP on LMS. Leave empty for normal routing." Compact="true" />
+                <UiCheckboxField Label="Compress SSH traffic" @bind-Value="editor.Compression" />
+                @if (!editor.IsRemote && editor.ListenKind == SshForwardEndpointKind.UnixSocket)
+                {
+                    <UiTextField Label="LMS listener socket permission mask" aria-label="LMS listener socket permission mask" @bind-Value="editor.SocketMask" Helper="0177 limits access to the socket owner." Compact="true" />
+                    <UiCheckboxField Label="Replace an existing listener socket" @bind-Value="editor.ReplaceStaleSocket" Helper="Only select this for a socket owned by this forward." />
+                }
+            </div></details>
+            <UiCheckboxField Label="Start after saving and reconnect automatically" @bind-Value="editor.Enabled" />
+            <div class="toolbar-row"><UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" OnClick="CloseEditor" Disabled="busy" /><UiCommandButton Label="@(busy ? "Saving…" : "Save forward")" Glyph="UiIconGlyph.Save" Type="submit" Disabled="@(busy || editor.CredentialId == Guid.Empty)" /></div>
+        </EditForm>
+    </UiModal>
+    <SavedCredentialsPanel @ref="credentialEditor" EditorOnly="true" SshOnly="true" Saved="CredentialSavedAsync" />
+
+    <UiModal IsOpen="@(caddyForward is not null)" Title="Link SSH forward to Caddy" Subtitle="Expose a remote web service through Edge Gateway; the SSH listener stays private." Class="ssh-forward-caddy" OnClose="CloseCaddy">
+        @if (caddyForward is { } forward)
+        {
+            <div class="stack-form">
+                @if (error && message is not null) { <p class="callout error" role="alert">@message</p> }
+                <div class="ssh-forward-chain"><strong>Caddy → LMS @Listen(forward) → @forward.Server @Target(forward)</strong></div>
+                <UiTextField Label="Public hostname" aria-label="Public hostname" @bind-Value="caddyHost" Placeholder="app.example.com" Compact="true" />
+                <UiTextField Label="Domain" aria-label="Domain" @bind-Value="caddyDomain" Placeholder="example.com" Compact="true" />
+                <UiSelectField TValue="EdgeGatewayTargetScheme" Label="Remote app protocol" aria-label="Remote app protocol" @bind-Value="caddyScheme" Compact="true"><option value="@EdgeGatewayTargetScheme.Http">HTTP</option><option value="@EdgeGatewayTargetScheme.Https">HTTPS (certificate verification enabled)</option></UiSelectField>
+                <UiSelectField TValue="EdgeGatewayAuthMode" Label="Public access" aria-label="Public access" @bind-Value="caddyAuth" Compact="true"><option value="@EdgeGatewayAuthMode.RequireMfa">LMS login + MFA</option><option value="@EdgeGatewayAuthMode.RequireLogin">LMS login</option><option value="@EdgeGatewayAuthMode.RequirePasskey">LMS passkey</option><option value="@EdgeGatewayAuthMode.PassThrough">Public — no LMS login</option><option value="@EdgeGatewayAuthMode.Blocked">Blocked</option></UiSelectField>
+                <p class="meta-text">This applies a Caddy route using Edge Gateway's normal validation. Configure the hostname's DNS / relay in Edge Gateway. Stopping the forward disables its linked route; editing the listen port updates it.</p>
+                <div class="toolbar-row"><UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" OnClick="CloseCaddy" Disabled="busy" /><UiCommandButton Label="@(busy ? "Applying…" : "Link and apply Caddy")" Glyph="UiIconGlyph.Connection" OnClick="LinkCaddyAsync" Disabled="busy" /></div>
+            </div>
+        }
+    </UiModal>
+    <UiModal IsOpen="@(confirmation is not null)" Title="@(unlinking ? "Unlink Caddy route" : "Remove SSH forward")" Class="ssh-forward-remove" OnClose="CloseConfirmation">
+        @if (confirmation is { } pending) { <p>@(unlinking ? $"Remove {pending.Name}'s Caddy route? The SSH forward remains. DNS records are unchanged." : $"Stop and remove {pending.Name}? Its saved credentials remain available.")</p> }
+        <div class="toolbar-row"><UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" OnClick="CloseConfirmation" Disabled="busy" /><UiCommandButton Label="Confirm" Glyph="UiIconGlyph.Delete" OnClick="ConfirmAsync" Disabled="busy" /></div>
+    </UiModal>
+</div>
+
+@code {
+    [Parameter] public bool CanAdminister { get; set; }
+    private IReadOnlyList<SshForwardView> entries = [];
+    private SshPortForward editor = new();
+    private SavedConnectionCredentialSummary? selected;
+    private SavedCredentialPicker? picker;
+    private SavedCredentialsPanel? credentialEditor;
+    private bool loading = true, busy, error, showEditor, editing, selectExisting, unlinking;
+    private string? message, loginTestMessage;
+    private SshPortForward? caddyForward, confirmation;
+    private string caddyHost = "", caddyDomain = "";
+    private EdgeGatewayTargetScheme caddyScheme;
+    private EdgeGatewayAuthMode caddyAuth = EdgeGatewayAuthMode.RequireMfa;
+    private readonly CancellationTokenSource lifetime = new();
+    private Task? polling;
+    protected override async Task OnInitializedAsync() { await LoadAsync(); polling = PollAsync(); }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (selectExisting && picker is not null) { selectExisting = false; await picker.SelectCreatedAsync(editor.CredentialId); }
+    }
+    private async Task PollAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            while (await timer.WaitForNextTickAsync(lifetime.Token))
+                await InvokeAsync(async () => { if (!busy && !showEditor && caddyForward is null && confirmation is null) { await LoadAsync(); StateHasChanged(); } });
+        }
+        catch (OperationCanceledException) { }
+    }
+    private async Task LoadAsync()
+    {
+        try { entries = await Forwards.ListAsync(lifetime.Token); }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception ex) { message = ex.Message; error = true; }
+        finally { loading = false; }
+    }
+    private Task NewAsync() { editor = new(); selected = null; loginTestMessage = null; editing = false; message = null; error = false; showEditor = true; return Task.CompletedTask; }
+    private Task EditAsync(SshPortForward rule) { editor = rule with { }; selected = null; loginTestMessage = null; editing = true; message = null; error = false; showEditor = true; selectExisting = true; return Task.CompletedTask; }
+    private void CloseEditor() { if (!busy) showEditor = false; }
+    private void ModeChanged() { if (!editor.IsRemote && editor.ListenPort == 0) editor.ListenPort = 8080; if (editor.IsSocks) editor.ListenKind = SshForwardEndpointKind.Tcp; }
+    private Task SelectCredentialAsync(SavedConnectionCredential credential)
+    {
+        loginTestMessage = null; selected = credential.Summary; editor.CredentialId = selected.Id;
+        if (selected.Server.Length > 0) { editor.Server = selected.Server; editor.SshPort = selected.Port; }
+        if (selected.Username.Length > 0) editor.Username = selected.Username;
+        return Task.CompletedTask;
+    }
+    private Task ClearCredentialAsync() { selected = null; editor.CredentialId = Guid.Empty; return Task.CompletedTask; }
+    private Task AddCredentialAsync() => credentialEditor?.OpenCreateAsync(editor.Name, editor.Server, editor.SshPort) ?? Task.CompletedTask;
+    private Task CredentialSavedAsync(SavedConnectionCredentialSummary summary) => picker?.SelectCreatedAsync(summary.Id) ?? Task.CompletedTask;
+    private Task ToggleAsync(SshPortForward rule) => OperateAsync(() => Forwards.SetEnabledAsync(rule.Id, !rule.Enabled), rule.Enabled ? "Forward stopped." : "Forward queued to start.");
+    private Task RestartAsync(SshPortForward rule) => OperateAsync(() => Forwards.RestartAsync(rule.Id), "Reconnecting this forward.");
+    private Task TestLoginAsync() => OperateAsync(async () => { loginTestMessage = null; await Forwards.TestConnectionAsync(editor, lifetime.Token); loginTestMessage = "SSH login passed with the saved credentials. Forwarding permissions and the listener are checked when this forward starts."; }, "SSH login verified.");
+    private Task SaveAsync() => OperateAsync(async () => { await Forwards.SaveAsync(editor, lifetime.Token); showEditor = false; }, "Forward saved. Its live connection status appears below.");
+    private async Task OperateAsync(Func<Task> operation, string success)
+    {
+        if (busy || !CanAdminister) return; busy = true; message = null; error = false;
+        try { await operation(); message = success; }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception ex) { message = ex.Message; error = true; }
+        finally { busy = false; await LoadAsync(); }
+    }
+    private void OpenCaddy(SshPortForward rule) { caddyForward = rule; caddyHost = ""; caddyDomain = ""; caddyScheme = EdgeGatewayTargetScheme.Http; caddyAuth = EdgeGatewayAuthMode.RequireMfa; message = null; error = false; }
+    private void CloseCaddy() { if (!busy) caddyForward = null; }
+    private Task LinkCaddyAsync() => caddyForward is null ? Task.CompletedTask : OperateAsync(async () => { await Forwards.LinkCaddyAsync(caddyForward.Id, new(caddyHost, caddyDomain, caddyScheme, caddyAuth), lifetime.Token); caddyForward = null; }, "Caddy route applied. Configure / verify its public hostname in Edge Gateway.");
+    private void Confirm(SshPortForward rule, bool unlink) { confirmation = rule; unlinking = unlink; }
+    private void CloseConfirmation() { if (!busy) confirmation = null; }
+    private Task ConfirmAsync() => confirmation is null ? Task.CompletedTask : OperateAsync(async () => { if (unlinking) await Forwards.UnlinkCaddyAsync(confirmation.Id, lifetime.Token); else await Forwards.DeleteAsync(confirmation.Id, lifetime.Token); confirmation = null; }, unlinking ? "Caddy route unlinked." : "Forward removed.");
+    private static string ModeLabel(SshForwardMode mode) => mode switch { SshForwardMode.Local => "Local", SshForwardMode.Remote => "Remote", SshForwardMode.LocalSocks => "Local SOCKS", _ => "Remote SOCKS" };
+    private static string Listen(SshPortForward r) => r.ListenKind == SshForwardEndpointKind.UnixSocket ? r.ListenSocket : Endpoint(r.ListenAddress, r.ListenPort);
+    private static string Target(SshPortForward r) => r.TargetKind == SshForwardEndpointKind.UnixSocket ? r.TargetSocket : Endpoint(r.TargetHost, r.TargetPort);
+    private static string Endpoint(string host, int port) => (host.Contains(':') ? $"[{host}]" : host) + $":{port}";
+    public async ValueTask DisposeAsync() { lifetime.Cancel(); if (polling is not null) await polling; lifetime.Dispose(); }
+}

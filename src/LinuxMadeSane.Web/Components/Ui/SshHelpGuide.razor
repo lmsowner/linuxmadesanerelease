@@ -68,6 +68,22 @@
         <p>LMS's automatic SSHFS mounts need non-interactive key login. They cannot stop to ask for a login password or key passphrase. Terminal access alone does not prove SFTP or the selected folder works.</p>
         <p><strong>Remote folder</strong> is the folder on the receiving server. <strong>Local mount point</strong> is where those files appear on LMS. Mounting does not copy the files.</p>
     </section>
+    <section hidden="@(activeSection != "forwards")">
+        <h2>SSH forwards: which way does it go?</h2>
+        <p>A forward carries a connection through SSH. It does not copy files and does not need SFTP.</p>
+        <dl>
+            <dt>Local forward</dt><dd>Listen on LMS. The SSH server connects to the destination. Use this to bring a remote service onto LMS.</dd>
+            <dt>Remote forward</dt><dd>Listen on the SSH server. LMS connects to the destination. Use this to make an LMS-side service reachable from the other computer.</dd>
+            <dt>Local or remote SOCKS proxy</dt><dd>The listener is a SOCKS4/5 proxy. Each client chooses where to connect. Local SOCKS reaches destinations from the SSH server; remote SOCKS reaches them from LMS.</dd>
+            <dt>Unix sockets</dt><dd>Local and remote forwards can use a TCP port or a Unix socket at either end. Enter the socket's full path on the correct computer. Its permissions still apply.</dd>
+        </dl>
+        <p><strong>127.0.0.1 means the computer on that side of the tunnel.</strong> Use the Listen on and Connect from headings in the setup dialog to see which box that is.</p>
+        <p>Choose saved SSH credentials; use Test SSH login before saving. Passwords and key passphrases can be supplied from the credential store. Server policies requiring an interactive extra factor cannot be completed by an unattended forward.</p>
+        <p>Enabled forwards start with LMS. SSH keepalives detect an unresponsive connection; LMS replaces a failed process with a bounded retry delay. Stopping a forward pauses reconnects.</p>
+        <p><strong>Connected means the SSH connection is up.</strong> It does not prove the destination app is healthy. A forwarding error names the computer that could not open the destination; fix the service or permissions there.</p>
+        <p>To expose a web app through Caddy, create a local TCP forward listening on 127.0.0.1 or ::1, then use Link to Caddy. The public hostname goes to Caddy, Caddy goes to the private listener, and SSH reaches the remote app. Set public login policy and DNS / relay in Edge Gateway.</p>
+        <p>Remote listeners need the server's forwarding permission. Non-local binds also depend on GatewayPorts. Remote TCP port 0 asks the server to choose an available port; monitoring shows the assigned port. Standard SSH port forwards carry TCP or Unix-socket connections, not UDP.</p>
+    </section>
     <section hidden="@(activeSection != "errors")">
         <h2>Something failed: where do I fix it?</h2>
         <dl>
@@ -97,7 +113,7 @@
         ("basics", "1", "Two computers"), ("keys", "2", "Public & private keys"),
         ("login-options", "3", "Login choices"), ("passwords", "4", "Which password?"),
         ("testing", "5", "Try a login"), ("mounts", "6", "File mounts"),
-        ("errors", "?", "Something failed"), ("sudo", "+", "Sudo access")
+        ("forwards", "7", "SSH forwards"), ("errors", "?", "Something failed"), ("sudo", "+", "Sudo access")
     ];
     protected override void OnInitialized() => SelectTopic(InitialSection);
     private void SelectTopic(string section) => activeSection = Topics.Any(topic => topic.Id == section) ? section : "basics";
