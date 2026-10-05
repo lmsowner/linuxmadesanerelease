@@ -12,6 +12,7 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddApplicationServices(this IServiceCollection services)
     {
+        services.AddScoped<SshfsCredentialRecoveryService>();
         services.AddScoped<IAiChatOrchestrationService, AiChatTurnOrchestrator>();
         services.AddScoped<IAiExecutionPlanExecutionService, AiExecutionPlanExecutionService>();
         services.AddScoped<IAiApprovalService, AiApprovalService>();

@@ -15,6 +15,10 @@ internal static class SshfsMountFailure
                 "The server's SSH identity could not be verified. Verify its host key before updating the trusted SSH host key on this LMS server.",
             _ when Has("invalid format") || Has("error in libcrypto") || Has("UNPROTECTED PRIVATE KEY FILE") =>
                 "SSH could not use the saved private key. Edit this host's saved credentials and test the key before retrying.",
+            _ when Has("with partial success") =>
+                "The server requires another authentication step after the key. SSHFS needs key-only login; review this user's SSH authentication policy before retrying.",
+            _ when Has("Permission denied (password,keyboard-interactive)") || Has("Permission denied (password)") || Has("Permission denied (keyboard-interactive)") =>
+                "The SSH server is not offering key-only login for this account. Repair the remote SSH authentication settings, then test the saved key and retry.",
             _ when !authenticated && !Has("fuse:") && !Has("fusermount") && (Has("Permission denied") || Has("No more authentication methods") || Has("sign_and_send_pubkey: signing failed")) =>
                 "SSH login failed using the saved key. Test this host's saved credentials and check that its public key is authorized for this user.",
             _ when Has("subsystem request failed") =>

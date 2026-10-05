@@ -232,6 +232,10 @@ internal sealed class SshfsRemoteMountService(
             requiresSudo: true,
             cancellationToken);
 
+        var host = await managedHostStore.GetAsync(entity.HostId, cancellationToken)
+            ?? throw new InvalidOperationException("The saved SSH mount's host no longer exists.");
+        await WriteIdentityFileAsync(host, entity.IdentityFilePath, cancellationToken);
+
         await RunRequiredCommandAsync(
             "mount",
             ["-o", "BatchMode=yes,PasswordAuthentication=no,KbdInteractiveAuthentication=no,ConnectTimeout=10", entity.LocalMountPath],

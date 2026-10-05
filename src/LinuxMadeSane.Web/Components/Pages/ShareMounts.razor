@@ -515,6 +515,12 @@
                                     {
                                         <p class="callout @sshfsStatusTone">@sshfsStatusMessage</p>
                                     }
+                                    @if (sshfsRecoveryMount is not null && !showAddSshfsMountPanel)
+                                    {
+                                        <SshfsMountRecoveryPanel @key="sshfsRecoveryMount.Id" HostId="@sshfsRecoveryMount.HostId"
+                                            RemotePath="@sshfsRecoveryMount.RemotePath" LocalMountPath="@sshfsRecoveryMount.LocalMountPath"
+                                            FailureDetail="@sshfsStatusMessage" Recovered="RetryRecoveredSshfsMountAsync" BusyChanged="HandleSshfsRecoveryBusyChanged" />
+                                    }
                                     @if (isSshfsMountStateLoading)
                                     {
                                         <p class="callout info">Checking saved SSHFS mounts in the background.</p>
@@ -947,7 +953,7 @@
                     {
                         <label class="service-search compact-search">
                             <span>SSH host</span>
-                            <select value="@sshfsEditor.HostId" @onchange="HandleSshfsHostChangedAsync">
+                            <select value="@sshfsEditor.HostId" @onchange="HandleSshfsHostChangedAsync" disabled="@(isCreatingSshfsMount || isSshfsRecoveryBusy)">
                                 @foreach (var host in GetMountableSshfsHostCandidates())
                                 {
                                     <option value="@host.HostId">@BuildSshfsHostOptionLabel(host)</option>
@@ -985,7 +991,7 @@
                     </div>
 
                     <div class="share-mapping-grid">
-                        <UiTextField Label="Remote SSH path"
+                        <UiTextField Label="Remote SSH path" Disabled="@(isCreatingSshfsMount || isSshfsRecoveryBusy)"
                                      Helper="Absolute path on the selected SSH host."
                                      Value="@sshfsEditor.RemotePath"
                                      ValueChanged="SetSshfsRemotePathAsync"
@@ -993,7 +999,7 @@
                                      Compact="true"
                                      Placeholder="/srv/data" />
 
-                        <UiTextField Label="LMS mount path"
+                        <UiTextField Label="LMS mount path" Disabled="@(isCreatingSshfsMount || isSshfsRecoveryBusy)"
                                      Helper="Absolute local path where LMS will mount the remote folder."
                                      Value="@sshfsEditor.LocalMountPath"
                                      ValueChanged="SetSshfsLocalMountPathAsync"
@@ -1043,6 +1049,13 @@
                     </div>
                 </section>
             </div>
+            @if (showSshfsRecovery)
+            {
+                <SshfsMountRecoveryPanel @key="sshfsEditor.HostId" HostId="@sshfsEditor.HostId"
+                    RemotePath="@sshfsEditor.RemotePath" LocalMountPath="@sshfsEditor.LocalMountPath"
+                    FailureDetail="@sshfsStatusMessage" Recovered="RetryRecoveredSshfsMountAsync" BusyChanged="HandleSshfsRecoveryBusyChanged" />
+            }
+
         </UiModal>
 
         <UiModal IsOpen="@showEditMountPanel"
@@ -1186,6 +1199,8 @@
     private bool hasStartedReconnectPass;
     private string sshfsStatusMessage = string.Empty;
     private string sshfsStatusTone = "info";
+    private bool showSshfsRecovery, isSshfsRecoveryBusy;
+    private ManagedSshfsMount? sshfsRecoveryMount;
     private ShareToolingInstallResult? shareToolingInstallResult;
     private ShareToolingInstallResult? sshfsToolingInstallResult;
     private ElementReference connectionTargetInputElement;
@@ -1501,12 +1516,14 @@
             var result = await ShareWorkspace.ReconnectManagedSshfsMountAsync(mount.Id);
             sshfsStatusMessage = result?.StatusMessage ?? "The saved SSHFS mount no longer exists.";
             sshfsStatusTone = result is null ? "warning" : "success";
+            sshfsRecoveryMount = null;
             sshfsExplorer = await ShareWorkspace.GetSshfsMountExplorerAsync(inspectTooling: false);
         }
         catch (Exception exception)
         {
             sshfsStatusMessage = exception.Message;
             sshfsStatusTone = "error";
+            sshfsRecoveryMount = mount;
         }
         finally
         {
@@ -1873,6 +1890,8 @@
     {
         sshfsStatusMessage = string.Empty;
         sshfsStatusTone = "info";
+        showSshfsRecovery = false;
+        sshfsRecoveryMount = null;
         var selected = SelectedSshfsHostCandidate ?? GetMountableSshfsHostCandidates().FirstOrDefault();
         if (selected is not null)
         {
@@ -1892,7 +1911,7 @@
 
     private void CloseAddSshfsMountModal()
     {
-        if (!isCreatingSshfsMount)
+        if (!isCreatingSshfsMount && !isSshfsRecoveryBusy)
         {
             showAddSshfsMountPanel = false;
         }
@@ -2025,6 +2044,17 @@
         }
     }
 
+    private void HandleSshfsRecoveryBusyChanged(bool busy) => isSshfsRecoveryBusy = busy;
+
+    private async Task RetryRecoveredSshfsMountAsync()
+    {
+        await RefreshSshfsAsync();
+        if (sshfsRecoveryMount is { } mount)
+            await ReconnectManagedSshfsMountAsync(mount);
+        else
+            await CreateSshfsMountAsync();
+    }
+
     private async Task CreateSshfsMountAsync()
     {
         if (!CanSubmitSshfsMount())
@@ -2045,6 +2075,7 @@
             sshfsStatusTone = "success";
             sshfsMountSearchTerm = string.Empty;
             showAddSshfsMountPanel = false;
+            showSshfsRecovery = false;
             expandedCurrentMountBrowsers.Add(result.LocalMountPath);
             await RefreshSshfsAsync();
         }
@@ -2052,6 +2083,7 @@
         {
             sshfsStatusMessage = exception.Message;
             sshfsStatusTone = "error";
+            showSshfsRecovery = true;
         }
         finally
         {
@@ -2428,7 +2460,7 @@
 
     private bool CanSubmitSshfsMount() =>
         CanCreateSshfsMounts() &&
-        !isCreatingSshfsMount &&
+        !isCreatingSshfsMount && !isSshfsRecoveryBusy &&
         sshfsEditor.HostId != Guid.Empty &&
         !string.IsNullOrWhiteSpace(sshfsEditor.RemotePath) &&
         !string.IsNullOrWhiteSpace(sshfsEditor.LocalMountPath) &&
@@ -2526,6 +2558,7 @@
 
     private void ApplySshfsHostCandidate(SshfsMountHostCandidate candidate)
     {
+        showSshfsRecovery = false;
         sshfsEditor.HostId = candidate.HostId;
         sshfsEditor.RemotePath = string.IsNullOrWhiteSpace(candidate.DefaultRemotePath)
             ? "/"
