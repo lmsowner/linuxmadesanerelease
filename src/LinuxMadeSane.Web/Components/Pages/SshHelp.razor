@@ -1,91 +1,16 @@
 @* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 @page "/help/ssh"
-
+@rendermode InteractiveServer
+@inject NavigationManager Navigation
 <PageTitle>SSH made simple | Linux Made Sane</PageTitle>
-<article class="ssh-help">
-    <header>
-        <h1>SSH made simple</h1>
-        <p>SSH is a secure connection between two computers. One asks to connect. The other decides whether to let it in.</p>
-    </header>
-    <nav aria-label="SSH guide sections">
-        <a href="#basics">Two computers</a><a href="#keys">Keys</a><a href="#login-options">Login choices</a>
-        <a href="#passwords">Which password?</a><a href="#testing">Try a login</a><a href="#mounts">File mounts</a>
-        <a href="#errors">Something failed</a><a href="#sudo">Sudo</a>
-    </nav>
-    <section id="basics">
-        <h2>1. Know which computer does what</h2>
-        <div class="ssh-help-pair">
-            <div class="surface-subcard"><strong>Connecting computer</strong><p>Your PC, Mac or Linux computer when you open SSH. For an LMS mount, it is the <strong>LMS host</strong>.</p></div>
-            <div class="surface-subcard"><strong>Receiving computer</strong><p>The server you connect to. It checks the username and login method, then allows access to that user's files.</p></div>
-        </div>
-        <p><code>ssh username@server</code> means “connect to this server as this user”. Use the server's reachable LAN name or address when connecting locally. The username is an account on that server.</p>
-    </section>
-    <section id="keys">
-        <h2>2. A key pair has two parts</h2>
-        <p>Think of the public key as a lock and the private key as the matching key.</p>
-        <dl>
-            <dt>Public key — safe to share</dt><dd>A file usually ending in <code>.pub</code>. Add it to the receiving user's allowed keys. In LMS, use that user's public-key settings; on a manually managed server, this is commonly <code>~/.ssh/authorized_keys</code>.</dd>
-            <dt>Private key — keep secret</dt><dd>The matching file without <code>.pub</code>. It stays on the connecting computer. If LMS makes the connection, save it in LMS's credential store. Never paste it into chat or put it in the server's public-key box.</dd>
-        </dl>
-        <p>The connecting computer proves it has the matching private key without sending that key to the server. <strong>Saving a key is not proof that login works.</strong> The server must also allow key login for that user and accept its public key.</p>
-        <p>Already have a suitable key? Test it first. You do not need to generate a new pair every time.</p>
-    </section>
-    <section id="login-options">
-        <h2>3. Choose how the server lets you in</h2>
-        <div class="ssh-help-table"><table><thead><tr><th>Login option</th><th>What you need</th></tr></thead><tbody>
-            <tr><td>Password only</td><td>Username + that server account's password.</td></tr>
-            <tr><td>Key only</td><td>Username + an accepted private key. No server login password.</td></tr>
-            <tr><td>Password <strong>or</strong> key</td><td>Either method works on its own. A valid key does not also need the server password.</td></tr>
-            <tr><td>Password <strong>and</strong> key</td><td>Both are required. A valid key alone is not enough.</td></tr>
-        </tbody></table></div>
-        <p>Set the policy on the <strong>receiving server</strong>. Server-wide rules and rules for that particular user must agree. Changing credentials on your computer cannot override the server's policy.</p>
-        <p>Keep your existing working session open while changing login settings. Try a fresh login before confirming a change.</p>
-    </section>
-    <section id="passwords">
-        <h2>4. Three different password prompts</h2>
-        <ul>
-            <li><strong>“Enter passphrase for key…”</strong> unlocks your private key on the connecting computer. It is not the server password. A key-only login can still ask for this.</li>
-            <li><strong>“username@server's password…”</strong> asks for that user's login password on the receiving server.</li>
-            <li><strong>“[sudo] password for username…”</strong> asks permission to do an administrator task after login. This is a separate setting.</li>
-        </ul>
-    </section>
-    <section id="testing">
-        <h2>5. Try it from the computer that will connect</h2>
-        <p>For your own login, open <strong>PowerShell on Windows or Terminal on macOS/Linux</strong>. Replace <code>username</code>, <code>server</code> and the key file below with your own values. Add <code>-p PORT</code> to SSH if the server uses a different port.</p>
-        <details><summary>Test password login</summary><pre><code>ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password username@server</code></pre><p>This deliberately tests a password without trying keys. It will fail if the server requires a key too.</p></details>
-        <details><summary>Test key login without falling back to a server password</summary><pre><code>ssh -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -i ~/.ssh/id_ed25519_lms username@server</code></pre><p>On Windows, use <code>"$env:USERPROFILE\.ssh\id_ed25519_lms"</code> for the key file. A private-key passphrase prompt is still possible. A server-password requirement makes this test fail.</p></details>
-        <p>For an LMS connection, use <strong>Test credentials</strong> in Saved credentials. A successful login from your laptop does not test the key saved on LMS.</p>
-        <p>On a first connection, check the server's host-key fingerprint with its administrator before trusting it. This identifies the server; it is different from your user's public key.</p>
-    </section>
-    <section id="mounts">
-        <h2>6. SSH login and a file mount are different checks</h2>
-        <ol>
-            <li><strong>On LMS:</strong> the server name and port must reach the intended server.</li>
-            <li><strong>On the receiving server:</strong> the selected user's saved key must be accepted without another login step.</li>
-            <li><strong>On the receiving server:</strong> SFTP must work and the user must be allowed into the selected folder.</li>
-            <li><strong>On LMS:</strong> SSHFS/FUSE support and the local mount folder must be available. LMS installs missing Ubuntu SSHFS packages when creating the mount.</li>
-        </ol>
-        <p>LMS's automatic SSHFS mounts need non-interactive key login. They cannot stop to ask for a login password or key passphrase. Terminal access alone does not prove SFTP or the selected folder works.</p>
-        <p><strong>Remote folder</strong> is the folder on the receiving server. <strong>Local mount point</strong> is where those files appear on LMS. Mounting does not copy the files.</p>
-    </section>
-    <section id="errors">
-        <h2>Something failed: where do I fix it?</h2>
-        <dl>
-            <dt>Password works, key fails</dt><dd><strong>Receiving server:</strong> check this user's login policy and allowed public keys. <strong>Connecting computer:</strong> check that the selected private key matches. Generating another key will not fix a server set to Password only.</dd>
-            <dt>Key accepted, then another login step required</dt><dd><strong>Receiving server:</strong> the policy requires an additional step, such as Password and key. This differs from Password or key. Review the intended policy before changing it.</dd>
-            <dt>Login works, SFTP fails</dt><dd><strong>Receiving server:</strong> check its SFTP subsystem and user restrictions.</dd>
-            <dt>Login works, folder denied or missing</dt><dd><strong>Receiving server:</strong> check the exact folder and the user's permissions. Restricted SFTP users may see different paths from a terminal login.</dd>
-            <dt>Name not found, timeout or connection refused</dt><dd><strong>Connecting computer:</strong> check the saved address, port and network route. <strong>Receiving server:</strong> check SSH is running and its firewall permits that connection.</dd>
-            <dt>Server identity changed</dt><dd>Confirm the server's current fingerprint before updating the connecting computer's trusted host key. Do not bypass this check.</dd>
-            <dt>Connection reset by peer</dt><dd>The connection closed. That message alone does not explain why. Check login and SFTP separately, then inspect SSH logs on the receiving server for the same user and time.</dd>
-            <dt>FUSE or local mount error</dt><dd><strong>LMS host:</strong> check its mount support and local mount-point permissions.</dd>
-        </dl>
-    </section>
-    <section id="sudo">
-        <h2>Sudo: permission to administer the server</h2>
-        <p>SSH answers “may you log in?” Sudo answers “may you do this administrator task?” Key-only SSH does not automatically grant password-free sudo.</p>
-        <p>In LMS's Users and groups settings, choose the user's sudo access separately. Password-free sudo is an explicit administrator permission, not a side effect of adding a public key.</p>
-    </section>
-    <footer>Technical reference: <a href="https://man.openbsd.org/ssh" target="_blank" rel="noopener noreferrer">OpenSSH client</a>, <a href="https://man.openbsd.org/sshd_config#AuthenticationMethods" target="_blank" rel="noopener noreferrer">server login methods</a>, <a href="https://man.openbsd.org/ssh-keygen" target="_blank" rel="noopener noreferrer">key pairs</a>.</footer>
-</article>
+<div class="surface-card stack-list">
+    <h1>SSH made simple</h1>
+    <p>Keys, passwords and what to check when a connection fails.</p>
+    <UiCommandButton Label="Open SSH guide" Glyph="UiIconGlyph.Info" OnClick="() => isOpen = true" />
+</div>
+<SshHelpDialog IsOpen="isOpen" InitialSection="@Section" OnClose="() => isOpen = false" />
+@code {
+    private bool isOpen = true;
+    private string Section => new Uri(Navigation.Uri).Fragment.TrimStart('#');
+}
