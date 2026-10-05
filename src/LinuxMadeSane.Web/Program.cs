@@ -142,6 +142,7 @@ public class Program
             serviceProvider.GetRequiredService<DesktopAssistantLaunchTicketStore>());
         builder.Services.AddSingleton<TerminalWorkspaceRegistry>();
         builder.Services.AddScoped<HomeLabTerminalTaskLauncher>();
+        builder.Services.AddScoped<SshMountTerminalTaskLauncher>();
         builder.Services.AddScoped<HomeLabTerminalCommandService>();
         builder.Services.AddSingleton<FileBrowserWorkspaceRegistry>();
         builder.Services.AddSingleton<FileActionQueueService>();
