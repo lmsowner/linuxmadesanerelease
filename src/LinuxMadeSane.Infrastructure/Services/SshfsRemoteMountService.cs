@@ -150,7 +150,9 @@ internal sealed class SshfsRemoteMountService(
                 BuildSshfsMountArguments(remoteSourcePath, localMountPath, host.Port, identityFilePath),
                 $"Mount {remoteSourcePath} on {localMountPath}",
                 requiresSudo: true,
-                cancellationToken);
+                cancellationToken,
+                mountFailureContext: remoteSourcePath,
+                mountDiagnosticRequest: BuildSftpDiagnosticRequest(host.Hostname, host.Username, host.Port, identityFilePath, remotePath));
 
             if (request.PersistOnServer)
             {
@@ -232,10 +234,12 @@ internal sealed class SshfsRemoteMountService(
 
         await RunRequiredCommandAsync(
             "mount",
-            [entity.LocalMountPath],
+            ["-o", "BatchMode=yes,PasswordAuthentication=no,KbdInteractiveAuthentication=no,ConnectTimeout=10", entity.LocalMountPath],
             $"Reconnect LMS SSHFS mount {entity.LocalMountPath}",
             requiresSudo: true,
-            cancellationToken);
+            cancellationToken,
+            mountFailureContext: remoteSourcePath,
+            mountDiagnosticRequest: BuildSftpDiagnosticRequest(entity.HostAddress, entity.UserName, entity.Port, entity.IdentityFilePath, entity.RemotePath));
 
         entity.LastMountedAtUtc = DateTimeOffset.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -409,7 +413,9 @@ internal sealed class SshfsRemoteMountService(
         IReadOnlyList<string> arguments,
         string description,
         bool requiresSudo,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? mountFailureContext = null,
+        LinuxCommandRequest? mountDiagnosticRequest = null)
     {
         var result = await commandRunner.RunAsync(
             new LinuxCommandRequest(fileName, arguments, requiresSudo, TimeSpan.FromSeconds(45), description),
@@ -425,10 +431,44 @@ internal sealed class SshfsRemoteMountService(
             ? result.StandardOutput.Trim()
             : result.StandardError.Trim();
 
+        if (mountFailureContext is not null)
+        {
+            if (mountDiagnosticRequest is not null)
+            {
+                var diagnostic = await commandRunner.RunAsync(mountDiagnosticRequest, dryRun: false, cancellationToken);
+                if (diagnostic.ExitCode == 0)
+                {
+                    throw new InvalidOperationException($"Could not mount {mountFailureContext}. " +
+                        "SFTP login and access to the remote folder succeeded using the saved key. " +
+                        "The SSHFS mount still failed. Check the mount detail below for a local FUSE, mount-point or intermittent connection problem. " +
+                        $"Mount detail: {message[..Math.Min(message.Length, 800)]}");
+                }
+
+                message = diagnostic.StandardError + "\n" + message;
+            }
+
+            throw new InvalidOperationException(SshfsMountFailure.Describe(mountFailureContext, message, result.ExitCode));
+        }
+
         throw new InvalidOperationException(string.IsNullOrWhiteSpace(message)
             ? $"{description} failed with exit code {result.ExitCode}."
             : $"{description} failed: {message}");
     }
+
+    private static LinuxCommandRequest BuildSftpDiagnosticRequest(
+        string hostname, string username, int port, string identityFilePath, string remotePath) =>
+        new("sftp",
+            ["-v", "-b", "-", "-P", port.ToString(), "-i", identityFilePath,
+             "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+             "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no",
+             "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10",
+             $"{username}@{hostname}"],
+            RequiresSudo: true,
+            Timeout: TimeSpan.FromSeconds(15),
+            Description: "Diagnose failed SSHFS mount using saved-key SFTP access")
+        {
+            StandardInputBytes = Encoding.UTF8.GetBytes("cd \"" + remotePath.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"\npwd\n")
+        };
 
     private void EnsureStorageDirectories()
     {
@@ -460,7 +500,7 @@ internal sealed class SshfsRemoteMountService(
                        !string.IsNullOrWhiteSpace(host.Hostname);
 
         var status = canMount
-            ? "Ready for SSHFS. This host has stored key-based SSH authentication."
+            ? "Stored SSH key available. LMS will verify access when mounting."
             : BuildHostCandidateFailure(host, hasPrivateKeyAuthentication, hasStoredPrivateKey, hasPrivateKeyPassphrase);
 
         return new SshfsMountHostCandidate(
@@ -525,6 +565,10 @@ internal sealed class SshfsRemoteMountService(
         [
             $"IdentityFile={identityFilePath}",
             "IdentitiesOnly=yes",
+            "BatchMode=yes",
+            "PasswordAuthentication=no",
+            "KbdInteractiveAuthentication=no",
+            "ConnectTimeout=10",
             "StrictHostKeyChecking=accept-new",
             "reconnect",
             "ServerAliveInterval=15",
