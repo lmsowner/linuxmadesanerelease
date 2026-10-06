@@ -27,7 +27,8 @@ public static class NetworkDevicePresentation
             })).Select(x => x.Interface).Distinct().ToArray();
             return matches.Length == 1 ? matches[0] : "Interface not determined";
         }
-        return inventory.Devices.GroupBy(Interface).OrderBy(x => x.Key == "Interface not determined" ? 1 : 0).ThenBy(x => x.Key)
+        return inventory.Devices.GroupBy(Interface).OrderBy(x => x.Key == "Interface not determined" ? 1 : 0)
+            .ThenByDescending(x => x.Count()).ThenBy(x => x.Key)
             .Select(group => new NetworkInterfaceDevices(group.Key,
                 inventory.InterfaceNetworks.Where(network => network.Interface == group.Key).Select(network => network.Network)
                     .Concat(group.Select(device => device.Subnet).Where(subnet => !string.IsNullOrWhiteSpace(subnet))).Distinct().Order().ToArray(),
