@@ -77,10 +77,15 @@ public sealed class SshForwardProcessFactory(SshForwardStore store, ILinuxComman
             Directory.Delete(runtime, true); throw;
         }
     }
+    public static void ValidateEmbeddedResources()
+    {
+        _ = Resource("forward-launcher.py");
+        _ = Resource("forward-askpass.py");
+    }
     private static string Resource(string name)
     {
         using var stream = typeof(SshForwardProcessFactory).Assembly.GetManifestResourceStream(
-            "LinuxMadeSane.Infrastructure.Services.SshForwards." + name) ?? throw new InvalidOperationException("SSH forward launcher is missing.");
+            "LinuxMadeSane.Infrastructure.Services.SshForwards." + name) ?? throw new InvalidOperationException($"On this LMS host: the installed package is missing SSH forwarding support ({name}). Update LMS to a complete CE package; changing credentials will not fix this packaging error.");
         using var reader = new StreamReader(stream); return reader.ReadToEnd();
     }
 }
