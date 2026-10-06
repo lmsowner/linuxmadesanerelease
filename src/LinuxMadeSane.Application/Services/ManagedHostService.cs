@@ -317,9 +317,7 @@ public sealed class ManagedHostService(
 
         if (!result.IsSuccess)
         {
-            var failureDetail = string.IsNullOrWhiteSpace(result.StandardError)
-                ? "The remote installer returned a non-zero exit code."
-                : result.StandardError.Trim();
+            var failureDetail = DescribeRemoteInstallFailure(host, result);
 
             return new ManagedHostLmsInstallResult(
                 false,
@@ -807,6 +805,25 @@ public sealed class ManagedHostService(
         return string.IsNullOrEmpty(password) ? null : password;
     }
 
+    private static string DescribeRemoteInstallFailure(ManagedHost host, CommandExecutionResult result)
+    {
+        var output = string.IsNullOrWhiteSpace(result.StandardError)
+            ? result.StandardOutput.Trim()
+            : result.StandardError.Trim();
+        if (output.Contains("sudo:", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("LMS_ADMIN_ACCESS_REQUIRED", StringComparison.Ordinal))
+        {
+            return $"SSH login to {host.Name} succeeded, but sudo administrator access failed. " +
+                   $"Save a valid sudo password for {host.Username} in this host's saved credentials, " +
+                   "or ask the server administrator to configure passwordless sudo for LMS updates. " +
+                   "SSH key authentication alone does not grant sudo access. Server detail: " + output;
+        }
+
+        return string.IsNullOrWhiteSpace(output)
+            ? $"The installer on {host.Name} stopped without reporting a cause (exit code {result.ExitCode}). Open this host's terminal to inspect the installer."
+            : $"Update on {host.Name} failed: {output}";
+    }
+
     private static string BuildLmsInstallCommand(
         ManagedHostLmsInstallOptions options,
         bool canUseStoredSudoPassword)
@@ -939,6 +956,10 @@ public sealed class ManagedHostService(
                 : "  SUDO='sudo -n'",
             "else",
             "  echo 'Remote account is not root and sudo is not installed.' >&2",
+            "  exit 126",
+            "fi",
+            "if ! $SUDO true; then",
+            "  echo 'LMS_ADMIN_ACCESS_REQUIRED: SSH login succeeded, but sudo requires authentication or this account is not allowed to administer LMS.' >&2",
             "  exit 126",
             "fi",
             "if ! command -v curl >/dev/null 2>&1; then",

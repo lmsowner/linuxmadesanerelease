@@ -206,6 +206,12 @@
                                         </div>
                                     </td>
                                 </tr>
+                                @if (GetLmsUpdateOperation(row.Host.Id) is { State: LmsHostUpdateOperationState.Failed } failedUpdate)
+                                {
+                                    <tr class="hosts-update-failure-row @stripeClass">
+                                        <td colspan="7"><p class="callout error" role="alert">@failedUpdate.Message</p></td>
+                                    </tr>
+                                }
                                 @if (hasRoutes)
                                 {
                                     <tr class="hosts-edge-routes-row @stripeClass">
@@ -1149,6 +1155,8 @@
     private Task ApplyLmsHostUpdateProgressAsync(Guid hostId, ManagedHostLmsInstallProgressUpdate update) =>
         SafeInvokeAsync(() =>
         {
+            // Progress<T> posts callbacks asynchronously. A late callback must not replace the final result.
+            if (GetLmsUpdateOperation(hostId)?.CompletedAtUtc is not null) return;
             var state = update.State switch
             {
                 ManagedHostLmsInstallProgressState.Starting => LmsHostUpdateOperationState.Started,
