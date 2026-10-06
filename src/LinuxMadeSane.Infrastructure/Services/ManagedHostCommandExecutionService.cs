@@ -133,49 +133,14 @@ public sealed class ManagedHostCommandExecutionService(
             using var command = client.CreateCommand(commandText);
             command.CommandTimeout = TimeSpan.FromMinutes(30);
 
-            var outputBuilder = new StringBuilder();
-            var errorBuilder = new StringBuilder();
-            using var cancellationRegistration = cancellationToken.Register(() =>
-            {
-                try
-                {
-                    command.CancelAsync();
-                }
-                catch
-                {
-                }
-            });
-
-            var asyncResult = command.BeginExecute();
-            var inputTask = input is null
-                ? Task.CompletedTask
-                : WriteInputAsync(command.CreateInputStream(), input, cancellationToken);
-            var stdoutTask = PumpStreamAsync(
-                command.OutputStream,
-                CommandExecutionOutputChannel.StandardOutput,
-                outputBuilder,
-                progress,
-                cancellationToken);
-            var stderrTask = PumpStreamAsync(
-                command.ExtendedOutputStream,
-                CommandExecutionOutputChannel.StandardError,
-                errorBuilder,
-                progress,
-                cancellationToken);
-
-            await Task.Run(() => command.EndExecute(asyncResult), cancellationToken);
-            await Task.WhenAll(stdoutTask, stderrTask, inputTask);
-
-            var output = outputBuilder.ToString();
-            var error = errorBuilder.ToString();
-            var exitStatus = command.ExitStatus;
+            var (output, error, exitStatus) = await ExecuteSshCommandAsync(command, input, progress, cancellationToken);
             var completedAt = DateTimeOffset.UtcNow;
 
-            progress?.Report(new CommandExecutionCompletedUpdate(exitStatus ?? -1, completedAt));
+            progress?.Report(new CommandExecutionCompletedUpdate(exitStatus, completedAt));
 
             return new CommandExecutionResult(
                 commandText,
-                exitStatus ?? -1,
+                exitStatus,
                 output ?? string.Empty,
                 error,
                 startedAt,
@@ -190,35 +155,37 @@ public sealed class ManagedHostCommandExecutionService(
         }
     }
 
-    private static async Task PumpStreamAsync(
-        Stream stream,
-        CommandExecutionOutputChannel channel,
-        StringBuilder builder,
-        IProgress<CommandExecutionUpdate>? progress,
-        CancellationToken cancellationToken)
+    internal static async Task<(string Output, string Error, int ExitCode)> ExecuteSshCommandAsync(
+        Renci.SshNet.SshCommand command, CommandExecutionInput? input,
+        IProgress<CommandExecutionUpdate>? progress, CancellationToken token)
     {
-        var buffer = new byte[4096];
+        var output = new StringBuilder();
+        var error = new StringBuilder();
+        // EndExecute reads command.Result, competing with our stdout pump and
+        // consuming the bytes after its first 4096-byte buffer. ExecuteAsync only
+        // waits for completion, leaving both streams exclusively to these readers.
+        var execution = command.ExecuteAsync(token);
+        var stdin = input is null ? Task.CompletedTask : WriteInputAsync(command.CreateInputStream(), input, token);
+        await Task.WhenAll(execution,
+            PumpStreamAsync(command.OutputStream, CommandExecutionOutputChannel.StandardOutput, output, progress, token),
+            PumpStreamAsync(command.ExtendedOutputStream, CommandExecutionOutputChannel.StandardError, error, progress, token), stdin);
+        return (output.ToString(), error.ToString(), command.ExitStatus ?? -1);
+    }
 
+    internal static async Task PumpStreamAsync(
+        Stream stream, CommandExecutionOutputChannel channel, StringBuilder builder,
+        IProgress<CommandExecutionUpdate>? progress, CancellationToken token)
+    {
+        // A decoder must retain partial UTF-8 characters across stream buffers.
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+        var buffer = new char[4096];
         while (true)
         {
-            var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
-            if (bytesRead <= 0)
-            {
-                break;
-            }
-
-            var chunk = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-            if (string.IsNullOrEmpty(chunk))
-            {
-                continue;
-            }
-
+            var count = await reader.ReadAsync(buffer.AsMemory(), token);
+            if (count == 0) break;
+            var chunk = new string(buffer, 0, count);
             builder.Append(chunk);
-            progress?.Report(new CommandExecutionOutputUpdate(
-                channel,
-                chunk,
-                false,
-                DateTimeOffset.UtcNow));
+            progress?.Report(new CommandExecutionOutputUpdate(channel, chunk, false, DateTimeOffset.UtcNow));
         }
     }
 

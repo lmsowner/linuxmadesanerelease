@@ -27,7 +27,10 @@ public sealed class LmsHostBenchmarkService(IServiceScopeFactory scopes, Perform
         p=root/'performance'/'latest.json'
         if p.exists():
             if p.stat().st_size>1048576: raise ValueError('Saved benchmark file is too large')
-            print(json.dumps(json.loads(p.read_text())))
+            result=json.loads(p.read_text())
+            # The Hosts table and remote Details need measurements, not the full sysbench log.
+            result['rawOutput']=''
+            print(json.dumps(result,separators=(',',':')))
         else: print('null')
         LMS_BENCHMARK
         """;
