@@ -1113,7 +1113,8 @@ Selected terminal content:
     private async Task<TerminalAiCommandResult> ExecuteSuggestedCommandAsync(
         string commandText,
         CancellationToken cancellationToken = default,
-        CommandExecutionInput? standardInput = null)
+        CommandExecutionInput? standardInput = null,
+        bool authenticateSudo = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (HomeLabTerminalProtocol.IsManagedCommand(commandText))
@@ -1144,7 +1145,7 @@ Selected terminal content:
                 commandText,
                 Tab.WorkingDirectory,
                 standardInput,
-                AuthenticateSudo: standardInput is { IsSensitive: true }),
+                AuthenticateSudo: authenticateSudo || standardInput is { IsSensitive: true }),
             cancellationToken: cancellationToken);
         EnsureCurrentTerminalContext(requestTab, requestSessionId, username, cancellationToken);
         return result;
@@ -1155,12 +1156,17 @@ Selected terminal content:
     {
         if (!TerminalAiSecureInputPolicy.TryPrepareSudoPasswordCommand(commandText, out var secureCommand))
         {
-            panelError = "This command cannot safely accept a password through AI repair. Open the terminal and run it there, or use a single journalctl --no-pager or systemctl command.";
-            return null;
+            agentStatus = "Simplifying the administrator command...";
+            return new TerminalAiCommandResult(Guid.NewGuid(), Tab.SessionId ?? Guid.Empty, commandText, Tab.ConnectedUsername,
+                Tab.WorkingDirectory, 126, string.Empty,
+                "LMS did not run this command or send a password. Propose one direct sudo operation without pipelines, shell scripts or substitutions. Supported operations: journalctl (quoted dates supported), systemctl, cat, head, tail, ls, df, du, stat, readlink, id, uptime, uname, and /usr/local/sbin/linux-made-sane-update. Split compound diagnostics into separate commands. Do not ask the user for a password in chat.",
+                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
         }
         var requestTab = Tab;
         var sessionId = Tab.SessionId;
         var username = Tab.ConnectedUsername;
+        var cachedResult = await ExecuteSuggestedCommandAsync(secureCommand, cancellationToken, authenticateSudo: true);
+        if (!TerminalAiSecureInputPolicy.RequiresSudoPassword(commandText, cachedResult)) return cachedResult;
         var password = await RequestSecureInputAsync(commandText, cancellationToken);
         try
         {

@@ -10,6 +10,7 @@ using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models;
 using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.DataProtection;
 using Renci.SshNet;
 using Renci.SshNet.Common;
 
@@ -17,7 +18,8 @@ namespace LinuxMadeSane.Infrastructure.Services;
 
 public sealed class SshTerminalSessionService(
     ILogger<SshTerminalSessionService> logger,
-    ManagedHostSshConnectionFactory sshConnectionFactory) : ITerminalSessionService
+    ManagedHostSshConnectionFactory sshConnectionFactory,
+    IDataProtectionProvider? dataProtectionProvider = null) : ITerminalSessionService
 {
     private readonly ConcurrentDictionary<Guid, SessionState> sessions = new();
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
@@ -70,6 +72,8 @@ public sealed class SshTerminalSessionService(
             host.Id, credentials.Username, Stopwatch.GetElapsedTime(setupStarted).TotalMilliseconds);
 
         var client = sshConnectionFactory.CreateSshClient(host, credentials, ConnectTimeout, KeepAliveInterval);
+        byte[] remoteHostKey = [];
+        client.HostKeyReceived += (_, args) => remoteHostKey = args.HostKey.ToArray();
         var setupStage = "SSH handshake";
         Task? connectTask = null;
         Task<ShellStream>? createStreamTask = null;
@@ -120,7 +124,7 @@ public sealed class SshTerminalSessionService(
                 Username = credentials.Username
             };
 
-            var state = new SessionState(session, host, credentials, client, stream, request.OwnerId);
+            var state = new SessionState(session, host, credentials, client, stream, request.OwnerId, remoteHostKey);
             sessions[session.Id] = state;
             registeredSessionId = session.Id;
 
@@ -302,16 +306,29 @@ public sealed class SshTerminalSessionService(
         var state = GetActiveSession(request.TerminalSessionId);
         if (request.StandardInput is { IsSensitive: true } && !request.AuthenticateSudo)
             throw new InvalidOperationException("Sensitive terminal input requires a trusted authentication operation.");
-        if (request.AuthenticateSudo && request.StandardInput is not { IsSensitive: true })
+        if (request.AuthenticateSudo && request.StandardInput is { IsSensitive: false })
             throw new InvalidOperationException("Private sudo authentication requires secure input.");
-        var executionCommand = request.AuthenticateSudo
-            ? TerminalSudoAuthentication.BuildCommand(request.CommandText)
-            : request.CommandText;
+        if (request.AuthenticateSudo) _ = TerminalSudoAuthentication.BuildCommand(request.CommandText);
 
         await state.AiCommandGate.WaitAsync(cancellationToken);
         try
         {
             EnsureSessionIsActive(state);
+            var commandInput = request.StandardInput;
+            if (request.AuthenticateSudo && commandInput is null)
+            {
+                lock (state.SyncRoot)
+                {
+                    if (state.SudoInputExpiresAt > DateTimeOffset.UtcNow && state.ProtectedSudoInput is not null && dataProtectionProvider is not null)
+                        commandInput = new CommandExecutionInput(dataProtectionProvider.CreateProtector("LMS.Terminal.Sudo", state.Session.Id.ToString()).Unprotect(state.ProtectedSudoInput), true);
+                    else state.ProtectedSudoInput = null;
+                }
+            }
+            var executionCommand = request.AuthenticateSudo
+                ? commandInput is null
+                    ? "exec </dev/null; /usr/bin/sudo -n -- " + GetSudoOperation(request.CommandText)
+                    : TerminalSudoAuthentication.BuildCommand(request.CommandText)
+                : request.CommandText;
             using var commandCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken,
                 state.LifetimeCancellation.Token);
@@ -328,6 +345,12 @@ public sealed class SshTerminalSessionService(
                 state.Credentials,
                 ConnectTimeout,
                 KeepAliveInterval);
+            var hostIdentityChanged = false;
+            client.HostKeyReceived += (_, args) =>
+            {
+                args.CanTrust = state.RemoteHostKey.Length > 0 && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(state.RemoteHostKey, args.HostKey);
+                hostIdentityChanged = !args.CanTrust;
+            };
             Task? connectTask = null;
             Task? commandTask = null;
             Task? inputTask = null;
@@ -355,22 +378,22 @@ public sealed class SshTerminalSessionService(
                 var outputBuilder = new StringBuilder();
                 var errorBuilder = new StringBuilder();
                 var asyncResult = command.BeginExecute();
-                inputTask = request.StandardInput is null
+                inputTask = commandInput is null
                     ? Task.CompletedTask
-                    : WriteAiCommandInputAsync(command.CreateInputStream(), request.StandardInput, commandToken);
+                    : WriteAiCommandInputAsync(command.CreateInputStream(), commandInput!, commandToken);
                 stdoutTask = PumpAiCommandStreamAsync(
                     command.OutputStream,
                     CommandExecutionOutputChannel.StandardOutput,
                     outputBuilder,
                     progress,
-                    request.StandardInput,
+                    commandInput,
                     commandToken);
                 stderrTask = PumpAiCommandStreamAsync(
                     command.ExtendedOutputStream,
                     CommandExecutionOutputChannel.StandardError,
                     errorBuilder,
                     progress,
-                    request.StandardInput,
+                    commandInput,
                     commandToken);
                 commandTask = Task.Run(() => command.EndExecute(asyncResult), CancellationToken.None);
 
@@ -378,8 +401,23 @@ public sealed class SshTerminalSessionService(
                 await Task.WhenAll(stdoutTask, stderrTask, inputTask).WaitAsync(commandToken);
 
                 var completedAt = DateTimeOffset.UtcNow;
-                var output = RedactSensitiveInput(outputBuilder.ToString(), request.StandardInput);
-                var error = RedactSensitiveInput(errorBuilder.ToString(), request.StandardInput);
+                var output = RedactSensitiveInput(outputBuilder.ToString(), commandInput);
+                var error = RedactSensitiveInput(errorBuilder.ToString(), commandInput);
+                if (request.AuthenticateSudo && commandInput is not null)
+                {
+                    lock (state.SyncRoot)
+                    {
+                        if (errorBuilder.ToString().Split('\n').Any(line => line.TrimEnd('\r') == TerminalSudoAuthentication.SuccessMarker) &&
+                            state.Session.Status == TerminalSessionStatus.Active && !commandToken.IsCancellationRequested && dataProtectionProvider is not null)
+                        {
+                            // Encrypted, in memory only, isolated to this SSH session/account.
+                            state.ProtectedSudoInput = dataProtectionProvider.CreateProtector("LMS.Terminal.Sudo", state.Session.Id.ToString()).Protect(commandInput.Content);
+                            if (request.StandardInput is not null) state.SudoInputExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
+                        }
+                        else if (error.Contains(TerminalSudoAuthentication.FailureMarker, StringComparison.Ordinal)) state.ProtectedSudoInput = null;
+                    }
+                    error = error.Replace(TerminalSudoAuthentication.SuccessMarker, string.Empty, StringComparison.Ordinal).Trim();
+                }
                 var exitCode = command.ExitStatus ?? -1;
                 progress?.Report(new CommandExecutionCompletedUpdate(exitCode, completedAt));
 
@@ -394,6 +432,11 @@ public sealed class SshTerminalSessionService(
                     error,
                     startedAt,
                     completedAt);
+            }
+            catch (Exception exception) when (hostIdentityChanged)
+            {
+                lock (state.SyncRoot) state.ProtectedSudoInput = null;
+                throw new InvalidOperationException("The host's SSH identity changed since this terminal connected. No password was sent. Reconnect and verify the destination before continuing.", exception);
             }
             catch (OperationCanceledException) when (
                 !cancellationToken.IsCancellationRequested &&
@@ -447,8 +490,15 @@ public sealed class SshTerminalSessionService(
         }
     }
 
+    private static string GetSudoOperation(string command)
+    {
+        if (!TerminalSudoAuthentication.TryGetOperation(command, out var operation)) throw new InvalidOperationException("Unsupported administrator operation.");
+        return operation;
+    }
+
     private static void AbortTransport(SessionState state)
     {
+        lock (state.SyncRoot) state.ProtectedSudoInput = null;
         try
         {
             state.Stream.Dispose();
@@ -846,8 +896,12 @@ public sealed class SshTerminalSessionService(
         ManagedHostSshCredentials credentials,
         SshClient client,
         ShellStream stream,
-        Guid? ownerId)
+        Guid? ownerId,
+        byte[] remoteHostKey)
     {
+        public byte[] RemoteHostKey { get; } = remoteHostKey;
+        public string? ProtectedSudoInput { get; set; }
+        public DateTimeOffset SudoInputExpiresAt { get; set; }
         public object SyncRoot { get; } = new();
         public TerminalSession Session { get; set; } = session;
         public ManagedHost Host { get; } = host;

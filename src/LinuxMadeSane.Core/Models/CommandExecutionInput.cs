@@ -5,4 +5,7 @@ namespace LinuxMadeSane.Core.Models;
 
 public sealed record CommandExecutionInput(
     string Content,
-    bool IsSensitive);
+    bool IsSensitive)
+{
+    public override string ToString() => IsSensitive ? "[secure input redacted]" : "[command input]";
+}
