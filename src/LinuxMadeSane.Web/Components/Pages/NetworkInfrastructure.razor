@@ -38,8 +38,14 @@
                     @foreach (var notice in inventory.Notices) { <p class="callout">@notice</p> }
                     @foreach (var group in NetworkDevicePresentation.Group(inventory))
                     {
+                        var dns = inventory.InterfaceDns.FirstOrDefault(item => item.Interface == group.Interface);
                         <section class="device-interface-group">
-                            <h2>@group.Interface <span class="meta-text">@string.Join(" · ", group.Subnets) · @group.Devices.Count devices</span></h2>
+                            <h2>@group.Interface <span class="meta-text">@string.Join(" · ", group.Subnets) · @group.Devices.Count devices</span>
+                                @if (dns is { Servers.Count: > 0 })
+                                {
+                                    <span class="meta-text" title="@DnsDetails(dns)">DNS: @string.Join(", ", dns.Servers) @(dns.DhcpServers.Count > 0 && dns.Servers.ToHashSet().SetEquals(dns.DhcpServers) ? "(DHCP)" : "")</span>
+                                }
+                            </h2>
                             <div class="infrastructure-table device-table"><table><thead><tr><th>Device</th><th>IP address</th><th>MAC address</th><th>Vendor</th><th>State</th><th>Last observed</th><th></th></tr></thead><tbody>
                             @foreach (var device in group.Devices)
                             {
@@ -87,6 +93,10 @@
         {
             <UiTextField Label="Friendly name" @bind-Value="selected.FriendlyName" />
             <p>@selected.Hostname · @string.Join(", ", selected.Addresses) · @selected.Mac</p>
+            @if (inventory?.InterfaceDns.FirstOrDefault(item => item.Interface == selected.Interface) is { } dns)
+            {
+                <p>@DnsDetails(dns)</p>
+            }
             <p>@selected.NameLookupStatus @if (selected.LastDnsLookupUtc is { } lookup) { <span class="meta-text">Last lookup: @lookup.ToLocalTime().ToString("g")</span> }</p>
             <p>First observed: @selected.FirstSeenUtc.ToLocalTime().ToString("g")<br />Sources: @string.Join(", ", selected.Sources)<br />DHCP: @selected.DhcpState</p>
             <p>@string.Join(" · ", selected.Services)</p>
@@ -118,6 +128,12 @@
     </ChildContent>
 </UiModal>
 @code {
+    private static string DnsDetails(InterfaceDnsConfiguration dns) =>
+        $"{dns.Interface}: active DNS ({dns.Source}): {(dns.Servers.Count > 0 ? string.Join(", ", dns.Servers) : "not reported")}. " +
+        $"DHCP-provided DNS: {(dns.DhcpServers.Count > 0 ? string.Join(", ", dns.DhcpServers) : "not reported")}. " +
+        $"DHCP server: {(dns.DhcpServer.Length > 0 ? dns.DhcpServer : "not reported")}. " +
+        (dns.Source == "systemd-resolved" && dns.Servers.Count > 0 ? "Reverse lookups are restricted to this interface's DNS." : "Lookups use the system resolver; its selected server cannot be confirmed here.");
+
     private RenderFragment ActionFeedback => @<div class="network-action-feedback">
         @if (busy) { <p class="callout info" role="status" aria-live="polite" aria-busy="true">@progress</p> }
         @if (error is not null) { <p class="callout error" role="alert">@error</p> }

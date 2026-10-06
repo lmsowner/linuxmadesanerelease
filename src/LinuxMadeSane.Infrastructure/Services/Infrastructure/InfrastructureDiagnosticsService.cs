@@ -112,6 +112,7 @@ public sealed class InfrastructureDiagnosticsService(
             foreach (var item in devices) { item.State = "Not recently observed"; item.DhcpState = "Unknown"; item.Services.Clear(); item.ServiceUrls.Clear(); }
             var notices = new List<string> { "Passive discovery only. A cached address does not prove reachability; no ports or subnets are scanned." };
             if (!OperatingSystem.IsLinux()) return new(devices, ["Network discovery requires a Linux host."]);
+            var interfaceDns = await ReadInterfaceDnsAsync(cancellationToken);
             var now = DateTimeOffset.UtcNow;
             var neighbours = await Run("ip", ["-j", "neigh", "show"], token: cancellationToken);
             if (neighbours.ExitCode == 0)
@@ -202,10 +203,10 @@ public sealed class InfrastructureDiagnosticsService(
                     (string.IsNullOrWhiteSpace(device.Hostname) || IPAddress.TryParse(device.Hostname, out _)))
                 .OrderBy(device => device.LastDnsLookupUtc).Take(64),
                 new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = cancellationToken },
-                (device, token) => new ValueTask(ResolveDeviceNameAsync(device, runner, token)));
+                (device, token) => new ValueTask(ResolveDeviceNameAsync(device, runner, token, interfaceDns.FirstOrDefault(dns => dns.Interface == device.Interface))));
             await Persist("devices", devices, cancellationToken);
             return new(devices.OrderBy(item => item.FriendlyName.Length > 0 ? item.FriendlyName : item.Hostname).ToArray(), notices)
-            { InterfaceNetworks = KeaDhcpManagementService.ReadInterfaceNetworks() };
+            { InterfaceNetworks = KeaDhcpManagementService.ReadInterfaceNetworks(), InterfaceDns = interfaceDns };
         }
         finally { InventoryGate.Release(); }
     }
@@ -240,7 +241,7 @@ public sealed class InfrastructureDiagnosticsService(
             await Parallel.ForEachAsync(devices.Where(device => device.Interface == listeningInterface && device.Addresses.Count > 0 &&
                     (string.IsNullOrWhiteSpace(device.Hostname) || IPAddress.TryParse(device.Hostname, out _) || device.LastDnsLookupUtc is null || device.LastDnsLookupUtc < now.AddHours(-1))),
                 new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = cancellationToken },
-                (device, token) => new ValueTask(ResolveDeviceNameAsync(device, runner, token)));
+                (device, token) => new ValueTask(ResolveDeviceNameAsync(device, runner, token, inventory.InterfaceDns.FirstOrDefault(dns => dns.Interface == device.Interface))));
             await Persist("devices", devices, cancellationToken);
             inventory = inventory with { Devices = devices.OrderBy(item => item.Hostname).ToArray() };
         }
@@ -248,20 +249,71 @@ public sealed class InfrastructureDiagnosticsService(
         return inventory with { Notices = inventory.Notices.Append("Probed " + subnet + " on " + listeningInterface + " using ICMP only. IP, MAC and DNS names are cached. Devices that ignore ping may still appear in neighbours or leases.").ToArray() };
     }
 
-    internal static async Task ResolveDeviceNameAsync(NetworkDevice device, ILinuxCommandRunner commands, CancellationToken token)
+    private async Task<IReadOnlyList<InterfaceDnsConfiguration>> ReadInterfaceDnsAsync(CancellationToken token)
+    {
+        var resolved = await Run("resolvectl", ["dns"], seconds: 3, token: token);
+        var nm = await Run("nmcli", ["--terse", "--escape", "no", "--fields", "GENERAL.DEVICE,IP4.DNS,IP6.DNS,DHCP4.OPTION", "device", "show"], seconds: 3, token: token);
+        return ParseInterfaceDns(resolved.ExitCode == 0 ? resolved.StandardOutput : "", nm.ExitCode == 0 ? nm.StandardOutput : "");
+    }
+
+    internal static IReadOnlyList<InterfaceDnsConfiguration> ParseInterfaceDns(string resolved, string networkManager)
+    {
+        var active = new Dictionary<string, InterfaceDnsConfiguration>(StringComparer.Ordinal);
+        foreach (var line in resolved.Split('\n'))
+        {
+            var match = Regex.Match(line, @"^Link \d+ \(([^)]+)\):\s*(.*)$");
+            if (match.Success) active[match.Groups[1].Value] = new(match.Groups[1].Value, DnsAddresses(match.Groups[2].Value), "systemd-resolved");
+        }
+        string current = "";
+        var supplied = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var leases = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var line in networkManager.Split('\n'))
+        {
+            var split = line.IndexOf(':'); if (split < 0) continue;
+            var key = line[..split]; var value = line[(split + 1)..].Trim();
+            if (key == "GENERAL.DEVICE") { current = value; continue; }
+            if (current.Length == 0) continue;
+            if (key.StartsWith("IP4.DNS[", StringComparison.Ordinal) || key.StartsWith("IP6.DNS[", StringComparison.Ordinal))
+            {
+                if (!active.TryGetValue(current, out var config)) config = new(current, [], "NetworkManager");
+                if (config.Source == "NetworkManager") active[current] = config with { Servers = config.Servers.Concat(DnsAddresses(value)).Distinct().ToArray() };
+            }
+            if (key.StartsWith("DHCP4.OPTION[", StringComparison.Ordinal))
+            {
+                if (value.StartsWith("domain_name_servers = ", StringComparison.Ordinal)) supplied[current] = DnsAddresses(value[22..]).ToList();
+                if (value.StartsWith("dhcp_server_identifier = ", StringComparison.Ordinal)) leases[current] = value[25..];
+            }
+        }
+        return active.Values.Select(config => config with { DhcpServers = supplied.GetValueOrDefault(config.Interface) ?? [], DhcpServer = leases.GetValueOrDefault(config.Interface) ?? "" }).ToArray();
+    }
+
+    private static IReadOnlyList<string> DnsAddresses(string text) => text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+        .Where(value => IPAddress.TryParse(value.Split('#')[0], out _) || IPEndPoint.TryParse(value.Split('#')[0], out _)).Distinct().ToArray();
+
+    internal static async Task ResolveDeviceNameAsync(NetworkDevice device, ILinuxCommandRunner commands, CancellationToken token, InterfaceDnsConfiguration? dns = null)
     {
         var addresses = device.Addresses.Select(value => IPAddress.TryParse(value, out var ip) ? ip : null)
             .Where(ip => ip is not null).OrderBy(ip => ip!.AddressFamily == AddressFamily.InterNetwork ? 0 : 1).Distinct().Take(3).ToArray();
-        device.NameLookupStatus = "No reverse name returned by this host's configured resolver.";
+        var interfaceLookup = dns is { Source: "systemd-resolved", Servers.Count: > 0 };
+        var resolver = interfaceLookup ? $"DNS servers {string.Join(", ", dns.Servers)} on {dns.Interface}" : "this host's configured resolver";
+        device.NameLookupStatus = $"No reverse name returned by {resolver}.";
         try
         {
             foreach (var address in addresses)
             {
-                var result = await commands.RunAsync(new("getent", ["hosts", address!.ToString()], false,
-                    TimeSpan.FromSeconds(3), "Resolve network device name using this host's configured resolver") { IsOptionalExternalTool = true }, false, token);
-                if (result.ExitCode == 127) { device.NameLookupStatus = "Linux getent is unavailable on this host; name lookup could not run."; break; }
-                if (result.ExitCode == 124) { device.NameLookupStatus = "Name lookup timed out. Check this host's configured DNS server and network access."; continue; }
-                var name = result.ExitCode == 0 ? ParseReverseName(result.StandardOutput, address) : null;
+                var result = await commands.RunAsync(new(interfaceLookup ? "resolvectl" : "getent", interfaceLookup
+                    ? ["--interface", dns!.Interface, "--protocol=dns", "--legend=no", "--cache=no", "query", address!.ToString()]
+                    : ["hosts", address!.ToString()], false, TimeSpan.FromSeconds(3), $"Resolve device name using {resolver}") { IsOptionalExternalTool = true }, false, token);
+                if (result.ExitCode == 127) { device.NameLookupStatus = interfaceLookup ? $"resolvectl is unavailable; could not query {resolver}." : "Linux getent is unavailable on this host; name lookup could not run."; break; }
+                if (result.ExitCode == 124) { device.NameLookupStatus = $"Name lookup timed out querying {resolver}. Check DNS server and network access."; continue; }
+                if (interfaceLookup && result.ExitCode != 0)
+                {
+                    device.NameLookupStatus = result.StandardError.Contains(".arpa' not found", StringComparison.Ordinal)
+                        ? $"{resolver} returned no reverse DNS (PTR) record for {address}. A forward DNS name alone does not provide an IP-to-name lookup. On this DNS server, enable DHCP hostname registration or add a reverse/PTR record for the device."
+                        : $"Could not resolve {address} using {resolver}: {result.StandardError.Trim()}";
+                }
+                var name = result.ExitCode == 0 ? ParseReverseName(interfaceLookup
+                    ? result.StandardOutput.Replace($"{address}: ", $"{address} ", StringComparison.Ordinal) : result.StandardOutput, address) : null;
                 if (name is null) continue;
                 // Preserve DHCP/managed-host names; use the resolver to fill missing
                 // names and refresh names previously obtained from this resolver.
@@ -270,7 +322,7 @@ public sealed class InfrastructureDiagnosticsService(
                     device.Hostname = name;
                     if (!device.Sources.Contains("System resolver")) device.Sources.Add("System resolver");
                 }
-                device.NameLookupStatus = $"Resolved {address} to {name} using this host's configured resolver.";
+                device.NameLookupStatus = $"Resolved {address} to {name} using {resolver}.";
                 return;
             }
         }

@@ -29,9 +29,16 @@ public sealed class NetworkDevice
     public string Tags { get; set; } = "";
 }
 
+public sealed record InterfaceDnsConfiguration(string Interface, IReadOnlyList<string> Servers, string Source)
+{
+    public IReadOnlyList<string> DhcpServers { get; init; } = [];
+    public string DhcpServer { get; init; } = "";
+}
+
 public sealed record DeviceInventory(IReadOnlyList<NetworkDevice> Devices, IReadOnlyList<string> Notices)
 {
     public IReadOnlyList<DhcpInterfaceNetwork> InterfaceNetworks { get; init; } = [];
+    public IReadOnlyList<InterfaceDnsConfiguration> InterfaceDns { get; init; } = [];
 }
 public sealed record ExposureEntry(string Service, string Local, string External, string Method, IReadOnlyList<string> Reasoning);
 public sealed record ExposureSnapshot(IReadOnlyList<ExposureEntry> Entries, IReadOnlyList<string> Notices);
