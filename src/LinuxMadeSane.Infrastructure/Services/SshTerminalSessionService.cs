@@ -309,13 +309,17 @@ public sealed class SshTerminalSessionService(
         if (request.AuthenticateSudo && request.StandardInput is { IsSensitive: false })
             throw new InvalidOperationException("Private sudo authentication requires secure input.");
         if (request.AuthenticateSudo) _ = TerminalSudoAuthentication.BuildCommand(request.CommandText);
+        // Ordinary follow-up commands must use the same session authentication as
+        // the password submission. Each SSH exec has its own sudo timestamp context.
+        var authenticateSudo = request.AuthenticateSudo ||
+            (request.StandardInput is null && TerminalSudoAuthentication.TryGetOperation(request.CommandText, out _));
 
         await state.AiCommandGate.WaitAsync(cancellationToken);
         try
         {
             EnsureSessionIsActive(state);
             var commandInput = request.StandardInput;
-            if (request.AuthenticateSudo && commandInput is null)
+            if (authenticateSudo && commandInput is null)
             {
                 lock (state.SyncRoot)
                 {
@@ -324,7 +328,7 @@ public sealed class SshTerminalSessionService(
                     else state.ProtectedSudoInput = null;
                 }
             }
-            var executionCommand = request.AuthenticateSudo
+            var executionCommand = authenticateSudo
                 ? commandInput is null
                     ? "exec </dev/null; /usr/bin/sudo -n -- " + GetSudoOperation(request.CommandText)
                     : TerminalSudoAuthentication.BuildCommand(request.CommandText)
@@ -403,7 +407,7 @@ public sealed class SshTerminalSessionService(
                 var completedAt = DateTimeOffset.UtcNow;
                 var output = RedactSensitiveInput(outputBuilder.ToString(), commandInput);
                 var error = RedactSensitiveInput(errorBuilder.ToString(), commandInput);
-                if (request.AuthenticateSudo && commandInput is not null)
+                if (authenticateSudo && commandInput is not null)
                 {
                     lock (state.SyncRoot)
                     {

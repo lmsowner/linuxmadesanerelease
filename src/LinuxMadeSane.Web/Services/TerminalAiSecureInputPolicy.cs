@@ -34,7 +34,7 @@ public static partial class TerminalAiSecureInputPolicy
     private static partial Regex StartsWithSudo();
 
     [GeneratedRegex(
-        @"(?:interactive authentication is required|LMS_ADMIN_ACCESS_REQUIRED|LMS_SUDO_AUTHENTICATION_FAILED|a password is required|a terminal is required to read the password|no tty present|\[sudo\]\s*password|password for\s+[^:\r\n]+:)",
+        @"(?:interactive authentication is required|LMS_ADMIN_ACCESS_REQUIRED|LMS_SUDO_AUTHENTICATION_FAILED|a password is required|a terminal is required to read the password|no interactive terminal|no tty present|sudo[^\r\n.]{0,80}(?:could not authenticate|administrator access failed|authentication failed)|\[sudo\]\s*password|password for\s+[^:\r\n]+:)",
         RegexOptions.IgnoreCase)]
     private static partial Regex SudoPasswordFailure();
 }

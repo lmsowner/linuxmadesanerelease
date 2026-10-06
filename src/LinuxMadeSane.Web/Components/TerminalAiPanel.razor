@@ -458,9 +458,11 @@ Selected terminal content:
         {
             var commandCount = 0;
             var recoveryTurns = 0;
+            var authenticatedInspectionAttempted = false;
 
-            if (requestTab.PendingSudoAuthentication)
+            if (requestTab.PendingSudoAuthentication || TerminalAiSecureInputPolicy.HasSudoAuthenticationFailure(requestText))
             {
+                authenticatedInspectionAttempted = true;
                 requestTab.PendingSudoAuthentication = false;
                 // The host updater already established that sudo needs authentication.
                 // Prompt before asking the model: do not depend on it proposing sudo.
@@ -508,6 +510,25 @@ Selected terminal content:
 
                 if (string.IsNullOrWhiteSpace(result.AssistantEntry.SuggestedCommand))
                 {
+                    // A model may describe the missing administrator authentication
+                    // instead of proposing a command. LMS owns that recovery flow.
+                    if (!authenticatedInspectionAttempted &&
+                        TerminalAiSecureInputPolicy.HasSudoAuthenticationFailure(result.AssistantEntry.Content))
+                    {
+                        authenticatedInspectionAttempted = true;
+                        var inspection = await ExecuteWithSecureAuthenticationAsync(
+                            TerminalSudoAuthentication.UpdateInspectionCommand, cancellationToken);
+                        if (inspection is null) return;
+                        latestStructuredCommandOutput = TerminalAiCommandEvidenceFormatter.Format(inspection);
+                        AddSystemEntry(latestStructuredCommandOutput);
+                        if (TerminalAiSecureInputPolicy.RequiresSudoPassword(inspection.CommandText, inspection))
+                        {
+                            panelError = "Administrator authentication failed on the connected host. Check this account's Linux password and sudo permission.";
+                            return;
+                        }
+                        recoveryTurns++;
+                        continue;
+                    }
                     agentStatus = string.Empty;
                     return;
                 }
@@ -522,7 +543,10 @@ Selected terminal content:
                 await InvokeAsync(StateHasChanged);
                 try
                 {
-                    var commandResult = await ExecuteSuggestedCommandAsync(normalizedCommand, cancellationToken);
+                    var commandResult = TerminalAiSecureInputPolicy.TryPrepareSudoPasswordCommand(normalizedCommand, out _)
+                        ? await ExecuteWithSecureAuthenticationAsync(normalizedCommand, cancellationToken)
+                        : await ExecuteSuggestedCommandAsync(normalizedCommand, cancellationToken);
+                    if (commandResult is null) return;
                     if (TerminalAiSecureInputPolicy.RequiresSudoPassword(normalizedCommand, commandResult))
                     {
                         var authenticatedResult = await ExecuteWithSecureAuthenticationAsync(normalizedCommand, cancellationToken);
