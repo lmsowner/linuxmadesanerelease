@@ -47,7 +47,8 @@ public static class ExposurePresentation
     private static bool SameBinding(ExposureEntry listener, ExposureEntry container)
     {
         var left = Binding(listener.Local); var right = Binding(container.Local);
-        var protocol = listener.Reasoning.Any(x => x.StartsWith("Observed " + right.Protocol + " listening socket.", StringComparison.OrdinalIgnoreCase));
+        var protocol = listener.Reasoning.Any(x => new[] { right.Protocol, right.Protocol + "4", right.Protocol + "6" }
+            .Any(protocol => x.StartsWith("Observed " + protocol + " listening socket.", StringComparison.OrdinalIgnoreCase)));
         return left.Port.Length > 0 && left.Port == right.Port && left.Address == right.Address && right.Protocol.Length > 0 && protocol;
     }
 }
