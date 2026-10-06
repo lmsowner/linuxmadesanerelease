@@ -10,5 +10,6 @@ public enum ScheduledTaskKind
     ShellScript = 2,
     SystemUpdate = 3,
     Runbook = 4,
-    Cleanup = 5
+    Cleanup = 5,
+    HostBackup = 6
 }

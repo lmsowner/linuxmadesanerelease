@@ -16,4 +16,6 @@ public interface ILocalSystemMaintenanceService
     Task<LocalDiskCleanupResult> CleanupDiskAsync(CancellationToken cancellationToken = default);
 
     Task RebootAsync(CancellationToken cancellationToken = default);
+    Task ShutdownAsync(CancellationToken cancellationToken = default) =>
+        Task.FromException(new NotSupportedException("Host shutdown is unavailable."));
 }

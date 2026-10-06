@@ -19,7 +19,8 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
     LinuxMadeSaneDbContext dbContext,
     ILinuxCommandRunner commandRunner,
     ISavedCommandStore savedCommandStore,
-    IConfiguration configuration) : ILinuxSchedulingModuleDataService
+    IConfiguration configuration,
+    IEnumerable<IScheduledTaskHandler>? taskHandlers = null) : ILinuxSchedulingModuleDataService
 {
     private const int TaskLogLineLimit = 400;
     private readonly string schedulerCallbackBaseUrl = ResolveSchedulerCallbackBaseUrl(configuration);
@@ -107,7 +108,7 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         CancellationToken cancellationToken = default)
     {
         var task = await GetTaskAsync(id, cancellationToken);
-        if (task is null || !IsValidExecutionToken(task.ExecutionToken, executionToken))
+        if (task is null || !IsValidExecutionToken(task.ExecutionToken, executionToken) || (task.TaskKind == ScheduledTaskKind.HostBackup && !task.IsEnabled))
         {
             return new ScheduledTaskRunResult(false, "Scheduled task trigger rejected.");
         }
@@ -120,6 +121,16 @@ public sealed class SqliteLinuxSchedulingModuleDataService(
         CancellationToken cancellationToken)
     {
         await EnsureLogDirectoryAsync(cancellationToken);
+        var handler = taskHandlers?.FirstOrDefault(item => item.CanHandle(task));
+        if (handler is not null)
+        {
+            await AppendSchedulerLogAsync($"Starting {task.Name} via LMS handler.", cancellationToken);
+            var handled = await handler.ExecuteAsync(task, cancellationToken);
+            await AppendSchedulerLogAsync(handled.Summary, cancellationToken);
+            return handled;
+        }
+        if (task.TaskKind == ScheduledTaskKind.HostBackup)
+            return new(false, "The LMS backup handler is unavailable. No shell command was executed.");
         var executionCommand = await ResolveExecutionCommandAsync(task, cancellationToken);
         if (string.IsNullOrWhiteSpace(executionCommand))
         {

@@ -1,0 +1,64 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@page "/system"
+@page "/system/{Section}"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@using LinuxMadeSane.Application.Contracts.Infrastructure
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Web.Components.Infrastructure
+@inject IInfrastructureDiagnosticsService Diagnostics
+@inject NavigationManager Navigation
+<PageTitle>System | Linux Made Sane</PageTitle>
+<div class="page-shell">
+    <header><h1>System</h1><p>Host backup, power protection and time diagnostics.</p></header>
+    <TabControl ActiveValue="@(Section ?? "time")" ActiveValueChanged="Navigate" Class="page-tab-control" PanelClass="page-tab-panel">
+        <ChildContent>
+            <TabPage Value="backup" Title="Backup & Restore"><ChildContent><BackupPanel /></ChildContent></TabPage>
+            <TabPage Value="ups" Title="Power / UPS"><ChildContent><UpsPanel /></ChildContent></TabPage>
+            <TabPage Value="time" Title="Time"><ChildContent>
+                <UiCommandButton Label="@(busy ? "Reading time status…" : "Refresh")" Disabled="@busy" OnClick="Load" />
+                @if (time is not null)
+                {
+                    <section class="surface-card">
+                        <h2>@time.Synchronization</h2>
+                        <dl><dt>Local time</dt><dd>@time.LocalTime.ToString("yyyy-MM-dd HH:mm:ss zzz")</dd>
+                        <dt>UTC</dt><dd>@time.UtcTime.ToString("yyyy-MM-dd HH:mm:ss 'UTC'")</dd>
+                        <dt>Timezone</dt><dd>@time.Timezone</dd><dt>Provider</dt><dd>@time.Provider · @time.ServiceState</dd>
+                        <dt>Active source</dt><dd>@time.ActiveSource</dd><dt>Estimated offset</dt><dd>@time.EstimatedOffset</dd>
+                        <dt>Last reference update</dt><dd>@time.LastSynchronization</dd></dl>
+                        @foreach (var notice in time.Notices) { <p class="callout">@notice</p> }
+                        <h3>Sources and synchronization details</h3><pre>@time.SourceDetails</pre>
+                        <div class="infrastructure-actions"><UiCommandButton Label="Restart existing time service" Disabled="@(busy || time.Provider == "Not identified")" OnClick="(() => Control(false))" />
+                        <UiCommandButton Label="Enable existing time service at boot" Disabled="@(busy || time.Provider == "Not identified")" OnClick="(() => Control(true))" /></div>
+                    </section>
+                }
+                <p>LMS diagnoses your existing Linux time provider. It does not replace it.</p>
+            </ChildContent></TabPage>
+        </ChildContent>
+    </TabControl>
+    @if (busy) { <p class="callout" aria-busy="true">Reading system information…</p> }
+    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+</div>
+@code {
+    [Parameter] public string? Section { get; set; }
+    private TimeDiagnostics? time;
+    private bool busy;
+    private string? error;
+    protected override async Task OnParametersSetAsync() { if (Section is null or "time") await Load(); }
+    private void Navigate(string value) => Navigation.NavigateTo("/system/" + value);
+    private async Task Load()
+    {
+        busy = true; error = null; await InvokeAsync(StateHasChanged); await Task.Yield();
+        try { time = await Diagnostics.GetTimeAsync(); }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+    private async Task Control(bool enable)
+    {
+        busy = true; error = null;
+        try { await Diagnostics.ControlTimeServiceAsync(enable); await Load(); }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+}

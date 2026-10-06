@@ -91,6 +91,7 @@ public static class ScheduledTaskCompiler
     {
         var innerCommand = editor.TaskKind switch
         {
+            ScheduledTaskKind.HostBackup => "LMS host backup",
             ScheduledTaskKind.ShellCommand => editor.CommandText.Trim(),
             ScheduledTaskKind.Runbook => RunbookExecutionCommandBuilder.BuildSchedulerCommand(editor.CommandText),
             ScheduledTaskKind.ShellScript => BuildShellScriptCommand(editor),
@@ -218,6 +219,7 @@ public static class ScheduledTaskCompiler
     private static string BuildDisplayPreview(ScheduledTaskEditor editor) =>
         editor.TaskKind switch
         {
+            ScheduledTaskKind.HostBackup => "LMS host backup",
             ScheduledTaskKind.ShellCommand => editor.CommandText.Trim(),
             ScheduledTaskKind.Runbook => BuildRunbookDisplayPreview(editor),
             ScheduledTaskKind.ShellScript => BuildShellScriptDisplayPreview(editor),

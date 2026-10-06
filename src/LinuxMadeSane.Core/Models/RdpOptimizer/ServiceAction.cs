@@ -10,4 +10,7 @@ public sealed record ServiceAction(
     string ServiceName,
     string Reason,
     bool IsDestructive,
-    string PlannedCommand);
+    string PlannedCommand)
+{
+    public bool RuntimeOnly { get; init; }
+}

@@ -137,6 +137,12 @@ public sealed class LocalSystemMaintenanceService : ILocalSystemMaintenanceServi
     }
 
     public async Task RebootAsync(CancellationToken cancellationToken = default)
+        => await PowerActionAsync("reboot", cancellationToken);
+
+    public async Task ShutdownAsync(CancellationToken cancellationToken = default)
+        => await PowerActionAsync("poweroff", cancellationToken);
+
+    private async Task PowerActionAsync(string action, CancellationToken cancellationToken)
     {
         EnsureLinux();
         await operationGate.WaitAsync(cancellationToken);
@@ -145,15 +151,15 @@ public sealed class LocalSystemMaintenanceService : ILocalSystemMaintenanceServi
             var result = await commandRunner.RunAsync(
                 new LinuxCommandRequest(
                     "systemctl",
-                    ["reboot"],
+                    [action],
                     RequiresSudo: true,
                     Timeout: RebootCommandTimeout,
-                    Description: "Reboot the LMS server"),
+                    Description: $"Request host {action}"),
                 dryRun: false,
                 cancellationToken);
             if (result.ExitCode != 0)
             {
-                throw new InvalidOperationException($"The reboot request failed: {BuildFailureDetail(result)}");
+                throw new InvalidOperationException($"The {action} request failed: {BuildFailureDetail(result)}");
             }
         }
         finally

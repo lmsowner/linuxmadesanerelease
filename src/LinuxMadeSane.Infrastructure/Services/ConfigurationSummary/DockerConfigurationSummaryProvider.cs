@@ -10,8 +10,24 @@ using LinuxMadeSane.Core.Models.RdpOptimizer;
 namespace LinuxMadeSane.Infrastructure.Services.ConfigurationSummary;
 
 public sealed class DockerConfigurationSummaryProvider(ILinuxCommandRunner commandRunner)
-    : ILmsConfigurationSummaryProvider
+    : ILmsConfigurationSummaryProvider, IDockerInventoryReader
 {
+    public async Task<IReadOnlyList<DockerContainerObservation>> GetContainersAsync(CancellationToken token = default)
+    {
+        var result = await RunAsync(["ps", "-a", "--format", "{{json .}}"], "Read Docker inventory", false, token);
+        if (result.ExitCode != 0 && result.ExitCode != 127)
+            result = await RunAsync(["ps", "-a", "--format", "{{json .}}"], "Read Docker inventory", true, token);
+        if (result.ExitCode == 127) return [];
+        if (result.ExitCode != 0) throw new InvalidOperationException("Docker inventory unavailable: " + result.StandardError);
+        var inventory = new List<DockerContainerObservation>();
+        foreach (var line in result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            using var document = JsonDocument.Parse(line); var value = document.RootElement;
+            inventory.Add(new(ReadString(value, "Names") ?? "", ReadString(value, "State") == "running",
+                ReadString(value, "Ports") ?? "", ReadString(value, "Networks") ?? ""));
+        }
+        return inventory;
+    }
     public string ModuleName => "Docker";
 
     public int SortOrder => 40;

@@ -22,6 +22,10 @@ public sealed class SqliteDatabaseInitializer(
     {
         EnsureDatabaseDirectoryExists();
         await dbContext.Database.EnsureCreatedAsync(cancellationToken);
+        await dbContext.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS infrastructure_state (
+                Key TEXT NOT NULL PRIMARY KEY, Json TEXT NOT NULL, UpdatedAtUtc TEXT NOT NULL);
+            """, cancellationToken);
         if (!OperatingSystem.IsWindows())
         {
             var databasePath = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(dbContext.Database.GetConnectionString()).DataSource;

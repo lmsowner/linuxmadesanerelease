@@ -1,0 +1,40 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using LinuxMadeSane.Application.Contracts.Infrastructure
+@using LinuxMadeSane.Application.Interfaces
+@inject IInfrastructureDiagnosticsService Diagnostics
+@if (status is null)
+{
+    <p class="callout" aria-busy="true">Checking required packages…</p>
+}
+else if (!status.Installed)
+{
+    <section class="surface-card">
+        <strong>@Feature requires: @string.Join(", ", status.Packages)</strong>
+        <p>@status.Explanation</p>
+        <UiCommandButton Label="@(busy ? "Installing…" : "Install & Configure")" Disabled="@(busy || !status.CanInstall)" OnClick="Install" />
+        @if (error is not null) { <p class="callout error">@error</p> }
+    </section>
+}
+else { @ChildContent }
+@code {
+    [Parameter, EditorRequired] public string Feature { get; set; } = "";
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public EventCallback OnInstalled { get; set; }
+    private FeaturePackageStatus? status;
+    private string? error;
+    private bool busy;
+    protected override async Task OnInitializedAsync()
+    {
+        try { status = await Diagnostics.GetPackageStatusAsync(Feature); }
+        catch (Exception e) { error = e.Message; status = new(Feature, [], false, false, e.Message); }
+    }
+    private async Task Install()
+    {
+        busy = true; error = null;
+        try { await Diagnostics.InstallPackagesAsync(Feature); status = await Diagnostics.GetPackageStatusAsync(Feature); await OnInstalled.InvokeAsync(); }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+}

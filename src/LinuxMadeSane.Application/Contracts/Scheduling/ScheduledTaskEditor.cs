@@ -168,6 +168,10 @@ public sealed class ScheduledTaskEditor : IValidatableObject
     {
         switch (TaskKind)
         {
+            case ScheduledTaskKind.HostBackup:
+                if (!Guid.TryParse(CommandText, out _) || RunAsUser != RootUserName)
+                    yield return new ValidationResult("Host backups require a saved backup set and root execution.", [nameof(CommandText)]);
+                break;
             case ScheduledTaskKind.ShellCommand:
                 if (string.IsNullOrWhiteSpace(CommandText))
                 {

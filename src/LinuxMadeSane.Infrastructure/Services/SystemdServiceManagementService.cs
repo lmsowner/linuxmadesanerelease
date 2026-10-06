@@ -55,7 +55,7 @@ public sealed class SystemdServiceManagementService(ILinuxCommandRunner commandR
             var result = await commandRunner.RunAsync(
                 new LinuxCommandRequest(
                     "systemctl",
-                    [verb, action.ServiceName],
+                    action.RuntimeOnly ? [verb, "--runtime", action.ServiceName] : [verb, action.ServiceName],
                     true,
                     TimeSpan.FromMinutes(2),
                     $"{action.Action} {action.ServiceName}"),
@@ -93,7 +93,7 @@ public sealed class SystemdServiceManagementService(ILinuxCommandRunner commandR
             name,
             unitFileState.Contains("enabled", StringComparison.OrdinalIgnoreCase),
             activeState.Equals("active", StringComparison.OrdinalIgnoreCase),
-            unitFileState.Equals("masked", StringComparison.OrdinalIgnoreCase),
+            unitFileState.Equals("masked", StringComparison.OrdinalIgnoreCase) || unitFileState.Equals("masked-runtime", StringComparison.OrdinalIgnoreCase),
             unitFileState,
             activeState,
             loadState.Equals("not-found", StringComparison.OrdinalIgnoreCase) ? $"{description} (not found)" : description);

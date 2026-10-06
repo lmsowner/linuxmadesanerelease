@@ -1,0 +1,109 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using LinuxMadeSane.Application.Contracts.Infrastructure
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.HomeLab
+@using LinuxMadeSane.Core.Models.Services
+@inject IUpsManagementService Ups
+@inject IInfrastructureDiagnosticsService Diagnostics
+@inject IHomeLabService HomeLab
+@inject IServiceOperationsService ServiceOperations
+<FeaturePackageGate Feature="UPS" OnInstalled="Load">
+<div class="ups-workspace">
+    <p>Network UPS Tools provides UPS drivers and status. You can use a local supported USB UPS or an existing remote NUT server.</p>
+    <div class="infrastructure-actions"><UiCommandButton Label="Refresh" Disabled="@busy" OnClick="Load" /><UiCommandButton Label="Detect local USB UPS" HideIcon="true" Disabled="@busy" OnClick="Scan" /></div>
+    @if (workspace is not null)
+    {
+        @if (workspace.LocalSources.Count == 0) { <p class="callout">No configured local UPS is available. Detect supported USB hardware or enter a remote NUT source below. VMs and containers may not have direct UPS access.</p> }
+        @if (workspace.LocalSources.Count > 0)
+        { <UiSelectField TValue="string" Label="Configured local UPS" @bind-Value="policy.Source"><option value="">Choose a UPS</option>@foreach (var source in workspace.LocalSources) { <option value="@source">@source</option> }</UiSelectField> }
+        <UiTextField Label="UPS source" Helper="UPS name@server, for example apc@nas.local or apc@192.168.1.20:3493" @bind-Value="policy.Source" />
+        <UiCommandButton Label="Test connection & read status" HideIcon="true" Disabled="@busy" OnClick="Test" />
+        @if (status is not null)
+        {
+            <section class="surface-card"><h3>@Value("ups.mfr") @Value("ups.model")</h3>
+                <p>@status.Message</p>
+                @if (status.Available)
+                {
+                    <div class="ups-metrics">
+                        <span>Status <strong>@Value("ups.status")</strong></span><span>Battery <strong>@Value("battery.charge")%</strong></span>
+                        <span>Load <strong>@Value("ups.load")%</strong></span><span>Runtime <strong>@Runtime</strong></span>
+                        <span>Input <strong>@Value("input.voltage") V</strong></span><span>Output <strong>@Value("output.voltage") V</strong></span>
+                        <span>Serial <strong>@Value("ups.serial")</strong></span>
+                    </div><small>Checked @status.CheckedUtc.ToLocalTime().ToString("g")</small>
+                }
+            </section>
+        }
+        @if (workspace.HardwareScan.Length > 0)
+        {
+            <details><summary>USB detection details</summary><pre>@workspace.HardwareScan</pre></details>
+            @if (drivers.Count > 0)
+            {
+                <h3>Set up detected USB UPS</h3>
+                <UiTextField Label="UPS name" @bind-Value="localName" />
+                <UiSelectField TValue="string" Label="Detected driver" @bind-Value="driver">@foreach (var item in drivers) { <option value="@item">@item</option> }</UiSelectField>
+                <UiCheckboxField Label="Allow LMS to add this UPS to the existing NUT configuration" Helper="Existing entries are preserved and configuration is backed up. This starts the local driver and NUT server; no shutdown policy is enabled." @bind-Value="adopt" />
+                <UiCommandButton Label="Configure detected UPS" HideIcon="true" Disabled="@(busy || !adopt)" OnClick="Configure" />
+            }
+            else { <p>No compatible local USB UPS was detected. Existing serial or advanced NUT configuration is preserved.</p> }
+        }
+        <h3>Power failure policy</h3>
+        <p>Actions run only while NUT reports that the UPS is on battery. Monitoring does not stop or restart workloads until you enable this policy.</p>
+        <UiCheckboxField Label="Enable power failure policy" @bind-Value="policy.Enabled" />
+        <UiNumberField TValue="int" Label="Stop selected Docker workloads after (minutes)" @bind-Value="policy.StopContainersAfterMinutes" min="1" max="1440" />
+        @foreach (var container in containers) { <UiCheckboxField Label="@container.DisplayName" Value="@policy.ContainerIds.Contains(container.Id)" ValueChanged="(value => SelectContainer(container.Id, value))" /> }
+        <UiNumberField TValue="int" Label="Stop selected services after (minutes)" @bind-Value="policy.StopServicesAfterMinutes" min="1" max="1440" />
+        @if (serviceNotice is not null) { <p class="callout">@serviceNotice</p> }
+        <UiSelectField TValue="string" Label="Add a non-essential service" Value="@selectedService" ValueChanged="AddService"><option value="">Select a service</option>@foreach (var service in services) { <option value="@service.UnitName">@service.DisplayName (@service.UnitName)</option> }</UiSelectField>
+        @foreach (var service in policy.Services.ToArray()) { <div class="infrastructure-actions"><span>@service</span><UiCommandButton Label="Remove" OnClick="(() => policy.Services.Remove(service))" /></div> }
+        <UiCheckboxField Label="Gracefully shut down this host when battery is low" @bind-Value="policy.ShutdownHost" />
+        @if (policy.ShutdownHost)
+        {
+            <UiNumberField TValue="int" Label="Shutdown below battery percentage" @bind-Value="policy.ShutdownBelowPercent" min="1" max="95" />
+            <UiCheckboxField Label="I authorize this host to shut down during a power failure" Helper="Ensure you have access to start the host again. NUT's existing critical shutdown configuration remains separate and unchanged." @bind-Value="policy.ShutdownConfirmed" />
+        }
+        <UiCommandButton Label="Test & save policy" HideIcon="true" Disabled="@busy" OnClick="Save" />
+        <h3>Recent power events</h3>@foreach (var item in workspace.Events.Take(20)) { <p>@item</p> }
+    }
+    @if (busy) { <p class="callout" aria-busy="true">@progress</p> }
+    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+</div>
+</FeaturePackageGate>
+@code {
+    private UpsWorkspace? workspace;
+    private UpsSnapshot? status;
+    private UpsPolicy policy = new();
+    private IReadOnlyList<HomeLabAppInstallation> containers = [];
+    private IReadOnlyList<LinuxServiceDefinition> services = [];
+    private List<string> drivers = [];
+    private bool busy, adopt;
+    private string localName = "ups", driver = "", selectedService = "", progress = "";
+    private string? error, serviceNotice;
+    protected override async Task OnInitializedAsync() { if ((await Diagnostics.GetPackageStatusAsync("UPS")).Installed) await Load(); }
+    private async Task Operation(string label, Func<Task> operation)
+    { busy = true; error = null; progress = label; await InvokeAsync(StateHasChanged); await Task.Yield(); try { await operation(); } catch (Exception e) { error = e.Message; } finally { busy = false; } }
+    private Task Load() => Operation("Reading UPS configuration…", async () =>
+    {
+        workspace = await Ups.GetAsync(); policy = workspace.Policy;
+        containers = (await HomeLab.GetWorkspaceSnapshotAsync()).Installations;
+        serviceNotice = null;
+        try { services = (await ServiceOperations.GetDashboardAsync()).Services.Where(item => !item.UnitName.StartsWith("nut-") && !item.UnitName.Contains("linux-made-sane")).ToArray(); }
+        catch (Exception e) when (e is InvalidOperationException or IOException)
+        { services = []; serviceNotice = "Service controls are unavailable in this environment. UPS status and remote NUT connections can still be used. Containers may not run a systemd service manager."; }
+        if (policy.Source.Length > 0) status = await Ups.InspectAsync(policy.Source);
+    });
+    private Task Scan() => Operation("Detecting local USB UPS devices…", async () =>
+    {
+        workspace = await Ups.GetAsync(true);
+        drivers = System.Text.RegularExpressions.Regex.Matches(workspace.HardwareScan, "(?m)^\\s*driver\\s*=\\s*\"?([a-zA-Z0-9_-]+)\"?\\s*$").Select(match => match.Groups[1].Value).Distinct().ToList();
+        driver = drivers.FirstOrDefault() ?? "";
+    });
+    private Task Test() => Operation("Testing NUT connection…", async () => status = await Ups.InspectAsync(policy.Source));
+    private Task Save() => Operation("Testing & saving UPS policy…", async () => { await Ups.SavePolicyAsync(policy); workspace = await Ups.GetAsync(); });
+    private Task Configure() => Operation("Validating & configuring the detected UPS…", async () => { await Ups.ConfigureLocalAsync(localName, driver, "auto", adopt); workspace = await Ups.GetAsync(); policy.Source = localName + "@localhost"; status = await Ups.InspectAsync(policy.Source); });
+    private string Value(string key) => status?.Values.GetValueOrDefault(key) ?? "—";
+    private string Runtime => double.TryParse(Value("battery.runtime"), out var seconds) ? Math.Round(seconds / 60).ToString() + " minutes" : "Not reported";
+    private void SelectContainer(Guid id, bool selected) { if (selected) policy.ContainerIds.Add(id); else policy.ContainerIds.Remove(id); }
+    private void AddService(string value) { if (value.Length > 0 && !policy.Services.Contains(value)) policy.Services.Add(value); selectedService = ""; }
+}

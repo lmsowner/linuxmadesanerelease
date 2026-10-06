@@ -9,6 +9,7 @@ namespace LinuxMadeSane.Infrastructure.Persistence;
 
 public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbContext> options) : DbContext(options)
 {
+    public DbSet<InfrastructureStateEntity> InfrastructureStates => Set<InfrastructureStateEntity>();
     public DbSet<ManagedHostEntity> ManagedHosts => Set<ManagedHostEntity>();
     public DbSet<SavedCommandEntity> SavedCommands => Set<SavedCommandEntity>();
     public DbSet<SambaShareEntity> SambaShares => Set<SambaShareEntity>();
@@ -80,6 +81,11 @@ public sealed class LinuxMadeSaneDbContext(DbContextOptions<LinuxMadeSaneDbConte
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<InfrastructureStateEntity>(entity =>
+        {
+            entity.ToTable("infrastructure_state");
+            entity.HasKey(item => item.Key);
+        });
         modelBuilder.Entity<ManagedHostEntity>(entity =>
         {
             entity.ToTable("managed_hosts");

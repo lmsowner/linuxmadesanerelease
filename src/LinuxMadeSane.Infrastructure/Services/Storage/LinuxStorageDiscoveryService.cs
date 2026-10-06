@@ -18,6 +18,7 @@ public sealed class LinuxStorageDiscoveryService(
     ILogger<LinuxStorageDiscoveryService> logger,
     TimeProvider timeProvider) : IStorageDiscoveryService
 {
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, LinuxMadeSane.Application.Contracts.Infrastructure.SmartHealth> lastHealth = new(StringComparer.Ordinal);
     private const long MiB = 1024L * 1024L;
     private const long GiB = 1024L * MiB;
     private static readonly TimeSpan DiscoveryTimeout = TimeSpan.FromSeconds(20);
@@ -82,6 +83,10 @@ public sealed class LinuxStorageDiscoveryService(
         return topology with
         {
             Disks = disksWithHealth,
+            Warnings = topology.Warnings.Concat(disksWithHealth.SelectMany(disk => lastHealth.TryGetValue(disk.DevicePath, out var health)
+                ? health.Warnings.Select(warning => disk.DevicePath + ": " + warning) : []))
+                .Concat(disksWithHealth.Where(disk => disk.Health == "Failing")
+                .Select(disk => $"{disk.DevicePath} reports failed SMART health. Protect your data and review Disk health.")).Distinct().ToArray(),
             Fingerprint = CreateFingerprint(disksWithHealth, topology.FileSystems)
         };
     }
@@ -742,37 +747,36 @@ public sealed class LinuxStorageDiscoveryService(
             : 0;
     }
 
+    public async Task<IReadOnlyList<LinuxMadeSane.Application.Contracts.Infrastructure.SmartHealth>> ReadSmartAsync(CancellationToken cancellationToken = default)
+    {
+        var topology = await DiscoverAsync(cancellationToken);
+        var results = new List<LinuxMadeSane.Application.Contracts.Infrastructure.SmartHealth>();
+        foreach (var disk in topology.Disks)
+            results.Add(lastHealth.TryGetValue(disk.DevicePath, out var health) ? health : new(disk.DevicePath, false, null, disk.Model,
+                null, null, null, new Dictionary<string, string>(), [], "", "This block device does not expose supported SMART information."));
+        return results;
+    }
+
+    private async Task<LinuxMadeSane.Application.Contracts.Infrastructure.SmartHealth> ReadDetailedHealthAsync(StorageDisk disk, CancellationToken token)
+    {
+        if (!IsSafeDevicePath(disk.DevicePath)) throw new InvalidOperationException("Invalid disk path.");
+        var result = await commandRunner.RunAsync(new LinuxCommandRequest("smartctl", ["-a", "-j", "-n", "standby", disk.DevicePath],
+            true, DiscoveryTimeout, $"Read health for {disk.DevicePath}") { IsOptionalExternalTool = true }, false, token);
+        LinuxMadeSane.Application.Contracts.Infrastructure.SmartHealth health;
+        try { health = LinuxMadeSane.Infrastructure.Services.Infrastructure.InfrastructureDiagnosticsService.ParseSmart(disk.DevicePath, result.StandardOutput); }
+        catch (JsonException) { health = new(disk.DevicePath, false, null, disk.Model, null, null, null,
+            new Dictionary<string, string>(), [], result.StandardOutput,
+            "SMART unavailable. Virtual disks, containers, adapters or sleeping disks may not expose it. " + result.StandardError); }
+        lastHealth[disk.DevicePath] = health;
+        return health;
+    }
+
     private async Task<StorageDisk> ReadDiskHealthAsync(StorageDisk disk, CancellationToken cancellationToken)
     {
-        if (!IsSafeDevicePath(disk.DevicePath))
-        {
-            return disk with { Health = "Not checked" };
-        }
-
-        var result = await commandRunner.RunAsync(
-            new LinuxCommandRequest(
-                "smartctl",
-                ["--json=c", "--health", "--attributes", disk.DevicePath],
-                RequiresSudo: true,
-                DiscoveryTimeout,
-                $"Read health for {disk.DevicePath}")
-            {
-                IsOptionalExternalTool = true
-            },
-            dryRun: false,
-            cancellationToken);
-        if (result.ExitCode == 127 || string.IsNullOrWhiteSpace(result.StandardOutput))
-        {
-            return disk with { Health = "Not checked" };
-        }
-
-        var health = ParseSmartHealth(result.StandardOutput);
-        return disk with
-        {
-            Health = health.Health,
-            TemperatureCelsius = health.TemperatureCelsius,
-            WearPercent = health.WearPercent
-        };
+        if (!IsSafeDevicePath(disk.DevicePath)) return disk with { Health = "Not checked" };
+        var health = await ReadDetailedHealthAsync(disk, cancellationToken);
+        return disk with { Health = health.Healthy == false ? "Failing" : health.Healthy == true ? "Good" : "Unavailable",
+            TemperatureCelsius = health.Temperature, WearPercent = health.WearPercent };
     }
 
     internal static (string Health, int? TemperatureCelsius, int? WearPercent) ParseSmartHealth(string json)

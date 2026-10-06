@@ -37,6 +37,7 @@ public static class DependencyInjection
             Path.Combine(contentRootPath, "data", "protection-keys"),
             contentRootPath));
         dataProtectionDirectory.Create();
+        services.AddSingleton(new LinuxMadeSane.Infrastructure.Services.Infrastructure.InfrastructureHostPaths(dataProtectionDirectory.FullName, contentRootPath));
         if (!OperatingSystem.IsWindows())
         {
             File.SetUnixFileMode(dataProtectionDirectory.FullName, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -229,6 +230,18 @@ public static class DependencyInjection
         services.AddScoped<ISshHostDiscoveryService, SshHostDiscoveryService>();
         services.AddScoped<IDesktopInspectionService, DesktopInspectionService>();
         services.AddScoped<IPackageManagementService, AptPackageManagementService>();
+        services.AddScoped<LinuxMadeSane.Application.Interfaces.IUpsManagementService,
+            LinuxMadeSane.Infrastructure.Services.Infrastructure.NutUpsManagementService>();
+        services.AddHostedService<LinuxMadeSane.Infrastructure.Services.Infrastructure.UpsPolicyMonitor>();
+        services.AddScoped<LinuxMadeSane.Infrastructure.Services.Infrastructure.ResticHostBackupService>();
+        services.AddScoped<LinuxMadeSane.Application.Interfaces.IHostBackupService>(provider =>
+            provider.GetRequiredService<LinuxMadeSane.Infrastructure.Services.Infrastructure.ResticHostBackupService>());
+        services.AddScoped<IScheduledTaskHandler>(provider =>
+            provider.GetRequiredService<LinuxMadeSane.Infrastructure.Services.Infrastructure.ResticHostBackupService>());
+        services.AddScoped<LinuxMadeSane.Application.Interfaces.IDhcpManagementService,
+            LinuxMadeSane.Infrastructure.Services.Infrastructure.KeaDhcpManagementService>();
+        services.AddScoped<LinuxMadeSane.Application.Interfaces.IInfrastructureDiagnosticsService,
+            LinuxMadeSane.Infrastructure.Services.Infrastructure.InfrastructureDiagnosticsService>();
         services.AddScoped<IServiceManagementService, SystemdServiceManagementService>();
         services.AddScoped<ISessionConfigurationService, XrdpSessionConfigurationService>();
         services.AddScoped<IRestoreSnapshotService, JsonRestoreSnapshotService>();
@@ -247,7 +260,9 @@ public static class DependencyInjection
         services.AddScoped<ILmsConfigurationSummaryProvider, SystemConfigurationSummaryProvider>();
         services.AddScoped<ILmsConfigurationSummaryProvider, EdgeGatewayConfigurationSummaryProvider>();
         services.AddScoped<ILmsConfigurationSummaryProvider, TailscaleConfigurationSummaryProvider>();
-        services.AddScoped<ILmsConfigurationSummaryProvider, DockerConfigurationSummaryProvider>();
+        services.AddScoped<DockerConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider>(provider => provider.GetRequiredService<DockerConfigurationSummaryProvider>());
+        services.AddScoped<IDockerInventoryReader>(provider => provider.GetRequiredService<DockerConfigurationSummaryProvider>());
         services.AddScoped<ILmsConfigurationSummaryProvider, FirewallConfigurationSummaryProvider>();
         services.AddScoped<ILmsConfigurationSummaryProvider, SftpConfigurationSummaryProvider>();
         services.AddScoped<ILmsConfigurationSummaryProvider, SharesConfigurationSummaryProvider>();

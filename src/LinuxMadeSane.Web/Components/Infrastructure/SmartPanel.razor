@@ -1,0 +1,45 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using LinuxMadeSane.Application.Contracts.Infrastructure
+@using LinuxMadeSane.Application.Interfaces
+@inject IInfrastructureDiagnosticsService Diagnostics
+<FeaturePackageGate Feature="SMART" OnInstalled="Refresh">
+    <p>Health information from directly accessible disks. Virtual disks and sleeping drives may not expose SMART.</p>
+    <UiCommandButton Label="@(busy ? "Reading disk health…" : "Read disk health")" Disabled="@busy" OnClick="Refresh" />
+    @if (error is not null) { <p class="callout error">@error</p> }
+    @foreach (var disk in disks.Where(item => item.Available))
+    {
+        <section class="surface-card">
+            <h3>@disk.Device @disk.Model</h3>
+            @if (!disk.Available) { <p>@disk.Explanation</p> }
+            else
+            {
+                <p>Health: @(disk.Healthy == true ? "Passed" : disk.Healthy == false ? "Failed" : "Not reported") · Temperature: @(disk.Temperature?.ToString() ?? "—") °C · Power-on: @(disk.PowerOnHours?.ToString() ?? "—") hours · Lifetime used: @(disk.WearPercent?.ToString() ?? "—")%</p>
+                @foreach (var warning in disk.Warnings) { <p class="callout error" role="alert">@warning</p> }
+                <details><summary>Details</summary><dl>@foreach (var pair in disk.Details) { <dt>@pair.Key</dt><dd>@pair.Value</dd> }</dl></details>
+            }
+            <details><summary>Raw SMART data</summary><pre>@disk.RawJson</pre></details>
+        </section>
+    }
+    @if (loaded && disks.Any(item => !item.Available))
+    {
+        <p class="callout">@(disks.All(item => !item.Available) ? "No disk exposes readable SMART information here." : "Some disks do not expose readable SMART information.") This is common with virtual disks, containers, sleeping drives or unsupported adapters.</p>
+        <details><summary>Devices without SMART (@disks.Count(item => !item.Available))</summary>
+            @foreach (var disk in disks.Where(item => !item.Available)) { <details><summary>@disk.Device @disk.Model</summary><p>@disk.Explanation</p><pre>@disk.RawJson</pre></details> }
+        </details>
+    }
+    @if (loaded && disks.Count == 0) { <p class="callout">No accessible disks were found. This can be normal inside a container or VM.</p> }
+</FeaturePackageGate>
+@code {
+    private IReadOnlyList<SmartHealth> disks = [];
+    private bool busy, loaded;
+    private string? error;
+    private async Task Refresh()
+    {
+        busy = true; error = null;
+        try { disks = await Diagnostics.GetSmartAsync(); loaded = true; }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+}

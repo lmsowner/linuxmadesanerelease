@@ -1,0 +1,129 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@using LinuxMadeSane.Application.Contracts.Infrastructure
+@using LinuxMadeSane.Application.Interfaces
+@inject IDhcpManagementService Dhcp
+@inject IInfrastructureDiagnosticsService Diagnostics
+<FeaturePackageGate Feature="DHCP" OnInstalled="Load">
+    <UiCommandButton Label="@(busy ? "Reading DHCP…" : "Refresh")" Disabled="@busy" OnClick="Load" />
+    @if (workspace is null) { <p>Read the existing configuration before making changes.</p> }
+    else
+    {
+        <div class="dhcp-workspace">
+        @foreach (var notice in workspace.Notices) { <p class="dhcp-notice">@notice</p> }
+        <EditForm Model="editor" OnSubmit="Save">
+            <h3>Network settings</h3>
+            <div class="infrastructure-form-grid">
+                <UiSelectField TValue="string" Label="Listening interface" @bind-Value="editor.Interface" @bind-Value:after="SelectInterface" Compact="true" Disabled="@workspace.ReadOnly">
+                    <option value="">Select an interface</option>@foreach (var nic in workspace.Interfaces) { <option value="@nic">@nic</option> }
+                </UiSelectField>
+                <UiTextField Label="Network / prefix" @bind-Value="editor.Subnet" Compact="true" Disabled="@workspace.ReadOnly" />
+                <UiTextField Label="Gateway (router IP)" @bind-Value="editor.Gateway" Compact="true" Disabled="@workspace.ReadOnly" />
+                <UiTextField Label="Pool start" @bind-Value="editor.PoolStart" Compact="true" Disabled="@workspace.ReadOnly" />
+                <UiTextField Label="Pool end" @bind-Value="editor.PoolEnd" Compact="true" Disabled="@workspace.ReadOnly" />
+                <UiNumberField TValue="int" Label="Lease duration (seconds)" @bind-Value="editor.LeaseSeconds" Compact="true" Disabled="@workspace.ReadOnly" min="60" max="31536000" />
+                <UiTextField Label="DNS servers (comma separated)" @bind-Value="editor.DnsServers" Compact="true" Disabled="@workspace.ReadOnly" Class="dhcp-dns" />
+            </div>
+            @if (networkSuggestion is not null) { <p class="dhcp-hint">@networkSuggestion</p> }
+            <h3>Reserved addresses</h3>
+            <p class="dhcp-hint">A reservation gives a device the same IP address each time it connects.</p>
+            @if (editor.Reservations.Count == 0) { <p class="dhcp-empty">No reserved addresses.</p> }
+            else
+            {
+                <div class="infrastructure-table"><table><thead><tr><th>Device</th><th>MAC address</th><th>Reserved IP</th><th></th></tr></thead><tbody>
+                @foreach (var reservation in editor.Reservations.ToArray())
+                {
+                    <tr><td>@(string.IsNullOrWhiteSpace(reservation.Hostname) ? "Unnamed device" : reservation.Hostname)</td><td>@reservation.Mac</td><td>@reservation.Address</td><td><UiCommandButton Label="Remove" HideIcon="true" Disabled="@workspace.ReadOnly" OnClick="(() => editor.Reservations.Remove(reservation))" /></td></tr>
+                }
+                </tbody></table></div>
+            }
+            <div class="infrastructure-form-grid">
+                <UiTextField Label="MAC address" @bind-Value="mac" Compact="true" Disabled="@workspace.ReadOnly" />
+                <UiTextField Label="Reserved IP" @bind-Value="address" Compact="true" Disabled="@workspace.ReadOnly" />
+                <UiTextField Label="Device name (optional)" @bind-Value="hostname" Compact="true" Disabled="@workspace.ReadOnly" />
+            </div>
+            <div class="infrastructure-actions"><UiCommandButton Label="Check & add reservation" HideIcon="true" Disabled="@(busy || workspace.ReadOnly)" OnClick="AddReservation" /><span class="dhcp-hint">Added reservations are saved when you apply changes.</span></div>
+            <h3>Apply changes</h3>
+            <div class="dhcp-apply">
+                <UiCheckboxField Label="Allow LMS to manage this Kea configuration" Helper="Validate first, back up the original, then apply. Restore the backup if activation fails." @bind-Value="editor.AdoptExisting" Disabled="@workspace.ReadOnly" />
+                <UiCheckboxField Label="Enable DHCP on this host" @bind-Value="editor.Enabled" Disabled="@workspace.ReadOnly" />
+                @if (editor.Enabled) { <div class="infrastructure-confirmation"><UiCheckboxField Label="I have checked that no other DHCP server serves this subnet" Helper="Check your router before enabling DHCP here." @bind-Value="editor.ConfirmSoleDhcpServer" Disabled="@workspace.ReadOnly" /></div> }
+                <UiCommandButton Label="@(busy ? "Validating & applying…" : "Validate & apply")" HideIcon="true" Disabled="@(busy || workspace.ReadOnly || !editor.AdoptExisting || (editor.Enabled && !editor.ConfirmSoleDhcpServer))" OnClick="Save" />
+            </div>
+        </EditForm>
+        </div>
+        <h3>Leases</h3>
+        <div class="infrastructure-table"><table><thead><tr><th>Address</th><th>MAC</th><th>Hostname</th><th>State</th><th>Expires</th></tr></thead><tbody>
+        @foreach (var lease in workspace.Leases) { <tr><td>@lease.Address</td><td>@lease.Mac</td><td>@lease.Hostname</td><td>@(lease.Active ? "Active" : "Expired / reclaimed")</td><td>@lease.ExpiresUtc.ToLocalTime().ToString("g")</td></tr> }
+        </tbody></table></div>
+        @if (workspace.Leases.Count == 0) { <p class="dhcp-empty">No leases to display.</p> }
+        <details class="dhcp-original"><summary>Original Kea configuration</summary><pre>@workspace.ExistingConfiguration</pre></details>
+    }
+    @if (message is not null) { <p class="callout" role="status">@message</p> }
+    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+</FeaturePackageGate>
+@code {
+    [SupplyParameterFromQuery(Name = "device")] public Guid? DeviceId { get; set; }
+    private DhcpWorkspace? workspace;
+    private DhcpEditor editor = new();
+    private string mac = "", address = "", hostname = "";
+    private string? error, message, networkSuggestion;
+    private bool busy;
+    protected override async Task OnInitializedAsync()
+    {
+        if ((await Diagnostics.GetPackageStatusAsync("DHCP")).Installed) await Load();
+    }
+    private async Task Load()
+    {
+        busy = true; error = null;
+        try
+        {
+            workspace = await Dhcp.GetAsync(); editor = workspace.Editor; networkSuggestion = null;
+            if (DeviceId is { } id)
+            {
+                var device = (await Diagnostics.DiscoverDevicesAsync()).Devices.FirstOrDefault(item => item.Id == id);
+                if (device is not null) { mac = device.Mac; address = device.Addresses.FirstOrDefault(value => System.Net.IPAddress.TryParse(value, out var ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) ?? ""; hostname = device.Hostname; }
+            }
+        }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+    private void SelectInterface()
+    {
+        var networks = workspace!.InterfaceNetworks.Where(item => item.Interface == editor.Interface).ToArray();
+        networkSuggestion = null;
+        if (networks.Length == 1 && string.IsNullOrWhiteSpace(editor.Subnet))
+        {
+            editor.Subnet = networks[0].Network;
+            networkSuggestion = $"Network taken from {editor.Interface} ({networks[0].Address}). Choose an unused pool; enter your router and DNS addresses.";
+        }
+        else if (networks.Length > 0)
+            networkSuggestion = "Interface networks: " + string.Join(", ", networks.Select(item => item.Network)) + ". Existing settings have been kept.";
+        else networkSuggestion = "This interface has no suitable IPv4 subnet. Configure its network address before enabling DHCP.";
+    }
+    private async Task AddReservation()
+    {
+        busy = true; error = message = null;
+        try
+        {
+            var reservation = new DhcpReservation(mac.Trim(), address.Trim(), hostname.Trim());
+            var conflicts = await Dhcp.CheckReservationAsync(reservation);
+            if (conflicts.Count > 0) throw new InvalidOperationException(string.Join(" ", conflicts));
+            editor.Reservations.Add(reservation);
+            try { LinuxMadeSane.Infrastructure.Services.Infrastructure.KeaDhcpManagementService.Validate(editor); }
+            catch { editor.Reservations.Remove(reservation); throw; }
+            message = "No known reservation, active lease or neighbour conflict found. Silent devices can still hold an address; confirm your network records. Apply to save this reservation.";
+            mac = address = hostname = "";
+        }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+    private async Task Save()
+    {
+        busy = true; error = message = null;
+        try { await Dhcp.SaveAsync(editor); message = "Kea configuration validated, backed up and applied. Service state verified."; await Load(); }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+}

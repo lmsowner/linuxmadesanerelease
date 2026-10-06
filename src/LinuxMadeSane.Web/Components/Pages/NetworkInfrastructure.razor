@@ -1,0 +1,129 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+
+@page "/network"
+@page "/network/{Section}"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@using LinuxMadeSane.Application.Contracts.Infrastructure
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Web.Components.Infrastructure
+@inject IInfrastructureDiagnosticsService Diagnostics
+@inject NavigationManager Navigation
+<PageTitle>Network | Linux Made Sane</PageTitle>
+<div class="page-shell infrastructure-page">
+    <header><h1>Network</h1><p>Devices visible to this host, DHCP and service exposure.</p></header>
+    <TabControl ActiveValue="@(Section ?? "devices")" ActiveValueChanged="Navigate" Class="page-tab-control" PanelClass="page-tab-panel">
+        <ChildContent>
+            <TabPage Value="devices" Title="Devices"><ChildContent>
+                <UiCommandButton Label="@(busy ? "Discovering devices…" : "Refresh devices")" Disabled="@busy" OnClick="Load" />
+                @if (inventory is not null)
+                {
+                    <div class="network-discovery-controls">
+                        <UiSelectField TValue="string" Label="Existing private subnet" @bind-Value="probeNetwork" Compact="true" Disabled="@busy">
+                            <option value="">Select a host interface and subnet</option>
+                            @foreach (var network in inventory.InterfaceNetworks) { <option value="@(network.Interface + "|" + network.Network)">@network.Interface · @network.Network (host @network.Address)</option> }
+                        </UiSelectField>
+                        <UiCommandButton Label="Scan subnet & cache devices" HideIcon="true" Disabled="@(busy || probeNetwork.Length == 0)" OnClick="(() => Probe(false))" />
+                    </div>
+                    <p class="network-discovery-hint">Uses the selected NIC's actual address and mask. ICMP discovery only; no port scan. Names are resolved through this host's DNS.</p>
+                    @if (probePackage is { Installed: false })
+                    {
+                        <p>Subnet scanning requires fping. @probePackage.Explanation</p>
+                        <UiCommandButton Label="Install fping & scan" HideIcon="true" Disabled="@(busy || !probePackage.CanInstall || probeNetwork.Length == 0)" OnClick="(() => Probe(true))" />
+                    }
+                    @foreach (var notice in inventory.Notices) { <p class="callout">@notice</p> }
+                    <div class="infrastructure-table"><table><thead><tr><th>Device</th><th>Addresses</th><th>MAC / vendor</th><th>State</th><th>Last observed</th><th></th></tr></thead><tbody>
+                        @foreach (var device in inventory.Devices)
+                        {
+                            <tr><td><strong>@(device.FriendlyName.Length > 0 ? device.FriendlyName : device.Hostname.Length > 0 ? device.Hostname : "Unnamed device")</strong><small>@device.Interface @device.Subnet</small></td>
+                            <td>@string.Join(", ", device.Addresses)</td><td>@device.Mac<small>@device.Vendor</small></td><td>@device.State</td><td>@device.LastSeenUtc.ToLocalTime().ToString("g")</td>
+                            <td><UiCommandButton Label="Inspect" OnClick="(() => selected = device)" /></td></tr>
+                        }
+                    </tbody></table></div>
+                    @if (inventory.Devices.Count == 0) { <p>No devices have been observed yet. Discovery does not require LMS DHCP.</p> }
+                }
+            </ChildContent></TabPage>
+            <TabPage Value="dhcp" Title="DHCP"><ChildContent><DhcpPanel /></ChildContent></TabPage>
+            <TabPage Value="exposure" Title="Exposure"><ChildContent>
+                <UiCommandButton Label="@(busy ? "Reading exposure…" : "Refresh exposure")" Disabled="@busy" OnClick="Load" />
+                @if (exposure is not null)
+                {
+                    @foreach (var notice in exposure.Notices) { <p class="callout">@notice</p> }
+                    <div class="infrastructure-table"><table><thead><tr><th>Service</th><th>Local</th><th>External route</th><th>Method / evidence</th></tr></thead><tbody>
+                    @foreach (var entry in exposure.Entries)
+                    { <tr><td>@entry.Service</td><td>@entry.Local</td><td>@(entry.External.Length > 0 ? entry.External : "Not known")</td><td>@entry.Method<details><summary>Why?</summary>@foreach (var reason in entry.Reasoning) { <p>@reason</p> }</details></td></tr> }
+                    </tbody></table></div>
+                }
+            </ChildContent></TabPage>
+        </ChildContent>
+    </TabControl>
+    @if (busy) { <p class="callout" aria-busy="true">@progress</p> }
+    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+</div>
+<UiModal IsOpen="@(selected is not null)" Title="Device" OnClose="(() => selected = null)">
+    <ChildContent>
+        @if (selected is not null)
+        {
+            <UiTextField Label="Friendly name" @bind-Value="selected.FriendlyName" />
+            <p>@selected.Hostname · @string.Join(", ", selected.Addresses) · @selected.Mac</p>
+            <p>First observed: @selected.FirstSeenUtc.ToLocalTime().ToString("g")<br />Sources: @string.Join(", ", selected.Sources)<br />DHCP: @selected.DhcpState</p>
+            <p>@string.Join(" · ", selected.Services)</p>
+            @foreach (var service in selected.ServiceUrls) { <UiCommandButton Label="@("Open " + service.Key)" Href="@service.Value" Target="_blank" Rel="noopener noreferrer" /> }
+            <UiTextField Label="Tags" @bind-Value="selected.Tags" />
+            <UiTextAreaField Label="Notes" @bind-Value="selected.Notes" />
+            <div class="infrastructure-actions">
+                <UiCommandButton Label="Save details" Disabled="@busy" OnClick="SaveDevice" />
+                <UiCommandButton Label="Wake-on-LAN" Disabled="@(busy || selected.Mac.Length == 0)" OnClick="Wake" />
+                <UiCommandButton Label="Reserve IP" OnClick="Reserve" />
+            </div>
+            @if (error is not null) { <p class="callout error">@error</p> }
+        }
+    </ChildContent>
+</UiModal>
+@code {
+    [Parameter] public string? Section { get; set; }
+    private DeviceInventory? inventory;
+    private ExposureSnapshot? exposure;
+    private NetworkDevice? selected;
+    private bool busy;
+    private string? error;
+    private string probeNetwork = "", progress = "Reading network information…";
+    private FeaturePackageStatus? probePackage;
+    protected override async Task OnParametersSetAsync() { await Task.Yield(); await Load(); }
+    private void Navigate(string value) => Navigation.NavigateTo("/network/" + value);
+    private async Task Load()
+    {
+        busy = true; error = null; progress = "Reading network information…"; await InvokeAsync(StateHasChanged); await Task.Yield();
+        try
+        {
+            if (Section == "exposure") exposure = await Diagnostics.GetExposureAsync();
+            else if (Section is null or "devices") inventory = await Diagnostics.DiscoverDevicesAsync();
+        }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+    private async Task Probe(bool install)
+    {
+        busy = true; error = null; progress = "Scanning the selected subnet and resolving device names…"; await InvokeAsync(StateHasChanged); await Task.Yield();
+        try
+        {
+            var parts = probeNetwork.Split('|');
+            if (parts.Length != 2) throw new InvalidOperationException("Select an existing private subnet.");
+            probePackage = await Diagnostics.GetPackageStatusAsync("Discovery");
+            if (!probePackage.Installed)
+            {
+                if (!install) return;
+                progress = "Installing fping…"; await InvokeAsync(StateHasChanged);
+                await Diagnostics.InstallPackagesAsync("Discovery");
+                probePackage = await Diagnostics.GetPackageStatusAsync("Discovery");
+            }
+            progress = $"Scanning {parts[1]} on {parts[0]} and caching device names…"; await InvokeAsync(StateHasChanged);
+            inventory = await Diagnostics.ProbeSubnetAsync(parts[0], parts[1]);
+        }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+    private void Reserve() => Navigation.NavigateTo("/network/dhcp?device=" + selected!.Id);
+    private async Task SaveDevice() { try { await Diagnostics.SaveDeviceAsync(selected!); selected = null; } catch (Exception e) { error = e.Message; } }
+    private async Task Wake() { try { await Diagnostics.WakeAsync(selected!.Id); error = "Wake packet sent. The device must support Wake-on-LAN."; } catch (Exception e) { error = e.Message; } }
+}
