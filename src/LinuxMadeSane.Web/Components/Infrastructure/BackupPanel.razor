@@ -6,10 +6,11 @@
 @inject IHostBackupService Backup
 @inject IInfrastructureDiagnosticsService Diagnostics
 <FeaturePackageGate Feature="Backup" OnInstalled="Load">
-    <p>Encrypted restic backups of LMS data and selected host directories. Use an existing disk or share mount as the destination.</p>
+    <p>Keep an encrypted copy of LMS and your chosen folders. First choose where to keep backups, then choose what to back up.</p>
     <div class="infrastructure-actions"><UiCommandButton Label="Refresh" Disabled="@busy" OnClick="Load" />
-    <UiCommandButton Label="Add repository" HideIcon="true" Disabled="@busy" OnClick="NewRepository" />
-    <UiCommandButton Label="Add backup set" HideIcon="true" Disabled="@(busy || workspace?.Repositories.Count is null or 0)" OnClick="NewSet" /></div>
+    <UiCommandButton Label="Set up backup storage" HideIcon="true" Disabled="@busy" OnClick="NewRepository" />
+    <UiCommandButton Label="Choose what to back up" HideIcon="true" Disabled="@(busy || workspace?.Repositories.Count is null or 0)" OnClick="NewSet" /></div>
+    @if (repositoryNotice is not null) { <p class="callout" role="status">@repositoryNotice</p> }
     @if (workspace is not null)
     {
         @foreach (var repository in workspace.Repositories)
@@ -36,32 +37,73 @@
     @if (error is not null) { <p class="callout error" role="alert">@error</p> }
 </FeaturePackageGate>
 <div class="backup-dialogs">
-<UiModal Class="backup-compact-modal" IsOpen="@(repositoryEditor is not null)" Title="Backup repository" OnClose="CloseRepository"><ChildContent>
+<UiModal Class="backup-compact-modal" IsOpen="@(repositoryEditor is not null)" Title="@(editingRepository ? "Edit backup storage" : "Set up backup storage")" OnClose="CloseRepository"><ChildContent>
     @if (repositoryEditor is not null)
     {
-        <UiTextField Label="Name" @bind-Value="repositoryEditor.Name" />
-        <UiSelectField TValue="string" Label="Existing destination mount" Value="@repositoryEditor.Path" ValueChanged="(value => repositoryEditor.Path = value)">
-            <option value="">Choose a mount or enter a path below</option>@foreach (var destination in workspace?.Destinations ?? []) { <option value="@destination">@destination</option> }
-        </UiSelectField>
-        <UiTextField Label="Repository directory" Helper="Use a dedicated directory within the selected mount, for example /mnt/backups/tron" @bind-Value="repositoryEditor.Path" />
-        <UiTextField Label="Repository password" Type="password" Autocomplete="new-password" Helper="Stored in the protected credential store. Keep your own recovery copy; without it the backup cannot be restored." @bind-Value="password" />
-        <UiCheckboxField Label="Initialize a new restic repository" Helper="Leave off to connect an existing repository. Existing data is never replaced." @bind-Value="initialize" />
-        <UiCommandButton Label="Test & save repository" HideIcon="true" Disabled="@busy" OnClick="SaveRepository" />
+        <p class="backup-introduction">This chooses where backups are stored. You will choose the files and schedule next.</p>
+        <section class="backup-setup-step">
+            <h3>1. Choose where to keep backups</h3>
+            <UiTextField Label="Name for this backup location" Placeholder="For example: NAS backups" Disabled="@busy" @bind-Value="repositoryEditor.Name" />
+            @if (!editingRepository)
+            {
+                <UiSelectField TValue="bool" Label="What are you setting up?" Disabled="@busy" @bind-Value="initialize">
+                    <option value="true">A new backup location</option>
+                    <option value="false">Connect an existing restic backup</option>
+                </UiSelectField>
+            }
+            <UiSelectField TValue="string" Label="Store backups on" Disabled="@busy" @bind-Value="backupDestination">
+                <option value="">Choose a disk or connected network share</option>
+                @foreach (var destination in (workspace?.Destinations ?? []).Where(path => path != "/")) { <option value="@destination">@destination</option> }
+                <option value="local">A folder on this host — enter its full path</option>
+            </UiSelectField>
+            @if (backupDestination == "local")
+            {
+                <UiTextField Label="Full path to the backup folder" Placeholder="/var/backups/lms" Helper="Backups on the same disk cannot protect you if that disk fails. A separate disk or network share is safer." Disabled="@busy" @bind-Value="localBackupPath" />
+            }
+            else if (backupDestination.Length > 0)
+            {
+                <UiTextField Label="Folder inside this disk or share" Placeholder="lms-backups" Helper="Use a dedicated folder. To connect an existing backup, enter its existing folder name." Disabled="@busy" @bind-Value="backupFolder" />
+            }
+            <p class="backup-mount-guide">Need a network destination? Connect it in <a href="/shares" target="_blank" rel="noopener">Network Shares</a>, then <button type="button" class="backup-refresh-link" disabled="@busy" @onclick="RefreshDestinations">refresh this list</button>.</p>
+        </section>
+        <section class="backup-setup-step">
+            <h3>2. Protect your backups</h3>
+            <UiTextField Label="Backup encryption password" Type="password" Autocomplete="new-password" Helper="@(editingRepository ? "Leave blank to keep the saved password. This is separate from your Linux or LMS login." : initialize ? "Choose a new password for these backups. This is separate from your Linux or LMS login." : "Enter the encryption password used when this restic backup was created.")" Disabled="@busy" @bind-Value="password" />
+            @if (initialize || password.Length > 0)
+            {
+                <UiTextField Label="Repeat backup password" Type="password" Autocomplete="new-password" Disabled="@busy" @bind-Value="passwordConfirmation" />
+            }
+            <p class="backup-password-guide">LMS stores this password encrypted. Keep a recovery copy in your password manager: you need it to restore backups if this LMS host is lost.</p>
+        </section>
+        <section class="backup-setup-step">
+            <h3>3. Check and save</h3>
+            @if (BackupPathPreview is { } preview) { <p class="backup-location-preview">Backups will be stored in <strong>@preview</strong>.</p> }
+            else { <p>Choose a destination and backup folder above.</p> }
+            <p>@(initialize ? "LMS will create encrypted backup storage here. Existing backups are not overwritten." : "LMS will check that it can open the existing backup with this password.") No backup runs at this step.</p>
+            <div class="infrastructure-actions">
+                <UiCommandButton Label="@(initialize ? "Create backup storage" : "Check & save backup storage")" HideIcon="true" Disabled="@(busy || BackupPathPreview is null || string.IsNullOrWhiteSpace(repositoryEditor.Name) || (!editingRepository && password.Length == 0) || ((initialize || password.Length > 0) && password != passwordConfirmation))" OnClick="SaveRepository" />
+                <UiCommandButton Label="Cancel" Variant="UiButtonVariant.Ghost" HideIcon="true" Disabled="@busy" OnClick="CloseRepository" />
+            </div>
+            @if (passwordConfirmation.Length > 0 && password != passwordConfirmation) { <p class="callout error" role="alert">The passwords do not match.</p> }
+            @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
+        </section>
         @if (error is not null) { <p class="callout error">@error</p> }
     }
 </ChildContent></UiModal>
-<UiModal Class="backup-compact-modal" IsOpen="@(setEditor is not null)" Title="Backup set" OnClose="CloseSet"><ChildContent>
+<UiModal Class="backup-compact-modal" IsOpen="@(setEditor is not null)" Title="Choose what to back up" OnClose="CloseSet"><ChildContent>
     @if (setEditor is not null)
     {
-        <UiTextField Label="Name" @bind-Value="setEditor.Name" />
-        <UiSelectField TValue="Guid" Label="Repository" @bind-Value="setEditor.RepositoryId">@foreach (var repo in workspace?.Repositories ?? []) { <option value="@repo.Id">@repo.Name</option> }</UiSelectField>
-        <UiCheckboxField Label="Include LMS database and protection keys" Helper="Creates a consistent database snapshot. Additional host configuration and compose directories can be selected below." @bind-Value="setEditor.IncludeLms" />
+        <p class="backup-introduction">Choose the files to protect and when to back them up. The backup location stores the encrypted copies.</p>
+        <UiTextField Label="Name for this backup" @bind-Value="setEditor.Name" />
+        <UiSelectField TValue="Guid" Label="Backup location" @bind-Value="setEditor.RepositoryId">@foreach (var repo in workspace?.Repositories ?? []) { <option value="@repo.Id">@repo.Name — @repo.Path</option> }</UiSelectField>
+        <UiCheckboxField Label="Back up LMS itself" Helper="Includes a consistent copy of the LMS database and the protection keys needed to recover saved credentials." @bind-Value="setEditor.IncludeLms" />
         <UiTextAreaField Label="Additional source directories" Helper="One absolute directory per line, for example /etc/ssh or your Docker compose directory" @bind-Value="sources" Rows="3" />
         <div class="infrastructure-grid"><UiNumberField TValue="int" Label="Daily snapshots" @bind-Value="setEditor.KeepDaily" min="0" /><UiNumberField TValue="int" Label="Weekly" @bind-Value="setEditor.KeepWeekly" min="0" /><UiNumberField TValue="int" Label="Monthly" @bind-Value="setEditor.KeepMonthly" min="0" /></div>
         <UiCheckboxField Label="Enable scheduled backups" Helper="New schedules run daily in the host's local timezone. Other schedules can be edited in Scheduling." @bind-Value="schedule" />
         @if (schedule && setEditor.ScheduleUsesDaily) { <div class="infrastructure-grid"><UiNumberField TValue="int" Label="Hour" @bind-Value="hour" min="0" max="23" /><UiNumberField TValue="int" Label="Minute" @bind-Value="minute" min="0" max="59" /></div> }
         @if (setEditor.ScheduleId.HasValue && !setEditor.ScheduleUsesDaily) { <p>@setEditor.ScheduleSummary · <a href="/scheduling">Edit schedule</a></p> }
-        <UiCommandButton Label="Save backup set" HideIcon="true" Disabled="@busy" OnClick="SaveSet" />
+        <UiCommandButton Label="Save backup plan" HideIcon="true" Disabled="@busy" OnClick="SaveSet" />
+        @if (busy) { <p class="callout" role="status">@progress</p> }
         @if (error is not null) { <p class="callout error">@error</p> }
     }
 </ChildContent></UiModal>
@@ -92,6 +134,13 @@
     private bool initialize, schedule, busy, overwrite, showOutput;
     private int hour = 2, minute;
     private string password = "", sources = "", restoreTarget = "", lmsRestorePath = "", progress = "";
+    private string backupDestination = "", backupFolder = "lms-backups", localBackupPath = "", passwordConfirmation = "";
+    private string? repositoryNotice;
+    private bool editingRepository;
+    private string? BackupPathPreview
+    {
+        get { try { return BackupDestinationSelection.Resolve(backupDestination, backupFolder, localBackupPath); } catch (InvalidOperationException) { return null; } }
+    }
     private string? error, output, snapshot;
     private IReadOnlyList<BackupSnapshot> snapshots = [];
     private IReadOnlyList<BackupFile> files = [];
@@ -100,10 +149,18 @@
     private async Task Operation(string label, Func<Task> operation)
     { busy = true; progress = label; error = null; await InvokeAsync(StateHasChanged); await Task.Yield(); try { await operation(); } catch (Exception e) { error = e.Message; } finally { busy = false; } }
     private Task Load() => Operation("Reading backup configuration…", async () => workspace = await Backup.GetAsync());
-    private void NewRepository() { error = null; password = ""; initialize = true; repositoryEditor = new(); }
-    private void EditRepository(BackupRepository repo) { error = null; password = ""; initialize = false; repositoryEditor = new() { Id = repo.Id, Name = repo.Name, Path = repo.Path }; }
-    private void CloseRepository() { if (!busy) { repositoryEditor = null; password = ""; } }
-    private Task SaveRepository() => Operation("Testing repository…", async () => { await Backup.SaveRepositoryAsync(repositoryEditor!, password, initialize); repositoryEditor = null; password = ""; workspace = await Backup.GetAsync(); });
+    private void NewRepository() { error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = true; editingRepository = false; backupDestination = localBackupPath = ""; backupFolder = "lms-backups"; repositoryEditor = new() { Name = "LMS backup" }; }
+    private void EditRepository(BackupRepository repo) { error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = false; editingRepository = true; backupDestination = "local"; localBackupPath = repo.Path; repositoryEditor = new() { Id = repo.Id, Name = repo.Name, Path = repo.Path }; }
+    private void CloseRepository() { if (!busy) { repositoryEditor = null; password = passwordConfirmation = ""; } }
+    private Task RefreshDestinations() => Operation("Refreshing connected disks and shares…", async () => workspace = await Backup.GetAsync());
+    private Task SaveRepository() => Operation(initialize ? "Creating encrypted backup storage…" : "Checking the backup password and location…", async () =>
+    {
+        repositoryEditor!.Path = BackupDestinationSelection.Resolve(backupDestination, backupFolder, localBackupPath);
+        if ((initialize || password.Length > 0) && password != passwordConfirmation) throw new InvalidOperationException("The passwords do not match.");
+        await Backup.SaveRepositoryAsync(repositoryEditor, password, initialize);
+        repositoryNotice = $"Backup storage is ready at {repositoryEditor.Path}. Next, select ‘Choose what to back up’ to choose files and a schedule. No backup has run yet.";
+        repositoryEditor = null; password = passwordConfirmation = ""; workspace = await Backup.GetAsync();
+    });
     private void NewSet() { error = null; setEditor = new() { RepositoryId = workspace!.Repositories[0].Id }; sources = ""; schedule = false; hour = 2; minute = 0; }
     private void EditSet(BackupSet set) { setEditor = System.Text.Json.JsonSerializer.Deserialize<BackupSet>(System.Text.Json.JsonSerializer.Serialize(set)); sources = string.Join('\n', set.Sources); schedule = set.ScheduleEnabled; hour = set.ScheduleHour; minute = set.ScheduleMinute; }
     private void CloseSet() { if (!busy) setEditor = null; }

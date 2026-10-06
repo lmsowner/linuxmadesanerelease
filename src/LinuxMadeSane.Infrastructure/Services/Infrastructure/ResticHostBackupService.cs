@@ -64,6 +64,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         {
             if (string.IsNullOrWhiteSpace(repository.Name)) throw new InvalidOperationException("Name this repository.");
             ValidatePath(repository.Path);
+            if (repository.Path.Trim('/') == "") throw new InvalidOperationException("Choose a dedicated backup folder, not the filesystem root (/).");
             var mounts = await shares.ListCurrentMountsAsync(token);
             var mount = mounts.Where(item => IsWithin(repository.Path, item.LocalMountPath)).OrderByDescending(item => item.LocalMountPath.Length).FirstOrDefault();
             if (mount?.IsReadOnly == true) throw new InvalidOperationException("This destination is mounted read-only.");
