@@ -26,7 +26,7 @@
             <article class="surface-subcard ssh-forward-row" @key="rule.Id">
                 <div class="ssh-forward-heading"><strong>@rule.Name</strong><span class="status-pill @(item.Status.State == "Connected" ? "success" : rule.Enabled ? "warning" : "neutral")">@item.Status.State</span><span class="meta-text">@ModeLabel(rule.Mode)</span></div>
                 @if (rule.Description.Length > 0) { <p class="ssh-forward-notes">@rule.Description</p> }
-                <div class="ssh-forward-path"><span>@(rule.IsRemote ? rule.Server : "LMS")</span><code>@(item.Status.AllocatedListenPort is { } allocated ? Endpoint(rule.ListenAddress, allocated) : Listen(rule))</code><span aria-hidden="true">→</span><span>@(rule.IsSocks ? "SOCKS destination chosen by client" : $"{(rule.IsRemote ? "LMS" : rule.Server)}: {Target(rule)}")</span></div>
+                <div class="ssh-forward-path"><span>Listen on @(rule.IsRemote ? rule.Server : "LMS"):</span><code>@(item.Status.AllocatedListenPort is { } allocated ? Endpoint(rule.ListenAddress, allocated) : Listen(rule))</code><span aria-hidden="true">→</span><span>@(rule.IsSocks ? $"SOCKS destinations chosen by each client, reached from {(rule.IsRemote ? "LMS" : rule.Server)}" : $"Forward to {Target(rule)} via {(rule.IsRemote ? "LMS" : rule.Server)}")</span></div>
                 <p class="meta-text">SSH: @rule.Username@@@rule.Server:@rule.SshPort · @item.Status.Detail</p>
                 <div class="ssh-forward-meta"><span>Reconnects: @item.Status.Restarts</span>
                     @if (item.Status.ConnectedAtUtc is { } connected) { <span>Connected since @connected.ToLocalTime().ToString("g")</span> }
@@ -34,7 +34,7 @@
                 </div>
                 @if (rule.EdgeGatewayRouteId is not null)
                 {
-                    <div class="ssh-forward-chain"><a href="@rule.PublicUrl" target="_blank" rel="noopener noreferrer">@rule.PublicUrl</a><span>→ Caddy → LMS @Listen(rule) → @rule.Server @Target(rule)</span></div>
+                    <div class="ssh-forward-chain"><a href="@rule.PublicUrl" target="_blank" rel="noopener noreferrer">@rule.PublicUrl</a><span>→ Caddy → Listen on LMS @Listen(rule) → Forward to @Target(rule) via @rule.Server</span></div>
                 }
                 <div class="toolbar-row ssh-forward-actions">
                     <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" OnClick="() => EditAsync(rule)" Disabled="@(!CanAdminister || busy)" />
@@ -53,7 +53,7 @@
         }
     }
 
-    <UiModal IsOpen="showEditor" Title="@(editing ? "Edit SSH forward" : "Add SSH forward")" Subtitle="Choose saved credentials, then describe the direction of the connection." Class="ssh-forward-editor" OnClose="CloseEditor">
+    <UiModal IsOpen="showEditor" Title="@(editing ? "Edit SSH forward" : "Add SSH forward")" Subtitle="Choose where to listen and the destination to forward connections to." Class="ssh-forward-editor" OnClose="CloseEditor">
         <EditForm Model="editor" OnSubmit="SaveAsync" class="stack-form">
             @if (error && message is not null) { <p class="callout error" role="alert">@message</p> }
             <div class="ssh-forward-fields"><UiTextField Label="Name" aria-label="Name" @bind-Value="editor.Name" Compact="true" /><UiTextAreaField Label="Description / notes" aria-label="Description / notes" @bind-Value="editor.Description" Rows="2" /></div>
@@ -66,10 +66,10 @@
                 <UiNumberField TValue="int" Label="SSH port" aria-label="SSH port" @bind-Value="editor.SshPort" min="1" max="65535" readonly="@(selected?.Server.Length > 0)" Compact="true" />
             </div>
             <UiSelectField TValue="SshForwardMode" Label="Forward type" aria-label="Forward type" @bind-Value="editor.Mode" @bind-Value:after="ModeChanged" Compact="true">
-                <option value="@SshForwardMode.Local">Local — listen on LMS, connect from the SSH server</option>
-                <option value="@SshForwardMode.Remote">Remote — listen on the SSH server, connect from LMS</option>
-                <option value="@SshForwardMode.LocalSocks">Local SOCKS — proxy on LMS, destinations reached by the SSH server</option>
-                <option value="@SshForwardMode.RemoteSocks">Remote SOCKS — proxy on the SSH server, destinations reached by LMS</option>
+                <option value="@SshForwardMode.Local">Local — listen on LMS, forward to a destination via the SSH server</option>
+                <option value="@SshForwardMode.Remote">Remote — listen on the SSH server, forward to a destination via LMS</option>
+                <option value="@SshForwardMode.LocalSocks">Local SOCKS — listen on LMS, clients choose destinations via the SSH server</option>
+                <option value="@SshForwardMode.RemoteSocks">Remote SOCKS — listen on the SSH server, clients choose destinations via LMS</option>
             </UiSelectField>
             <div class="ssh-forward-endpoints">
                 <section class="surface-subcard"><h3>Listen on @(editor.IsRemote ? "the SSH server" : "LMS")</h3>
@@ -77,19 +77,19 @@
                     { <UiSelectField TValue="SshForwardEndpointKind" Label="Listener" aria-label="Listener" @bind-Value="editor.ListenKind" Compact="true"><option value="@SshForwardEndpointKind.Tcp">TCP port</option><option value="@SshForwardEndpointKind.UnixSocket">Unix socket</option></UiSelectField> }
                     @if (editor.ListenKind == SshForwardEndpointKind.Tcp)
                     {
-                        <UiTextField Label="Listen address" aria-label="Listen address" @bind-Value="editor.ListenAddress" Helper="127.0.0.1 keeps this private to that computer. Use a specific LAN IP or * to allow other clients." Compact="true" />
+                        <UiTextField Label="Listen address" aria-label="Listen address" @bind-Value="editor.ListenAddress" Helper="@(editor.IsRemote ? "127.0.0.1 allows connections only from the SSH server itself. Use its LAN IP or * to allow other computers." : "127.0.0.1 allows connections only from LMS itself, including Caddy. Use the LMS LAN IP or * to allow other computers.")" Compact="true" />
                         <UiNumberField TValue="int" Label="@(editor.IsRemote ? "Listen port (0 = server chooses)" : "Listen port")" aria-label="Listen port" @bind-Value="editor.ListenPort" min="@(editor.IsRemote ? 0 : 1)" max="65535" Compact="true" />
                     }
                     else { <UiTextField Label="Socket path" aria-label="Socket path" @bind-Value="editor.ListenSocket" Placeholder="/run/my-service.sock" Compact="true" /> }
                 </section>
-                <section class="surface-subcard"><h3>@(editor.IsSocks ? "SOCKS destinations" : $"Connect from {(editor.IsRemote ? "LMS" : "the SSH server")}")</h3>
-                    @if (editor.IsSocks) { <p>Clients choose a destination for each connection using SOCKS4/5. There is no fixed destination port.</p> }
+                <section class="surface-subcard"><h3>@(editor.IsSocks ? "SOCKS destinations" : "Forward to destination")</h3>
+                    @if (editor.IsSocks) { <p>Clients choose the destination host and port. Connections reach it from @(editor.IsRemote ? "LMS" : $"the SSH server ({editor.Server})").</p> }
                     else
                     {
                         <UiSelectField TValue="SshForwardEndpointKind" Label="Destination" aria-label="Destination" @bind-Value="editor.TargetKind" Compact="true"><option value="@SshForwardEndpointKind.Tcp">TCP host and port</option><option value="@SshForwardEndpointKind.UnixSocket">Unix socket</option></UiSelectField>
                         @if (editor.TargetKind == SshForwardEndpointKind.Tcp)
                         {
-                            <UiTextField Label="Destination host" aria-label="Destination host" @bind-Value="editor.TargetHost" Helper="127.0.0.1 means this side of the tunnel, not your browser's computer." Compact="true" />
+                            <UiTextField Label="Destination host" aria-label="Destination host" @bind-Value="editor.TargetHost" Helper="@(editor.IsRemote ? "127.0.0.1 means a service on LMS. For another destination server, enter its hostname or IP as reachable from LMS." : $"127.0.0.1 means a service on the SSH server ({editor.Server}). For another destination server, enter its hostname or IP as reachable from that SSH server.")" Compact="true" />
                             <UiNumberField TValue="int" Label="Destination port" aria-label="Destination port" @bind-Value="editor.TargetPort" min="1" max="65535" Compact="true" />
                         }
                         else { <UiTextField Label="Destination socket" aria-label="Destination socket" @bind-Value="editor.TargetSocket" Compact="true" /> }
@@ -123,7 +123,7 @@
         {
             <div class="stack-form">
                 @if (error && message is not null) { <p class="callout error" role="alert">@message</p> }
-                <div class="ssh-forward-chain"><strong>Caddy → LMS @Listen(forward) → @forward.Server @Target(forward)</strong></div>
+                <div class="ssh-forward-chain"><strong>Caddy → Listen on LMS @Listen(forward) → Forward to @Target(forward) via @forward.Server</strong></div>
                 <UiTextField Label="Public hostname" aria-label="Public hostname" @bind-Value="caddyHost" Placeholder="app.example.com" Compact="true" />
                 <UiTextField Label="Domain" aria-label="Domain" @bind-Value="caddyDomain" Placeholder="example.com" Compact="true" />
                 <UiSelectField TValue="EdgeGatewayTargetScheme" Label="Remote app protocol" aria-label="Remote app protocol" @bind-Value="caddyScheme" Compact="true"><option value="@EdgeGatewayTargetScheme.Http">HTTP</option><option value="@EdgeGatewayTargetScheme.Https">HTTPS (certificate verification enabled)</option></UiSelectField>
