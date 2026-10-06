@@ -55,13 +55,13 @@ public static partial class TerminalSudoAuthentication
         {
             var argument = arguments[index];
             if (argument is "--no-pager" or "--system" or "--user" or "--utc" or "-b" or "--boot" or "--reverse" or "-r" or "--quiet" or "-q") continue;
-            if (argument is "-u" or "--unit" or "-n" or "--lines" or "-p" or "--priority" or "--since" or "--until" or "-S" or "-U" or "-o" or "--output")
+            if (argument is "-u" or "--unit" or "-t" or "--identifier" or "-n" or "--lines" or "-p" or "--priority" or "--since" or "--until" or "-S" or "-U" or "-o" or "--output")
             {
                 if (++index >= arguments.Count || arguments[index].StartsWith('-')) return false;
                 if (argument is "-n" or "--lines" && !int.TryParse(arguments[index], out _)) return false;
                 continue;
             }
-            if (new[] { "--unit=", "--priority=", "--since=", "--until=", "--output=", "--boot=" }
+            if (new[] { "--unit=", "--identifier=", "--priority=", "--since=", "--until=", "--output=", "--boot=" }
                 .Any(prefix => argument.StartsWith(prefix, StringComparison.Ordinal) && argument.Length > prefix.Length)) continue;
             if (argument.StartsWith("--lines=", StringComparison.Ordinal) && int.TryParse(argument[8..], out _)) continue;
             return false;
@@ -81,7 +81,8 @@ public static partial class TerminalSudoAuthentication
             if (option == "--version" && VersionValue().IsMatch(value)) continue;
             return false;
         }
-        return arguments.Count > 0;
+        // The installed updater supports a normal no-argument invocation.
+        return true;
     }
 
     // Parse literal shell arguments without executing expansion or accepting a command list.
