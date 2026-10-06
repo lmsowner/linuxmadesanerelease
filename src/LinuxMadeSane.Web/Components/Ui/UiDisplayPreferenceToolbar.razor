@@ -10,13 +10,46 @@
 @inject DesktopAssistantNativeThemeStore NativeThemeStore
 @inject IJSRuntime JSRuntime
 
-<div class="display-preference-toolbar">
-    <UiFontScalePicker Value="@fontScalePercent" ValueChanged="@HandleFontScaleChangedAsync" />
-    <UiThemePalettePicker Value="@paletteId" ValueChanged="@HandlePaletteChangedAsync" />
-    <UiThemeModeToggle Value="@darkModeEnabled" ValueChanged="@HandleDarkModeChangedAsync" />
-</div>
+@if (AsContextMenu)
+{
+    <UiContextSubmenu Label="Text size" IconName="UiIconName.TextSize">
+        <UiContextMenuButton Label="Decrease text size" IconName="UiIconName.TextSize" Disabled="@(fontScalePercent <= ThemeFontScaleOptionCatalog.Options.First().Percent)" OnClick="@(() => StepFontAsync(-1))" />
+        <UiContextMenuButton Label="Increase text size" IconName="UiIconName.TextSize" Disabled="@(fontScalePercent >= ThemeFontScaleOptionCatalog.Options.Last().Percent)" OnClick="@(() => StepFontAsync(1))" />
+        <div class="host-file-context-submenu-divider"></div>
+        @foreach (var option in ThemeFontScaleOptionCatalog.Options)
+        {
+            <UiContextMenuButton Label="@option.Label" IconName="UiIconName.TextSize" Selected="@(fontScalePercent == option.Percent)" OnClick="@(() => HandleFontScaleChangedAsync(option.Percent))" />
+        }
+    </UiContextSubmenu>
+    <UiContextSubmenu Label="Colour profile" IconName="UiIconName.Palette">
+        @foreach (var option in ThemePaletteOptionCatalog.Options)
+        {
+            <UiContextMenuButton Label="@option.Name" IconName="UiIconName.Palette" Selected="@(paletteId == option.Id)" OnClick="@(() => HandlePaletteChangedAsync(option.Id))" />
+        }
+    </UiContextSubmenu>
+    <UiContextSubmenu Label="Light / dark mode" IconName="UiIconName.Contrast">
+        <UiContextMenuButton Label="Light" IconName="UiIconName.Contrast" Selected="@(!darkModeEnabled)" OnClick="@(() => HandleDarkModeChangedAsync(false))" />
+        <UiContextMenuButton Label="Dark" IconName="UiIconName.Contrast" Selected="@darkModeEnabled" OnClick="@(() => HandleDarkModeChangedAsync(true))" />
+    </UiContextSubmenu>
+}
+else
+{
+    <div class="display-preference-toolbar">
+        <UiFontScalePicker Value="@fontScalePercent" ValueChanged="@HandleFontScaleChangedAsync" />
+        <UiThemePalettePicker Value="@paletteId" ValueChanged="@HandlePaletteChangedAsync" />
+        <UiThemeModeToggle Value="@darkModeEnabled" ValueChanged="@HandleDarkModeChangedAsync" />
+    </div>
+}
 
 @code {
+    [Parameter] public bool AsContextMenu { get; set; }
+    private Task StepFontAsync(int direction)
+    {
+        var options = ThemeFontScaleOptionCatalog.Options;
+        var index = options.ToList().FindIndex(option => option.Percent == fontScalePercent);
+        return HandleFontScaleChangedAsync(options[Math.Clamp(index + direction, 0, options.Count - 1)].Percent);
+    }
+
     [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
 
     private Guid? userId;

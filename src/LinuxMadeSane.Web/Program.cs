@@ -75,6 +75,7 @@ public class Program
         builder.Services.AddSingleton<IBenchmarkProcessRunner, BenchmarkProcessRunner>();
         builder.Services.AddSingleton<PerformanceBenchmarkService>();
         builder.Services.AddScoped<LmsHostBenchmarkService>();
+        builder.Services.AddScoped<OverviewRefreshPreference>();
         builder.Services.AddSingleton<ConnectedUserHubFilter>();
         builder.Services.AddCascadingAuthenticationState();
         builder.Services.AddHttpContextAccessor();

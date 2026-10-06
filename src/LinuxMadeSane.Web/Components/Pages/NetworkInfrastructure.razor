@@ -36,14 +36,23 @@
                     @ActionFeedback
                     <p class="network-discovery-hint">Uses the selected NIC's actual address and mask. ICMP discovery only; no port scan. Names are resolved through this host's DNS.</p>
                     @foreach (var notice in inventory.Notices) { <p class="callout">@notice</p> }
-                    <div class="infrastructure-table"><table><thead><tr><th>Device</th><th>Addresses</th><th>MAC / vendor</th><th>State</th><th>Last observed</th><th></th></tr></thead><tbody>
-                        @foreach (var device in inventory.Devices)
-                        {
-                            <tr><td><strong>@(device.FriendlyName.Length > 0 ? device.FriendlyName : device.Hostname.Length > 0 ? device.Hostname : "Unnamed device")</strong><small>@device.Interface @device.Subnet</small></td>
-                            <td>@string.Join(", ", device.Addresses)</td><td>@device.Mac<small>@device.Vendor</small></td><td>@device.State</td><td>@device.LastSeenUtc.ToLocalTime().ToString("g")</td>
-                            <td><UiCommandButton Label="Inspect" OnClick="(() => selected = device)" /></td></tr>
-                        }
-                    </tbody></table></div>
+                    @foreach (var group in NetworkDevicePresentation.Group(inventory))
+                    {
+                        <section class="device-interface-group">
+                            <h2>@group.Interface <span class="meta-text">@string.Join(" · ", group.Subnets) · @group.Devices.Count devices</span></h2>
+                            <div class="infrastructure-table device-table"><table><thead><tr><th>Device</th><th>IP address</th><th>MAC address</th><th>Vendor</th><th>State</th><th>Last observed</th><th></th></tr></thead><tbody>
+                            @foreach (var device in group.Devices)
+                            {
+                                <tr><td title="@device.NameLookupStatus"><strong>@NetworkDevicePresentation.Name(device)</strong></td>
+                                    <td title="@string.Join(", ", device.Addresses)">@NetworkDevicePresentation.PrimaryAddress(device)@if (device.Addresses.Count > 1) { <span class="meta-text"> · +@(device.Addresses.Count - 1)</span> }</td>
+                                    <td>@device.Mac</td><td title="@device.Vendor">@(device.Vendor.StartsWith("Unknown") || device.Vendor.Length == 0 ? "—" : device.Vendor)</td>
+                                    <td>@device.State</td><td>@device.LastSeenUtc.ToLocalTime().ToString("g")</td>
+                                    <td><UiCommandButton Label="Inspect" HideIcon="true" OnClick="(() => selected = device)" /></td>
+                                </tr>
+                            }
+                            </tbody></table></div>
+                        </section>
+                    }
                     @if (inventory.Devices.Count == 0) { <p>No devices have been observed yet. Discovery does not require LMS DHCP.</p> }
                 }
             </ChildContent></TabPage>
@@ -78,6 +87,7 @@
         {
             <UiTextField Label="Friendly name" @bind-Value="selected.FriendlyName" />
             <p>@selected.Hostname · @string.Join(", ", selected.Addresses) · @selected.Mac</p>
+            <p>@selected.NameLookupStatus @if (selected.LastDnsLookupUtc is { } lookup) { <span class="meta-text">Last lookup: @lookup.ToLocalTime().ToString("g")</span> }</p>
             <p>First observed: @selected.FirstSeenUtc.ToLocalTime().ToString("g")<br />Sources: @string.Join(", ", selected.Sources)<br />DHCP: @selected.DhcpState</p>
             <p>@string.Join(" · ", selected.Services)</p>
             @foreach (var service in selected.ServiceUrls) { <UiCommandButton Label="@("Open " + service.Key)" Href="@service.Value" Target="_blank" Rel="noopener noreferrer" /> }

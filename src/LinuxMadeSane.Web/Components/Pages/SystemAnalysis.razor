@@ -16,6 +16,7 @@
 @inject IConfigurationSummaryService ConfigurationSummaryService
 @inject IJSRuntime JSRuntime
 @inject NavigationManager Navigation
+@inject LinuxMadeSane.Web.Services.OverviewRefreshPreference RefreshPreference
 
 <PageTitle>@(IsOverview ? "Overview" : "System Info") | Linux Made Sane</PageTitle>
 
@@ -667,7 +668,7 @@
     private Task? pollingTask;
     private readonly SemaphoreSlim refreshGate = new(1, 1);
     private string activeTab = "overview";
-    private static readonly int[] PollIntervalsSeconds = [0, 1, 2, 5, 10, 30];
+    private static readonly int[] PollIntervalsSeconds = LinuxMadeSane.Web.Services.OverviewRefreshPreference.IntervalsSeconds;
     private static readonly IReadOnlySet<string> SupportedTabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         "overview",
@@ -718,6 +719,8 @@
 
     protected override async Task OnInitializedAsync()
     {
+        pollPresetIndex = RefreshPreference.PresetIndex;
+        RefreshPreference.Changed += HandleRefreshPreferenceChangedAsync;
         await RefreshSnapshotAsync(CancellationToken.None);
         hasInitializedPolling = true;
         StartPolling();
@@ -768,13 +771,14 @@
         }
     }
 
-    private async Task ChangePollPresetAsync(int value)
+    private Task ChangePollPresetAsync(int value) => RefreshPreference.SetAsync(value);
+
+    private Task HandleRefreshPreferenceChangedAsync() => InvokeAsync(async () =>
     {
-        var nextIndex = Math.Clamp(value, 0, PollIntervalsSeconds.Length - 1);
-        if (pollPresetIndex == nextIndex) return;
-        pollPresetIndex = nextIndex;
+        pollPresetIndex = RefreshPreference.PresetIndex;
         await RestartPollingAsync();
-    }
+        StateHasChanged();
+    });
 
     private async Task RefreshManuallyAsync()
     {
@@ -1338,6 +1342,7 @@
 
     public async ValueTask DisposeAsync()
     {
+        RefreshPreference.Changed -= HandleRefreshPreferenceChangedAsync;
         isDisposed = true;
         driveUsageCancellation?.Cancel();
         pollingCancellation?.Cancel();

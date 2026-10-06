@@ -24,6 +24,7 @@ public sealed class NetworkDevice
     public string DhcpState { get; set; } = "Unknown";
     public Guid? LmsHostId { get; set; }
     public DateTimeOffset? LastDnsLookupUtc { get; set; }
+    public string NameLookupStatus { get; set; } = "No lookup recorded";
     public string Notes { get; set; } = "";
     public string Tags { get; set; } = "";
 }

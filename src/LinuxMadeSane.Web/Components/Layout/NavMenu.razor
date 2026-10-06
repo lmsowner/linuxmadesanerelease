@@ -11,8 +11,9 @@
 @inject IUserDisplayPreferenceService UserDisplayPreferenceService
 @inject AuthenticationStateProvider AuthenticationStateProvider
 @inject IJSRuntime JSRuntime
+@inject LinuxMadeSane.Web.Services.OverviewRefreshPreference RefreshPreference
 
-<div class="nav-shell @(mobileMenuOpen ? "mobile-open" : string.Empty)">
+<div class="nav-shell @(mobileMenuOpen ? "mobile-open" : string.Empty)" @ref="navShellElement">
     <div class="nav-shell-top">
         <div class="brand-lockup">
             <button class="brand-link"
@@ -126,6 +127,25 @@
     </div>
 </div>
 
+<div class="host-file-browser-context-menu sidebar-context-menu" popover="auto" tabindex="-1"
+     role="menu" aria-label="Sidebar actions" data-lms-context-menu="true" @ref="sidebarMenuElement">
+    <UiDisplayPreferenceToolbar AsContextMenu="true" />
+    <UiContextSubmenu Label="Overview update speed" Glyph="UiIconGlyph.Refresh">
+        @for (var index = 0; index < LinuxMadeSane.Web.Services.OverviewRefreshPreference.IntervalsSeconds.Length; index++)
+        {
+            var preset = index;
+            var seconds = LinuxMadeSane.Web.Services.OverviewRefreshPreference.IntervalsSeconds[index];
+            <UiContextMenuButton Label="@(seconds == 0 ? "Manual" : $"Every {seconds} seconds")" Glyph="UiIconGlyph.Refresh"
+                Selected="@(RefreshPreference.PresetIndex == preset)" OnClick="@(() => RefreshPreference.SetAsync(preset))" />
+        }
+    </UiContextSubmenu>
+    <div class="host-file-context-submenu-divider"></div>
+    <UiContextMenuButton Label="Open terminal" Glyph="UiIconGlyph.Terminal" Href="/local-workspace/terminal" Target="_blank" Rel="noopener"
+        OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+    <UiContextMenuButton Label="Open file browser" Glyph="UiIconGlyph.Files" Href="/local-workspace/files" Target="_blank" Rel="noopener"
+        OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+</div>
+
 @code {
     [Parameter] public bool IsAuthenticated { get; set; }
     [Parameter] public Guid? UserId { get; set; }
@@ -136,7 +156,8 @@
     private readonly string signOutTitleId = $"lms-signout-title-{Guid.NewGuid():N}";
     private readonly string signOutDescriptionId = $"lms-signout-description-{Guid.NewGuid():N}";
     private readonly List<string> navigationOrder = [];
-    private ElementReference navListElement;
+    private ElementReference navListElement, navShellElement, sidebarMenuElement;
+    private IJSObjectReference? sidebarMenuModule;
     private IJSObjectReference? navOrderModule;
     private DotNetObjectReference<NavMenu>? navOrderReference;
     private Guid? loadedUserId;
@@ -202,10 +223,15 @@
             return;
         }
 
+        RefreshPreference.Changed += RefreshMenuSelectionAsync;
         navOrderModule = await JSRuntime.InvokeAsync<IJSObjectReference>("import", $"/scripts/nav-order.js?v={ProductVersion}");
+        sidebarMenuModule = await JSRuntime.InvokeAsync<IJSObjectReference>("import", $"/scripts/sidebar-context-menu.js?v={ProductVersion}");
+        await sidebarMenuModule.InvokeVoidAsync("bind", navShellElement, sidebarMenuElement);
         navOrderReference = DotNetObjectReference.Create(this);
         await navOrderModule.InvokeVoidAsync("bindNavOrder", navListElement, navOrderReference);
     }
+
+    private Task RefreshMenuSelectionAsync() => InvokeAsync(StateHasChanged);
 
     [JSInvokable]
     public async Task MoveNavigationItemAsync(string sourcePath, string targetPath, bool insertBefore)
@@ -251,6 +277,13 @@
 
     public async ValueTask DisposeAsync()
     {
+        RefreshPreference.Changed -= RefreshMenuSelectionAsync;
+        if (sidebarMenuModule is not null)
+        {
+            try { await sidebarMenuModule.InvokeVoidAsync("unbind", navShellElement); await sidebarMenuModule.DisposeAsync(); }
+            catch (JSDisconnectedException) { }
+        }
+
         if (navOrderModule is not null)
         {
             try

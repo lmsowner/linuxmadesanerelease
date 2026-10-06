@@ -196,15 +196,13 @@ public sealed class InfrastructureDiagnosticsService(
             }
             catch (InvalidOperationException e) { notices.Add(e.Message); }
             foreach (var device in devices.Where(device => device.Mac.Length > 0)) device.Vendor = await ReadVendor(device.Mac, cancellationToken);
-            // DNS lookups are bounded and do not change observation timestamps or state.
-            await Parallel.ForEachAsync(devices.Where(device => device.Addresses.Count > 0 && string.IsNullOrEmpty(device.Hostname))
+            // Use Linux's configured NSS/DNS resolver for reverse names, without
+            // GetHostEntry's additional forward lookup or a 400ms cutoff.
+            await Parallel.ForEachAsync(devices.Where(device => device.Addresses.Count > 0 &&
+                    (string.IsNullOrWhiteSpace(device.Hostname) || IPAddress.TryParse(device.Hostname, out _)))
                 .OrderBy(device => device.LastDnsLookupUtc).Take(64),
-                new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = cancellationToken }, async (device, token) =>
-                {
-                    try { device.Hostname = (await Dns.GetHostEntryAsync(IPAddress.Parse(device.Addresses[0])).WaitAsync(TimeSpan.FromMilliseconds(400), token)).HostName; }
-                    catch (Exception e) when (e is SocketException or TimeoutException or ArgumentException) { }
-                    finally { device.LastDnsLookupUtc = DateTimeOffset.UtcNow; }
-                });
+                new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = cancellationToken },
+                (device, token) => new ValueTask(ResolveDeviceNameAsync(device, runner, token)));
             await Persist("devices", devices, cancellationToken);
             return new(devices.OrderBy(item => item.FriendlyName.Length > 0 ? item.FriendlyName : item.Hostname).ToArray(), notices)
             { InterfaceNetworks = KeaDhcpManagementService.ReadInterfaceNetworks() };
@@ -240,18 +238,55 @@ public sealed class InfrastructureDiagnosticsService(
                     KeaDhcpManagementService.NetworkPrefix(ip, int.Parse(subnet.Split('/')[1])) == subnet)
                     Merge(devices, new() { Addresses = [line], Interface = listeningInterface, Subnet = subnet, State = "Reachable", Sources = ["ICMP probe"] }, now);
             await Parallel.ForEachAsync(devices.Where(device => device.Interface == listeningInterface && device.Addresses.Count > 0 &&
-                    (device.LastDnsLookupUtc is null || device.LastDnsLookupUtc < now.AddHours(-1))),
-                new ParallelOptions { MaxDegreeOfParallelism = 32, CancellationToken = cancellationToken }, async (device, token) =>
-                {
-                    try { device.Hostname = (await Dns.GetHostEntryAsync(IPAddress.Parse(device.Addresses[0])).WaitAsync(TimeSpan.FromMilliseconds(400), token)).HostName; }
-                    catch (Exception e) when (e is SocketException or TimeoutException or ArgumentException) { }
-                    finally { device.LastDnsLookupUtc = DateTimeOffset.UtcNow; }
-                });
+                    (string.IsNullOrWhiteSpace(device.Hostname) || IPAddress.TryParse(device.Hostname, out _) || device.LastDnsLookupUtc is null || device.LastDnsLookupUtc < now.AddHours(-1))),
+                new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = cancellationToken },
+                (device, token) => new ValueTask(ResolveDeviceNameAsync(device, runner, token)));
             await Persist("devices", devices, cancellationToken);
             inventory = inventory with { Devices = devices.OrderBy(item => item.Hostname).ToArray() };
         }
         finally { InventoryGate.Release(); }
         return inventory with { Notices = inventory.Notices.Append("Probed " + subnet + " on " + listeningInterface + " using ICMP only. IP, MAC and DNS names are cached. Devices that ignore ping may still appear in neighbours or leases.").ToArray() };
+    }
+
+    internal static async Task ResolveDeviceNameAsync(NetworkDevice device, ILinuxCommandRunner commands, CancellationToken token)
+    {
+        var addresses = device.Addresses.Select(value => IPAddress.TryParse(value, out var ip) ? ip : null)
+            .Where(ip => ip is not null).OrderBy(ip => ip!.AddressFamily == AddressFamily.InterNetwork ? 0 : 1).Distinct().Take(3).ToArray();
+        device.NameLookupStatus = "No reverse name returned by this host's configured resolver.";
+        try
+        {
+            foreach (var address in addresses)
+            {
+                var result = await commands.RunAsync(new("getent", ["hosts", address!.ToString()], false,
+                    TimeSpan.FromSeconds(3), "Resolve network device name using this host's configured resolver") { IsOptionalExternalTool = true }, false, token);
+                if (result.ExitCode == 127) { device.NameLookupStatus = "Linux getent is unavailable on this host; name lookup could not run."; break; }
+                if (result.ExitCode == 124) { device.NameLookupStatus = "Name lookup timed out. Check this host's configured DNS server and network access."; continue; }
+                var name = result.ExitCode == 0 ? ParseReverseName(result.StandardOutput, address) : null;
+                if (name is null) continue;
+                // Preserve DHCP/managed-host names; use the resolver to fill missing
+                // names and refresh names previously obtained from this resolver.
+                if (string.IsNullOrWhiteSpace(device.Hostname) || IPAddress.TryParse(device.Hostname, out _) || device.Sources.Contains("System resolver"))
+                {
+                    device.Hostname = name;
+                    if (!device.Sources.Contains("System resolver")) device.Sources.Add("System resolver");
+                }
+                device.NameLookupStatus = $"Resolved {address} to {name} using this host's configured resolver.";
+                return;
+            }
+        }
+        finally { device.LastDnsLookupUtc = DateTimeOffset.UtcNow; }
+    }
+
+    internal static string? ParseReverseName(string output, IPAddress address)
+    {
+        foreach (var line in output.Split('\n'))
+        {
+            var fields = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length < 2 || !IPAddress.TryParse(fields[0], out var found) || !found.Equals(address)) continue;
+            var name = fields[1].TrimEnd('.');
+            if (name.Length > 0 && !IPAddress.TryParse(name, out _)) return name;
+        }
+        return null;
     }
 
     public static IReadOnlyList<NetworkDevice> ParseNeighbours(string json)
