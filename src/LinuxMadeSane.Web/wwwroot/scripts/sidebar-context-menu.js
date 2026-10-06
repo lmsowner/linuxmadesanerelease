@@ -37,14 +37,19 @@ export function bind(shell, menu) {
             (index + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length;
         choices[next].focus();
     };
+    const dismissOutside = event => { if (!menu.contains(event.target)) close(); };
     sidebar.addEventListener('contextmenu', open);
+    document.addEventListener('pointerdown', dismissOutside, true);
+    document.addEventListener('focusin', dismissOutside, true);
     menu.addEventListener('click', click);
     menu.addEventListener('keydown', key);
-    // Light-dismiss and Escape are handled by the native popover top layer.
-    // It also avoids clipping inside the sidebar's blurred/scrolling container.
+    // Manual dismissal avoids native light-dismiss on the right-button release
+    // that follows opening a context menu. Keep the top layer to prevent clipping.
     bindings.set(shell, () => {
         close(); sidebar.removeEventListener('contextmenu', open);
         menu.removeEventListener('click', click); menu.removeEventListener('keydown', key);
+        document.removeEventListener('pointerdown', dismissOutside, true);
+        document.removeEventListener('focusin', dismissOutside, true);
     });
 }
 export function unbind(shell) { bindings.get(shell)?.(); bindings.delete(shell); }

@@ -14,6 +14,9 @@
 @inject ISshKeyPairGenerator SshKeyPairGenerator
 @inject IServiceScopeFactory ServiceScopeFactory
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+@inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
+@inject IAiThreadService AiThreadService
+@inject ILogger<Hosts> Logger
 @inject FileThumbnailCacheService FileThumbnailCacheService
 @inject ApplicationUpdateService LocalApplicationUpdates
 @inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
@@ -199,10 +202,11 @@
                                             <div class="hosts-browser-action-main">
                                                 <UiCommandButton Label="Terminal"
                                                                  Glyph="UiIconGlyph.Run"
-                                                                 Href="@($"/hosts/{row.Host.Id}/terminal")"
+                                                                 OnClientPointerDown="@PrepareHostTerminalPopup(row.Host)"
+                                                                 OnClick="@(() => OpenHostTerminalAsync(row.Host))"
                                                                  Variant="UiButtonVariant.Action"
                                                                  SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
-                                                <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
+                                                <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/file-browser-window?hostId={row.Host.Id}")" Target="_blank" Rel="noopener noreferrer" OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,this.target))return false;" Variant="UiButtonVariant.Action" />
                                                 <UiCommandButton Label="Flush thumbnail cache"
                                                                  Title="Flush this host's image thumbnail cache"
                                                                  Glyph="UiIconGlyph.ImageCacheClear"
@@ -227,7 +231,17 @@
                                 @if (GetLmsUpdateOperation(row.Host.Id) is { State: LmsHostUpdateOperationState.Failed } failedUpdate)
                                 {
                                     <tr class="hosts-update-failure-row @stripeClass">
-                                        <td colspan="8"><p class="callout error" role="alert">@failedUpdate.Message</p></td>
+                                        <td colspan="8">
+                                            <p class="callout error" role="alert">@failedUpdate.Message</p>
+                                            <div class="hosts-update-recovery-actions">
+                                                <span>Open this host’s terminal to investigate the update failure.</span>
+                                                <UiCommandButton Label="Open terminal" Glyph="UiIconGlyph.Run" OnClientPointerDown="@PrepareHostTerminalPopup(row.Host)" OnClick="@(() => OpenHostTerminalAsync(row.Host))" />
+                                                @if (terminalAiAvailable)
+                                                {
+                                                    <UiCommandButton Label="Fix this using AI" Glyph="UiIconGlyph.Ai" OnClientPointerDown="@PrepareHostTerminalPopup(row.Host)" OnClick="@(() => OpenHostTerminalAsync(row.Host, failedUpdate.Message))" />
+                                                }
+                                            </div>
+                                        </td>
                                     </tr>
                                 }
                                 @if (hasRoutes)
@@ -326,10 +340,11 @@
                                             <div class="hosts-browser-action-main">
                                                 <UiCommandButton Label="Terminal"
                                                                  Glyph="UiIconGlyph.Run"
-                                                                 Href="@($"/hosts/{row.Host.Id}/terminal")"
+                                                                 OnClientPointerDown="@PrepareHostTerminalPopup(row.Host)"
+                                                                 OnClick="@(() => OpenHostTerminalAsync(row.Host))"
                                                                  Variant="UiButtonVariant.Action"
                                                                  SuperscriptText="@GetTerminalSessionBadge(row.Host.Id)" />
-                                                <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/hosts/{row.Host.Id}/files")" Variant="UiButtonVariant.Action" />
+                                                <UiCommandButton Label="Files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/file-browser-window?hostId={row.Host.Id}")" Target="_blank" Rel="noopener noreferrer" OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,this.target))return false;" Variant="UiButtonVariant.Action" />
                                                 <UiCommandButton Label="Flush thumbnail cache"
                                                                  Title="Flush this host's image thumbnail cache"
                                                                  Glyph="UiIconGlyph.ImageCacheClear"
@@ -570,6 +585,53 @@
         !isRemovingHost &&
         CanRemoveHost(hostPendingRemoval);
 
+    private bool terminalAiAvailable;
+    private static string HostTerminalPopupName(ManagedHost host) => $"lms-host-terminal-{host.Id:N}";
+    private static string PrepareHostTerminalPopup(ManagedHost host) =>
+        $"window.lmsTerminalWindow?.preparePopup('{HostTerminalPopupName(host)}');";
+
+    private async Task<bool> HasTerminalAiAsync()
+    {
+        var context = await AiThreadService.GetEditorAsync();
+        return context.ConfiguredProviders.Any(provider => provider.IsEnabled &&
+            (!provider.RequiresApiKey || provider.HasApiKeyConfigured) &&
+            context.SupportedProviders.Any(definition => definition.ProviderType == provider.ProviderType && definition.IsRuntimeImplemented));
+    }
+
+    private async Task RefreshTerminalAiAvailabilityAsync()
+    {
+        try { terminalAiAvailable = await HasTerminalAiAsync(); }
+        catch (Exception exception) { Logger.LogWarning(exception, "Could not check local terminal AI availability"); terminalAiAvailable = false; }
+        await SafeInvokeAsync(StateHasChanged);
+    }
+
+    private async Task OpenHostTerminalAsync(ManagedHost host, string? updateFailure = null)
+    {
+        var popupName = HostTerminalPopupName(host);
+        try
+        {
+            if (updateFailure is not null && !await HasTerminalAiAsync())
+                throw new InvalidOperationException("AI is no longer enabled on this LMS host. Open the terminal to investigate manually.");
+            var workspace = TerminalWorkspaceRegistry.GetOrCreate(TerminalWorkspaceAccessor.GetWorkspaceId());
+            var tab = updateFailure is null ? workspace.EnsureHostTab(host) : workspace.AddTab(host);
+            if (updateFailure is not null)
+            {
+                tab.PendingAiTaskPrompt = $"Investigate and help repair the failed LMS update on this connected host ({host.Name}). The update reported:\n{updateFailure}\nCheck the actual installer/service logs and current installed version before proposing a fix. Preserve configuration, credentials and data. Do not change release channel or use Home Lab repair tools. Explain the cause and verify LMS health after any approved repair.";
+                tab.StartPendingAiTask = true;
+                workspace.SetAiPanelOpen(tab.Id, true);
+            }
+            var opened = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.openPopup", $"/terminal-window/{tab.Id}?autoconnect=true", popupName);
+            if (!opened) throw new InvalidOperationException("Your browser blocked the terminal window. Allow popups for LMS and try again.");
+            workspace.SetDetached(tab.Id, true);
+        }
+        catch (Exception exception)
+        {
+            lmsConnectStatus = $"Could not open {host.Name}'s terminal: {exception.Message}";
+            lmsConnectTone = "error";
+            await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.setPreparedPopupStatus", popupName, "Could not open terminal", exception.Message, "error");
+        }
+    }
+
     protected override async Task OnInitializedAsync()
     {
         var hosts = await HostService.ListHostsAsync();
@@ -603,6 +665,7 @@
             _ = RefreshLmsUpdateStatusesAsync(statusRefreshCancellationTokenSource.Token);
             _ = RefreshEdgeGatewaySummariesAsync(statusRefreshCancellationTokenSource.Token);
             _ = RefreshBenchmarksAsync(statusRefreshCancellationTokenSource.Token);
+            _ = RefreshTerminalAiAvailabilityAsync();
         }
 
         return Task.CompletedTask;
