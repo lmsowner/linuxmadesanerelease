@@ -156,6 +156,7 @@ public class Program
         builder.Services.AddSingleton<MediaLibrarySignedUrlService>();
         builder.Services.AddSingleton<RemoteLmsTunnelAccessService>();
         builder.Services.AddSingleton<RemoteLmsRelayCaddyService>();
+        builder.Services.AddHostedService(provider => provider.GetRequiredService<RemoteLmsRelayCaddyService>());
         builder.Services.AddSingleton<RemoteLmsSshTunnelService>();
         builder.Services.AddSingleton<OnDemandAppLaunchTicketStore>();
         builder.Services.AddSingleton<OnDemandAppLaunchCoordinator>();

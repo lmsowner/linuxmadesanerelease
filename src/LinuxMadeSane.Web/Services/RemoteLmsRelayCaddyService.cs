@@ -15,15 +15,23 @@ namespace LinuxMadeSane.Web.Services;
 
 public sealed class RemoteLmsRelayCaddyService(
     IServiceScopeFactory scopeFactory,
-    ILogger<RemoteLmsRelayCaddyService> logger)
+    ILogger<RemoteLmsRelayCaddyService> logger) : IHostedService
 {
     private const string ServiceName = "caddy";
     private const string MainConfigPath = "/etc/caddy/Caddyfile";
     private const string ManagedRootDirectory = "/etc/caddy/linuxmadesane";
     private const string ManagedConfigPath = "/etc/caddy/linuxmadesane/remote-lms-relays.caddy";
+    private readonly string configurationPath = ManagedConfigPath;
     private static readonly Regex RepeatedDashPattern = new("-+", RegexOptions.Compiled);
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Dictionary<Guid, RemoteLmsRelayRoute> routes = [];
+
+    internal RemoteLmsRelayCaddyService(IServiceScopeFactory scopeFactory, ILogger<RemoteLmsRelayCaddyService> logger, string configurationPath)
+        : this(scopeFactory, logger) => this.configurationPath = configurationPath;
+
+    public Task StartAsync(CancellationToken cancellationToken) => ClearAsync(cancellationToken, clearPersisted: true);
+
+    public Task StopAsync(CancellationToken cancellationToken) => ClearAsync(cancellationToken, clearPersisted: true);
 
     public async Task<RemoteLmsRelayPublishResult> PublishAsync(
         ManagedHost host,
@@ -85,14 +93,19 @@ public sealed class RemoteLmsRelayCaddyService(
         }
     }
 
-    public async Task ClearAsync(CancellationToken cancellationToken = default)
+    public async Task ClearAsync(CancellationToken cancellationToken = default, bool clearPersisted = false)
     {
         await gate.WaitAsync(cancellationToken);
         try
         {
             if (routes.Count == 0)
             {
-                return;
+                // Tunnels live in this LMS process. A previous process may have died
+                // before clearing its generated routes, so an empty in-memory list
+                // does not prove that the persisted Caddy file is already empty.
+                if (!clearPersisted) return;
+                var persisted = await ReadTextOrDefaultAsync(configurationPath, cancellationToken);
+                if (!HasPersistedRelayRoutes(persisted)) return;
             }
 
             routes.Clear();
@@ -107,6 +120,10 @@ public sealed class RemoteLmsRelayCaddyService(
             gate.Release();
         }
     }
+
+    internal static bool HasPersistedRelayRoutes(string configuration) =>
+        configuration.Contains("# Remote LMS relay routes. Imported inside the Edge Gateway Caddy listener.", StringComparison.Ordinal) &&
+        configuration.Contains("reverse_proxy http://127.0.0.1:", StringComparison.Ordinal);
 
     private async Task<EdgeGatewayCloudflareDomainOption> ResolveRelayDomainAsync(CancellationToken cancellationToken)
     {
@@ -182,10 +199,10 @@ public sealed class RemoteLmsRelayCaddyService(
     private async Task ApplyRoutesUnsafeAsync(CancellationToken cancellationToken)
     {
         await EnsureRemoteRelayFileExistsAsync(cancellationToken);
-        var previousText = await ReadTextOrDefaultAsync(ManagedConfigPath, cancellationToken);
+        var previousText = await ReadTextOrDefaultAsync(configurationPath, cancellationToken);
         var nextText = BuildCaddyfile(routes.Values);
 
-        await WriteTextAsync(ManagedConfigPath, nextText, cancellationToken);
+        await WriteTextAsync(configurationPath, nextText, cancellationToken);
         try
         {
             await ValidateCaddyAsync(cancellationToken);
@@ -193,7 +210,7 @@ public sealed class RemoteLmsRelayCaddyService(
         }
         catch
         {
-            await WriteTextAsync(ManagedConfigPath, previousText, cancellationToken);
+            await WriteTextAsync(configurationPath, previousText, cancellationToken);
             try
             {
                 await ReloadCaddyAsync(cancellationToken);
@@ -283,13 +300,13 @@ public sealed class RemoteLmsRelayCaddyService(
 
     private async Task EnsureRemoteRelayFileExistsAsync(CancellationToken cancellationToken)
     {
-        if (File.Exists(ManagedConfigPath))
+        if (File.Exists(configurationPath))
         {
             return;
         }
 
         await EnsureDirectoryAsync(ManagedRootDirectory, cancellationToken);
-        await WriteTextAsync(ManagedConfigPath, BuildCaddyfile([]), cancellationToken);
+        await WriteTextAsync(configurationPath, BuildCaddyfile([]), cancellationToken);
     }
 
     private async Task EnsureDirectoryAsync(string path, CancellationToken cancellationToken)
