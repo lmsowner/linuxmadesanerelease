@@ -72,6 +72,9 @@ public class Program
         builder.Services.AddSingleton<ConnectedUserRegistry>();
         builder.Services.AddSingleton<ConnectedUserDnsResolver>();
         builder.Services.AddScoped<LmsHostEdgeGatewaySummaryService>();
+        builder.Services.AddSingleton<IBenchmarkProcessRunner, BenchmarkProcessRunner>();
+        builder.Services.AddSingleton<PerformanceBenchmarkService>();
+        builder.Services.AddScoped<LmsHostBenchmarkService>();
         builder.Services.AddSingleton<ConnectedUserHubFilter>();
         builder.Services.AddCascadingAuthenticationState();
         builder.Services.AddHttpContextAccessor();

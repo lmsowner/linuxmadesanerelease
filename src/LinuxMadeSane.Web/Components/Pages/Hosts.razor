@@ -18,6 +18,7 @@
 @inject ApplicationUpdateService LocalApplicationUpdates
 @inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
 @inject LmsHostEdgeGatewaySummaryService EdgeGatewaySummaryService
+@inject LmsHostBenchmarkService BenchmarkService
 @inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
 @inject IJSRuntime JSRuntime
 @inject NavigationManager NavigationManager
@@ -65,6 +66,7 @@
                         <col class="hosts-col-auth" />
                         <col class="hosts-col-version" />
                         <col class="hosts-col-channel" />
+                        <col class="hosts-col-performance" />
                         <col class="hosts-col-last-seen" />
                         <col class="hosts-col-actions" />
                     </colgroup>
@@ -75,6 +77,7 @@
                             <th><span class="hosts-column-heading">Auth</span></th>
                             <th><span class="hosts-column-heading">Version</span></th>
                             <th><span class="hosts-column-heading">Channel</span></th>
+                            <th><span class="hosts-column-heading">Performance</span></th>
                             <th><span class="hosts-column-heading">Last seen</span></th>
                             <th></th>
                         </tr>
@@ -83,7 +86,7 @@
                         @if (LmsHostRows.Count == 0)
                         {
                             <tr>
-                                <td colspan="7" class="hosts-loading-cell">
+                                <td colspan="8" class="hosts-loading-cell">
                                     <span class="meta-text">No LMS hosts registered yet.</span>
                                 </td>
                             </tr>
@@ -128,6 +131,20 @@
                                         </div>
                                     </td>
                                     <td><span class="hosts-row-value">@(row.LmsUpdate?.ReleaseChannel switch { "development" => "Development", "stable" => "Stable", _ => "Unknown" })</span></td>
+                                    <td class="hosts-performance-cell">
+                                        @if (hostBenchmarks.TryGetValue(row.Host.Id, out var benchmark))
+                                        {
+                                            @if (benchmark.Result is { } score)
+                                            {
+                                                <a href="@($"/hosts/{row.Host.Id}?tab=performance")" title="@($"CPU: single-core / multi-core events per second. R: disk read; W: disk write. {score.ToolVersion} · {score.TestedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm} · {score.DiskFolder} · {score.Threads} threads")">
+                                                    <span>CPU @score.SingleCpu.ToString("N0") / @score.MultiCpu.ToString("N0")</span>
+                                                    <small>R @score.ReadMBps.ToString("N0") · W @score.WriteMBps.ToString("N0") MB/s</small>
+                                                </a>
+                                            }
+                                            else { <span class="meta-text" title="@benchmark.Error">@(benchmark.Error is null ? "Not benchmarked" : "Unavailable")</span> }
+                                        }
+                                        else { <span class="meta-text">Checking…</span> }
+                                    </td>
                                     <td><span class="hosts-row-value hosts-last-seen-value">@FormatLastSeen(row)</span></td>
                                     <td class="actions-cell">
                                         <div class="row-action-cluster">
@@ -209,13 +226,13 @@
                                 @if (GetLmsUpdateOperation(row.Host.Id) is { State: LmsHostUpdateOperationState.Failed } failedUpdate)
                                 {
                                     <tr class="hosts-update-failure-row @stripeClass">
-                                        <td colspan="7"><p class="callout error" role="alert">@failedUpdate.Message</p></td>
+                                        <td colspan="8"><p class="callout error" role="alert">@failedUpdate.Message</p></td>
                                     </tr>
                                 }
                                 @if (hasRoutes)
                                 {
                                     <tr class="hosts-edge-routes-row @stripeClass">
-                                        <td colspan="7">
+                                        <td colspan="8">
                                             <div class="hosts-edge-routes">
                                                 <span class="meta-text">Edge Gateway routes</span>
                                                 @foreach (var link in edgeSummary!.Links)
@@ -584,6 +601,7 @@
             _ = RefreshStatusesAsync(statusRefreshCancellationTokenSource.Token);
             _ = RefreshLmsUpdateStatusesAsync(statusRefreshCancellationTokenSource.Token);
             _ = RefreshEdgeGatewaySummariesAsync(statusRefreshCancellationTokenSource.Token);
+            _ = RefreshBenchmarksAsync(statusRefreshCancellationTokenSource.Token);
         }
 
         return Task.CompletedTask;
@@ -673,6 +691,26 @@
             isRemovingHost = false;
             await InvokeAsync(StateHasChanged);
         }
+    }
+
+    private readonly Dictionary<Guid, LmsHostBenchmark> hostBenchmarks = [];
+    private async Task RefreshBenchmarksAsync(CancellationToken token)
+    {
+        using var gate = new SemaphoreSlim(3);
+        try
+        {
+            await Task.WhenAll(LmsHostRows.Select(async row =>
+            {
+                await gate.WaitAsync(token);
+                try
+                {
+                    var result = await BenchmarkService.GetAsync(row.Host, token);
+                    await InvokeAsync(() => { if (!token.IsCancellationRequested) { hostBenchmarks[row.Host.Id] = result; StateHasChanged(); } });
+                }
+                finally { gate.Release(); }
+            }));
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
     }
 
     private async Task RefreshEdgeGatewaySummariesAsync(CancellationToken cancellationToken)

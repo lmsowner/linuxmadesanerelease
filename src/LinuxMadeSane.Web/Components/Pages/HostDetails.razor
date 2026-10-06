@@ -7,6 +7,7 @@
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Models
 @inject IManagedHostService HostService
+@inject LmsHostBenchmarkService BenchmarkService
 @inject IServiceScopeFactory ServiceScopeFactory
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
@@ -295,6 +296,32 @@ else
 
                     </ChildContent>
                 </TabPage>
+                @if (details.Capabilities.IsLmsHost)
+                {
+                    <TabPage Value="performance" Title="Performance">
+                        @if (details.Capabilities.IsLocalLmsHost) { <PerformanceBenchmarkPanel /> }
+                        else
+                        {
+                            <h2>Saved performance benchmark</h2>
+                            @if (benchmark?.Result is { } score)
+                            {
+                                <dl>
+                                    <dt>Single-core CPU</dt><dd>@score.SingleCpu.ToString("N1") events/second</dd>
+                                    <dt>Multi-core CPU</dt><dd>@score.MultiCpu.ToString("N1") events/second · @score.Threads threads</dd>
+                                    <dt>Disk read</dt><dd>@score.ReadMBps.ToString("N1") MB/s</dd>
+                                    <dt>Disk write</dt><dd>@score.WriteMBps.ToString("N1") MB/s</dd>
+                                </dl>
+                                <p class="meta-text">@score.TestedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm") · @score.ToolVersion · @score.DiskFolder · @score.Filesystem</p>
+                            }
+                            else { <p class="callout info">@(benchmark is null ? "Reading saved benchmark…" : benchmark.Error ?? "Not benchmarked")</p> }
+                            <p class="meta-text">Run the benchmark from this host's Overview → Performance tab.</p>
+                            @if (CanOpenRemoteLmsDirectly)
+                            { <UiCommandButton Label="Open Performance on this host" Glyph="UiIconGlyph.Connect" Href="@BuildDirectLmsUrl(details.Host, "/?tab=performance")" Target="_blank" Rel="noopener noreferrer" /> }
+                            else
+                            { <UiCommandButton Label="Open Performance on this host" Glyph="UiIconGlyph.Connect" OnClick="@(() => ConnectToRemoteLmsAsync("/?tab=performance"))" Disabled="@(!CanRunRemoteLmsTunnel || isRemoteLmsConnectBusy)" /> }
+                        }
+                    </TabPage>
+                }
                 <TabPage Value="@IntegrationsTabValue" Title="Integrations">
                     <ChildContent>
                         <section class="surface-card integrations-shell">
@@ -373,6 +400,8 @@ else
     private bool detailsLoading = true, loadPending;
     private string? detailsLoadError;
     private CancellationTokenSource detailsLoad = new();
+    [SupplyParameterFromQuery(Name = "tab")] public string? RequestedTab { get; set; }
+    private LmsHostBenchmark? benchmark;
     private string activeTab = OverviewTabValue;
     private ManagedHostLmsInstallOptions lmsInstallOptions = new();
     private ManagedHostLmsUninstallOptions lmsUninstallOptions = new();
@@ -555,7 +584,8 @@ else
     {
         detailsLoad.Cancel(); detailsLoad.Dispose(); detailsLoad = new();
         details = null; remoteLmsWebAccess = null; detailsLoadError = null;
-        detailsLoading = true; loadPending = true;
+        detailsLoading = true; loadPending = true; benchmark = null;
+        activeTab = RequestedTab == "performance" ? "performance" : OverviewTabValue;
         return Task.CompletedTask;
     }
 
@@ -577,6 +607,7 @@ else
     {
         await LoadDetailsAsync(token);
         token.ThrowIfCancellationRequested();
+        if (details is not null && details.Capabilities.IsLmsHost) { benchmark = await BenchmarkService.GetAsync(details.Host, token); }
         if (details is not null &&
             !isInstallingLms &&
             !showLmsInstallPrompt &&

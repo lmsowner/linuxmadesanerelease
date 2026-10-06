@@ -1,0 +1,53 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@implements IAsyncDisposable
+@inject PerformanceBenchmarkService Benchmarks
+
+<div class="benchmark-panel">
+    <div class="benchmark-heading">
+        <div><h2>Performance benchmark</h2><p class="meta-text">Compare CPU and disk speeds using sysbench. Higher numbers are faster.</p></div>
+        <div class="toolbar-row">
+            <UiCommandButton Label="@(state.Running ? "Benchmark running…" : state.Result is null ? "Run benchmark" : "Run again")" Glyph="UiIconGlyph.Run" OnClick="Start" Disabled="@(state.Running || !OperatingSystem.IsLinux())" />
+            @if (state.Running) { <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Stop" OnClick="Cancel" /> }
+        </div>
+    </div>
+    <p class="meta-text">About 2–4 minutes. This temporarily uses CPU and disk capacity; run it when the host is quiet. You can leave this page while it runs.</p>
+    <details><summary>Test settings</summary>
+        <UiTextField Label="Disk test folder" @bind-Value="diskFolder" Helper="Choose an existing folder on the filesystem you want to compare. At least 2.2 GB must be free. Only temporary test files are written." Disabled="@state.Running" />
+        <p class="meta-text">Three 10-second runs per test; the middle result is saved. CPU: prime limit 10,000; one thread, then all CPU threads available to LMS. Disk: approximately 1.07 GB of temporary files, sequential read/write, direct I/O, 1,048,576-byte blocks. MB/s means 1,000,000 bytes per second.</p>
+    </details>
+    @if (state.Running || state.Stage is not "Ready" and not "Not benchmarked") { <p class="callout info" role="status">@state.Stage</p> }
+    @if (error is not null || state.Error is not null) { <p class="callout error" role="alert">@(error ?? state.Error)</p> }
+    @if (state.Result is { } result)
+    {
+        <div class="benchmark-metrics">
+            <article><span>Single-core CPU</span><strong>@Number(result.SingleCpu)</strong><small>events/second · 1 thread</small></article>
+            <article><span>Multi-core CPU</span><strong>@Number(result.MultiCpu)</strong><small>events/second · @result.Threads threads</small></article>
+            <article><span>Disk read</span><strong>@Number(result.ReadMBps) <small>MB/s</small></strong><small>Sequential read</small></article>
+            <article><span>Disk write</span><strong>@Number(result.WriteMBps) <small>MB/s</small></strong><small>Sequential write</small></article>
+        </div>
+        <p class="meta-text">Last completed @result.TestedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm") · @result.ToolVersion</p>
+        <p class="meta-text">Disk: @result.DiskFolder · @result.Filesystem</p>
+        <p class="meta-text">Load before testing: @result.LoadBefore.ToString("0.00") · compare results from quiet hosts using the same test settings.</p>
+        <details><summary>Benchmark commands and output</summary><p class="meta-text">These standard commands can also be run outside LMS. Run file tests in a dedicated temporary folder and use the same settings.</p><pre>@result.RawOutput</pre></details>
+    }
+    else { <p class="callout info">Not benchmarked. Run the benchmark to save CPU and disk results for this host.</p> }
+</div>
+
+@code {
+    private PerformanceBenchmarkStatus state = new(false, "Not benchmarked", null, null);
+    private string diskFolder = "";
+    private string? error;
+    private readonly CancellationTokenSource stop = new();
+    private Task? polling;
+    protected override void OnInitialized() { state = Benchmarks.GetStatus(); diskFolder = Benchmarks.DefaultDiskFolder; polling = PollAsync(); }
+    private void Start() { try { error = null; Benchmarks.Start(diskFolder); state = Benchmarks.GetStatus(); } catch (Exception ex) { error = ex.Message; } }
+    private void Cancel() { Benchmarks.Cancel(); state = Benchmarks.GetStatus(); }
+    private async Task PollAsync()
+    {
+        try { using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1)); while (await timer.WaitForNextTickAsync(stop.Token)) { state = Benchmarks.GetStatus(); await InvokeAsync(StateHasChanged); } }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+    }
+    private static string Number(double value) => value.ToString("N1");
+    public async ValueTask DisposeAsync() { await stop.CancelAsync(); if (polling is not null) await polling; stop.Dispose(); }
+}
