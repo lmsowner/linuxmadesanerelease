@@ -16,6 +16,7 @@
         <ChildContent>
             <TabPage Value="devices" Title="Devices"><ChildContent>
                 <UiCommandButton Label="@(busy ? "Discovering devices…" : "Refresh devices")" Disabled="@busy" OnClick="Load" />
+                @if (inventory is null) { @ActionFeedback }
                 @if (inventory is not null)
                 {
                     <div class="network-discovery-controls">
@@ -24,13 +25,16 @@
                             @foreach (var network in inventory.InterfaceNetworks) { <option value="@(network.Interface + "|" + network.Network)">@network.Interface · @network.Network (host @network.Address)</option> }
                         </UiSelectField>
                         <UiCommandButton Label="Scan subnet & cache devices" HideIcon="true" Disabled="@(busy || probeNetwork.Length == 0)" OnClick="(() => Probe(false))" />
+                        @if (probePackage is { Installed: false })
+                        {
+                            <div class="network-discovery-package">
+                                <p>Subnet scanning requires fping. @probePackage.Explanation</p>
+                                <UiCommandButton Label="Install fping & scan" HideIcon="true" Disabled="@(busy || !probePackage.CanInstall || probeNetwork.Length == 0)" OnClick="(() => Probe(true))" />
+                            </div>
+                        }
                     </div>
+                    @ActionFeedback
                     <p class="network-discovery-hint">Uses the selected NIC's actual address and mask. ICMP discovery only; no port scan. Names are resolved through this host's DNS.</p>
-                    @if (probePackage is { Installed: false })
-                    {
-                        <p>Subnet scanning requires fping. @probePackage.Explanation</p>
-                        <UiCommandButton Label="Install fping & scan" HideIcon="true" Disabled="@(busy || !probePackage.CanInstall || probeNetwork.Length == 0)" OnClick="(() => Probe(true))" />
-                    }
                     @foreach (var notice in inventory.Notices) { <p class="callout">@notice</p> }
                     <div class="infrastructure-table"><table><thead><tr><th>Device</th><th>Addresses</th><th>MAC / vendor</th><th>State</th><th>Last observed</th><th></th></tr></thead><tbody>
                         @foreach (var device in inventory.Devices)
@@ -46,6 +50,7 @@
             <TabPage Value="dhcp" Title="DHCP"><ChildContent><DhcpPanel /></ChildContent></TabPage>
             <TabPage Value="exposure" Title="Exposure"><ChildContent>
                 <UiCommandButton Label="@(busy ? "Reading exposure…" : "Refresh exposure")" Disabled="@busy" OnClick="Load" />
+                @ActionFeedback
                 @if (exposure is not null)
                 {
                     @foreach (var notice in exposure.Notices) { <p class="callout">@notice</p> }
@@ -57,8 +62,6 @@
             </ChildContent></TabPage>
         </ChildContent>
     </TabControl>
-    @if (busy) { <p class="callout" aria-busy="true">@progress</p> }
-    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
 </div>
 <UiModal IsOpen="@(selected is not null)" Title="Device" OnClose="(() => selected = null)">
     <ChildContent>
@@ -81,6 +84,10 @@
     </ChildContent>
 </UiModal>
 @code {
+    private RenderFragment ActionFeedback => @<div class="network-action-feedback">
+        @if (busy) { <p class="callout info" role="status" aria-live="polite" aria-busy="true">@progress</p> }
+        @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+    </div>;
     [Parameter] public string? Section { get; set; }
     private DeviceInventory? inventory;
     private ExposureSnapshot? exposure;
