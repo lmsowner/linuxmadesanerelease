@@ -38,8 +38,10 @@ public sealed class RemoteLmsRelayCaddyService(
         var route = new RemoteLmsRelayRoute(host.Id, host.Name, hostname, localPort, DateTimeOffset.UtcNow);
 
         await gate.WaitAsync(cancellationToken);
+        RemoteLmsRelayRoute? previous = null;
         try
         {
+            routes.TryGetValue(host.Id, out previous);
             routes[host.Id] = route;
             await EnsureRemoteRelayFileExistsAsync(cancellationToken);
             await EnsureCaddyReadyAsync(cancellationToken);
@@ -49,7 +51,8 @@ public sealed class RemoteLmsRelayCaddyService(
         }
         catch
         {
-            routes.Remove(host.Id);
+            if (previous is not null) routes[host.Id] = previous;
+            else routes.Remove(host.Id);
             throw;
         }
         finally

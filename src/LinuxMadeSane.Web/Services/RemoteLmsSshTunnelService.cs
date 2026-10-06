@@ -27,7 +27,6 @@ public sealed class RemoteLmsSshTunnelService(
     private static readonly TimeSpan TunnelReadyAttemptTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RelayDnsReadyTimeout = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan RelayDnsReadyAttemptTimeout = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan CachedRelaySessionLifetime = TimeSpan.FromHours(7.5);
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Dictionary<Guid, RemoteLmsSshTunnel> tunnels = [];
     private bool disposed;
@@ -47,15 +46,9 @@ public sealed class RemoteLmsSshTunnelService(
                 if (existing.IsUsable)
                 {
                     existing.Touch();
-                    if (existing.TryBuildCachedRelayConnection(
-                            path,
-                            CachedRelaySessionLifetime,
-                            DateTimeOffset.UtcNow,
-                            out var cachedConnection))
-                    {
-                        return cachedConnection;
-                    }
-
+                    // An SSH transport can survive an LMS update/restart, but the
+                    // remote in-memory login session cannot. Every Connect must
+                    // refresh the relay and obtain a new one-time login grant.
                     return await BuildRelayConnectionAsync(existing, path, reused: true, cancellationToken);
                 }
 
@@ -136,9 +129,15 @@ public sealed class RemoteLmsSshTunnelService(
             path,
             cancellationToken);
         await WaitForRelayPublicDnsReadyAsync(client, relay.Hostname, cancellationToken);
+        return await AuthenticateRelayAsync(client, connection, relay.Hostname, path, cancellationToken);
+    }
+
+    internal static async Task<RemoteLmsSshTunnelConnection> AuthenticateRelayAsync(
+        HttpClient client, RemoteLmsSshTunnelConnection connection, string hostname, string path,
+        CancellationToken cancellationToken = default)
+    {
         var grant = await IssueTunnelGrantAsync(client, connection.BaseUrl, path, cancellationToken);
-        var consumeUrl = BuildRelayConsumeUrl(relay.Hostname, grant.Token);
-        tunnel.RememberRelay(relay.Hostname);
+        var consumeUrl = BuildRelayConsumeUrl(hostname, grant.Token);
 
         return connection with
         {
@@ -460,45 +459,7 @@ public sealed class RemoteLmsSshTunnelService(
 
         private DateTimeOffset LastUsedUtc { get; set; } = DateTimeOffset.UtcNow;
 
-        private string? RelayHostname { get; set; }
-
-        private DateTimeOffset? RelaySessionIssuedAtUtc { get; set; }
-
         public void Touch() => LastUsedUtc = DateTimeOffset.UtcNow;
-
-        public void RememberRelay(string hostname)
-        {
-            RelayHostname = hostname;
-            RelaySessionIssuedAtUtc = DateTimeOffset.UtcNow;
-        }
-
-        public bool TryBuildCachedRelayConnection(
-            string path,
-            TimeSpan maxSessionAge,
-            DateTimeOffset now,
-            out RemoteLmsSshTunnelConnection connection)
-        {
-            connection = default!;
-            if (string.IsNullOrWhiteSpace(RelayHostname) ||
-                !RelaySessionIssuedAtUtc.HasValue ||
-                now - RelaySessionIssuedAtUtc.Value > maxSessionAge)
-            {
-                return false;
-            }
-
-            var baseUri = new UriBuilder(Uri.UriSchemeHttp, IPAddress.Loopback.ToString(), LocalPort, "/").Uri;
-            var relayUrl = BuildRelayUrl(RelayHostname, path);
-            connection = new RemoteLmsSshTunnelConnection(
-                Host.Id,
-                Host.Name,
-                baseUri.ToString(),
-                relayUrl,
-                relayUrl,
-                LocalPort,
-                true,
-                LastUsedUtc);
-            return true;
-        }
 
         public RemoteLmsSshTunnelConnection ToConnection(string path, bool reused)
         {
@@ -543,11 +504,6 @@ public sealed class RemoteLmsSshTunnelService(
             return new Uri(baseUri, trimmedPath);
         }
 
-        private static string BuildRelayUrl(string hostname, string? path)
-        {
-            var returnPath = RemoteLmsTunnelAccessService.NormalizeReturnUrl(path);
-            return new Uri(new UriBuilder(Uri.UriSchemeHttps, hostname).Uri, returnPath).ToString();
-        }
     }
 }
 
