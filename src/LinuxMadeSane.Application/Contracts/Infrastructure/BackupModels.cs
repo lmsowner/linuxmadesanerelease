@@ -32,6 +32,10 @@ public sealed class BackupSet
 public sealed record BackupOperation(Guid Id, Guid RepositoryId, Guid? SetId, string Kind,
     DateTimeOffset StartedUtc, DateTimeOffset FinishedUtc, bool Success, string Detail);
 public sealed record BackupWorkspace(IReadOnlyList<BackupRepository> Repositories, IReadOnlyList<BackupSet> Sets,
-    IReadOnlyList<BackupOperation> History, IReadOnlyList<string> Destinations);
+    IReadOnlyList<BackupOperation> History, IReadOnlyList<string> Destinations)
+{
+    public IReadOnlyList<BackupNetworkDestination> NetworkDestinations { get; init; } = [];
+}
+public sealed record BackupNetworkDestination(string Path, string Share, bool IsMounted, bool IsReadOnly, Guid? ManagedMountId);
 public sealed record BackupSnapshot(string Id, DateTimeOffset Time, IReadOnlyList<string> Paths);
 public sealed record BackupFile(string Path, string Type, long Size);

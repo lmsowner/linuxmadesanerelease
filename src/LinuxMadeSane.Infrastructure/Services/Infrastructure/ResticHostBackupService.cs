@@ -11,6 +11,7 @@ using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
 using LinuxMadeSane.Core.Models.RdpOptimizer;
 using LinuxMadeSane.Core.Models.Scheduling;
+using LinuxMadeSane.Core.Models.Shares;
 using LinuxMadeSane.Infrastructure.Persistence;
 using LinuxMadeSane.Infrastructure.Persistence.Entities;
 using Microsoft.Data.Sqlite;
@@ -52,8 +53,27 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             set.ScheduleHour = editor.Hour ?? 2; set.ScheduleMinute = editor.Minute ?? 0;
             set.ScheduleSummary = editor.Id.HasValue ? ScheduledTaskCompiler.Compile(editor).ScheduleSummary : "Schedule no longer exists";
         }
+        var mounts = await shares.ListCurrentMountsAsync(token);
+        var managed = await shares.ListManagedRemoteMountsAsync(token);
         return new(repositories, sets, await Read<BackupOperation>("backup-history", token),
-            (await shares.ListCurrentMountsAsync(token)).Select(mount => mount.LocalMountPath).Distinct().Order().ToArray());
+            mounts.Select(mount => mount.LocalMountPath).Distinct().Order().ToArray())
+        { NetworkDestinations = BuildNetworkDestinations(mounts, managed) };
+    }
+
+    public static IReadOnlyList<BackupNetworkDestination> BuildNetworkDestinations(
+        IReadOnlyList<CurrentSystemMount> mounts, IReadOnlyList<ManagedRemoteShareMount> managed)
+    {
+        var result = new Dictionary<string, BackupNetworkDestination>(StringComparer.Ordinal);
+        foreach (var mount in mounts.Where(mount => mount.IsNetworkMount))
+            result[mount.LocalMountPath] = new(mount.LocalMountPath, mount.SourcePath, true, mount.IsReadOnly, null);
+        foreach (var mount in managed)
+        {
+            var current = mounts.FirstOrDefault(item => item.LocalMountPath == mount.LocalMountPath && item.IsNetworkMount);
+            result[mount.LocalMountPath] = new(mount.LocalMountPath, mount.RemoteUncPath,
+                mount.IsMounted && current is not null, current?.IsReadOnly ?? false, mount.Id);
+        }
+        return result.Values.OrderByDescending(item => item.IsMounted && !item.IsReadOnly)
+            .ThenBy(item => item.Share, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     public async Task SaveRepositoryAsync(BackupRepository repository, string? password, bool initialize, CancellationToken token = default)

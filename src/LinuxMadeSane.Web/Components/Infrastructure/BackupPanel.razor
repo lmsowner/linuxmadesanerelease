@@ -3,8 +3,10 @@
 
 @using LinuxMadeSane.Application.Contracts.Infrastructure
 @using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Contracts.Shares
 @inject IHostBackupService Backup
 @inject IInfrastructureDiagnosticsService Diagnostics
+@inject ShareMountsWorkspaceService ShareWorkspace
 <FeaturePackageGate Feature="Backup" OnInstalled="Load">
     <p>Keep an encrypted copy of LMS and your chosen folders. First choose where to keep backups, then choose what to back up.</p>
     <div class="infrastructure-actions"><UiCommandButton Label="Refresh" Disabled="@busy" OnClick="Load" />
@@ -37,7 +39,7 @@
     @if (error is not null) { <p class="callout error" role="alert">@error</p> }
 </FeaturePackageGate>
 <div class="backup-dialogs">
-<UiModal Class="backup-compact-modal" IsOpen="@(repositoryEditor is not null)" Title="@(editingRepository ? "Edit backup storage" : "Set up backup storage")" OnClose="CloseRepository"><ChildContent>
+<UiModal Class="backup-compact-modal" IsOpen="@(repositoryEditor is not null && !showNetworkMount)" Title="@(editingRepository ? "Edit backup storage" : "Set up backup storage")" OnClose="CloseRepository"><ChildContent>
     @if (repositoryEditor is not null)
     {
         <p class="backup-introduction">This chooses where backups are stored. You will choose the files and schedule next.</p>
@@ -52,19 +54,35 @@
                 </UiSelectField>
             }
             <UiSelectField TValue="string" Label="Store backups on" Disabled="@busy" @bind-Value="backupDestination">
-                <option value="">Choose a disk or connected network share</option>
-                @foreach (var destination in (workspace?.Destinations ?? []).Where(path => path != "/")) { <option value="@destination">@destination</option> }
+                <option value="">Choose a network share</option>
+                @foreach (var destination in workspace?.NetworkDestinations ?? [])
+                { <option value="@destination.Path" disabled="@destination.IsReadOnly">@destination.Share — @(destination.IsReadOnly ? "Read-only" : destination.IsMounted ? "Connected" : "Not connected")</option> }
                 <option value="local">A folder on this host — enter its full path</option>
             </UiSelectField>
+            <div class="infrastructure-actions">
+                <UiCommandButton Label="Add network share" Glyph="UiIconGlyph.NetworkMount" Disabled="@busy" OnClick="OpenNetworkMount" />
+                <UiCommandButton Label="Refresh shares" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="RefreshDestinations" />
+            </div>
+            @if (SelectedNetworkDestination is { } network)
+            {
+                <p>Share: <strong>@network.Share</strong> · Available on LMS at <strong>@network.Path</strong></p>
+                @if (!network.IsMounted && network.ManagedMountId.HasValue)
+                {
+                    <UiCommandButton Label="Connect this saved share" Glyph="UiIconGlyph.Connect" Disabled="@busy" OnClick="ReconnectDestination" />
+                }
+            }
+            else if (backupDestination != "local")
+            {
+                <p>@((workspace?.NetworkDestinations.Count ?? 0) == 0 ? "No network shares are set up yet. Add one above using your saved server credentials." : "Choose an existing share above, or add another. LMS uses the same network mounts as the file manager.")</p>
+            }
             @if (backupDestination == "local")
             {
                 <UiTextField Label="Full path to the backup folder" Placeholder="/var/backups/lms" Helper="Backups on the same disk cannot protect you if that disk fails. A separate disk or network share is safer." Disabled="@busy" @bind-Value="localBackupPath" />
             }
             else if (backupDestination.Length > 0)
             {
-                <UiTextField Label="Folder inside this disk or share" Placeholder="lms-backups" Helper="Use a dedicated folder. To connect an existing backup, enter its existing folder name." Disabled="@busy" @bind-Value="backupFolder" />
+                <UiTextField Label="Backup folder inside this share" Placeholder="lms-backups" Helper="Use a dedicated folder. To connect an existing backup, enter its existing folder name." Disabled="@busy" @bind-Value="backupFolder" />
             }
-            <p class="backup-mount-guide">Need a network destination? Connect it in <a href="/shares" target="_blank" rel="noopener">Network Shares</a>, then <button type="button" class="backup-refresh-link" disabled="@busy" @onclick="RefreshDestinations">refresh this list</button>.</p>
         </section>
         <section class="backup-setup-step">
             <h3>2. Protect your backups</h3>
@@ -81,7 +99,7 @@
             else { <p>Choose a destination and backup folder above.</p> }
             <p>@(initialize ? "LMS will create encrypted backup storage here. Existing backups are not overwritten." : "LMS will check that it can open the existing backup with this password.") No backup runs at this step.</p>
             <div class="infrastructure-actions">
-                <UiCommandButton Label="@(initialize ? "Create backup storage" : "Check & save backup storage")" HideIcon="true" Disabled="@(busy || BackupPathPreview is null || string.IsNullOrWhiteSpace(repositoryEditor.Name) || (!editingRepository && password.Length == 0) || ((initialize || password.Length > 0) && password != passwordConfirmation))" OnClick="SaveRepository" />
+                <UiCommandButton Label="@(initialize ? "Create backup storage" : "Check & save backup storage")" HideIcon="true" Disabled="@(busy || BackupPathPreview is null || (backupDestination != "local" && SelectedNetworkDestination is not { IsMounted: true, IsReadOnly: false }) || string.IsNullOrWhiteSpace(repositoryEditor.Name) || (!editingRepository && password.Length == 0) || ((initialize || password.Length > 0) && password != passwordConfirmation))" OnClick="SaveRepository" />
                 <UiCommandButton Label="Cancel" Variant="UiButtonVariant.Ghost" HideIcon="true" Disabled="@busy" OnClick="CloseRepository" />
             </div>
             @if (passwordConfirmation.Length > 0 && password != passwordConfirmation) { <p class="callout error" role="alert">The passwords do not match.</p> }
@@ -90,6 +108,14 @@
         @if (error is not null) { <p class="callout error">@error</p> }
     }
 </ChildContent></UiModal>
+<UiModal Class="share-mapping-modal" IsOpen="@showNetworkMount" Title="Add network share for backups" Subtitle="Choose saved server credentials and a share. LMS saves a permanent mount so scheduled backups can use it after a restart." OnClose="CloseNetworkMount">
+    @if (showNetworkMount)
+    {
+        <ShareMappingForm Editor="@networkMountEditor" EnableRemoteShareDiscovery="true" ShowPersistenceToggle="false" PreferLmsDefaultMountPath="true"
+                          IsBusy="@connectingNetworkMount" StatusMessage="@networkMountStatus" StatusTone="error"
+                          PermanentSubmitLabel="Connect share & use for backups" OnCreateMount="CreateBackupNetworkMount" />
+    }
+</UiModal>
 <UiModal Class="backup-compact-modal" IsOpen="@(setEditor is not null)" Title="Choose what to back up" OnClose="CloseSet"><ChildContent>
     @if (setEditor is not null)
     {
@@ -137,6 +163,10 @@
     private string backupDestination = "", backupFolder = "lms-backups", localBackupPath = "", passwordConfirmation = "";
     private string? repositoryNotice;
     private bool editingRepository;
+    private bool showNetworkMount, connectingNetworkMount;
+    private RemoteShareMountEditor networkMountEditor = new() { PersistOnServer = true };
+    private string? networkMountStatus;
+    private BackupNetworkDestination? SelectedNetworkDestination => workspace?.NetworkDestinations.FirstOrDefault(item => item.Path == backupDestination);
     private string? BackupPathPreview
     {
         get { try { return BackupDestinationSelection.Resolve(backupDestination, backupFolder, localBackupPath); } catch (InvalidOperationException) { return null; } }
@@ -150,12 +180,63 @@
     { busy = true; progress = label; error = null; await InvokeAsync(StateHasChanged); await Task.Yield(); try { await operation(); } catch (Exception e) { error = e.Message; } finally { busy = false; } }
     private Task Load() => Operation("Reading backup configuration…", async () => workspace = await Backup.GetAsync());
     private void NewRepository() { error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = true; editingRepository = false; backupDestination = localBackupPath = ""; backupFolder = "lms-backups"; repositoryEditor = new() { Name = "LMS backup" }; }
-    private void EditRepository(BackupRepository repo) { error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = false; editingRepository = true; backupDestination = "local"; localBackupPath = repo.Path; repositoryEditor = new() { Id = repo.Id, Name = repo.Name, Path = repo.Path }; }
+    private void EditRepository(BackupRepository repo)
+    {
+        error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = false; editingRepository = true;
+        var share = workspace?.NetworkDestinations.Where(item => repo.Path.StartsWith(item.Path.TrimEnd('/') + "/", StringComparison.Ordinal))
+            .OrderByDescending(item => item.Path.Length).FirstOrDefault();
+        backupDestination = share?.Path ?? "local"; localBackupPath = repo.Path;
+        backupFolder = share is null ? "lms-backups" : repo.Path[(share.Path.TrimEnd('/').Length + 1)..];
+        repositoryEditor = new() { Id = repo.Id, Name = repo.Name, Path = repo.Path };
+    }
     private void CloseRepository() { if (!busy) { repositoryEditor = null; password = passwordConfirmation = ""; } }
     private Task RefreshDestinations() => Operation("Refreshing connected disks and shares…", async () => workspace = await Backup.GetAsync());
+    private void OpenNetworkMount()
+    {
+        networkMountStatus = null;
+        networkMountEditor = new() { PersistOnServer = true };
+        showNetworkMount = true;
+    }
+    private void CloseNetworkMount()
+    {
+        if (connectingNetworkMount) return;
+        showNetworkMount = false;
+        networkMountEditor = new() { PersistOnServer = true };
+        networkMountStatus = null;
+    }
+    private async Task CreateBackupNetworkMount(bool _)
+    {
+        connectingNetworkMount = true; networkMountStatus = null;
+        try
+        {
+            networkMountEditor.PersistOnServer = true;
+            var result = await ShareWorkspace.CreateRemoteShareMountAsync(networkMountEditor);
+            // Select the actual mount returned by the standard share workflow, not a guessed path.
+            backupDestination = result.LocalMountPath;
+            showNetworkMount = false;
+            networkMountEditor = new() { PersistOnServer = true };
+            await RefreshDestinations();
+        }
+        catch (Exception exception) { networkMountStatus = exception.Message; }
+        finally { connectingNetworkMount = false; }
+    }
+    private Task ReconnectDestination() => Operation("Connecting the saved network share…", async () =>
+    {
+        var id = SelectedNetworkDestination?.ManagedMountId ?? throw new InvalidOperationException("Choose a saved network share to reconnect.");
+        var result = await ShareWorkspace.ReconnectManagedRemoteMountAsync(id);
+        workspace = await Backup.GetAsync();
+        if (result is null || SelectedNetworkDestination is not { IsMounted: true, IsReadOnly: false })
+            throw new InvalidOperationException("This share is not connected for writing. Check its connection in Network Shares before creating backup storage.");
+    });
     private Task SaveRepository() => Operation(initialize ? "Creating encrypted backup storage…" : "Checking the backup password and location…", async () =>
     {
         repositoryEditor!.Path = BackupDestinationSelection.Resolve(backupDestination, backupFolder, localBackupPath);
+        if (backupDestination != "local")
+        {
+            workspace = await Backup.GetAsync();
+            if (SelectedNetworkDestination is not { IsMounted: true, IsReadOnly: false })
+                throw new InvalidOperationException("Connect this network share before saving. LMS will not put backups in an empty mount folder.");
+        }
         if ((initialize || password.Length > 0) && password != passwordConfirmation) throw new InvalidOperationException("The passwords do not match.");
         await Backup.SaveRepositoryAsync(repositoryEditor, password, initialize);
         repositoryNotice = $"Backup storage is ready at {repositoryEditor.Path}. Next, select ‘Choose what to back up’ to choose files and a schedule. No backup has run yet.";
