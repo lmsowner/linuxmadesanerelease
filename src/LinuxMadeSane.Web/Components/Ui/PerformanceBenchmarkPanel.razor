@@ -5,16 +5,17 @@
 
 <div class="benchmark-panel">
     <div class="benchmark-heading">
-        <div><h2>Performance benchmark</h2><p class="meta-text">Compare CPU and disk speeds using sysbench. Higher numbers are faster.</p></div>
+        <div><h2>Performance benchmark</h2><p class="meta-text">Compare CPU and disk speeds using sysbench, and internet speed using LibreSpeed. Higher numbers are faster.</p></div>
         <div class="toolbar-row">
             <UiCommandButton Label="@(state.Running ? "Benchmark running…" : state.Result is null ? "Run benchmark" : "Run again")" Glyph="UiIconGlyph.Run" OnClick="Start" Disabled="@(state.Running || !OperatingSystem.IsLinux())" />
             @if (state.Running) { <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Stop" OnClick="Cancel" /> }
         </div>
     </div>
-    <p class="meta-text">About 2–4 minutes. This temporarily uses CPU and disk capacity; run it when the host is quiet. You can leave this page while it runs.</p>
+    <p class="meta-text">About 3–5 minutes. This temporarily uses CPU and disk capacity; run it when the host is quiet. The internet test downloads and uploads data to public test servers and can use hundreds of MB or more. You can leave this page while it runs.</p>
     <details><summary>Test settings</summary>
         <UiTextField Label="Disk test folder" @bind-Value="diskFolder" Helper="Choose an existing folder on the filesystem you want to compare. At least 2.2 GB must be free. Only temporary test files are written." Disabled="@state.Running" />
         <p class="meta-text">Three 10-second runs per test; the middle result is saved. CPU: prime limit 10,000; one thread, then all CPU threads available to LMS. Disk: approximately 1.07 GB of temporary files, sequential read/write, direct I/O, 1,048,576-byte blocks. MB/s means 1,000,000 bytes per second.</p>
+        <p class="meta-text">Internet: one 10-second download and upload test; fastest responding LibreSpeed server selected automatically. Uses this LMS host’s current route, including any VPN. Measures the connection to that server, rather than a guaranteed ISP line speed. Results sharing is disabled. The first run downloads a checksum-verified LibreSpeed tool from its official GitHub release; no administrator access is required.</p>
     </details>
     @if (state.Running || state.Stage is not "Ready" and not "Not benchmarked") { <p class="callout info" role="status">@state.Stage</p> }
     @if (error is not null || state.Error is not null) { <p class="callout error" role="alert">@(error ?? state.Error)</p> }
@@ -26,12 +27,22 @@
             <article><span>Disk read</span><strong>@Number(result.ReadMBps) <small>MB/s</small></strong><small>Sequential read</small></article>
             <article><span>Disk write</span><strong>@Number(result.WriteMBps) <small>MB/s</small></strong><small>Sequential write</small></article>
         </div>
+        @if (result.Internet is { } internet)
+        {
+            <div class="benchmark-metrics internet-metrics">
+                <article><span>Internet download</span><strong>@Number(internet.DownloadMbps) <small>Mbps</small></strong><small>To this LMS host</small></article>
+                <article><span>Internet upload</span><strong>@Number(internet.UploadMbps) <small>Mbps</small></strong><small>From this LMS host</small></article>
+                <article><span>Internet latency</span><strong>@Number(internet.LatencyMs) <small>ms</small></strong><small>Jitter @Number(internet.JitterMs) ms</small></article>
+            </div>
+            <p class="meta-text">Internet test: @internet.Server · @internet.TestedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</p>
+        }
+        else { <p class="callout info">@(result.InternetError ?? "Internet speed has not been tested. Run the benchmark again to include it.") CPU and disk results are saved.</p> }
         <p class="meta-text">Last completed @result.TestedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm") · @result.ToolVersion</p>
         <p class="meta-text">Disk: @result.DiskFolder · @result.Filesystem</p>
         <p class="meta-text">Load before testing: @result.LoadBefore.ToString("0.00") · compare results from quiet hosts using the same test settings.</p>
         <details><summary>Benchmark commands and output</summary><p class="meta-text">These standard commands can also be run outside LMS. Run file tests in a dedicated temporary folder and use the same settings.</p><pre>@result.RawOutput</pre></details>
     }
-    else { <p class="callout info">Not benchmarked. Run the benchmark to save CPU and disk results for this host.</p> }
+    else { <p class="callout info">Not benchmarked. Run the benchmark to save CPU, disk and internet results for this host.</p> }
 </div>
 
 @code {

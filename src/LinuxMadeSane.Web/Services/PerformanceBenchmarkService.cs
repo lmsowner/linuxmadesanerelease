@@ -10,7 +10,9 @@ namespace LinuxMadeSane.Web.Services;
 
 public sealed record PerformanceBenchmarkResult(string Profile, string ToolVersion, DateTimeOffset TestedAtUtc,
     string DiskFolder, string Filesystem, int Threads, double SingleCpu, double MultiCpu, double ReadMBps,
-    double WriteMBps, double LoadBefore, string RawOutput);
+    double WriteMBps, double LoadBefore, string RawOutput, InternetBenchmarkResult? Internet = null, string? InternetError = null);
+public sealed record InternetBenchmarkResult(double DownloadMbps, double UploadMbps, double LatencyMs, double JitterMs,
+    string Server, DateTimeOffset TestedAtUtc);
 public sealed record PerformanceBenchmarkStatus(bool Running, string Stage, string? Error, PerformanceBenchmarkResult? Result);
 public sealed record BenchmarkCommandResult(int ExitCode, string Output, string Error);
 public interface IBenchmarkProcessRunner
@@ -58,7 +60,7 @@ public sealed class BenchmarkProcessRunner : IBenchmarkProcessRunner
     }
 }
 
-// Only orchestration: every measurement comes from the packaged sysbench CPU/fileio tests.
+// Only orchestration: sysbench measures CPU/disk; LibreSpeed measures the host's internet connection.
 public sealed class PerformanceBenchmarkService
 {
     public const string Profile = "sysbench-1.0-cpu10000-direct1M-1G-3x10s-v1";
@@ -66,6 +68,7 @@ public sealed class PerformanceBenchmarkService
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly IBenchmarkProcessRunner runner;
     private readonly IHostApplicationLifetime lifetime;
+    private readonly IHttpClientFactory clients;
     private readonly ILogger<PerformanceBenchmarkService> logger;
     private readonly object gate = new();
     private CancellationTokenSource? cancellation;
@@ -74,9 +77,9 @@ public sealed class PerformanceBenchmarkService
     public string ResultFile { get; }
 
     public PerformanceBenchmarkService(IBenchmarkProcessRunner runner, IConfiguration config, IWebHostEnvironment environment,
-        IHostApplicationLifetime lifetime, ILogger<PerformanceBenchmarkService> logger)
+        IHostApplicationLifetime lifetime, ILogger<PerformanceBenchmarkService> logger, IHttpClientFactory clients)
     {
-        this.runner = runner; this.lifetime = lifetime; this.logger = logger;
+        this.runner = runner; this.lifetime = lifetime; this.logger = logger; this.clients = clients;
         var db = new SqliteConnectionStringBuilder(config.GetConnectionString("LinuxMadeSane") ?? "Data Source=data/linuxmadesane.db");
         DefaultDiskFolder = Path.GetDirectoryName(Path.GetFullPath(db.DataSource, environment.ContentRootPath))!;
         ResultFile = Path.Combine(DefaultDiskFolder, "performance", "latest.json");
@@ -169,8 +172,25 @@ public sealed class PerformanceBenchmarkService
             log.AppendLine("sysbench fileio --file-num=1 --file-total-size=1G prepare").AppendLine(await Command("sysbench", ["fileio", "--file-num=1", "--file-total-size=1G", "prepare"], work, token));
             var write = await Measure("Disk write", DiskArguments("seqrewr"), x => ParseDisk(x, "written", "write"));
             var read = await Measure("Disk read", DiskArguments("seqrd"), x => ParseDisk(x, "read", "read"));
+            InternetBenchmarkResult? internet = null;
+            string? internetError = null;
+            try
+            {
+                Stage("Preparing LibreSpeed internet test…");
+                var tool = await LibreSpeedTool.EnsureAsync(Path.Combine(Path.GetDirectoryName(ResultFile)!, "tools"), clients.CreateClient(), token);
+                Stage("Testing internet download, upload and latency…");
+                var output = await Command(tool, InternetArguments(), folder, token, 180);
+                internet = ParseInternet(output);
+                // Keep public IP/ISP details out of the saved raw output; retain the actual measurements.
+                log.AppendLine("librespeed-cli " + string.Join(" ", InternetArguments())).AppendLine(JsonSerializer.Serialize(internet, JsonOptions));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Internet benchmark failed; CPU and disk results will still be saved.");
+                internetError = "Internet test could not finish. Check this host's internet/DNS access or try again if the test servers are unavailable. " + ex.Message;
+            }
             var result = new PerformanceBenchmarkResult(Profile, version, DateTimeOffset.UtcNow, folder, filesystem,
-                threads, single, multi, read, write, load, log.ToString());
+                threads, single, multi, read, write, load, log.ToString(), internet, internetError);
             token.ThrowIfCancellationRequested();
             Directory.CreateDirectory(Path.GetDirectoryName(ResultFile)!);
             var temporary = ResultFile + ".tmp";
@@ -195,6 +215,26 @@ public sealed class PerformanceBenchmarkService
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { logger.LogWarning(ex, "Could not remove temporary benchmark result."); }
             lock (gate) status = status with { Running = false };
         }
+    }
+    public static string[] InternetArguments() => ["--json", "--secure", "--no-icmp", "--telemetry-level", "disabled", "--duration", "10", "--timeout", "10"];
+    public static InternetBenchmarkResult ParseInternet(string output)
+    {
+        using var json = JsonDocument.Parse(output);
+        if (json.RootElement.ValueKind != JsonValueKind.Array || json.RootElement.GetArrayLength() != 1)
+            throw new InvalidOperationException("LibreSpeed did not report a completed test.");
+        var row = json.RootElement[0];
+        // v1.0.14 report/json.go and speedtest/helper.go emit decimal Mbps, despite older README wording.
+        var result = new InternetBenchmarkResult(row.GetProperty("download").GetDouble(), row.GetProperty("upload").GetDouble(),
+            row.GetProperty("ping").GetDouble(), row.GetProperty("jitter").GetDouble(),
+            row.GetProperty("server").GetProperty("name").GetString() ?? "Unknown server", row.GetProperty("timestamp").GetDateTimeOffset());
+        ValidateInternet(result);
+        return result;
+    }
+    private static void ValidateInternet(InternetBenchmarkResult result)
+    {
+        if (new[] { result.DownloadMbps, result.UploadMbps }.Any(x => !double.IsFinite(x) || x <= 0) ||
+            new[] { result.LatencyMs, result.JitterMs }.Any(x => !double.IsFinite(x) || x < 0) || result.TestedAtUtc == default)
+            throw new InvalidOperationException("LibreSpeed reported an incomplete or invalid measurement.");
     }
     public static string[] CpuArguments(int threads) => ["cpu", "--cpu-max-prime=10000", $"--threads={threads}", "--time=10", "--events=0", "run"];
     public static string[] DiskArguments(string mode) => ["fileio", "--file-num=1", "--file-total-size=1G", "--file-block-size=1M", "--file-extra-flags=direct", "--file-io-mode=sync", "--file-fsync-freq=0", "--file-fsync-end=on", $"--file-test-mode={mode}", "--threads=1", "--time=10", "--events=0", "run"];
@@ -225,6 +265,7 @@ public sealed class PerformanceBenchmarkService
         if (result is null) return null;
         if (result.Profile != Profile || result.Threads < 1 || new[] { result.SingleCpu, result.MultiCpu, result.ReadMBps, result.WriteMBps }.Any(x => !double.IsFinite(x) || x <= 0))
             throw new InvalidOperationException("Saved benchmark uses an unsupported profile or contains invalid results. Run the benchmark again.");
+        if (result.Internet is not null) ValidateInternet(result.Internet);
         return result;
     }
 }
