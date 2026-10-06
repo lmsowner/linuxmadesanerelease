@@ -17,4 +17,8 @@ public sealed record SshfsMountHostCandidate(
     bool HasStoredPrivateKey,
     bool HasPrivateKeyPassphrase,
     bool CanMountWithSshfs,
-    string StatusMessage);
+    string StatusMessage)
+{
+    public bool CanPersistWithSshfs { get; init; }
+    public bool HasStoredPassword { get; init; }
+}

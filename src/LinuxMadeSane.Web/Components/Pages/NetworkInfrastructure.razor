@@ -53,11 +53,20 @@
                 @ActionFeedback
                 @if (exposure is not null)
                 {
+                    <p class="network-discovery-hint">Grouped by service. A listening port does not prove Internet access. Inspect a service for its bindings, firewall evidence and Docker configuration.</p>
                     @foreach (var notice in exposure.Notices) { <p class="callout">@notice</p> }
-                    <div class="infrastructure-table"><table><thead><tr><th>Service</th><th>Local</th><th>External route</th><th>Method / evidence</th></tr></thead><tbody>
-                    @foreach (var entry in exposure.Entries)
-                    { <tr><td>@entry.Service</td><td>@entry.Local</td><td>@(entry.External.Length > 0 ? entry.External : "Not known")</td><td>@entry.Method<details><summary>Why?</summary>@foreach (var reason in entry.Reasoning) { <p>@reason</p> }</details></td></tr> }
+                    <div class="infrastructure-table exposure-table"><table><thead><tr><th>Service</th><th>Listening addresses / ports</th><th>Edge Gateway routes</th><th>Access summary</th><th></th></tr></thead><tbody>
+                    @foreach (var group in ExposurePresentation.Group(exposure))
+                    {
+                        <tr><td><strong>@group.Service</strong></td>
+                            <td title="@string.Join(", ", group.Bindings)">@string.Join(", ", group.Bindings.Take(3))@if (group.Bindings.Count > 3) { <span> · +@(group.Bindings.Count - 3) more</span> }</td>
+                            <td>@if (group.Routes.Count == 0) { <span class="meta-text">None configured</span> } else { @string.Join(", ", group.Routes.Take(2))@if (group.Routes.Count > 2) { <span> · +@(group.Routes.Count - 2) more</span> } }</td>
+                            <td>@group.AccessSummary</td>
+                            <td><UiCommandButton Label="Inspect" HideIcon="true" OnClick="(() => selectedExposure = group)" /></td>
+                        </tr>
+                    }
                     </tbody></table></div>
+                    @if (exposure.Entries.Count == 0) { <p>No listening services or configured Edge Gateway routes were found.</p> }
                 }
             </ChildContent></TabPage>
         </ChildContent>
@@ -83,6 +92,21 @@
         }
     </ChildContent>
 </UiModal>
+<UiModal IsOpen="@(selectedExposure is not null)" Title="@(selectedExposure is null ? "Service exposure" : selectedExposure.Service + " exposure")" OnClose="(() => selectedExposure = null)">
+    <ChildContent>
+        @if (selectedExposure is { } group)
+        {
+            <p><strong>@group.AccessSummary</strong></p>
+            <h3>Listening addresses and ports</h3>
+            <p>@string.Join(" · ", group.Bindings)</p>
+            <h3>Edge Gateway routes</h3>
+            <p>@(group.Routes.Count == 0 ? "None configured in LMS." : string.Join(" · ", group.Routes))</p>
+            <h3>What LMS observed</h3>
+            <p>@string.Join(" · ", group.Entries.Select(x => x.Method).Distinct())</p>
+            <ul>@foreach (var reason in group.Entries.SelectMany(x => x.Reasoning).Distinct()) { <li>@reason</li> }</ul>
+        }
+    </ChildContent>
+</UiModal>
 @code {
     private RenderFragment ActionFeedback => @<div class="network-action-feedback">
         @if (busy) { <p class="callout info" role="status" aria-live="polite" aria-busy="true">@progress</p> }
@@ -91,6 +115,7 @@
     [Parameter] public string? Section { get; set; }
     private DeviceInventory? inventory;
     private ExposureSnapshot? exposure;
+    private ExposureServiceGroup? selectedExposure;
     private NetworkDevice? selected;
     private bool busy;
     private string? error;

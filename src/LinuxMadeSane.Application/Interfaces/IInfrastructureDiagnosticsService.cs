@@ -7,6 +7,7 @@ namespace LinuxMadeSane.Application.Interfaces;
 
 public interface IInfrastructureDiagnosticsService
 {
+    Task<DeviceInventory> GetCachedDevicesAsync(CancellationToken cancellationToken = default);
     Task<DeviceInventory> DiscoverDevicesAsync(CancellationToken cancellationToken = default);
     Task<DeviceInventory> ProbeSubnetAsync(string listeningInterface, string subnet, CancellationToken cancellationToken = default);
     Task SaveDeviceAsync(NetworkDevice device, CancellationToken cancellationToken = default);

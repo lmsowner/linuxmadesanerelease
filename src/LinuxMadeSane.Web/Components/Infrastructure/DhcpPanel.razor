@@ -7,9 +7,12 @@
 @inject IInfrastructureDiagnosticsService Diagnostics
 <FeaturePackageGate Feature="DHCP" OnInstalled="Load">
     <UiCommandButton Label="@(busy ? "Reading DHCP…" : "Refresh")" Disabled="@busy" OnClick="Load" />
+    @if (message is not null) { <p class="callout" role="status">@message</p> }
+    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
     @if (workspace is null) { <p>Read the existing configuration before making changes.</p> }
     else
     {
+        <p class="callout info">@(wasRunning ? "DHCP is currently running. Existing configuration is preserved until you apply changes." : "DHCP is off. Installation does not start it. Review the devices and address pool before explicitly enabling DHCP.")</p>
         <div class="dhcp-workspace">
         @foreach (var notice in workspace.Notices) { <p class="dhcp-notice">@notice</p> }
         <EditForm Model="editor" OnSubmit="Save">
@@ -26,6 +29,23 @@
                 <UiTextField Label="DNS servers (comma separated)" @bind-Value="editor.DnsServers" Compact="true" Disabled="@workspace.ReadOnly" Class="dhcp-dns" />
             </div>
             @if (networkSuggestion is not null) { <p class="dhcp-hint">@networkSuggestion</p> }
+            <h3>Existing network devices</h3>
+            <p class="dhcp-hint">Uses the saved Network → Devices inventory. Choose a reservation to keep an address, or dynamic addressing to use the pool. This does not change a device's manually configured IP settings.</p>
+            @if (cachedDevices.Count == 0) { <p class="dhcp-empty">No cached devices. Scan Network → Devices, then refresh here before enabling DHCP.</p> }
+            else
+            {
+                <div class="infrastructure-table"><table><thead><tr><th>Device</th><th>Current IPv4</th><th>MAC</th><th>Addressing</th></tr></thead><tbody>
+                @foreach (var device in cachedDevices.Where(DeviceInSelectedNetwork))
+                {
+                    var ip = DeviceAddress(device);
+                    <tr><td>@(string.IsNullOrWhiteSpace(device.FriendlyName) ? device.Hostname : device.FriendlyName)</td><td>@ip</td><td>@device.Mac</td>
+                        <td><select aria-label="@($"Addressing for {device.Hostname}")" value="@DeviceChoice(device)" disabled="@(busy || workspace.ReadOnly || string.IsNullOrWhiteSpace(device.Mac) || string.IsNullOrWhiteSpace(ip))" @onchange="@(args => SetDeviceChoice(device, args.Value?.ToString()))">
+                            <option value="unchanged">Leave unchanged</option><option value="reserved">Reserve current IP</option><option value="dynamic">Dynamic pool</option>
+                        </select></td></tr>
+                }
+                </tbody></table></div>
+                <p class="dhcp-hint">Changes are staged until Validate &amp; apply. Devices without a known MAC or IPv4 cannot be reserved. Cached addresses may be stale; address conflicts are checked before saving.</p>
+            }
             <h3>Reserved addresses</h3>
             <p class="dhcp-hint">A reservation gives a device the same IP address each time it connects.</p>
             @if (editor.Reservations.Count == 0) { <p class="dhcp-empty">No reserved addresses.</p> }
@@ -60,8 +80,7 @@
         @if (workspace.Leases.Count == 0) { <p class="dhcp-empty">No leases to display.</p> }
         <details class="dhcp-original"><summary>Original Kea configuration</summary><pre>@workspace.ExistingConfiguration</pre></details>
     }
-    @if (message is not null) { <p class="callout" role="status">@message</p> }
-    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+
 </FeaturePackageGate>
 @code {
     [SupplyParameterFromQuery(Name = "device")] public Guid? DeviceId { get; set; }
@@ -69,7 +88,49 @@
     private DhcpEditor editor = new();
     private string mac = "", address = "", hostname = "";
     private string? error, message, networkSuggestion;
-    private bool busy;
+    private bool busy, wasRunning;
+    private DhcpReservation[] originalReservations = [];
+    private IReadOnlyList<NetworkDevice> cachedDevices = [];
+    private readonly Dictionary<Guid, string> deviceChoices = [];
+    private string DeviceAddress(NetworkDevice device) => device.Addresses.FirstOrDefault(value => System.Net.IPAddress.TryParse(value, out var ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) ?? "";
+    private bool DeviceInSelectedNetwork(NetworkDevice device)
+    {
+        if (string.IsNullOrWhiteSpace(editor.Subnet)) return string.IsNullOrWhiteSpace(editor.Interface) || device.Interface == editor.Interface;
+        var parts = editor.Subnet.Split('/');
+        return parts.Length == 2 && int.TryParse(parts[1], out var prefix) && prefix is >= 0 and <= 32 && System.Net.IPAddress.TryParse(DeviceAddress(device), out var ip) &&
+            LinuxMadeSane.Infrastructure.Services.Infrastructure.KeaDhcpManagementService.NetworkPrefix(ip, prefix).Equals(editor.Subnet, StringComparison.Ordinal);
+    }
+    private string DeviceChoice(NetworkDevice device) => deviceChoices.GetValueOrDefault(device.Id) ??
+        (editor.Reservations.Any(item => item.Mac.Equals(device.Mac, StringComparison.OrdinalIgnoreCase)) ? "reserved" : "unchanged");
+    private async Task SetDeviceChoice(NetworkDevice device, string? choice)
+    {
+        busy = true; error = message = null;
+        try
+        {
+            var existing = editor.Reservations.Where(item => item.Mac.Equals(device.Mac, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (choice == "reserved")
+            {
+                var reservation = new DhcpReservation(device.Mac, DeviceAddress(device), device.Hostname);
+                var conflicts = await Dhcp.CheckReservationAsync(reservation);
+                if (editor.Reservations.Any(item => item.Address == reservation.Address && !item.Mac.Equals(reservation.Mac, StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidOperationException("Another staged reservation already uses this address.");
+                if (conflicts.Count > 0) throw new InvalidOperationException(string.Join(" ", conflicts));
+                foreach (var item in existing) editor.Reservations.Remove(item);
+                editor.Reservations.Add(reservation);
+            }
+            else if (choice == "dynamic") foreach (var item in existing) editor.Reservations.Remove(item);
+            else if (choice == "unchanged")
+            {
+                foreach (var item in existing) editor.Reservations.Remove(item);
+                editor.Reservations.AddRange(originalReservations.Where(item => item.Mac.Equals(device.Mac, StringComparison.OrdinalIgnoreCase)));
+            }
+            else return;
+            deviceChoices[device.Id] = choice!;
+            message = "Addressing choice staged. Review the pool and apply changes to save; DHCP remains in its current state.";
+        }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
     protected override async Task OnInitializedAsync()
     {
         if ((await Diagnostics.GetPackageStatusAsync("DHCP")).Installed) await Load();
@@ -79,10 +140,11 @@
         busy = true; error = null;
         try
         {
-            workspace = await Dhcp.GetAsync(); editor = workspace.Editor; networkSuggestion = null;
+            workspace = await Dhcp.GetAsync(); editor = workspace.Editor; wasRunning = editor.Enabled; originalReservations = editor.Reservations.ToArray(); networkSuggestion = null;
+            cachedDevices = (await Diagnostics.GetCachedDevicesAsync()).Devices; deviceChoices.Clear();
             if (DeviceId is { } id)
             {
-                var device = (await Diagnostics.DiscoverDevicesAsync()).Devices.FirstOrDefault(item => item.Id == id);
+                var device = cachedDevices.FirstOrDefault(item => item.Id == id);
                 if (device is not null) { mac = device.Mac; address = device.Addresses.FirstOrDefault(value => System.Net.IPAddress.TryParse(value, out var ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) ?? ""; hostname = device.Hostname; }
             }
         }

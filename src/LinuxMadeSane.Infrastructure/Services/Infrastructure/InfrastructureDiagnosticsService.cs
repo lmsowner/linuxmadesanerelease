@@ -90,6 +90,18 @@ public sealed class InfrastructureDiagnosticsService(
         }
     }
 
+    public async Task<DeviceInventory> GetCachedDevicesAsync(CancellationToken cancellationToken = default)
+    {
+        await InventoryGate.WaitAsync(cancellationToken);
+        try
+        {
+            var row = await database.InfrastructureStates.FindAsync(["devices"], cancellationToken);
+            return new(row is null ? [] : JsonSerializer.Deserialize<List<NetworkDevice>>(row.Json) ?? [],
+                ["Cached observations from Network → Devices. These do not establish whether a device uses DHCP or a manually configured address."]);
+        }
+        finally { InventoryGate.Release(); }
+    }
+
     public async Task<DeviceInventory> DiscoverDevicesAsync(CancellationToken cancellationToken = default)
     {
         await InventoryGate.WaitAsync(cancellationToken);

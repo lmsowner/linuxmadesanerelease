@@ -461,7 +461,7 @@
                                         </div>
 
                                         <p class="callout warning">@sshfsExplorer.Tooling.StatusMessage</p>
-                                        <p class="meta-text">SSH Mount uses `sshfs` and FUSE on this LMS server. LMS mounts registered SSH hosts using stored public key authentication.</p>
+                                        <p class="meta-text">SSH Mount uses `sshfs` and FUSE on this LMS server. Temporary mounts can use saved username/password credentials; persistent mounts require a private key.</p>
                                         <code class="block-code">@sshfsExplorer.Tooling.InstallCommand</code>
 
                                         @if (sshfsExplorer.Tooling.IsLocalHostRegistered && !string.IsNullOrWhiteSpace(sshfsExplorer.Tooling.LocalHostName))
@@ -557,7 +557,7 @@
                                     {
                                         <div class="empty-state">
                                             <h3>No SSHFS mounts yet</h3>
-                                            <p>Register an SSH host with stored public key authentication, then mount a remote folder onto this LMS server.</p>
+                                            <p>Register an SSH host with saved credentials, then mount a remote folder onto this LMS server.</p>
                                         </div>
                                     }
                                     else if (GetSshfsMountListCount() == 0)
@@ -929,7 +929,7 @@
 
         <UiModal IsOpen="@showAddSshfsMountPanel"
                  Title="Mount SSH host"
-                 Subtitle="Mount a registered public-key SSH host with SSHFS."
+                 Subtitle="Mount a registered SSH host with SSHFS."
                  Class="share-add-modal"
                  CloseOnBackdrop="false"
                  OnClose="CloseAddSshfsMountModal">
@@ -939,14 +939,14 @@
                         <span class="add-share-step-number">1</span>
                         <div>
                             <strong>Select a registered host</strong>
-                            <span class="meta-text">SSHFS mounts require stored public key authentication and a non-interactive private key.</span>
+                            <span class="meta-text">Use saved username/password credentials for a temporary mount, or a private key for a persistent mount.</span>
                         </div>
                     </div>
 
                     @if (GetMountableSshfsHostCandidates().Count == 0)
                     {
                         <div class="empty-state">
-                            <p>No registered SSH hosts are ready for SSHFS. Add or edit a host so it uses stored public key authentication.</p>
+                            <p>No registered SSH hosts have usable saved credentials. Add or edit a host with a username/password or private key.</p>
                         </div>
                     }
                     else
@@ -1029,12 +1029,15 @@
                     <div class="add-share-step-header">
                         <span class="add-share-step-number">3</span>
                         <div>
-                            <strong>Mount and save</strong>
-                            <span class="meta-text">LMS writes a managed SSHFS mount and keeps the private key file locked down on this server.</span>
+                            <strong>Mount options</strong>
+                            <span class="meta-text">A temporary mount lasts until disconnected or this host restarts.</span>
                         </div>
                     </div>
 
-                    <p class="callout warning">Use a dedicated mount key where possible. LMS cannot automate SSHFS mounts that require an interactive key passphrase.</p>
+                    <UiCheckboxField Label="Reconnect after restart (requires a private key)"
+                        @bind-Value="sshfsEditor.PersistOnServer"
+                        Disabled="@(isCreatingSshfsMount || SelectedSshfsHostCandidate?.CanPersistWithSshfs != true)" />
+                    <p class="meta-text">@(sshfsEditor.PersistOnServer ? "LMS saves this mount using the host's non-interactive private key." : "Uses the host's saved credentials. No password is written to the mount configuration.")</p>
 
                     @if (!string.IsNullOrWhiteSpace(sshfsStatusMessage))
                     {
@@ -1042,7 +1045,7 @@
                     }
 
                     <div class="toolbar-row share-mapping-actions">
-                        <UiCommandButton Label="@(isCreatingSshfsMount ? "Mounting..." : "Mount and save")"
+                        <UiCommandButton Label="@(isCreatingSshfsMount ? "Mounting..." : sshfsEditor.PersistOnServer ? "Mount and save" : "Mount temporarily")"
                                          Glyph="UiIconGlyph.NetworkMount"
                                          Disabled="@(!CanSubmitSshfsMount())"
                                          OnClick="CreateSshfsMountAsync" />
@@ -2083,7 +2086,7 @@
         {
             sshfsStatusMessage = exception.Message;
             sshfsStatusTone = "error";
-            showSshfsRecovery = true;
+            showSshfsRecovery = SelectedSshfsHostCandidate?.CanPersistWithSshfs == true;
         }
         finally
         {
@@ -2462,6 +2465,7 @@
         CanCreateSshfsMounts() &&
         !isCreatingSshfsMount && !isSshfsRecoveryBusy &&
         sshfsEditor.HostId != Guid.Empty &&
+        (!sshfsEditor.PersistOnServer || SelectedSshfsHostCandidate?.CanPersistWithSshfs == true) &&
         !string.IsNullOrWhiteSpace(sshfsEditor.RemotePath) &&
         !string.IsNullOrWhiteSpace(sshfsEditor.LocalMountPath) &&
         Path.IsPathRooted(sshfsEditor.LocalMountPath);
@@ -2564,7 +2568,7 @@
             ? "/"
             : candidate.DefaultRemotePath;
         sshfsEditor.LocalMountPath = BuildDefaultSshfsMountPath(candidate, sshfsEditor.RemotePath);
-        sshfsEditor.PersistOnServer = true;
+        sshfsEditor.PersistOnServer = candidate.CanPersistWithSshfs;
     }
 
     private Task SetSshfsRemotePathAsync(string? value)

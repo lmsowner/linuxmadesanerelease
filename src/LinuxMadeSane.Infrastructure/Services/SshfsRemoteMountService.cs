@@ -2,6 +2,8 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text;
+using System.Security.Cryptography;
+using Renci.SshNet.Common;
 using LinuxMadeSane.Application.Interfaces;
 using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Enums;
@@ -19,7 +21,8 @@ internal sealed class SshfsRemoteMountService(
     ILinuxCommandRunner commandRunner,
     IManagedHostStore managedHostStore,
     ISecretStore secretStore,
-    ShareMountStorageSettings storageSettings) : ISshfsMountService
+    ShareMountStorageSettings storageSettings,
+    ManagedHostSshConnectionFactory? sshConnectionFactory = null) : ISshfsMountService
 {
     private const string FstabFileSystemType = "fuse.sshfs";
 
@@ -112,6 +115,12 @@ internal sealed class SshfsRemoteMountService(
             throw new InvalidOperationException(candidate.StatusMessage);
         }
 
+        if (request.PersistOnServer && !candidate.CanPersistWithSshfs)
+            throw new InvalidOperationException("Persistent SSH mounts require a saved, non-interactive private key. Select a temporary mount to use username and password.");
+        var usePassword = !request.PersistOnServer && candidate.HasStoredPassword &&
+            (host.PrimaryAuthenticationType == AuthenticationType.Password || !candidate.CanPersistWithSshfs);
+        byte[]? passwordInput = null;
+        string? password = null;
         var remotePath = NormalizeRemotePath(request.RemotePath);
         var localMountPath = NormalizeLocalMountPath(request.LocalMountPath);
         var remoteSourcePath = BuildRemoteSourcePath(host.Username, host.Hostname, remotePath);
@@ -135,7 +144,14 @@ internal sealed class SshfsRemoteMountService(
 
         try
         {
-            await WriteIdentityFileAsync(host, identityFilePath, cancellationToken);
+            if (usePassword)
+            {
+                password = await secretStore.ResolveSecretAsync(host.PasswordSecretReference!, cancellationToken);
+                if (string.IsNullOrEmpty(password)) throw new InvalidOperationException("The saved SSH password is unavailable. Edit and test this host's credentials before mounting.");
+                if (password.Contains('\n') || password.Contains('\r')) throw new InvalidOperationException("SSHFS password input does not support passwords containing line breaks.");
+                passwordInput = Encoding.UTF8.GetBytes(password + "\n");
+            }
+            else await WriteIdentityFileAsync(host, identityFilePath, cancellationToken);
             await EnsureFuseAllowOtherAsync(cancellationToken);
 
             await RunRequiredCommandAsync(
@@ -145,14 +161,28 @@ internal sealed class SshfsRemoteMountService(
                 requiresSudo: true,
                 cancellationToken);
 
+            try
+            {
             await RunRequiredCommandAsync(
                 "sshfs",
-                BuildSshfsMountArguments(remoteSourcePath, localMountPath, host.Port, identityFilePath),
+                usePassword
+                    ? BuildPasswordMountArguments(remoteSourcePath, localMountPath, host.Port)
+                    : BuildSshfsMountArguments(remoteSourcePath, localMountPath, host.Port, identityFilePath),
                 $"Mount {remoteSourcePath} on {localMountPath}",
                 requiresSudo: true,
                 cancellationToken,
                 mountFailureContext: remoteSourcePath,
-                mountDiagnosticRequest: BuildSftpDiagnosticRequest(host.Hostname, host.Username, host.Port, identityFilePath, remotePath));
+                mountDiagnosticRequest: usePassword ? null : BuildSftpDiagnosticRequest(host.Hostname, host.Username, host.Port, identityFilePath, remotePath),
+                passwordInput: passwordInput, redactedPassword: password);
+            }
+            catch (InvalidOperationException exception) when (usePassword && sshConnectionFactory is not null &&
+                (exception.Message.Contains("Connection reset", StringComparison.OrdinalIgnoreCase) ||
+                 exception.Message.Contains("Connection closed", StringComparison.OrdinalIgnoreCase) ||
+                 exception.Message.Contains("Permission denied", StringComparison.OrdinalIgnoreCase)))
+            {
+                var diagnosis = await DiagnosePasswordMountFailureAsync(host, password!, remotePath, cancellationToken);
+                throw new InvalidOperationException($"Could not mount {remoteSourcePath}. {diagnosis} Mount detail: {exception.Message}");
+            }
 
             if (request.PersistOnServer)
             {
@@ -198,6 +228,10 @@ internal sealed class SshfsRemoteMountService(
             }
 
             throw;
+        }
+        finally
+        {
+            if (passwordInput is not null) CryptographicOperations.ZeroMemory(passwordInput);
         }
     }
 
@@ -412,6 +446,38 @@ internal sealed class SshfsRemoteMountService(
             cancellationToken);
     }
 
+    internal async Task<string> DiagnosePasswordMountFailureAsync(ManagedHost host, string password, string remotePath, CancellationToken token)
+    {
+        // SSHFS/OpenSSH already verified or rejected the server identity. Reuse its
+        // root-owned known_hosts trust for the diagnostic; never send a password to
+        // an identity that OpenSSH has not accepted.
+        var lookup = host.Port is 22 or <= 0 ? host.Hostname : $"[{host.Hostname}]:{host.Port}";
+        var known = await commandRunner.RunAsync(new("ssh-keygen", ["-F", lookup], true,
+            TimeSpan.FromSeconds(5), "Read SSHFS trusted host identity for password diagnostics"), false, token);
+        var keys = known.StandardOutput.Split('\n').Select(line => line.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .Where(fields => fields.Length >= 3 && !fields[0].StartsWith('#') && !fields[0].StartsWith('@'))
+            .Select(fields => fields[2]).ToHashSet(StringComparer.Ordinal);
+        if (known.ExitCode != 0 || keys.Count == 0)
+            return "SSH login could not be confirmed. The server identity is not present in this LMS host's SSHFS trusted-host file; verify the host key before retrying.";
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        try
+        {
+            using var client = sshConnectionFactory!.CreateSftpClient(host,
+                new ManagedHostSshCredentials(host.Username, password, null, null, AuthenticationType.Password), TimeSpan.FromSeconds(10));
+            client.OperationTimeout = TimeSpan.FromSeconds(10);
+            client.HostKeyReceived += (_, args) => args.CanTrust = keys.Contains(Convert.ToBase64String(args.HostKey));
+            await client.ConnectAsync(timeout.Token);
+            await Task.Run(() => client.GetAttributes(remotePath), timeout.Token);
+            return "Saved username/password login and SFTP access to the remote folder succeeded. Check the local FUSE/mount-point error or an intermittent connection failure.";
+        }
+        catch (SshAuthenticationException) { return "The SSH server rejected the saved username/password. Test the saved credentials and check that password authentication is allowed for this user on the remote server."; }
+        catch (SftpPermissionDeniedException) { return "Password login succeeded, but the remote server denied access to this folder. Check its permissions and this user's SFTP restrictions."; }
+        catch (SftpPathNotFoundException) { return "Password login succeeded, but this folder does not exist on the remote server. Check the remote path."; }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) { return "The password/SFTP diagnostic timed out. Check connectivity and the remote SSH service; login could not be confirmed."; }
+        catch (SshException) { return "The password/SFTP diagnostic could not complete. Verify the server identity and that its SFTP subsystem is enabled; login could not be confirmed."; }
+    }
+
     private async Task RunRequiredCommandAsync(
         string fileName,
         IReadOnlyList<string> arguments,
@@ -419,10 +485,11 @@ internal sealed class SshfsRemoteMountService(
         bool requiresSudo,
         CancellationToken cancellationToken,
         string? mountFailureContext = null,
-        LinuxCommandRequest? mountDiagnosticRequest = null)
+        LinuxCommandRequest? mountDiagnosticRequest = null,
+        byte[]? passwordInput = null, string? redactedPassword = null)
     {
         var result = await commandRunner.RunAsync(
-            new LinuxCommandRequest(fileName, arguments, requiresSudo, TimeSpan.FromSeconds(45), description),
+            new LinuxCommandRequest(fileName, arguments, requiresSudo, TimeSpan.FromSeconds(45), description) { StandardInputBytes = passwordInput },
             dryRun: false,
             cancellationToken);
 
@@ -434,6 +501,8 @@ internal sealed class SshfsRemoteMountService(
         var message = string.IsNullOrWhiteSpace(result.StandardError)
             ? result.StandardOutput.Trim()
             : result.StandardError.Trim();
+
+        if (!string.IsNullOrEmpty(redactedPassword)) message = message.Replace(redactedPassword, "[redacted]", StringComparison.Ordinal);
 
         if (mountFailureContext is not null)
         {
@@ -451,7 +520,7 @@ internal sealed class SshfsRemoteMountService(
                 message = diagnostic.StandardError + "\n" + message;
             }
 
-            throw new InvalidOperationException(SshfsMountFailure.Describe(mountFailureContext, message, result.ExitCode));
+            throw new InvalidOperationException(SshfsMountFailure.Describe(mountFailureContext, message, result.ExitCode, passwordInput is not null));
         }
 
         throw new InvalidOperationException(string.IsNullOrWhiteSpace(message)
@@ -491,20 +560,24 @@ internal sealed class SshfsRemoteMountService(
     private string BuildIdentityDirectory() =>
         Path.Combine(storageSettings.RootDirectory, "sshfs-keys");
 
-    private static SshfsMountHostCandidate BuildHostCandidate(ManagedHost host)
+    internal static SshfsMountHostCandidate BuildHostCandidate(ManagedHost host)
     {
         var hasPrivateKeyAuthentication = host.PrimaryAuthenticationType == AuthenticationType.PrivateKey ||
                                           host.FallbackAuthenticationType == AuthenticationType.PrivateKey;
         var hasStoredPrivateKey = !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
         var hasPrivateKeyPassphrase = !string.IsNullOrWhiteSpace(host.PrivateKeyPassphraseSecretReference);
-        var canMount = hasPrivateKeyAuthentication &&
+        var canPersist = hasPrivateKeyAuthentication &&
                        hasStoredPrivateKey &&
                        !hasPrivateKeyPassphrase &&
                        !string.IsNullOrWhiteSpace(host.Username) &&
                        !string.IsNullOrWhiteSpace(host.Hostname);
 
-        var status = canMount
+        var hasPassword = !string.IsNullOrWhiteSpace(host.PasswordSecretReference) &&
+            (host.PrimaryAuthenticationType is AuthenticationType.Password or AuthenticationType.Conditional || host.FallbackAuthenticationType == AuthenticationType.Password);
+        var canMount = canPersist || (hasPassword && !string.IsNullOrWhiteSpace(host.Username) && !string.IsNullOrWhiteSpace(host.Hostname));
+        var status = canPersist
             ? "Stored SSH key available. LMS will verify access when mounting."
+            : canMount ? "Saved username and password available for a temporary mount. Reconnecting after restart requires a private key."
             : BuildHostCandidateFailure(host, hasPrivateKeyAuthentication, hasStoredPrivateKey, hasPrivateKeyPassphrase);
 
         return new SshfsMountHostCandidate(
@@ -519,7 +592,7 @@ internal sealed class SshfsRemoteMountService(
             hasStoredPrivateKey,
             hasPrivateKeyPassphrase,
             canMount,
-            status);
+            status) { CanPersistWithSshfs = canPersist, HasStoredPassword = hasPassword };
     }
 
     private static string BuildHostCandidateFailure(
@@ -535,7 +608,7 @@ internal sealed class SshfsRemoteMountService(
 
         if (!hasPrivateKeyAuthentication)
         {
-            return "SSHFS mounts require the registered host to use public key authentication.";
+            return "Save a username and password for a temporary SSH mount, or a private key for a persistent mount.";
         }
 
         if (!hasStoredPrivateKey)
@@ -550,6 +623,10 @@ internal sealed class SshfsRemoteMountService(
 
         return "This host is not ready for SSHFS.";
     }
+
+    internal static IReadOnlyList<string> BuildPasswordMountArguments(string source, string mountPath, int port) =>
+        [source, mountPath, "-p", port.ToString(), "-o",
+         "password_stdin,BatchMode=no,PasswordAuthentication=yes,PubkeyAuthentication=no,PreferredAuthentications=password,KbdInteractiveAuthentication=no,NumberOfPasswordPrompts=1,ConnectTimeout=10,StrictHostKeyChecking=accept-new,ServerAliveInterval=15,ServerAliveCountMax=3,allow_other"];
 
     private static IReadOnlyList<string> BuildSshfsMountArguments(
         string remoteSourcePath,

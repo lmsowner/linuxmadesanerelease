@@ -5,7 +5,7 @@ namespace LinuxMadeSane.Infrastructure.Services;
 
 internal static class SshfsMountFailure
 {
-    internal static string Describe(string source, string output, int exitCode)
+    internal static string Describe(string source, string output, int exitCode, bool usingPassword = false)
     {
         bool Has(string value) => output.Contains(value, StringComparison.OrdinalIgnoreCase);
         var authenticated = Has("Authenticated to ");
@@ -13,6 +13,8 @@ internal static class SshfsMountFailure
         {
             _ when Has("REMOTE HOST IDENTIFICATION HAS CHANGED") || Has("Host key verification failed") =>
                 "The server's SSH identity could not be verified. Verify its host key before updating the trusted SSH host key on this LMS server.",
+            _ when usingPassword && !authenticated && (Has("Permission denied") || Has("No more authentication methods")) =>
+                "SSH login failed using the saved username and password. Test this host's saved credentials and check that its SSH server allows password authentication for this user.",
             _ when Has("invalid format") || Has("error in libcrypto") || Has("UNPROTECTED PRIVATE KEY FILE") =>
                 "SSH could not use the saved private key. Edit this host's saved credentials and test the key before retrying.",
             _ when Has("with partial success") =>
