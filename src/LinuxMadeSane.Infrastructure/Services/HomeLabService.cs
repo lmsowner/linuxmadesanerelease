@@ -43,6 +43,7 @@ public sealed class HomeLabService(
     private const string ContainerSettingsBackupConfigurationKey = "lms-container-backup-configuration";
     private const string ContainerSettingsBackupVolumesKey = "lms-container-backup-volumes";
     private const string ManagementOwnerKey = "lms-management-owner";
+    private const string StartOnBootKey = "lms-start-on-boot";
     private const string ComposeDraftKey = "lms-compose-draft";
     private const string ExternalManagementOwner = "external";
     private const string HomeLabFilesRole = "home-lab";
@@ -1123,7 +1124,9 @@ public sealed class HomeLabService(
         var previousConfiguration = gateway.ConfigurationJson;
         var previousSecrets = gateway.SecretConfigurationJson;
         var previousDisplayName = gateway.DisplayName;
-        gateway.ConfigurationJson = JsonSerializer.Serialize(prepared.Configuration, JsonOptions);
+        var nextConfiguration = new Dictionary<string, string>(prepared.Configuration, StringComparer.OrdinalIgnoreCase);
+        if (DeserializeDictionary(previousConfiguration).TryGetValue(StartOnBootKey, out var startup)) nextConfiguration[StartOnBootKey] = startup;
+        gateway.ConfigurationJson = JsonSerializer.Serialize(nextConfiguration, JsonOptions);
         gateway.SecretConfigurationJson = JsonSerializer.Serialize(prepared.SecretReferences, JsonOptions);
         if (prepared.Configuration.TryGetValue("gateway-name", out var gatewayName) && !string.IsNullOrWhiteSpace(gatewayName))
         {
@@ -1867,7 +1870,9 @@ public sealed class HomeLabService(
         _ = DeserializeDictionary(configurationJson);
         _ = DeserializeBindings(volumesJson);
         installation.Image = image;
-        installation.ConfigurationJson = configurationJson;
+        var restoredConfiguration = DeserializeDictionary(configurationJson);
+        if (configuration.TryGetValue(StartOnBootKey, out var startup)) restoredConfiguration[StartOnBootKey] = startup;
+        installation.ConfigurationJson = JsonSerializer.Serialize(restoredConfiguration, JsonOptions);
         installation.VolumeMappingsJson = volumesJson;
         installation.HealthState = (int)HomeLabHealthState.Starting;
         installation.HealthDetail = "Restoring the container settings used before manual editing.";
@@ -1875,6 +1880,79 @@ public sealed class HomeLabService(
         await dbContext.SaveChangesAsync(cancellationToken);
 
         return await ExecuteAsync(installation.Id, HomeLabLifecycleAction.Recreate, cancellationToken);
+    }
+
+    private static string ResolveRestartPolicy(HomeLabInstallationEntity installation)
+    {
+        var configuration = DeserializeDictionary(installation.ConfigurationJson);
+        return configuration.TryGetValue(StartOnBootKey, out var value)
+            ? value == "true" ? "always" : "no"
+            : "unless-stopped"; // Preserve the policy of existing installations until explicitly changed.
+    }
+
+    public async Task<HomeLabOperationResult> SetStartOnBootAsync(
+        IReadOnlyList<Guid> installationIds, bool enabled, CancellationToken cancellationToken = default)
+    {
+        var ids = installationIds.Distinct().ToArray();
+        var installations = (await dbContext.HomeLabInstallations.Where(item => ids.Contains(item.Id)).ToListAsync(cancellationToken))
+            .OrderBy(item => Array.IndexOf(ids, item.Id)).ToList();
+        if (ids.Length == 0 || installations.Count != ids.Length)
+            return Failure("Startup settings were not changed.", "One or more selected containers no longer exist. Refresh the group.", [], HomeLabHealthState.Failed);
+        if (installations.Any(IsExternallyManaged))
+            return Failure("Startup settings were not changed.", "A Docker manager owns a container in this group. Change its startup policy in that manager.", [], HomeLabHealthState.Blocked);
+
+        var originals = new Dictionary<Guid, (string Policy, string Configuration, DateTimeOffset Updated)>();
+        var changed = new List<HomeLabInstallationEntity>();
+        var output = new List<string>();
+        try
+        {
+            // Inspect every container before changing any policy, including custom retry limits.
+            foreach (var item in installations)
+            {
+                var inspect = await RunDockerAsync(["inspect", "--format", "{{json .HostConfig.RestartPolicy}}", item.ContainerName], $"Read startup policy for {item.DisplayName}", cancellationToken);
+                if (inspect.ExitCode != 0) throw new InvalidOperationException($"{item.DisplayName}: {NormalizeFailure(inspect)}");
+                using var policy = JsonDocument.Parse(inspect.StandardOutput.Trim());
+                var name = policy.RootElement.GetProperty("Name").GetString();
+                if (name is not ("no" or "always" or "unless-stopped" or "on-failure"))
+                    throw new InvalidOperationException($"{item.DisplayName}: Docker returned an unknown restart policy.");
+                var retries = policy.RootElement.GetProperty("MaximumRetryCount").GetInt32();
+                originals[item.Id] = (name == "on-failure" && retries > 0 ? $"on-failure:{retries}" : name, item.ConfigurationJson, item.UpdatedAtUtc);
+            }
+            foreach (var item in installations)
+            {
+                changed.Add(item);
+                var update = await RunDockerAsync(["update", "--restart", enabled ? "always" : "no", item.ContainerName], $"Set start on boot for {item.DisplayName}", cancellationToken);
+                if (update.ExitCode != 0) throw new InvalidOperationException($"{item.DisplayName}: {NormalizeFailure(update)}");
+                var configuration = DeserializeDictionary(item.ConfigurationJson);
+                configuration[StartOnBootKey] = enabled ? "true" : "false";
+                item.ConfigurationJson = JsonSerializer.Serialize(configuration, JsonOptions);
+                item.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                output.Add($"{item.DisplayName}: start on boot {(enabled ? "on" : "off")}.");
+            }
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return Success("Group startup settings saved.", enabled
+                ? "The containers will start when Docker starts, including after a reboot. Stop keeps them stopped until then; turning this on does not start them now."
+                : "The containers will not start automatically or restart after failure. Running containers stay running until stopped.", output, HomeLabHealthState.Healthy);
+        }
+        catch (Exception exception)
+        {
+            var rollbackFailures = new List<string>();
+            foreach (var item in changed.AsEnumerable().Reverse())
+            {
+                var original = originals[item.Id];
+                item.ConfigurationJson = original.Configuration; item.UpdatedAtUtc = original.Updated;
+                try
+                {
+                    var restored = await RunDockerAsync(["update", "--restart", original.Policy, item.ContainerName], $"Restore startup policy for {item.DisplayName}", CancellationToken.None);
+                    if (restored.ExitCode != 0) rollbackFailures.Add($"{item.DisplayName}: {NormalizeFailure(restored)}");
+                }
+                catch (Exception rollback) { rollbackFailures.Add($"{item.DisplayName}: {rollback.Message}"); }
+            }
+            if (exception is OperationCanceledException && rollbackFailures.Count == 0) throw;
+            return Failure("Group startup settings were not saved.", exception.Message + (rollbackFailures.Count == 0
+                ? " Previous policies were retained or restored."
+                : " Policy rollback needs attention: " + string.Join("; ", rollbackFailures)), output, HomeLabHealthState.Failed);
+        }
     }
 
     public async Task<HomeLabOperationResult> ExecuteAsync(
@@ -1897,6 +1975,7 @@ public sealed class HomeLabService(
         var app = HomeLabCatalog.GetApp(installation.AppId);
         if (app.RequiresVpnGateway &&
             !installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase) &&
+            action != HomeLabLifecycleAction.Stop &&
             action != HomeLabLifecycleAction.Remove &&
             action != HomeLabLifecycleAction.RefreshHealth)
         {
@@ -3636,7 +3715,7 @@ public sealed class HomeLabService(
             $"  {app.Id}:",
             $"    container_name: {ComposeScalar(installation.ContainerName)}",
             $"    image: {ComposeScalar(installation.Image)}",
-            "    restart: unless-stopped"
+            $"    restart: {ResolveRestartPolicy(installation)}"
         };
 
         if (ResolveBrowserEntry(installation, app) is { } browserEntry)
@@ -4311,7 +4390,7 @@ public sealed class HomeLabService(
         var args = new List<string>
         {
             "run", "--detach", "--name", installation.ContainerName,
-            "--restart", "unless-stopped",
+            "--restart", ResolveRestartPolicy(installation),
             "--label", "com.linuxmadesane.homelab=true",
             "--label", $"com.linuxmadesane.homelab.app={app.Id}",
             "--label", $"com.linuxmadesane.homelab.deployment={installation.DeploymentId}"
@@ -5980,6 +6059,7 @@ public sealed class HomeLabService(
         key.StartsWith("lms-container-backup-", StringComparison.OrdinalIgnoreCase) ||
         key.Equals(ManagementOwnerKey, StringComparison.OrdinalIgnoreCase) ||
         key.Equals(ComposeDraftKey, StringComparison.OrdinalIgnoreCase) ||
+        key.Equals(StartOnBootKey, StringComparison.OrdinalIgnoreCase) ||
         key.Equals(HomeLabBrowserUrl.ConfigurationKey, StringComparison.OrdinalIgnoreCase) ||
         key.Equals(HomeLabBrowserUrl.DiscoveredKey, StringComparison.OrdinalIgnoreCase);
 
@@ -6330,7 +6410,8 @@ public sealed class HomeLabService(
                 .Select(MapServiceEndpoint)
                 .ToArray(),
             IsExternallyManaged(item),
-            ResolveBrowserEntry(item, HomeLabCatalog.GetApp(item.AppId)));
+            ResolveBrowserEntry(item, HomeLabCatalog.GetApp(item.AppId)))
+        { StartOnBoot = ResolveRestartPolicy(item) != "no", RestartPolicy = ResolveRestartPolicy(item) };
 
     private static HomeLabServiceEndpoint MapServiceEndpoint(HomeLabServiceEndpointEntity item) =>
         new(

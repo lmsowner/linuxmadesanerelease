@@ -15,6 +15,7 @@
 @inject IServiceScopeFactory ServiceScopeFactory
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject FileThumbnailCacheService FileThumbnailCacheService
+@inject ApplicationUpdateService LocalApplicationUpdates
 @inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
 @inject LmsHostEdgeGatewaySummaryService EdgeGatewaySummaryService
 @inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
@@ -27,6 +28,7 @@
     <UiHeroPanel Title="Hosts"
                  Compact="true">
         <Actions>
+            <UiCommandButton Label="Update All" Glyph="UiIconGlyph.Download" Title="Update all registered LMS hosts using each host’s selected Dev or Stable channel" Disabled="@(updatingAllHosts || LmsHostRows.Count == 0)" OnClick="UpdateAllLmsHostsAsync" />
             <UiCommandButton Label="Add host" Glyph="UiIconGlyph.Plus" Href="/hosts/new" />
         </Actions>
     </UiHeroPanel>
@@ -118,6 +120,7 @@
                                     <td class="hosts-version-cell">
                                         <div class="stack-tight hosts-version-stack">
                                             <UiPill Tone="@GetLmsUpdateTone(row)" Class="hosts-version-pill">@GetLmsVersionLabel(row)</UiPill>
+                                            <span class="meta-text hosts-row-meta">@(row.LmsUpdate?.ReleaseChannel switch { "development" => "Dev", "stable" => "Stable", _ => "Channel unknown" })</span>
                                             <span class="meta-text hosts-row-meta" title="@GetLmsVersionTooltip(row)">@GetLmsVersionDetailWithOperation(row)</span>
                                         </div>
                                     </td>
@@ -482,6 +485,7 @@
     private CancellationTokenSource? statusRefreshCancellationTokenSource;
     private bool isStatusRefreshInProgress;
     private bool isLmsUpdateRefreshInProgress;
+    private bool updatingAllHosts;
     private string activeHostTab = LmsHostsTabValue;
     private ManagedHost? publicKeySetupHost;
     private ManagedHostEditor? publicKeySetupEditor;
@@ -745,48 +749,12 @@
         try
         {
             var latestVersionTask = LmsUpdateAvailabilityService.CheckLatestVersionAsync(cancellationToken);
-            var localLatestVersion = LinuxMadeSaneBuildVersion.GetCurrent(typeof(Program).Assembly);
-            var localLatestVersionCheck = new LmsLatestVersionCheck(localLatestVersion, string.Empty);
-            var accessTasks = lmsHosts
-                .Select(host => LmsUpdateAvailabilityService.CheckDirectWebAccessAsync(host, cancellationToken))
-                .ToList();
-            var installedVersionResults = new Dictionary<Guid, LmsHostWebAccessStatus>();
-
-            while (accessTasks.Count > 0)
+            var latest = await latestVersionTask;
+            var checks = lmsHosts.Select(host => LmsUpdateAvailabilityService.CheckHostAsync(host, latest, cancellationToken)).ToList();
+            while (checks.Count > 0)
             {
-                var completed = await Task.WhenAny(accessTasks);
-                accessTasks.Remove(completed);
-                var access = await completed;
-                installedVersionResults[access.HostId] = access;
-
-                if (latestVersionTask.IsCompletedSuccessfully)
-                {
-                    var effectiveLatestVersionCheck = ResolveEffectiveLatestVersion(
-                        latestVersionTask.Result,
-                        localLatestVersion);
-                    await ApplyLmsUpdateResultAsync(LmsHostUpdateAvailabilityService.BuildAvailability(
-                        access.HostId,
-                        access.InstalledVersion,
-                        effectiveLatestVersionCheck.Version,
-                        effectiveLatestVersionCheck.Failure));
-                    continue;
-                }
-
-                await ApplyLmsUpdateResultAsync(LmsHostUpdateAvailabilityService.BuildAvailability(
-                    access.HostId,
-                    access.InstalledVersion,
-                    localLatestVersionCheck.Version,
-                    localLatestVersionCheck.Failure));
-            }
-
-            var latestVersionCheck = ResolveEffectiveLatestVersion(await latestVersionTask, localLatestVersion);
-            foreach (var access in installedVersionResults.Values)
-            {
-                await ApplyLmsUpdateResultAsync(LmsHostUpdateAvailabilityService.BuildAvailability(
-                    access.HostId,
-                    access.InstalledVersion,
-                    latestVersionCheck.Version,
-                    latestVersionCheck.Failure));
+                var completed = await Task.WhenAny(checks); checks.Remove(completed);
+                await ApplyLmsUpdateResultAsync(await completed);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1098,6 +1066,37 @@
 
     private static string BuildLmsUninstallHref(ManagedHost host) =>
         $"/hosts/{host.Id}?uninstall=lms";
+
+    private Task UpdateAllLmsHostsAsync()
+    {
+        if (updatingAllHosts) return Task.CompletedTask;
+        var targets = LmsHostRows.Select(row => row.Host).Where(host => !IsLmsUpdateActiveFor(host)).ToArray();
+        updatingAllHosts = true;
+        foreach (var host in targets) SetLmsUpdateOperation(host.Id, new(LmsHostUpdateOperationState.Started, "Queued for update.", DateTimeOffset.UtcNow));
+        lmsConnectStatus = $"Updating {targets.Length} LMS host(s), each on its own release channel. Per-host progress appears in the list.";
+        lmsConnectTone = "info";
+        _ = RunAllLmsHostUpdatesAsync(targets);
+        return Task.CompletedTask;
+    }
+
+    private async Task RunAllLmsHostUpdatesAsync(IReadOnlyList<ManagedHost> targets)
+    {
+        // Finish remote updates before self-update, which may restart this LMS process.
+        foreach (var host in targets.Where(host => !IsCurrentLmsEndpoint(host)))
+            await RunLmsHostUpdateInBackgroundAsync(host.Id);
+        foreach (var host in targets.Where(IsCurrentLmsEndpoint))
+        {
+            try
+            {
+                var result = await LocalApplicationUpdates.InstallLatestAsync(CancellationToken.None);
+                await SafeInvokeAsync(() => SetLmsUpdateOperation(host.Id, new(
+                    result.State == ApplicationUpdateState.Failed ? LmsHostUpdateOperationState.Failed : result.State == ApplicationUpdateState.Installing ? LmsHostUpdateOperationState.Applying : LmsHostUpdateOperationState.Completed,
+                    result.Summary, DateTimeOffset.UtcNow)));
+            }
+            catch (Exception ex) { await ApplyLmsHostUpdateFailureAsync(host.Id, ex.Message); }
+        }
+        await SafeInvokeAsync(() => { updatingAllHosts = false; lmsConnectStatus = "Update All finished or handed off to the local updater. Review each host’s result."; });
+    }
 
     private Task StartLmsHostUpdateAsync(ManagedHost host)
     {

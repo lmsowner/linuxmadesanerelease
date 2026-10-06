@@ -31,7 +31,11 @@ public sealed record HomeLabAppInstallation(
     bool IsRecipeInstallation,
     IReadOnlyList<HomeLabServiceEndpoint>? ServiceEndpoints = null,
     bool IsExternallyManaged = false,
-    string? BrowserEntry = null);
+    string? BrowserEntry = null)
+{
+    public bool StartOnBoot { get; init; } = true;
+    public string RestartPolicy { get; init; } = "unless-stopped";
+}
 
 public sealed record HomeLabServiceEndpoint(
     Guid Id,

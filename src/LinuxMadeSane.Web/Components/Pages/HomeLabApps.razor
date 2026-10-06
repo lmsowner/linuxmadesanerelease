@@ -744,6 +744,17 @@
                             @if (hasRepairCandidates || group.Installations.Count > 0)
                             {
                                 <div class="home-lab-installation-group-actions">
+                                    @if (!IsDockerManagerMode && group.Installations.All(item => !item.IsExternallyManaged))
+                                    {
+                                        <UiCommandButton Label="Start group" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunGroupAsync(group, HomeLabLifecycleAction.Start)" />
+                                        <UiCommandButton Label="Stop group" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunGroupAsync(group, HomeLabLifecycleAction.Stop)" />
+                                        <UiCommandButton Label="Restart group" Glyph="UiIconGlyph.Restart" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunGroupAsync(group, HomeLabLifecycleAction.Restart)" />
+                                        <div class="home-lab-group-startup">
+                                            <UiSelectField TValue="string" Label="Start on boot" aria-label="@($"Start on boot for {group.Name}")" Compact="true" Value="@GroupStartupValue(group)" ValueChanged="value => SetGroupStartupAsync(group, value)" Disabled="@busy">
+                                                <option value="mixed" selected="@(GroupStartupValue(group) == "mixed")" disabled>Mixed</option><option value="unless-stopped" selected="@(GroupStartupValue(group) == "unless-stopped")" disabled>On unless stopped</option><option value="on" selected="@(GroupStartupValue(group) == "on")">On</option><option value="off" selected="@(GroupStartupValue(group) == "off")">Off</option>
+                                            </UiSelectField>
+                                        </div>
+                                    }
                                     @if (group.RecipeRunId.HasValue && !IsDockerManagerMode)
                                     {
                                         <UiCommandButton Label="Add app"
@@ -2887,6 +2898,22 @@
             SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
         });
     }
+
+    private static string GroupStartupValue(HomeLabInstallationGroup group) =>
+        group.Installations.All(item => item.RestartPolicy == "always") ? "on" : group.Installations.All(item => !item.StartOnBoot) ? "off" : group.Installations.All(item => item.RestartPolicy == "unless-stopped") ? "unless-stopped" : "mixed";
+
+    private Task RunGroupAsync(HomeLabInstallationGroup group, HomeLabLifecycleAction action) => RunUiOperationAsync(async () =>
+    {
+        var result = await HomeLabGroupLifecycleWorkflow.RunAsync(HomeLabService, group.Installations.Select(item => item.Id).ToArray(), action);
+        SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+    });
+
+    private Task SetGroupStartupAsync(HomeLabInstallationGroup group, string value) => RunUiOperationAsync(async () =>
+    {
+        if (value is not ("on" or "off")) return;
+        var result = await HomeLabService.SetStartOnBootAsync(group.Installations.Select(item => item.Id).ToArray(), value == "on");
+        SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+    });
 
     private async Task RepairGroupAsync(HomeLabInstallationGroup group)
     {

@@ -23,6 +23,7 @@ public sealed record LmsHostUpdateAvailability(
     string LatestVersion,
     string Detail)
 {
+    public string? ReleaseChannel { get; init; }
     public bool IsUpdateAvailable => State == LmsHostUpdateAvailabilityState.UpdateAvailable;
     public bool IsDirectWebAvailable => !string.IsNullOrWhiteSpace(InstalledVersion) &&
                                         !InstalledVersion.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
@@ -154,7 +155,7 @@ public sealed class LmsHostUpdateAvailabilityService(
             host.Id,
             installedVersion,
             latestVersionCheck.Version,
-            latestVersionCheck.Failure);
+            latestVersionCheck.Failure) with { ReleaseChannel = AiLocalMachine.IsLocalMachine(host.Id) ? channel : string.IsNullOrWhiteSpace(installedVersion) ? null : hostChannels.GetValueOrDefault(host.Id) };
     }
 
     public static LmsHostUpdateAvailability BuildAvailability(
@@ -243,7 +244,8 @@ public sealed class LmsHostUpdateAvailabilityService(
                 {
                     using var health = JsonDocument.Parse(content);
                     var channel = ReadJsonString(health.RootElement, "releaseChannel");
-                    hostChannels[host.Id] = channel == "development" ? "development" : "stable";
+                    if (channel is "development" or "stable") hostChannels[host.Id] = channel;
+                    else hostChannels.TryRemove(host.Id, out _);
                     return version;
                 }
             }

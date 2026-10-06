@@ -980,7 +980,11 @@ public sealed class ManagedHostService(
             "  $SUDO systemctl --no-pager --full status \"$REMOTE_LMS_SERVICE_UNIT\" >&2 || true",
             "  return 1",
             "}",
-            $"if ! curl -fsSL {QuoteShellArgument(installUrl)} | $SUDO env LMS_SOURCE={source} bash -s -- {quotedInstallerArguments}; then",
+            $"REMOTE_LMS_INSTALL_URL={QuoteShellArgument(installUrl)}",
+            source == "lms-host-conversion" && installerArguments.Contains("--install")
+                ? "REMOTE_LMS_INSTALL_URL=$(" + "$SUDO python3 -c " + QuoteShellArgument("import json,pathlib,sys,urllib.parse; p=pathlib.Path('/var/lib/linuxmadesane/ce/update-channel.json'); url=sys.argv[1]; channel=json.loads(p.read_text()).get('channel','stable') if p.exists() else None; assert channel in (None,'stable','development'), 'Invalid saved LMS release channel'; u=urllib.parse.urlsplit(url); q=[(k,v) for k,v in urllib.parse.parse_qsl(u.query,keep_blank_values=True) if k!='channel']+[('channel',channel)] if channel else None; print(urllib.parse.urlunsplit((u.scheme,u.netloc,u.path,urllib.parse.urlencode(q),u.fragment)) if q is not None else url)") + " \"$REMOTE_LMS_INSTALL_URL\")"
+                : ":",
+            $"if ! curl -fsSL \"$REMOTE_LMS_INSTALL_URL\" | $SUDO env LMS_SOURCE={source} bash -s -- {quotedInstallerArguments}; then",
             "  rollback_remote_lms 'installer returned a non-zero exit code'",
             "  exit 1",
             "fi",

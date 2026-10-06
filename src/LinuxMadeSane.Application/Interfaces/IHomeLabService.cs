@@ -40,6 +40,8 @@ public interface IHomeLabService
     Task<int> HandOffHomeLabToDockerManagerAsync(CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("Docker management handoff is unavailable.");
     Task<HomeLabNetworkSecurity> GetNetworkSecurityAsync(Guid installationId, CancellationToken cancellationToken = default);
+    Task<HomeLabOperationResult> SetStartOnBootAsync(IReadOnlyList<Guid> installationIds, bool enabled, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("Home Lab startup settings are unavailable.");
     Task<HomeLabOperationResult> ExecuteAsync(Guid installationId, HomeLabLifecycleAction action, CancellationToken cancellationToken = default);
     Task<HomeLabOperationResult> ResetCredentialsAsync(Guid installationId, CancellationToken cancellationToken = default);
     Task<HomeLabLogsResult> GetLogsAsync(Guid installationId, CancellationToken cancellationToken = default);
