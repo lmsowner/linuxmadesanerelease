@@ -9,4 +9,5 @@ public sealed record TerminalAiCommandRequest(
     string CommandText,
     string WorkingDirectory,
     CommandExecutionInput? StandardInput = null,
-    int TimeoutSeconds = 120);
+    int TimeoutSeconds = 120,
+    bool AuthenticateSudo = false);

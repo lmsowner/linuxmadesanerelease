@@ -300,6 +300,13 @@ public sealed class SshTerminalSessionService(
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
         var state = GetActiveSession(request.TerminalSessionId);
+        if (request.StandardInput is { IsSensitive: true } && !request.AuthenticateSudo)
+            throw new InvalidOperationException("Sensitive terminal input requires a trusted authentication operation.");
+        if (request.AuthenticateSudo && request.StandardInput is not { IsSensitive: true })
+            throw new InvalidOperationException("Private sudo authentication requires secure input.");
+        var executionCommand = request.AuthenticateSudo
+            ? TerminalSudoAuthentication.BuildCommand(request.CommandText)
+            : request.CommandText;
 
         await state.AiCommandGate.WaitAsync(cancellationToken);
         try
@@ -332,7 +339,7 @@ public sealed class SshTerminalSessionService(
                 connectTask = Task.Run(client.Connect, CancellationToken.None);
                 await connectTask.WaitAsync(commandToken);
 
-                using var command = client.CreateCommand(BuildAiRemoteCommand(request.CommandText, workingDirectory));
+                using var command = client.CreateCommand(BuildAiRemoteCommand(executionCommand, workingDirectory));
                 command.CommandTimeout = TimeSpan.FromSeconds(Math.Clamp(request.TimeoutSeconds, 5, 1800));
                 using var cancellationRegistration = commandToken.Register(() =>
                 {
@@ -770,8 +777,12 @@ public sealed class SshTerminalSessionService(
         using (stream)
         {
             var bytes = Encoding.UTF8.GetBytes(input.Content);
-            await stream.WriteAsync(bytes.AsMemory(), cancellationToken);
-            await stream.FlushAsync(cancellationToken);
+            try
+            {
+                await stream.WriteAsync(bytes.AsMemory(), cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+            }
+            finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
         }
     }
 

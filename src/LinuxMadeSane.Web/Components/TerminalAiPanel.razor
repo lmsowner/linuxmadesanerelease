@@ -164,36 +164,10 @@
         </section>
     }
 
-    @if (!string.IsNullOrWhiteSpace(pendingSecureCommand))
-    {
-        <section class="terminal-ai-approval-card terminal-ai-secure-input-card" role="alert" aria-live="assertive">
-            <div class="terminal-ai-approval-copy">
-                <strong>Sudo password required</strong>
-                <UiPill Tone="UiPillTone.Warning">Local input</UiPill>
-            </div>
-            <span class="terminal-ai-approval-summary">This value goes only to the private command channel. It is never added to the AI request, conversation history, command output, or logs.</span>
-            <pre class="command-preview-block command-display-block terminal-ai-command-preview">@pendingSecureCommand</pre>
-            <label class="terminal-inline-field">
-                <span>Password</span>
-                <input class="ui-control-input"
-                       type="password"
-                       autocomplete="off"
-                       spellcheck="false"
-                       @bind="secureInputText"
-                       @bind:event="oninput" />
-            </label>
-            <div class="toolbar-row terminal-ai-approval-actions">
-                <UiCommandButton Label="Continue"
-                                 Glyph="UiIconGlyph.Run"
-                                 Disabled="@(string.IsNullOrEmpty(secureInputText))"
-                                 OnClick="SubmitSecureInputAsync" />
-                <UiCommandButton Label="Cancel"
-                                 Glyph="UiIconGlyph.Clear"
-                                 Variant="UiButtonVariant.Ghost"
-                                 OnClick="CancelSecureInputAsync" />
-            </div>
-        </section>
-    }
+    <TerminalAuthenticationDialog IsOpen="@(!string.IsNullOrWhiteSpace(pendingSecureCommand))"
+        HostName="@Tab.HostName" Username="@Tab.ConnectedUsername" Command="@pendingSecureCommand"
+        Password="@secureInputText" PasswordChanged="@(value => secureInputText = value)"
+        OnSubmit="SubmitSecureInputAsync" OnCancel="CancelSecureInputAsync" />
 
     <section class="terminal-ai-section terminal-ai-composer">
         <label class="terminal-ai-prompt-field">
@@ -485,6 +459,24 @@ Selected terminal content:
             var commandCount = 0;
             var recoveryTurns = 0;
 
+            if (requestTab.PendingSudoAuthentication)
+            {
+                requestTab.PendingSudoAuthentication = false;
+                // The host updater already established that sudo needs authentication.
+                // Prompt before asking the model: do not depend on it proposing sudo.
+                var inspection = await ExecuteWithSecureAuthenticationAsync(
+                    TerminalSudoAuthentication.UpdateInspectionCommand, cancellationToken);
+                if (inspection is null) return;
+                latestStructuredCommandOutput = TerminalAiCommandEvidenceFormatter.Format(inspection);
+                AddSystemEntry(latestStructuredCommandOutput);
+                if (TerminalAiSecureInputPolicy.RequiresSudoPassword(inspection.CommandText, inspection))
+                {
+                    requestTab.PendingSudoAuthentication = true;
+                    panelError = "Administrator authentication did not succeed. Check this Linux account's password and sudo permission, then try again. SSH key login remains unchanged.";
+                    return;
+                }
+            }
+
             if (SupportsManagedHomeLabOperations)
             {
                 agentStatus = "Inspecting Home Lab...";
@@ -531,23 +523,16 @@ Selected terminal content:
                 try
                 {
                     var commandResult = await ExecuteSuggestedCommandAsync(normalizedCommand, cancellationToken);
-                    if (TerminalAiSecureInputPolicy.RequiresSudoPassword(normalizedCommand, commandResult) &&
-                        TerminalAiSecureInputPolicy.TryPrepareSudoPasswordCommand(normalizedCommand, out var secureCommand))
+                    if (TerminalAiSecureInputPolicy.RequiresSudoPassword(normalizedCommand, commandResult))
                     {
-                        var secureInput = await RequestSecureInputAsync(normalizedCommand, cancellationToken);
-                        if (secureInput is null)
+                        var authenticatedResult = await ExecuteWithSecureAuthenticationAsync(normalizedCommand, cancellationToken);
+                        if (authenticatedResult is null) return;
+                        commandResult = authenticatedResult;
+                        if (TerminalAiSecureInputPolicy.RequiresSudoPassword(normalizedCommand, commandResult))
                         {
-                            agentStatus = "Stopped — no password was sent.";
+                            panelError = "Administrator authentication failed. Check this account's Linux password and sudo permission. No changes were made to its SSH key or sudo policy.";
                             return;
                         }
-
-                        agentStatus = "Running command with local secure input...";
-                        await InvokeAsync(StateHasChanged);
-                        commandResult = await ExecuteSuggestedCommandAsync(
-                            secureCommand,
-                            cancellationToken,
-                            new CommandExecutionInput($"{secureInput}{Environment.NewLine}", true));
-                        secureInput = string.Empty;
                     }
 
                     latestStructuredCommandOutput = TerminalAiCommandEvidenceFormatter.Format(commandResult);
@@ -1158,10 +1143,37 @@ Selected terminal content:
                 Tab.SessionId.Value,
                 commandText,
                 Tab.WorkingDirectory,
-                standardInput),
+                standardInput,
+                AuthenticateSudo: standardInput is { IsSensitive: true }),
             cancellationToken: cancellationToken);
         EnsureCurrentTerminalContext(requestTab, requestSessionId, username, cancellationToken);
         return result;
+    }
+
+    private async Task<TerminalAiCommandResult?> ExecuteWithSecureAuthenticationAsync(
+        string commandText, CancellationToken cancellationToken)
+    {
+        if (!TerminalAiSecureInputPolicy.TryPrepareSudoPasswordCommand(commandText, out var secureCommand))
+        {
+            panelError = "This command cannot safely accept a password through AI repair. Open the terminal and run it there, or use a single journalctl --no-pager or systemctl command.";
+            return null;
+        }
+        var requestTab = Tab;
+        var sessionId = Tab.SessionId;
+        var username = Tab.ConnectedUsername;
+        var password = await RequestSecureInputAsync(commandText, cancellationToken);
+        try
+        {
+            EnsureCurrentTerminalContext(requestTab, sessionId, username, cancellationToken);
+            if (password is null) { agentStatus = "Stopped — no password was sent."; return null; }
+            if (password.Contains('\n') || password.Contains('\r'))
+                throw new InvalidOperationException("Enter a single password without line breaks.");
+            agentStatus = "Authenticating on the connected host...";
+            await InvokeAsync(StateHasChanged);
+            return await ExecuteSuggestedCommandAsync(secureCommand, cancellationToken,
+                new CommandExecutionInput(password + "\n", true));
+        }
+        finally { password = null; }
     }
 
     private async Task<string?> RequestSecureInputAsync(
@@ -1177,7 +1189,11 @@ Selected terminal content:
 
         try
         {
-            return await source.Task.WaitAsync(cancellationToken);
+            return await source.Task.WaitAsync(TimeSpan.FromMinutes(5), cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            throw new InvalidOperationException("Authentication timed out. No password was sent. Start repair again when you are ready.");
         }
         finally
         {

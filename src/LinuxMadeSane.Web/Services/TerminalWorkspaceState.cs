@@ -445,6 +445,7 @@ public sealed class TerminalTabState
     public string HomeLabTaskTitle { get; set; } = string.Empty;
     public string? PendingAiTaskPrompt { get; set; }
     public bool StartPendingAiTask { get; set; }
+    public bool PendingSudoAuthentication { get; set; }
     public bool CanStartPendingAiTask => StartPendingAiTask && (IsHomeLabTask || IsSessionActive);
 
     public TerminalAiAccessMode AiAccessMode { get; set; } = TerminalAiAccessMode.Agent;

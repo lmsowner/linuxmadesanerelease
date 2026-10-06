@@ -1,0 +1,62 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@implements IAsyncDisposable
+@inject IJSRuntime JSRuntime
+
+@if (IsOpen)
+{
+    <div @ref="focusRegion" tabindex="-1" @onkeydown="HandleKeyDown">
+        <UiModal IsOpen="true" Title="Authenticate administrator access" Class="terminal-authentication-modal" OnClose="OnCancel">
+            <ChildContent>
+                <p>SSH login worked. To continue, enter this Linux account’s password for administrator access.</p>
+                <dl class="authentication-target"><dt>Host</dt><dd>@HostName</dd><dt>SSH account</dt><dd>@Username</dd></dl>
+                <label class="terminal-inline-field">
+                    <span>Linux password for <strong>@Username</strong></span>
+                    <input class="ui-control-input" type="password" autocomplete="off" spellcheck="false"
+                           autofocus value="@Password" @oninput="PasswordInputAsync" />
+                </label>
+                <p class="meta-text">Entered privately in LMS; never added to the AI request or chat. Used for this operation only, not saved. Your SSH key stays unchanged.</p>
+                <details><summary>Operation to run</summary><pre class="command-preview-block">@Command</pre></details>
+                <p class="meta-text">Need a different account? Cancel and choose Connect As in the terminal.</p>
+            </ChildContent>
+            <Footer>
+                <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="OnCancel" />
+                <UiCommandButton Label="Authenticate & continue" Glyph="UiIconGlyph.Run" Disabled="@(string.IsNullOrEmpty(Password))" OnClick="OnSubmit" />
+            </Footer>
+        </UiModal>
+    </div>
+}
+@code {
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter] public string HostName { get; set; } = string.Empty;
+    [Parameter] public string Username { get; set; } = string.Empty;
+    [Parameter] public string Command { get; set; } = string.Empty;
+    [Parameter] public string Password { get; set; } = string.Empty;
+    [Parameter] public EventCallback<string> PasswordChanged { get; set; }
+    [Parameter] public EventCallback OnSubmit { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+    private ElementReference focusRegion;
+    private bool focusPending;
+    private bool wasOpen;
+    private IJSObjectReference? module;
+    protected override void OnParametersSet() { focusPending = IsOpen && !wasOpen; wasOpen = IsOpen; }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!focusPending) return;
+        focusPending = false;
+        module ??= await JSRuntime.InvokeAsync<IJSObjectReference>("import", "./Components/Ui/TerminalAuthenticationDialog.razor.js");
+        await module.InvokeVoidAsync("trapFocus", focusRegion);
+
+    }
+    private Task PasswordInputAsync(ChangeEventArgs args) => PasswordChanged.InvokeAsync(args.Value?.ToString() ?? string.Empty);
+    private Task HandleKeyDown(KeyboardEventArgs args) => args.Key switch
+    {
+        "Escape" => OnCancel.InvokeAsync(),
+        "Enter" when !string.IsNullOrEmpty(Password) => OnSubmit.InvokeAsync(),
+        _ => Task.CompletedTask
+    };
+    public async ValueTask DisposeAsync()
+    {
+        if (module is not null) { try { await module.DisposeAsync(); } catch (JSDisconnectedException) { } }
+    }
+}

@@ -23,37 +23,18 @@ public static partial class TerminalAiSecureInputPolicy
 
     public static bool TryPrepareSudoPasswordCommand(string commandText, out string preparedCommand)
     {
-        preparedCommand = string.Empty;
-        if (string.IsNullOrWhiteSpace(commandText))
-        {
-            return false;
-        }
-
-        var match = StartsWithSudo().Match(commandText);
-        if (!match.Success)
-        {
-            return false;
-        }
-
-        var rest = StandaloneNonInteractiveOption().Replace(match.Groups["rest"].Value, string.Empty);
-        var options = SudoReadsStandardInput().IsMatch(rest)
-            ? "sudo -p ''"
-            : "sudo -S -p ''";
-        preparedCommand = $"{match.Groups["indent"].Value}{options}{rest}";
-        return true;
+        preparedCommand = commandText;
+        return TerminalSudoAuthentication.TryGetOperation(commandText, out _);
     }
+
+    public static bool HasSudoAuthenticationFailure(string? failureText) =>
+        SudoPasswordFailure().IsMatch(failureText ?? string.Empty);
 
     [GeneratedRegex(@"^(?<indent>\s*)sudo(?<rest>(?:\s.*)?)$", RegexOptions.Singleline)]
     private static partial Regex StartsWithSudo();
 
-    [GeneratedRegex(@"(?<!\S)-n(?!\S)")]
-    private static partial Regex StandaloneNonInteractiveOption();
-
-    [GeneratedRegex(@"(?<!\S)-[A-Za-z]*S[A-Za-z]*(?!\S)")]
-    private static partial Regex SudoReadsStandardInput();
-
     [GeneratedRegex(
-        @"(?:a password is required|a terminal is required to read the password|no tty present|\[sudo\]\s*password|password for\s+[^:\r\n]+:)",
+        @"(?:interactive authentication is required|LMS_ADMIN_ACCESS_REQUIRED|LMS_SUDO_AUTHENTICATION_FAILED|a password is required|a terminal is required to read the password|no tty present|\[sudo\]\s*password|password for\s+[^:\r\n]+:)",
         RegexOptions.IgnoreCase)]
     private static partial Regex SudoPasswordFailure();
 }
