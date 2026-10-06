@@ -48,7 +48,9 @@
 
     @if (!string.IsNullOrWhiteSpace(lmsConnectStatus))
     {
-        <p class="@($"callout {lmsConnectTone}")">@lmsConnectStatus</p>
+        <p class="@($"callout {lmsConnectTone}")">@lmsConnectStatus
+            @if (lmsConnectUrl is not null) { <a href="@lmsConnectUrl" target="_blank" rel="noopener noreferrer">Open LMS</a> }
+        </p>
     }
 
     <TabControl ActiveValue="@activeHostTab"
@@ -62,6 +64,7 @@
                         <col class="hosts-col-status" />
                         <col class="hosts-col-auth" />
                         <col class="hosts-col-version" />
+                        <col class="hosts-col-channel" />
                         <col class="hosts-col-last-seen" />
                         <col class="hosts-col-actions" />
                     </colgroup>
@@ -71,6 +74,7 @@
                             <th><span class="hosts-column-heading">Status</span></th>
                             <th><span class="hosts-column-heading">Auth</span></th>
                             <th><span class="hosts-column-heading">Version</span></th>
+                            <th><span class="hosts-column-heading">Channel</span></th>
                             <th><span class="hosts-column-heading">Last seen</span></th>
                             <th></th>
                         </tr>
@@ -79,7 +83,7 @@
                         @if (LmsHostRows.Count == 0)
                         {
                             <tr>
-                                <td colspan="6" class="hosts-loading-cell">
+                                <td colspan="7" class="hosts-loading-cell">
                                     <span class="meta-text">No LMS hosts registered yet.</span>
                                 </td>
                             </tr>
@@ -120,10 +124,10 @@
                                     <td class="hosts-version-cell">
                                         <div class="stack-tight hosts-version-stack">
                                             <UiPill Tone="@GetLmsUpdateTone(row)" Class="hosts-version-pill">@GetLmsVersionLabel(row)</UiPill>
-                                            <span class="meta-text hosts-row-meta">@(row.LmsUpdate?.ReleaseChannel switch { "development" => "Dev", "stable" => "Stable", _ => "Channel unknown" })</span>
                                             <span class="meta-text hosts-row-meta" title="@GetLmsVersionTooltip(row)">@GetLmsVersionDetailWithOperation(row)</span>
                                         </div>
                                     </td>
+                                    <td><span class="hosts-row-value">@(row.LmsUpdate?.ReleaseChannel switch { "development" => "Development", "stable" => "Stable", _ => "Unknown" })</span></td>
                                     <td><span class="hosts-row-value hosts-last-seen-value">@FormatLastSeen(row)</span></td>
                                     <td class="actions-cell">
                                         <div class="row-action-cluster">
@@ -133,7 +137,7 @@
                                                 {
                                                     <UiCommandButton Label="Connect"
                                                                      Glyph="UiIconGlyph.Connect"
-                                                                     Title="Open the directly reachable LMS web UI on port 5080."
+                                                                     Title="Open this host’s verified HTTPS/HTTP LMS address."
                                                                      Variant="UiButtonVariant.Action"
                                                                      Href="@BuildDirectLmsRootUrl(row.Host)"
                                                                      Target="_blank"
@@ -205,7 +209,7 @@
                                 @if (hasRoutes)
                                 {
                                     <tr class="hosts-edge-routes-row @stripeClass">
-                                        <td colspan="6">
+                                        <td colspan="7">
                                             <div class="hosts-edge-routes">
                                                 <span class="meta-text">Edge Gateway routes</span>
                                                 @foreach (var link in edgeSummary!.Links)
@@ -486,6 +490,7 @@
     private bool isStatusRefreshInProgress;
     private bool isLmsUpdateRefreshInProgress;
     private bool updatingAllHosts;
+    private string? lmsConnectUrl;
     private string activeHostTab = LmsHostsTabValue;
     private ManagedHost? publicKeySetupHost;
     private ManagedHostEditor? publicKeySetupEditor;
@@ -1055,7 +1060,7 @@
 
     private static string GetLmsTunnelConnectTitle(ManagedHost host) =>
         CanConnectRemoteLmsHostThroughSsh(host)
-            ? "Port 5080 is not directly reachable. Use saved SSH credentials to open the remote LMS through the Caddy relay."
+            ? "Direct LMS web access is unavailable. Use saved SSH credentials to open the remote LMS through the Caddy relay."
             : "Save SSH credentials for this host before opening its LMS UI through the relay.";
 
     private static bool ShouldShowLmsUninstallAction(HostRowState row)
@@ -1232,11 +1237,13 @@
     private LmsHostUpdateOperation? GetLmsUpdateOperation(Guid hostId) =>
         lmsUpdateOperations.TryGetValue(hostId, out var operation) ? operation : null;
 
-    private static string BuildDirectLmsRootUrl(ManagedHost host) =>
+    private string BuildDirectLmsRootUrl(ManagedHost host) =>
         BuildDirectLmsUrl(host, "/");
 
-    private static string BuildDirectLmsUrl(ManagedHost host, string path)
+    private string BuildDirectLmsUrl(ManagedHost host, string path)
     {
+        if (LmsUpdateAvailabilityService.GetDirectBaseUrl(host.Id) is { } verifiedUrl)
+            return new Uri(new Uri(verifiedUrl), path).ToString();
         var endpoint = host.Hostname.Trim();
         var scheme = Uri.UriSchemeHttp;
         if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
@@ -1261,7 +1268,8 @@
         lmsConnectStatus = $"Opening an SSH tunnel to {host.Name}...";
         lmsConnectTone = "info";
         var popupName = BuildRemoteLmsPopupName(host);
-        var popupPrepared = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.preparePopup", popupName, 1280, 900);
+        lmsConnectUrl = null;
+        var popupPrepared = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.prepareBrowserWindow", popupName);
         if (popupPrepared)
         {
             _ = await JSRuntime.InvokeAsync<bool>(
@@ -1284,15 +1292,14 @@
             }
 
             var opened = await JSRuntime.InvokeAsync<bool>(
-                "lmsTerminalWindow.openPopupAfterDelay",
+                "lmsTerminalWindow.openPreparedBrowserWindow",
                 connection.Url,
-                popupName,
-                1280,
-                900,
-                1200);
+                popupName);
             if (!opened)
             {
-                NavigationManager.NavigateTo(connection.Url, forceLoad: true);
+                lmsConnectUrl = connection.Url;
+                lmsConnectStatus = "The connection is ready. Your browser blocked the new window; use Open LMS to open it.";
+                lmsConnectTone = "info";
             }
         }
         catch (Exception ex)

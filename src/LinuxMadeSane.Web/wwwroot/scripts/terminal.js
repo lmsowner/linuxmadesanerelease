@@ -816,6 +816,28 @@ window.lmsTerminalWindow = (() => {
         return true;
     }
 
+    function prepareBrowserWindow(name) {
+        const browserWindow = window.open("about:blank", "_blank");
+        if (!browserWindow) return false;
+        browserWindow.opener = null;
+        writePopupStatus(browserWindow, "Opening Linux Made Sane", "Preparing the connection.");
+        preparedPopups.set(name, browserWindow);
+        return true;
+    }
+
+    function openPreparedBrowserWindow(url, name) {
+        const browserWindow = preparedPopups.get(name);
+        preparedPopups.delete(name);
+        if (browserWindow && !browserWindow.closed) {
+            browserWindow.location.href = url;
+            browserWindow.focus();
+            return true;
+        }
+        const opened = window.open(url, "_blank");
+        if (opened) opened.opener = null;
+        return !!opened;
+    }
+
     function setPreparedPopupStatus(name, title, message, tone = "info") {
         const popup = preparedPopups.get(name);
         return writePopupStatus(popup, title, message, tone);
@@ -922,6 +944,8 @@ window.lmsTerminalWindow = (() => {
 
     return {
         preparePopup,
+        prepareBrowserWindow,
+        openPreparedBrowserWindow,
         setPreparedPopupStatus,
         openPopup,
         openPopupAfterDelay,

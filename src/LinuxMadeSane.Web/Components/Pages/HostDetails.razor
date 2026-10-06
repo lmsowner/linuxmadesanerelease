@@ -3,6 +3,7 @@
 
 @page "/hosts/{HostId:guid}"
 @rendermode InteractiveServer
+@implements IDisposable
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Models
 @inject IManagedHostService HostService
@@ -19,7 +20,9 @@
 {
     <div class="page-shell">
         <section class="surface-card">
-            <h1>Host not found</h1>
+            <h1>@(detailsLoading ? "Host details" : "Host not found")</h1>
+            @if (detailsLoading) { <p class="callout info" role="status">Enumerating host settings…</p> }
+            @if (detailsLoadError is not null) { <p class="callout error" role="alert">@detailsLoadError</p> }
             <UiCommandButton Label="Return to inventory" Glyph="UiIconGlyph.FolderOpen" Href="/hosts" />
         </section>
     </div>
@@ -88,9 +91,12 @@ else
             </div>
         </section>
 
+        @if (detailsLoading) { <p class="callout info" role="status">Checking host connectivity…</p> }
         @if (!string.IsNullOrWhiteSpace(remoteLmsConnectStatus))
         {
-            <p class="@($"callout {remoteLmsConnectTone}")">@remoteLmsConnectStatus</p>
+            <p class="@($"callout {remoteLmsConnectTone}")">@remoteLmsConnectStatus
+                @if (remoteLmsConnectUrl is not null) { <a href="@remoteLmsConnectUrl" target="_blank" rel="noopener noreferrer">Open LMS</a> }
+            </p>
         }
         @if (!string.IsNullOrWhiteSpace(lmsBackgroundUpdateStatus))
         {
@@ -116,7 +122,7 @@ else
                                 <p class="meta-text">Current live checks use the stored SSH credentials and verify that Linux Made Sane can open a real shell session.</p>
                                 @if (ShouldShowRemoteLmsWebAccessNote)
                                 {
-                                    <p class="callout info">Direct port 5080 is not reachable from this LMS session. Connect uses the saved SSH login to open a local tunnel.</p>
+                                    <p class="callout info">Direct HTTPS/HTTP access is not reachable from this LMS session. Connect uses the saved SSH login and Caddy relay.</p>
                                 }
                                 <p class="meta-text">Checked @details.ConnectionTest.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</p>
                             </section>
@@ -364,6 +370,9 @@ else
     public string? UninstallAction { get; set; }
 
     private ManagedHostDetailsViewModel? details;
+    private bool detailsLoading = true, loadPending;
+    private string? detailsLoadError;
+    private CancellationTokenSource detailsLoad = new();
     private string activeTab = OverviewTabValue;
     private ManagedHostLmsInstallOptions lmsInstallOptions = new();
     private ManagedHostLmsUninstallOptions lmsUninstallOptions = new();
@@ -380,6 +389,7 @@ else
     private Guid? uninstallQueryHandledForHostId;
     private LmsHostWebAccessStatus? remoteLmsWebAccess;
     private bool isRemoteLmsConnectBusy;
+    private string? remoteLmsConnectUrl;
     private string remoteLmsConnectStatus = string.Empty;
     private string remoteLmsConnectTone = "info";
     private string lmsBackgroundUpdateStatus = string.Empty;
@@ -422,9 +432,9 @@ else
 
     private string RemoteLmsConnectTitle =>
         CanOpenRemoteLmsDirectly
-            ? "Open the directly reachable LMS web UI on port 5080."
+            ? "Open this host’s verified HTTPS/HTTP LMS address."
             : CanRunRemoteLmsTunnel
-                ? "Port 5080 is not directly reachable. Use saved SSH credentials to open the remote LMS through the Caddy relay."
+                ? "Direct LMS web access is unavailable. Use saved SSH credentials to open the remote LMS through the Caddy relay."
                 : "Save SSH credentials for this host before opening its LMS UI through the relay.";
 
     private bool CanRunLmsInstaller => details is not null && HasStoredCredentials(details.Host);
@@ -442,17 +452,19 @@ else
     private string LmsUpdateButtonLabel =>
         isInstallingLms && isBackgroundLmsUpdate ? "Updating..." : "Update LMS";
 
-    private static string BuildDirectLmsRootUrl(ManagedHost host) =>
+    private string BuildDirectLmsRootUrl(ManagedHost host) =>
         BuildDirectLmsUrl(host, "/");
 
-    private static string BuildDirectLmsAiSetupUrl(ManagedHost host) =>
+    private string BuildDirectLmsAiSetupUrl(ManagedHost host) =>
         BuildDirectLmsUrl(host, "/ai/engine");
 
-    private static string BuildDirectLmsEdgeGatewayUrl(ManagedHost host) =>
+    private string BuildDirectLmsEdgeGatewayUrl(ManagedHost host) =>
         BuildDirectLmsUrl(host, "/edge-gateway");
 
-    private static string BuildDirectLmsUrl(ManagedHost host, string path)
+    private string BuildDirectLmsUrl(ManagedHost host, string path)
     {
+        if (LmsUpdateAvailabilityService.GetDirectBaseUrl(host.Id) is { } verifiedUrl)
+            return new Uri(new Uri(verifiedUrl), path).ToString();
         var endpoint = host.Hostname.Trim();
         var scheme = Uri.UriSchemeHttp;
         if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
@@ -539,9 +551,32 @@ else
             : isLmsUpdateMode ? "Run update" : "Run installer";
     }
 
-    protected override async Task OnParametersSetAsync()
+    protected override Task OnParametersSetAsync()
     {
-        await LoadDetailsAsync();
+        detailsLoad.Cancel(); detailsLoad.Dispose(); detailsLoad = new();
+        details = null; remoteLmsWebAccess = null; detailsLoadError = null;
+        detailsLoading = true; loadPending = true;
+        return Task.CompletedTask;
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (loadPending) { loadPending = false; _ = LoadPageAsync(detailsLoad.Token); }
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadPageAsync(CancellationToken token)
+    {
+        try { await LoadPageCoreAsync(token); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex) { if (!token.IsCancellationRequested) detailsLoadError = ex.Message; }
+        finally { if (!token.IsCancellationRequested) { detailsLoading = false; await InvokeAsync(StateHasChanged); } }
+    }
+
+    private async Task LoadPageCoreAsync(CancellationToken token)
+    {
+        await LoadDetailsAsync(token);
+        token.ThrowIfCancellationRequested();
         if (details is not null &&
             !isInstallingLms &&
             !showLmsInstallPrompt &&
@@ -578,19 +613,23 @@ else
         }
     }
 
-    private async Task LoadDetailsAsync()
+    private async Task LoadDetailsAsync(CancellationToken cancellationToken = default)
     {
-        remoteLmsWebAccess = null;
-        details = await HostService.GetDetailsAsync(HostId);
-        if (details is null)
-        {
-            return;
-        }
-
-        remoteLmsWebAccess = details.Capabilities is { IsLmsHost: true, IsLocalLmsHost: false }
-            ? await LmsUpdateAvailabilityService.CheckDirectWebAccessAsync(details.Host)
+        var requestedHostId = HostId;
+        await using var scope = ServiceScopeFactory.CreateAsyncScope();
+        var hostService = scope.ServiceProvider.GetRequiredService<IManagedHostService>();
+        var loaded = await hostService.GetDetailsAsync(requestedHostId, cancellationToken);
+        if (cancellationToken.IsCancellationRequested || HostId != requestedHostId) return;
+        details = loaded; remoteLmsWebAccess = null;
+        await InvokeAsync(StateHasChanged);
+        if (loaded is null) return;
+        var access = loaded.Capabilities is { IsLmsHost: true, IsLocalLmsHost: false }
+            ? await LmsUpdateAvailabilityService.CheckDirectWebAccessAsync(loaded.Host, cancellationToken)
             : null;
+        if (!cancellationToken.IsCancellationRequested && HostId == requestedHostId) remoteLmsWebAccess = access;
     }
+
+    public void Dispose() { detailsLoad.Cancel(); detailsLoad.Dispose(); }
 
     private void ShowLmsInstallPrompt()
     {
@@ -892,7 +931,8 @@ else
         remoteLmsConnectStatus = $"Opening an SSH tunnel to {details.Host.Name}...";
         remoteLmsConnectTone = "info";
         var popupName = BuildRemoteLmsPopupName(details.Host);
-        var popupPrepared = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.preparePopup", popupName, 1280, 900);
+        remoteLmsConnectUrl = null;
+        var popupPrepared = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.prepareBrowserWindow", popupName);
         if (popupPrepared)
         {
             _ = await JSRuntime.InvokeAsync<bool>(
@@ -915,15 +955,14 @@ else
             }
 
             var opened = await JSRuntime.InvokeAsync<bool>(
-                "lmsTerminalWindow.openPopupAfterDelay",
+                "lmsTerminalWindow.openPreparedBrowserWindow",
                 connection.Url,
-                popupName,
-                1280,
-                900,
-                1200);
+                popupName);
             if (!opened)
             {
-                NavigationManager.NavigateTo(connection.Url, forceLoad: true);
+                remoteLmsConnectUrl = connection.Url;
+                remoteLmsConnectStatus = "The connection is ready. Your browser blocked the new window; use Open LMS to open it.";
+                remoteLmsConnectTone = "info";
             }
         }
         catch (Exception ex)

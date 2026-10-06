@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text.Json;
+using LinuxMadeSane.Core.Abstractions;
 using LinuxMadeSane.Core.Models;
 using LinuxMadeSane.Core.Models.Ai;
 using LinuxMadeSane.Core.Versioning;
@@ -25,8 +26,9 @@ public sealed record LmsHostUpdateAvailability(
 {
     public string? ReleaseChannel { get; init; }
     public bool IsUpdateAvailable => State == LmsHostUpdateAvailabilityState.UpdateAvailable;
-    public bool IsDirectWebAvailable => !string.IsNullOrWhiteSpace(InstalledVersion) &&
-                                        !InstalledVersion.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
+    public bool? DirectWebReachable { get; init; }
+    public bool IsDirectWebAvailable => DirectWebReachable ?? (!string.IsNullOrWhiteSpace(InstalledVersion) &&
+                                        !InstalledVersion.Equals("Unknown", StringComparison.OrdinalIgnoreCase));
 }
 
 public sealed record LmsHostWebAccessStatus(
@@ -44,9 +46,13 @@ public sealed class LmsHostUpdateAvailabilityService(
     HttpClient httpClient,
     IOptionsMonitor<ApplicationUpdateOptions> optionsMonitor,
     ILogger<LmsHostUpdateAvailabilityService> logger,
-    ApplicationUpdateService? localUpdates = null)
+    ApplicationUpdateService? localUpdates = null,
+    IServiceScopeFactory? scopes = null)
 {
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> hostChannels = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, bool> hostWebAccess = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> directBaseUrls = new();
+    public string? GetDirectBaseUrl(Guid hostId) => directBaseUrls.GetValueOrDefault(hostId);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan ManifestTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan HealthProbeTimeout = TimeSpan.FromSeconds(4);
@@ -131,7 +137,7 @@ public sealed class LmsHostUpdateAvailabilityService(
                 host.Id,
                 true,
                 installedVersion,
-                $"Remote LMS web UI answered on port 5080. Installed version: {installedVersion}.");
+                $"Remote LMS web UI is reachable. Installed version: {installedVersion}.");
     }
 
     public async Task<LmsHostUpdateAvailability> CheckHostAsync(
@@ -141,7 +147,7 @@ public sealed class LmsHostUpdateAvailabilityService(
     {
         var installedVersion = AiLocalMachine.IsLocalMachine(host.Id)
             ? LinuxMadeSaneBuildVersion.GetCurrent(typeof(Program).Assembly)
-            : await ProbeRemoteInstalledVersionAsync(host, cancellationToken);
+            : await ProbeRemoteInstalledVersionAsync(host, cancellationToken, allowSshFallback: true);
 
         var channel = AiLocalMachine.IsLocalMachine(host.Id)
             ? localUpdates?.GetStatus().Channel ?? "stable"
@@ -155,7 +161,7 @@ public sealed class LmsHostUpdateAvailabilityService(
             host.Id,
             installedVersion,
             latestVersionCheck.Version,
-            latestVersionCheck.Failure) with { ReleaseChannel = AiLocalMachine.IsLocalMachine(host.Id) ? channel : string.IsNullOrWhiteSpace(installedVersion) ? null : hostChannels.GetValueOrDefault(host.Id) };
+            latestVersionCheck.Failure) with { ReleaseChannel = AiLocalMachine.IsLocalMachine(host.Id) ? channel : hostChannels.GetValueOrDefault(host.Id), DirectWebReachable = AiLocalMachine.IsLocalMachine(host.Id) || hostWebAccess.GetValueOrDefault(host.Id) };
     }
 
     public static LmsHostUpdateAvailability BuildAvailability(
@@ -224,42 +230,91 @@ public sealed class LmsHostUpdateAvailabilityService(
 
     private async Task<string> ProbeRemoteInstalledVersionAsync(
         ManagedHost host,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool allowSshFallback = false)
     {
-        foreach (var uri in BuildHealthUris(host))
+        var webVersion = string.Empty;
+        hostWebAccess[host.Id] = false;
+        hostChannels.TryRemove(host.Id, out _);
+        directBaseUrls.TryRemove(host.Id, out _);
+        // Probe together, then choose in HTTPS-first order. An unreachable endpoint must not multiply delays.
+        var probes = BuildHealthUris(host).Select(async uri =>
         {
             try
             {
                 using var requestCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 requestCts.CancelAfter(HealthProbeTimeout);
                 using var response = await httpClient.GetAsync(uri, requestCts.Token);
-                if (!response.IsSuccessStatusCode)
-                {
-                    continue;
-                }
-
+                if (!response.IsSuccessStatusCode) return ((Uri Uri, string Version, string? Channel)?)null;
                 var content = await response.Content.ReadAsStringAsync(requestCts.Token);
                 var version = TryReadHealthVersion(content);
-                if (!string.IsNullOrWhiteSpace(version))
-                {
-                    using var health = JsonDocument.Parse(content);
-                    var channel = ReadJsonString(health.RootElement, "releaseChannel");
-                    if (channel is "development" or "stable") hostChannels[host.Id] = channel;
-                    else hostChannels.TryRemove(host.Id, out _);
-                    return version;
-                }
+                if (string.IsNullOrWhiteSpace(version)) return null;
+                using var health = JsonDocument.Parse(content);
+                return (uri, version, ReadJsonString(health.RootElement, "releaseChannel"));
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                logger.LogDebug(ex, "LMS host version probe failed for {Host} at {Uri}.", host.Name, uri);
-            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex) { logger.LogDebug(ex, "LMS host version probe failed for {Host} at {Uri}.", host.Name, uri); return null; }
+        });
+        var reachable = (await Task.WhenAll(probes)).FirstOrDefault(result => result is not null);
+        if (reachable is { } access)
+        {
+            hostWebAccess[host.Id] = true;
+            directBaseUrls[host.Id] = new Uri(access.Uri, "/").ToString();
+            webVersion = access.Version;
+            if (access.Channel is "stable" or "development") { hostChannels[host.Id] = access.Channel; return webVersion; }
         }
 
-        return string.Empty;
+        if (allowSshFallback && scopes is not null)
+        {
+            try
+            {
+                await using var scope = scopes.CreateAsyncScope();
+                var commands = scope.ServiceProvider.GetRequiredService<ICommandExecutionService>();
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(15));
+                var result = await commands.ExecuteAsync(host, SavedReleaseMetadataCommand, cancellationToken: timeout.Token);
+                if (result.IsSuccess)
+                {
+                    using var metadata = JsonDocument.Parse(result.StandardOutput.Trim());
+                    var channel = ReadJsonString(metadata.RootElement, "releaseChannel");
+                    if (channel is "stable" or "development") hostChannels[host.Id] = channel;
+                    var version = ReadJsonString(metadata.RootElement, "version");
+                    if (HasLinuxMadeSaneVersionShape(version)) return version!;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex) { logger.LogDebug(ex, "Saved LMS release metadata probe failed for {Host}.", host.Name); }
+        }
+        return webVersion;
+    }
+
+    private const string SavedReleaseMetadataScript = """
+        import json,pathlib
+        root=pathlib.Path('/var/lib/linuxmadesane/ce'); channel=None
+        p=root/'update-channel.json'
+        if p.exists():
+         try:
+          value=json.loads(p.read_text()).get('channel')
+          if value in ('stable','development'): channel=value
+         except (OSError,ValueError): pass
+        if channel is None:
+         p=pathlib.Path('/etc/linuxmadesane/ce/service.env')
+         if p.exists():
+          for line in p.read_text().splitlines():
+           if line.startswith('ApplicationUpdates__Channel='):
+            value=line.split('=',1)[1].strip().strip('"').strip("'")
+            if value in ('stable','development'): channel=value
+        version=None
+        for name in ('/opt/linuxmadesane/ce/current/version.txt','/opt/linuxmadesane/ce/current/app/version.txt'):
+         p=pathlib.Path(name)
+         if p.exists():
+          version=p.read_text().strip(); break
+        print(json.dumps({'releaseChannel':channel,'version':version}))
+        """;
+    private static readonly string SavedReleaseMetadataCommand = BuildSavedReleaseMetadataCommand();
+    private static string BuildSavedReleaseMetadataCommand()
+    {
+        var program = "python3 -c "+"\'" + SavedReleaseMetadataScript.Replace("\'", "\'\\\'\'") + "\'";
+        return "if [ \"$(id -u)\" = 0 ]; then " + program + "; else sudo -n " + program + " 2>/dev/null || " + program + "; fi";
     }
 
     private static IReadOnlyList<Uri> BuildHealthUris(ManagedHost host)
@@ -272,8 +327,9 @@ public sealed class LmsHostUpdateAvailabilityService(
 
         return
         [
-            new UriBuilder(Uri.UriSchemeHttp, endpoint, 5080, "healthz").Uri,
-            new UriBuilder(Uri.UriSchemeHttps, endpoint, 5080, "healthz").Uri
+            new UriBuilder(Uri.UriSchemeHttps, endpoint, 443, "healthz").Uri,
+            new UriBuilder(Uri.UriSchemeHttps, endpoint, 5080, "healthz").Uri,
+            new UriBuilder(Uri.UriSchemeHttp, endpoint, 5080, "healthz").Uri
         ];
     }
 
@@ -334,7 +390,7 @@ public sealed class LmsHostUpdateAvailabilityService(
         values.Select(value => value?.Trim()).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 
     private static string BuildDirectWebUnavailableDetail() =>
-        "LMS is installed and SSH management may still work, but the remote LMS web endpoint on port 5080 is not directly reachable. Use Portal/Pro relay or Edge Gateway for browser access.";
+        "LMS is installed and SSH management may still work, but direct HTTPS/HTTP access to the remote LMS is unavailable. Use Portal/Pro relay or Edge Gateway for browser access.";
 
     private static string BuildLatestVersionUnavailableDetail(string installedVersion, string failure) =>
         string.IsNullOrWhiteSpace(failure)

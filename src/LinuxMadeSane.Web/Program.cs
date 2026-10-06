@@ -177,8 +177,7 @@ public class Program
         builder.Services.AddHttpClient<LmsHostUpdateAvailabilityService>()
             .ConfigurePrimaryHttpMessageHandler(static () => new HttpClientHandler
             {
-                AllowAutoRedirect = false,
-                ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+                AllowAutoRedirect = false
             });
         builder.Services.AddHostedService<ApplicationUpdateHostedService>();
         builder.Services.AddScoped<MediaLibraryTranscodePreviewService>();
