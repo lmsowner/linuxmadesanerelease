@@ -15,8 +15,28 @@ namespace LinuxMadeSane.Infrastructure.Services;
 public sealed class ManagedHostCommandExecutionService(
     ManagedHostSshConnectionFactory sshConnectionFactory,
     ILinuxCommandRunner linuxCommandRunner,
-    ILogger<ManagedHostCommandExecutionService> logger) : ICommandExecutionService, ICommandExecutionInputService
+    ILogger<ManagedHostCommandExecutionService> logger) : ICommandExecutionService, ICommandExecutionInputService, IManagedHostPublicKeyInstaller
 {
+    public async Task<CommandExecutionResult> InstallAsync(ManagedHost host, string publicKey, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(publicKey)) throw new InvalidOperationException("A public key is required.");
+        var command = SshAuthorizedKeyInstallCommandBuilder.Build(publicKey);
+        if (!AiLocalMachine.IsLocalMachine(host.Id))
+            return await ExecuteRemoteAsync(host, command, null, null, cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(host.Username) || host.Username.StartsWith('-') || host.Username.Any(char.IsWhiteSpace))
+            throw new InvalidOperationException("Select the local Linux account for this key.");
+        // The service cannot enter another user's private home. Start in / and
+        // let sudo select the target account and its real home from passwd.
+        // This is a typed key-install operation, not elevation of arbitrary chat commands.
+        var result = await linuxCommandRunner.RunAsync(new LinuxCommandRequest(
+            "sudo", ["-n", "-H", "-u", host.Username, "--", "/bin/sh", "-c", command],
+            true, TimeSpan.FromSeconds(30), $"Install SSH public key for local account {host.Username}.", "/"), false, cancellationToken);
+        var error = result.ExitCode == 0 ? result.StandardError :
+            $"LMS could not install the key for local account '{host.Username}' using its service sudo access. Your existing login is unchanged. " + result.StandardError;
+        return new(command, result.ExitCode, result.StandardOutput, error, result.StartedAt, result.CompletedAt);
+    }
+
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(15);
 

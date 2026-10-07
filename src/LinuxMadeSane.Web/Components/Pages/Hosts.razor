@@ -11,6 +11,7 @@
 @using LinuxMadeSane.Core.Versioning
 @inject IManagedHostService HostService
 @inject ICommandExecutionService CommandExecutionService
+@inject IManagedHostPublicKeyInstaller PublicKeyInstaller
 @inject ISshKeyPairGenerator SshKeyPairGenerator
 @inject IServiceScopeFactory ServiceScopeFactory
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
@@ -442,7 +443,7 @@
                     </article>
                     <article class="surface-subcard hosts-public-key-step">
                         <strong>2. Install</strong>
-                        <span>LMS appends the public key to the remote account's authorized_keys file using the host's current saved SSH login.</span>
+                        <span>@(LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(publicKeySetupHost.Id) ? "LMS uses its existing administrator access to install the key for this local Linux account." : "LMS appends the public key using this host’s saved SSH login.")</span>
                     </article>
                     <article class="surface-subcard hosts-public-key-step">
                         <strong>3. Save</strong>
@@ -1619,10 +1620,10 @@
 
             keepStoredPasswordFallback = publicKeySetupEditor.HasStoredPassword;
             await GeneratePublicKeySetupKeyCoreAsync();
-            publicKeySetupStatus = HasStoredConnectionMaterial(host)
+            publicKeySetupStatus = (LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(host.Id) || HasStoredConnectionMaterial(host))
                 ? "Ready. Click Install, test, and save to set up key authentication automatically."
                 : "Save SSH credentials for this host first. LMS needs the current login once so it can install the public key.";
-            publicKeySetupTone = HasStoredConnectionMaterial(host) ? "success" : "warning";
+            publicKeySetupTone = (LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(host.Id) || HasStoredConnectionMaterial(host)) ? "success" : "warning";
         }
         catch (Exception exception)
         {
@@ -1714,7 +1715,7 @@
             return;
         }
 
-        if (!HasStoredConnectionMaterial(publicKeySetupHost))
+        if (!LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(publicKeySetupHost.Id) && !HasStoredConnectionMaterial(publicKeySetupHost))
         {
             publicKeySetupStatus = "Save SSH credentials for this host first, then run public-key setup.";
             publicKeySetupTone = "warning";
@@ -1729,14 +1730,14 @@
 
         try
         {
-            var installResult = await CommandExecutionService.ExecuteAsync(
+            var installResult = await PublicKeyInstaller.InstallAsync(
                 publicKeySetupHost,
-                PublicKeySetupInstallCommand);
+                publicKeySetupKeyPair.PublicKey);
             publicKeySetupCommandOutput = BuildCommandOutput(installResult);
 
             if (!installResult.IsSuccess)
             {
-                publicKeySetupStatus = $"Public key install failed with exit code {installResult.ExitCode}.";
+                publicKeySetupStatus = "Key installation failed. Your existing login is unchanged. See the setup output above for the cause.";
                 publicKeySetupTone = "error";
                 return;
             }
@@ -1751,10 +1752,8 @@
             editor.ClearStoredPrivateKey = false;
             editor.ClearStoredPrivateKeyPassphrase = editor.HasStoredPrivateKeyPassphrase;
             editor.PrimaryAuthenticationType = AuthenticationType.PrivateKey;
-            editor.FallbackAuthenticationType =
-                keepStoredPasswordFallback && editor.HasStoredPassword
-                    ? AuthenticationType.Password
-                    : null;
+            editor.FallbackAuthenticationType = null; // Verify the key without password fallback.
+            editor.UseKeyboardInteractiveFallback = false;
             editor.Password = string.Empty;
             editor.ClearStoredPassword = !keepStoredPasswordFallback && editor.HasStoredPassword;
 
@@ -1768,6 +1767,8 @@
                 return;
             }
 
+            editor.FallbackAuthenticationType = keepStoredPasswordFallback && editor.HasStoredPassword
+                ? AuthenticationType.Password : null;
             await HostService.SaveHostAsync(editor);
             await RefreshHostAfterPublicKeySetupAsync(editor.Id ?? publicKeySetupHost.Id, testResult);
 

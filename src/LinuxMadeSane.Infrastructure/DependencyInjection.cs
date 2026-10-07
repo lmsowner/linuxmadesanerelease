@@ -279,6 +279,7 @@ public static class DependencyInjection
         services.AddScoped<ICloudflareAccessService, CloudflareAccessService>();
         services.AddScoped<ISshConnectionService, SshConnectionService>();
         services.AddScoped<ICommandExecutionService, ManagedHostCommandExecutionService>();
+        services.AddScoped<IManagedHostPublicKeyInstaller, ManagedHostCommandExecutionService>();
         services.AddScoped<ILocalHttpServiceDiscoveryService, LocalHttpServiceDiscoveryService>();
         services.AddScoped<IManagedHostFileAccessService, ManagedHostFileAccessService>();
         services.AddScoped<PrivilegedFileBrowsingService>();
