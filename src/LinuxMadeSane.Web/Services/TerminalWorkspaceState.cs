@@ -21,7 +21,41 @@ public sealed class TerminalWorkspaceRegistry(ITerminalSessionService terminalSe
             workspace.Tabs.Count(tab =>
                 tab.HostId == hostId &&
                 tab.ConnectionDesired &&
-                tab.SessionId.HasValue));
+                tab.SessionId.HasValue &&
+                tab.Snapshot?.Status is null or TerminalSessionStatus.Starting or TerminalSessionStatus.Active));
+
+    public async Task RefreshSessionsAsync(Guid? hostId = null, CancellationToken cancellationToken = default)
+    {
+        foreach (var tab in workspaces.Values.SelectMany(workspace => workspace.Tabs)
+                     .Where(tab => hostId is null || tab.HostId == hostId))
+        {
+            if (tab.SessionId is not Guid sessionId || tab.IsBusy)
+                continue;
+
+            await tab.ConnectionGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (tab.SessionId != sessionId || tab.IsBusy)
+                    continue;
+                var snapshot = await terminalSessionService.GetSnapshotAsync(sessionId, cancellationToken);
+                if (snapshot is null || snapshot.Status is TerminalSessionStatus.Closed or TerminalSessionStatus.Faulted)
+                {
+                    tab.RequestDisconnect();
+                    tab.SessionId = null;
+                    tab.Snapshot = snapshot ?? (tab.Snapshot is null ? null : tab.Snapshot with { Status = TerminalSessionStatus.Closed });
+                    await terminalSessionService.CloseSessionAsync(sessionId, cancellationToken);
+                }
+                else
+                {
+                    tab.Snapshot = snapshot;
+                }
+            }
+            finally
+            {
+                tab.ConnectionGate.Release();
+            }
+        }
+    }
 
     public bool HasActiveSession(Guid hostId) =>
         workspaces.Values.Any(workspace =>

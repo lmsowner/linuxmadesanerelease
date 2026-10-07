@@ -614,7 +614,10 @@
             if (updateFailure is not null && !await HasTerminalAiAsync())
                 throw new InvalidOperationException("AI is no longer enabled on this LMS host. Open the terminal to investigate manually.");
             var workspace = TerminalWorkspaceRegistry.GetOrCreate(TerminalWorkspaceAccessor.GetWorkspaceId());
+            await TerminalWorkspaceRegistry.RefreshSessionsAsync(host.Id);
             var tab = updateFailure is null ? workspace.EnsureHostTab(host) : workspace.AddTab(host);
+            if (updateFailure is null && !tab.ConnectionDesired && !tab.IsBusy && tab.Snapshot is not null)
+                tab = workspace.AddTab(host);
             if (updateFailure is not null)
             {
                 tab.PendingAiTaskPrompt = $"Investigate and help repair the failed LMS update on this connected host ({host.Name}). The update reported:\n{updateFailure}\nCheck the actual installer/service logs and current installed version before proposing a fix. Preserve configuration, credentials and data. Do not change release channel or use Home Lab repair tools. Explain the cause and verify LMS health after any approved repair.";
@@ -637,6 +640,7 @@
     protected override async Task OnInitializedAsync()
     {
         var hosts = await HostService.ListHostsAsync();
+        await TerminalWorkspaceRegistry.RefreshSessionsAsync();
         hostRows = hosts
             .OrderBy(ManagedHostCapabilities.GetSortRank)
             .ThenBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
@@ -668,9 +672,24 @@
             _ = RefreshEdgeGatewaySummariesAsync(statusRefreshCancellationTokenSource.Token);
             _ = RefreshBenchmarksAsync(statusRefreshCancellationTokenSource.Token);
             _ = RefreshTerminalAiAvailabilityAsync();
+            _ = MonitorTerminalSessionsAsync(statusRefreshCancellationTokenSource.Token);
         }
 
         return Task.CompletedTask;
+    }
+
+    private async Task MonitorTerminalSessionsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await TerminalWorkspaceRegistry.RefreshSessionsAsync(cancellationToken: cancellationToken);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
     public async ValueTask DisposeAsync()
