@@ -4,6 +4,7 @@
 @using LinuxMadeSane.Application.Contracts.Infrastructure
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Application.Contracts.Shares
+@using LinuxMadeSane.Core.Enums
 @inject IHostBackupService Backup
 @inject IInfrastructureDiagnosticsService Diagnostics
 @inject ShareMountsWorkspaceService ShareWorkspace
@@ -11,33 +12,55 @@
     <p>Keep an encrypted copy of LMS and your chosen folders. First choose where to keep backups, then choose what to back up.</p>
     <div class="infrastructure-actions"><UiCommandButton Label="Refresh" Disabled="@busy" OnClick="Load" />
     <UiCommandButton Label="Set up backup storage" HideIcon="true" Disabled="@busy" OnClick="NewRepository" />
-    <UiCommandButton Label="Choose what to back up" HideIcon="true" Disabled="@(busy || workspace?.Repositories.Count is null or 0)" OnClick="NewSet" /></div>
+    <UiCommandButton Label="Add backup plan" HideIcon="true" Disabled="@(busy || workspace?.Repositories.Count is null or 0)" OnClick="NewSet" /></div>
     @if (repositoryNotice is not null) { <p class="callout" role="status">@repositoryNotice</p> }
+    @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
+    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
     @if (workspace is not null)
     {
+        <h3>Backup plans</h3>
+        <p>Each plan has its own files, destination, schedule and retention. Several plans can share a storage location.</p>
+        @if (workspace.Sets.Count == 0) { <p>No plans yet. Select <strong>Add backup plan</strong> above to choose what to protect.</p> }
+        <div class="backup-plan-grid">
+        @foreach (var set in workspace.Sets)
+        {
+            var destination = workspace.Repositories.FirstOrDefault(repo => repo.Id == set.RepositoryId);
+            var last = workspace.History.FirstOrDefault(item => item.SetId == set.Id && item.Kind.StartsWith("Backup", StringComparison.Ordinal));
+            var lastFinished = set.LastFinishedUtc ?? last?.FinishedUtc;
+            var lastSucceeded = set.LastRunSucceeded ?? last?.Success;
+            var lastSuccess = workspace.History.FirstOrDefault(item => item.SetId == set.Id && item.Kind.StartsWith("Backup", StringComparison.Ordinal) && item.Success);
+            <section class="surface-card backup-plan-card"><h3>@set.Name</h3>
+                <p><strong>Protects:</strong> @(set.IncludeLms ? "LMS configuration, credentials & database" : "Selected folders")@((set.IncludeLms && set.Sources.Count > 0) ? "; " : "")@string.Join("; ", set.Sources)</p>
+                <p><strong>Destination:</strong> @(destination?.Name ?? "Storage location missing") · @destination?.Path</p>
+                <p><strong>Schedule:</strong> @(set.ScheduleEnabled ? set.ScheduleSummary : "Manual — scheduled backups off")</p>
+                <p><strong>Retention:</strong> @set.KeepDaily daily · @set.KeepWeekly weekly · @set.KeepMonthly monthly</p>
+                <p><strong>Last run:</strong> @(lastFinished is null ? "Not run yet" : $"{lastFinished.Value.ToLocalTime():g} · {(lastSucceeded == true ? "Success" : "Failed — open history for details")}")</p>
+                <p><strong>Last successful backup:</strong> @((set.LastSuccessfulBackupUtc ?? lastSuccess?.FinishedUtc)?.ToLocalTime().ToString("g") ?? "None recorded")</p>
+                @if (!string.IsNullOrWhiteSpace(set.Notes)) { <p class="backup-plan-notes"><strong>Notes:</strong> @set.Notes</p> }
+                <div class="infrastructure-actions">
+                    <UiCommandButton Label="Edit plan" HideIcon="true" Disabled="@busy" OnClick="(() => EditSet(set))" />
+                    <UiCommandButton Label="Back up now" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="(() => Run(set.Id))" />
+                    <UiCommandButton Label="Restore" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ShowSnapshots(destination!, set))" />
+                    <UiCommandButton Label="History & logs" HideIcon="true" Disabled="@busy" OnClick="(() => ShowHistory(set.Id, null, set.Name))" />
+                </div>
+            </section>
+        }
+        </div>
+        <details class="backup-storage"><summary>Backup storage locations (@workspace.Repositories.Count)</summary>
         @foreach (var repository in workspace.Repositories)
         {
             <section class="surface-card"><h3>@repository.Name</h3><p>@repository.Path</p>
-                <div class="infrastructure-actions"><UiCommandButton Label="Edit" Disabled="@busy" OnClick="(() => EditRepository(repository))" />
-                <UiCommandButton Label="Back up LMS configuration" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="(() => NewSetForRepository(repository.Id))" />
-                <UiCommandButton Label="Snapshots / restore" Disabled="@busy" OnClick="(() => ShowSnapshots(repository))" />
-                <UiCommandButton Label="Statistics" Disabled="@busy" OnClick="(() => Inspect(repository, false))" />
-                <UiCommandButton Label="Integrity check" Disabled="@busy" OnClick="(() => Inspect(repository, true))" /></div>
+                @if (!string.IsNullOrWhiteSpace(repository.Notes)) { <p class="backup-plan-notes">@repository.Notes</p> }
+                <div class="infrastructure-actions"><UiCommandButton Label="Edit storage" HideIcon="true" Disabled="@busy" OnClick="(() => EditRepository(repository))" />
+                <UiCommandButton Label="Add backup plan" HideIcon="true" Disabled="@busy" OnClick="(() => NewSetForRepository(repository.Id))" />
+                <UiCommandButton Label="All snapshots / restore" HideIcon="true" Disabled="@busy" OnClick="(() => ShowSnapshots(repository))" />
+                <UiCommandButton Label="History & logs" HideIcon="true" Disabled="@busy" OnClick="(() => ShowHistory(null, repository.Id, repository.Name))" />
+                <UiCommandButton Label="Statistics" HideIcon="true" Disabled="@busy" OnClick="(() => Inspect(repository, false))" />
+                <UiCommandButton Label="Integrity check" HideIcon="true" Disabled="@busy" OnClick="(() => Inspect(repository, true))" /></div>
             </section>
         }
-        @foreach (var set in workspace.Sets)
-        {
-            <section class="surface-card"><h3>@set.Name</h3><p>Sources: @(set.IncludeLms ? "LMS database and protection keys; " : "")@string.Join("; ", set.Sources)</p>
-            <p>Keep @set.KeepDaily daily · @set.KeepWeekly weekly · @set.KeepMonthly monthly · @set.ScheduleSummary @(set.ScheduleId.HasValue && !set.ScheduleEnabled ? "(disabled)" : "")</p>
-            <div class="infrastructure-actions"><UiCommandButton Label="Edit set" Disabled="@busy" OnClick="(() => EditSet(set))" />
-            <UiCommandButton Label="Back up now" Disabled="@busy" OnClick="(() => Run(set.Id))" /></div></section>
-        }
-        <h3>History</h3>
-        @foreach (var history in workspace.History.Take(20))
-        { <details class="surface-card"><summary>@history.StartedUtc.ToLocalTime().ToString("g") · @history.Kind · @(history.Success ? "Success" : "Failed")</summary><pre>@history.Detail</pre></details> }
+        </details>
     }
-    @if (busy) { <p class="callout" aria-busy="true">@progress</p> }
-    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
 </FeaturePackageGate>
 <div class="backup-dialogs">
 <UiModal Class="backup-compact-modal" IsOpen="@(repositoryEditor is not null && !showNetworkMount)" Title="@(editingRepository ? "Edit backup storage" : "Set up backup storage")" OnClose="CloseRepository"><ChildContent>
@@ -46,6 +69,7 @@
         <p class="backup-introduction">This chooses where backups are stored. You will choose the files and schedule next.</p>
         <section class="backup-setup-step">
             <h3>1. Choose where to keep backups</h3>
+            <UiTextAreaField Label="Storage notes (optional)" Helper="For example, NAS ownership or where the recovery password is kept. Do not put passwords in notes." Rows="2" @bind-Value="repositoryEditor.Notes" />
             <UiTextField Label="Name for this backup location" Placeholder="For example: NAS backups" Disabled="@busy" @bind-Value="repositoryEditor.Name" />
             @if (!editingRepository)
             {
@@ -121,7 +145,8 @@
     @if (setEditor is not null)
     {
         <p class="backup-introduction"><strong>Start with LMS itself.</strong> Leave it selected below to protect LMS settings, saved credentials and its database. You do not need to enter a folder for this.</p>
-        <UiTextField Label="Name for this backup" @bind-Value="setEditor.Name" />
+        <UiTextField Label="Name for this backup plan" @bind-Value="setEditor.Name" />
+        <UiTextAreaField Label="Notes & recovery instructions (optional)" Helper="Explain what this plan protects and how to recover it. Notes are included inside its encrypted backup. Do not enter passwords here." Rows="3" @bind-Value="setEditor.Notes" />
         <UiSelectField TValue="Guid" Label="Backup location" @bind-Value="setEditor.RepositoryId">@foreach (var repo in workspace?.Repositories ?? []) { <option value="@repo.Id">@repo.Name — @repo.Path</option> }</UiSelectField>
         <UiCheckboxField Label="LMS configuration, credentials & database (recommended)" Helper="Includes LMS settings stored in its database, application configuration files and the protection keys needed to recover saved credentials. LMS prepares a consistent database copy automatically." @bind-Value="setEditor.IncludeLms" />
         <section class="backup-setup-step">
@@ -133,9 +158,34 @@
             <p><strong>Do not select / (the whole filesystem).</strong> This is a backup of selected files, not a full disk image. Keep the backup destination out of this list. Running applications may need their own backup procedure for consistent data.</p>
         </section>
         <div class="infrastructure-grid"><UiNumberField TValue="int" Label="Daily snapshots" @bind-Value="setEditor.KeepDaily" min="0" /><UiNumberField TValue="int" Label="Weekly" @bind-Value="setEditor.KeepWeekly" min="0" /><UiNumberField TValue="int" Label="Monthly" @bind-Value="setEditor.KeepMonthly" min="0" /></div>
-        <UiCheckboxField Label="Enable scheduled backups" Helper="New schedules run daily in the host's local timezone. Other schedules can be edited in Scheduling." @bind-Value="schedule" />
-        @if (schedule && setEditor.ScheduleUsesDaily) { <div class="infrastructure-grid"><UiNumberField TValue="int" Label="Hour" @bind-Value="hour" min="0" max="23" /><UiNumberField TValue="int" Label="Minute" @bind-Value="minute" min="0" max="59" /></div> }
-        @if (setEditor.ScheduleId.HasValue && !setEditor.ScheduleUsesDaily) { <p>@setEditor.ScheduleSummary · <a href="/scheduling">Edit schedule</a></p> }
+        <UiCheckboxField Label="Enable scheduled backups" Helper="This schedule applies only to this plan, in the host’s local timezone." @bind-Value="schedule" />
+        @if (schedule)
+        {
+            <UiSelectField TValue="ScheduledTaskScheduleMode" Label="How often?" @bind-Value="setEditor.ScheduleMode">
+                <option value="@ScheduledTaskScheduleMode.Hourly">Hourly</option>
+                <option value="@ScheduledTaskScheduleMode.Daily">Daily</option>
+                <option value="@ScheduledTaskScheduleMode.Weekly">Weekly</option>
+                <option value="@ScheduledTaskScheduleMode.Monthly">Monthly</option>
+                @if (setEditor.ScheduleMode is not (ScheduledTaskScheduleMode.Hourly or ScheduledTaskScheduleMode.Daily or ScheduledTaskScheduleMode.Weekly or ScheduledTaskScheduleMode.Monthly))
+                { <option value="@setEditor.ScheduleMode">@setEditor.ScheduleSummary — managed in Scheduling</option> }
+            </UiSelectField>
+            @if (setEditor.ScheduleMode == ScheduledTaskScheduleMode.Weekly)
+            {
+                <UiSelectField TValue="string" Label="Day of week" @bind-Value="setEditor.ScheduleDaysOfWeekCsv">
+                    <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option>
+                    @if (setEditor.ScheduleDaysOfWeekCsv.Contains(',')) { <option value="@setEditor.ScheduleDaysOfWeekCsv">Existing days: @setEditor.ScheduleDaysOfWeekCsv</option> }
+                </UiSelectField>
+            }
+            @if (setEditor.ScheduleMode == ScheduledTaskScheduleMode.Monthly) { <UiNumberField TValue="int" Label="Day of month" @bind-Value="setEditor.ScheduleDayOfMonth" min="1" max="31" /> }
+            @if (setEditor.ScheduleMode is ScheduledTaskScheduleMode.Hourly or ScheduledTaskScheduleMode.Daily or ScheduledTaskScheduleMode.Weekly or ScheduledTaskScheduleMode.Monthly)
+            {
+                <div class="infrastructure-grid">
+                    @if (setEditor.ScheduleMode != ScheduledTaskScheduleMode.Hourly) { <UiNumberField TValue="int" Label="Hour" @bind-Value="hour" min="0" max="23" /> }
+                    <UiNumberField TValue="int" Label="Minute" @bind-Value="minute" min="0" max="59" />
+                </div>
+            }
+            <p><a href="/scheduling">Advanced schedules</a></p>
+        }
         <p>Choose <strong>Save & back up now</strong> to protect these files straight away, or save the plan for later.</p>
         <div class="infrastructure-actions">
             <UiCommandButton Label="Save & back up now" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="(() => SaveSet(true))" />
@@ -145,13 +195,13 @@
         @if (error is not null) { <p class="callout error">@error</p> }
     }
 </ChildContent></UiModal>
-<UiModal IsOpen="@(snapshotRepository is not null)" Title="Snapshots & restore" OnClose="CloseSnapshots"><ChildContent>
+<UiModal IsOpen="@(snapshotRepository is not null)" Title="@(snapshotPlan is null ? "Snapshots & restore" : $"Restore: {snapshotPlan.Name}")" OnClose="CloseSnapshots"><ChildContent>
     @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
     @if (error is not null)
     {
         <p class="callout error" role="alert">@error</p>
         @if (snapshotRepository is { } repository)
-        { <UiCommandButton Label="Try again" Disabled="@busy" OnClick="(() => ShowSnapshots(repository))" /> }
+        { <UiCommandButton Label="Try again" Disabled="@busy" OnClick="(() => ShowSnapshots(repository, snapshotPlan))" /> }
     }
     @if (!busy && error is null && snapshots.Count == 0)
     {
@@ -159,6 +209,7 @@
         <p>Choose what to back up, then select “Back up now” on your backup plan. Once a backup succeeds, it will appear here for browsing and restoring.</p>
         <UiCommandButton Label="Choose what to back up" HideIcon="true" OnClick="ChooseSnapshotBackup" />
     }
+    @if (snapshotPlan is not null) { <p>Showing only snapshots for <strong>@snapshotPlan.Name</strong>. Each new backup includes a <strong>backup-plan.json</strong> recovery record with the settings and notes at backup time.</p> }
     @foreach (var item in snapshots.OrderByDescending(item => item.Time))
     { <div class="infrastructure-actions"><span>@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]</span><UiCommandButton Label="Browse snapshot" Disabled="@busy" OnClick="(() => Browse(item.Id))" /></div> }
     @if (snapshot is not null)
@@ -174,12 +225,30 @@
     }
     @if (output is not null) { <pre>@output</pre> }
 </ChildContent></UiModal>
+<UiModal Class="backup-compact-modal" IsOpen="@showHistory" Title="@($"History & logs: {historyTitle}")" OnClose="(() => showHistory = false)"><ChildContent>
+    @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
+    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+    <p>Times are shown in this host’s local timezone. Each entry records the operation’s result and command output.</p>
+    @if (!busy && error is null && !HistoryEntries.Any()) { <p>No operations have been recorded yet.</p> }
+    @foreach (var entry in HistoryEntries)
+    {
+        <details><summary>@entry.FinishedUtc.ToLocalTime().ToString("g") · @entry.Kind · @(entry.Success ? "Success" : "Failed")</summary>
+            <p>Started @entry.StartedUtc.ToLocalTime().ToString("g") · Duration @((entry.FinishedUtc - entry.StartedUtc).TotalSeconds.ToString("0")) seconds</p><pre>@entry.Detail</pre>
+        </details>
+    }
+</ChildContent></UiModal>
 <UiModal IsOpen="@showOutput" Title="Repository operation" OnClose="(() => showOutput = false)"><ChildContent><pre>@output</pre></ChildContent></UiModal>
 </div>
 @code {
     private BackupWorkspace? workspace;
     private BackupRepository? repositoryEditor, snapshotRepository;
-    private BackupSet? setEditor;
+    private BackupSet? setEditor, snapshotPlan;
+    private bool showHistory;
+    private Guid? historySetId, historyRepositoryId;
+    private string historyTitle = "";
+    private IEnumerable<BackupOperation> HistoryEntries => (workspace?.History ?? []).Where(item =>
+        (!historySetId.HasValue || item.SetId == historySetId) && (!historyRepositoryId.HasValue || item.RepositoryId == historyRepositoryId)).OrderByDescending(item => item.FinishedUtc);
+    private Task ShowHistory(Guid? setId, Guid? repositoryId, string title) => Operation("Reading backup history…", async () => { historySetId = setId; historyRepositoryId = repositoryId; historyTitle = title; showHistory = true; workspace = await Backup.GetAsync(); });
     private bool initialize, schedule, busy, overwrite, showOutput;
     private int hour = 2, minute;
     private string password = "", sources = "", restoreTarget = "", lmsRestorePath = "", progress = "";
@@ -210,7 +279,7 @@
             .OrderByDescending(item => item.Path.Length).FirstOrDefault();
         backupDestination = share?.Path ?? "local"; localBackupPath = repo.Path;
         backupFolder = share is null ? "lms-backups" : repo.Path[(share.Path.TrimEnd('/').Length + 1)..];
-        repositoryEditor = new() { Id = repo.Id, Name = repo.Name, Path = repo.Path };
+        repositoryEditor = new() { Id = repo.Id, Name = repo.Name, Path = repo.Path, Notes = repo.Notes };
     }
     private void CloseRepository() { if (!busy) { repositoryEditor = null; password = passwordConfirmation = ""; } }
     private Task RefreshDestinations() => Operation("Refreshing connected disks and shares…", async () => workspace = await Backup.GetAsync());
@@ -290,7 +359,7 @@
         if (runNow) repositoryNotice = "Backup completed. Select ‘Snapshots / restore’ on its backup location to browse or restore it.";
     });
     private Task Run(Guid id) => Operation("Backup running… You can find its result in History.", async () => { try { await Backup.RunBackupAsync(id); } finally { workspace = await Backup.GetAsync(); } });
-    private Task ShowSnapshots(BackupRepository repo) => Operation("Reading snapshots…", async () => { snapshotRepository = repo; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); snapshots = await Backup.SnapshotsAsync(repo.Id); });
+    private Task ShowSnapshots(BackupRepository repo, BackupSet? plan = null) => Operation("Reading snapshots…", async () => { snapshotRepository = repo; snapshotPlan = plan; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); snapshots = (await Backup.SnapshotsAsync(repo.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); });
     private void ChooseSnapshotBackup()
     {
         var repositoryId = snapshotRepository!.Id;
@@ -299,7 +368,7 @@
     }
     private Task Browse(string id) => Operation("Reading snapshot files…", async () => { snapshot = id; files = await Backup.FilesAsync(snapshotRepository!.Id, id); selection.Clear(); });
     private void Select(string path, bool selected) { if (selected) selection.Add(path); else selection.Remove(path); }
-    private void CloseSnapshots() { if (!busy) snapshotRepository = null; }
+    private void CloseSnapshots() { if (!busy) { snapshotRepository = null; snapshotPlan = null; } }
     private Task Restore() => Operation("Restoring selected snapshot…", async () => { await Backup.RestoreAsync(snapshotRepository!.Id, snapshot!, restoreTarget, selection.ToArray(), overwrite); output = "Restore completed at " + restoreTarget + ". Live LMS data was not changed."; });
     private Task ValidateRestore() => Operation("Validating LMS restore…", async () => output = await Backup.ValidateLmsRestoreAsync(lmsRestorePath));
     private Task Inspect(BackupRepository repo, bool check) => Operation(check ? "Checking repository data integrity…" : "Reading repository statistics…", async () => { output = await Backup.InspectRepositoryAsync(repo.Id, check); showOutput = true; });

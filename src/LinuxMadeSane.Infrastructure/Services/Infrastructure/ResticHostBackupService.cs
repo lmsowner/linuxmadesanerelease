@@ -50,6 +50,9 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             var editor = await scheduler.GetEditorAsync(set.ScheduleId, token);
             set.ScheduleEnabled = editor.Id.HasValue && editor.IsEnabled;
             set.ScheduleUsesDaily = editor.ScheduleMode == ScheduledTaskScheduleMode.Daily;
+            set.ScheduleMode = editor.ScheduleMode;
+            set.ScheduleDaysOfWeekCsv = editor.DaysOfWeekCsv;
+            set.ScheduleDayOfMonth = editor.DayOfMonth ?? 1;
             set.ScheduleHour = editor.Hour ?? 2; set.ScheduleMinute = editor.Minute ?? 0;
             set.ScheduleSummary = editor.Id.HasValue ? ScheduledTaskCompiler.Compile(editor).ScheduleSummary : "Schedule no longer exists";
         }
@@ -117,6 +120,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         try
         {
             if (string.IsNullOrWhiteSpace(set.Name)) throw new InvalidOperationException("Name this backup set.");
+            if (set.Notes.Length > 8000) throw new InvalidOperationException("Keep backup notes within 8,000 characters.");
             var repo = await Repository(set.RepositoryId, token);
             foreach (var path in set.Sources)
             {
@@ -131,23 +135,37 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             var sets = await Read<BackupSet>("backup-sets", token);
             var old = sets.FirstOrDefault(item => item.Id == set.Id);
             set.ScheduleId = old?.ScheduleId;
-            // Persist the set before enabling its schedule so the callback always has a target.
-            sets.RemoveAll(item => item.Id == set.Id); sets.Add(set);
-            await Write("backup-sets", sets, token);
+            set.LastFinishedUtc = old?.LastFinishedUtc;
+            set.LastRunSucceeded = old?.LastRunSucceeded;
+            set.LastSuccessfulBackupUtc = old?.LastSuccessfulBackupUtc;
             var scheduler = provider.GetRequiredService<IScheduledTaskService>();
             if (schedule || set.ScheduleId is not null)
             {
                 var task = await scheduler.GetEditorAsync(set.ScheduleId, token);
-                task.Name = "Backup: " + set.Name; task.Description = "Managed by System → Backup & Restore";
+                task.Name = "Backup: " + set.Name; task.Description = set.Notes;
                 task.TaskKind = ScheduledTaskKind.HostBackup; task.CommandText = set.Id.ToString(); task.RunAsUser = "root"; task.IsEnabled = schedule;
                 // Preserve an advanced schedule edited in the existing Scheduling screen.
-                if (task.Id is null || task.ScheduleMode == ScheduledTaskScheduleMode.Daily)
-                { task.ScheduleMode = ScheduledTaskScheduleMode.Daily; task.Hour = hour; task.Minute = minute; }
+                if (set.ScheduleMode is ScheduledTaskScheduleMode.Hourly or ScheduledTaskScheduleMode.Daily or ScheduledTaskScheduleMode.Weekly or ScheduledTaskScheduleMode.Monthly)
+                {
+                    task.ScheduleMode = set.ScheduleMode; task.Hour = hour; task.Minute = minute;
+                    task.DaysOfWeekCsv = set.ScheduleDaysOfWeekCsv; task.DayOfMonth = set.ScheduleDayOfMonth;
+                }
+                ScheduledTaskCompiler.ValidateAndThrow(task);
+                // Validate first, then persist before enabling so the callback has a target.
+                sets.RemoveAll(item => item.Id == set.Id); sets.Add(set);
+                await Write("backup-sets", sets, token);
                 set.ScheduleId = await scheduler.SaveTaskAsync(task, token);
                 set.ScheduleEnabled = schedule; set.ScheduleHour = task.Hour ?? hour; set.ScheduleMinute = task.Minute ?? minute;
                 set.ScheduleSummary = ScheduledTaskCompiler.Compile(task).ScheduleSummary;
                 await Write("backup-sets", sets, token);
             }
+            else
+            {
+                sets.RemoveAll(item => item.Id == set.Id); sets.Add(set);
+                await Write("backup-sets", sets, token);
+            }
+            await History(repo.Id, set.Id, old is null ? "Plan created" : "Plan updated", DateTimeOffset.UtcNow, true,
+                $"Sources: {(set.IncludeLms ? "LMS configuration; " : "")}{string.Join("; ", set.Sources)}\nDestination: {repo.Name} ({repo.Path})\nScheduled backups: {(schedule ? "Enabled" : "Disabled")}", token);
         }
         finally { Gate.Release(); }
     }
@@ -161,12 +179,22 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             var set = (await Read<BackupSet>("backup-sets", token)).Single(item => item.Id == setId);
             var repository = await Repository(set.RepositoryId, token); repositoryId = repository.Id;
             var sources = set.Sources.ToList();
+            scratch = Path.Combine(DataDirectory, "backup-staging", set.Id.ToString("N"));
+            Directory.CreateDirectory(scratch);
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(scratch, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            // This recovery record travels with the encrypted snapshot, independently of the live LMS database.
+            await File.WriteAllTextAsync(Path.Combine(scratch, "backup-plan.json"), JsonSerializer.Serialize(new
+            {
+                SchemaVersion = 1, Host = Environment.MachineName, CreatedUtc = start,
+                PlanId = set.Id, set.Name, set.Notes, set.IncludeLms, set.Sources,
+                DestinationName = repository.Name, DestinationPath = repository.Path,
+                set.ScheduleSummary, set.ScheduleEnabled, set.KeepDaily, set.KeepWeekly, set.KeepMonthly,
+                Recovery = "Restore to an alternate directory. This is a file/configuration backup, not bootable bare-metal recovery."
+            }), token);
+            sources.Add(scratch);
             if (set.IncludeLms)
             {
                 // Stable staging path makes restored DB/keys identifiable without exposing a live DB copy.
-                scratch = Path.Combine(DataDirectory, "backup-staging", set.Id.ToString("N"));
-                Directory.CreateDirectory(scratch);
-                if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(scratch, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
                 var sqlite = (SqliteConnection)database.Database.GetDbConnection();
                 await database.Database.OpenConnectionAsync(token);
                 var snapshotPath = Path.Combine(scratch, "linuxmadesane.db");
@@ -190,7 +218,6 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                     if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
                 }
                 await File.WriteAllTextAsync(Path.Combine(scratch, "restore-info.json"), JsonSerializer.Serialize(new { Database = "linuxmadesane.db", Keys = "protection-keys", CreatedUtc = DateTimeOffset.UtcNow }), token);
-                sources.Add(scratch);
             }
             var args = new List<string> { "backup", "--json", "--tag", "lms-set-" + set.Id.ToString("N"), "--" };
             args.AddRange(sources);
@@ -213,7 +240,8 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         var output = await Restic(await Repository(repositoryId, token), ["snapshots", "--json"], token);
         using var document = JsonDocument.Parse(output);
         return document.RootElement.EnumerateArray().Select(value => new BackupSnapshot(value.GetProperty("id").GetString()!,
-            value.GetProperty("time").GetDateTimeOffset(), value.GetProperty("paths").EnumerateArray().Select(path => path.GetString()!).ToArray())).ToArray();
+                value.GetProperty("time").GetDateTimeOffset(), value.GetProperty("paths").EnumerateArray().Select(path => path.GetString()!).ToArray())
+                { Tags = value.TryGetProperty("tags", out var tags) ? tags.EnumerateArray().Select(tag => tag.GetString()!).ToArray() : [] }).ToArray();
     }
     public async Task<IReadOnlyList<BackupFile>> FilesAsync(Guid repositoryId, string snapshot, CancellationToken token = default)
     {
@@ -253,6 +281,9 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         foreach (var path in include)
             if (!files.Any(file => file.Path == path) || path.Split('/').Any(part => part is ".." or "."))
                 throw new InvalidOperationException("Select existing snapshot files or directories; relative traversal is not allowed.");
+            var restoredSnapshot = (await SnapshotsAsync(repositoryId, token)).FirstOrDefault(item => item.Id.StartsWith(snapshot, StringComparison.Ordinal));
+            var planTags = restoredSnapshot?.Tags.Where(tag => tag.StartsWith("lms-set-", StringComparison.Ordinal)).ToArray() ?? [];
+            Guid? restoredSetId = planTags.Length == 1 && Guid.TryParse(planTags[0][8..], out var parsedId) ? parsedId : null;
         await Gate.WaitAsync(token); var start = DateTimeOffset.UtcNow;
         try
         {
@@ -262,9 +293,9 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             var args = new List<string> { "restore", snapshot, "--target", target };
             foreach (var path in include) { args.Add("--include"); args.Add(EscapeRestorePattern(path)); }
             var output = await Restic(repo, args.ToArray(), token);
-            await History(repositoryId, null, "Restore", start, true, output, CancellationToken.None);
+            await History(repositoryId, restoredSetId, "Restore", start, true, output, CancellationToken.None);
         }
-        catch (Exception e) { await History(repositoryId, null, "Restore", start, false, e.Message, CancellationToken.None); throw; }
+        catch (Exception e) { await History(repositoryId, restoredSetId, "Restore", start, false, e.Message, CancellationToken.None); throw; }
         finally { Gate.Release(); }
     }
 
@@ -310,6 +341,16 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
     private async Task History(Guid repository, Guid? set, string kind, DateTimeOffset start, bool success, string detail, CancellationToken token)
     {
         var history = await Read<BackupOperation>("backup-history", token);
+        var plans = set.HasValue ? await Read<BackupSet>("backup-sets", token) : [];
+        var plan = plans.FirstOrDefault(item => item.Id == set);
+        if (plan is not null) detail = $"Plan: {plan.Name}\nNotes: {plan.Notes}\nSchedule: {plan.ScheduleSummary}\nRetention: {plan.KeepDaily} daily, {plan.KeepWeekly} weekly, {plan.KeepMonthly} monthly\n\n" + detail;
+        if (plan is not null && kind.StartsWith("Backup", StringComparison.Ordinal))
+        {
+            plan.LastFinishedUtc = DateTimeOffset.UtcNow;
+            plan.LastRunSucceeded = success;
+            if (success) plan.LastSuccessfulBackupUtc = plan.LastFinishedUtc;
+            await Write("backup-sets", plans, token);
+        }
         history.Insert(0, new(Guid.NewGuid(), repository, set, kind, start, DateTimeOffset.UtcNow, success, detail.Length > 65536 ? detail[^65536..] : detail));
         await Write("backup-history", history.Take(100).ToArray(), token);
     }
