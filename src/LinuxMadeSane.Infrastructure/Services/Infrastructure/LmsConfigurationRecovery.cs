@@ -7,15 +7,21 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace LinuxMadeSane.Infrastructure.Services.Infrastructure;
 
-internal static class LmsConfigurationRecovery
+public static class LmsConfigurationRecovery
 {
+    public static void ValidateEmbeddedResources()
+    {
+        _ = Script;
+        _ = FullSystemScript;
+    }
+
     internal static string Script => ReadScript("lms_config_recovery.py");
     internal static string FullSystemScript => ReadScript("lms_full_system.py");
     private static string ReadScript(string name)
     {
         using var stream = typeof(LmsConfigurationRecovery).Assembly.GetManifestResourceStream(
             "LinuxMadeSane.Infrastructure.Services.Infrastructure.Recovery." + name)
-            ?? throw new InvalidOperationException("The LMS recovery tool is missing.");
+            ?? throw new InvalidOperationException($"This LMS installation is missing the packaged recovery tool {name}. Reinstall or update LMS; installing Linux packages will not repair this application packaging error.");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
     }

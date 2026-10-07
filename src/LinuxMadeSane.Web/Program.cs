@@ -2096,6 +2096,7 @@ public class Program
         using var scope = services.CreateScope();
         ComponentInjectionValidator.Validate(scope.ServiceProvider, typeof(App).Assembly);
         LinuxMadeSane.Infrastructure.Services.SshForwards.SshForwardProcessFactory.ValidateEmbeddedResources();
+        LinuxMadeSane.Infrastructure.Services.Infrastructure.LmsConfigurationRecovery.ValidateEmbeddedResources();
         var dbContext = scope.ServiceProvider.GetRequiredService<LinuxMadeSaneDbContext>();
         var dataSource = dbContext.Database.GetDbConnection().DataSource;
 
