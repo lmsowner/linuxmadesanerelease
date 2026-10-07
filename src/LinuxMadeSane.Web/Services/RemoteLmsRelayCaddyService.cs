@@ -237,7 +237,7 @@ public sealed class RemoteLmsRelayCaddyService(
             var grantMatcherName = $"remote_lms_grants_{route.HostId:N}";
             builder.AppendLine($"@{grantMatcherName} {{");
             builder.AppendLine($"    host {route.Hostname}");
-            builder.AppendLine("    path /internal/lms-tunnel/grants /internal/lms-tunnel/grants/*");
+            builder.AppendLine("    path /internal/lms-tunnel/grants /internal/lms-tunnel/grants/* /internal/lms-tunnel/update /internal/lms-tunnel/update/*");
             builder.AppendLine("}");
             builder.AppendLine($"handle @{grantMatcherName} {{");
             builder.AppendLine("    respond 404");

@@ -23,6 +23,7 @@
 @inject LmsHostEdgeGatewaySummaryService EdgeGatewaySummaryService
 @inject LmsHostBenchmarkService BenchmarkService
 @inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
+@inject IHostAdministratorCredentials AdministratorCredentials
 @inject IJSRuntime JSRuntime
 @inject NavigationManager NavigationManager
 
@@ -1239,11 +1240,24 @@
 
         try
         {
+            var managedUpdate = await RemoteLmsSshTunnelService.UpdateAsync(hostId);
+            if (managedUpdate is not null)
+            {
+                await SafeInvokeAsync(() => SetLmsUpdateOperation(hostId, new(
+                    LmsHostUpdateOperationState.Completed, managedUpdate.Summary,
+                    GetLmsUpdateOperation(hostId)?.StartedAtUtc ?? DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)));
+                await RefreshLmsUpdateStatusesAsync(CancellationToken.None);
+                return;
+            }
             await using var scope = ServiceScopeFactory.CreateAsyncScope();
             var hostService = scope.ServiceProvider.GetRequiredService<IManagedHostService>();
+            var host = hostRows.FirstOrDefault(row => row.Host.Id == hostId)?.Host
+                ?? throw new InvalidOperationException("Host not found.");
+            var options = BuildLmsUpdateOptions();
+            options.AdministratorInput = await AdministratorCredentials.ResolveAsync(hostId, host.Username);
             var result = await hostService.InstallLmsAsync(
                 hostId,
-                BuildLmsUpdateOptions(),
+                options,
                 progress,
                 CancellationToken.None);
 

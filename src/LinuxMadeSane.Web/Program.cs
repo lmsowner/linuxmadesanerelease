@@ -154,6 +154,7 @@ public class Program
         builder.Services.AddScoped<ShareMountsWorkspaceService>();
         builder.Services.AddScoped<ConnectionProfileUserResolver>();
         builder.Services.AddScoped<ISavedCredentialAccessContext, SavedCredentialAccessContext>();
+        builder.Services.AddScoped<IHostAdministratorCredentials, HostAdministratorCredentials>();
         builder.Services.AddSingleton<MediaLibrarySignedUrlService>();
         builder.Services.AddSingleton<RemoteLmsTunnelAccessService>();
         builder.Services.AddSingleton<RemoteLmsRelayCaddyService>();
@@ -426,6 +427,7 @@ public class Program
             {
                 status = "ok",
                 product = "linux-made-sane",
+            supportsManagedUpdates = true,
                 requiresAuthentication
             });
         });
@@ -786,6 +788,19 @@ public class Program
                 cancellationToken: context.RequestAborted) ?? new RemoteLmsTunnelGrantRequest("/");
             var grant = tunnelAccessService.IssueGrant(request.ReturnUrl);
             return Results.Json(new RemoteLmsTunnelGrantResponse(grant.Token, grant.ExpiresAtUtc));
+        }).DisableAntiforgery();
+        app.MapPost("/internal/lms-tunnel/update", async (
+            HttpContext context, RemoteLmsTunnelAccessService tunnelAccessService,
+            ApplicationUpdateService updates) =>
+        {
+            if (!IsLoopbackRequest(context.Connection.RemoteIpAddress) || !IsLoopbackRequestHost(context.Request.Host))
+                return Results.NotFound();
+            var request = await context.Request.ReadFromJsonAsync<RemoteLmsUpdateRequest>(cancellationToken: context.RequestAborted);
+            if (request is null || !tunnelAccessService.AuthorizeUpdate(context.Connection.RemoteIpAddress, context.Request.Host.Host, request.Token))
+                return Results.Unauthorized();
+            // No caller-supplied command, account or channel: the remote LMS owns
+            // its updater and preserves its own selected release channel.
+            return Results.Json(await updates.InstallLatestAsync(context.RequestAborted));
         }).DisableAntiforgery();
         app.MapGet("/internal/lms-tunnel/consume", (
             HttpContext context,

@@ -260,7 +260,9 @@ public sealed class ManagedHostService(
             throw new InvalidOperationException("Save SSH credentials for this host before installing Linux Made Sane on it.");
         }
 
-        var sudoPassword = await ResolveStoredSudoPasswordAsync(host, cancellationToken);
+        var sudoPassword = options.AdministratorInput is { IsSensitive: true } administratorInput
+            ? administratorInput.Content.TrimEnd('\r', '\n')
+            : await ResolveStoredSudoPasswordAsync(host, cancellationToken);
         var inputExecutionService = commandExecutionService as ICommandExecutionInputService;
         var canUseStoredSudoPassword =
             !string.IsNullOrEmpty(sudoPassword) &&

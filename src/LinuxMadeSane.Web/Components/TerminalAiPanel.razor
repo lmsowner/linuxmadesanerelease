@@ -20,6 +20,7 @@
 @inject ITerminalAiCommandDaemon TerminalAiCommandDaemon
 @inject IJSRuntime JSRuntime
 @inject IServiceScopeFactory HomeLabScopeFactory
+@inject IHostAdministratorCredentials AdministratorCredentials
 
 <section class="surface-card terminal-ai-panel">
     @if (SupportsManagedHomeLabOperations)
@@ -176,6 +177,7 @@
     <TerminalAuthenticationDialog IsOpen="@(!string.IsNullOrWhiteSpace(pendingSecureCommand))"
         HostName="@Tab.HostName" Username="@Tab.ConnectedUsername" Command="@pendingSecureCommand"
         Password="@secureInputText" PasswordChanged="@(value => secureInputText = value)"
+        SavePassword="@saveAdministratorPassword" SavePasswordChanged="@(value => saveAdministratorPassword = value)"
         OnSubmit="SubmitSecureInputAsync" OnCancel="CancelSecureInputAsync" />
 
     <section class="terminal-ai-section terminal-ai-composer">
@@ -315,6 +317,7 @@
 
 @code {
     private bool hasStartedChat;
+    private bool saveAdministratorPassword;
     [Parameter, EditorRequired]
     public TerminalTabState Tab { get; set; } = default!;
 
@@ -1205,6 +1208,13 @@ Selected terminal content:
         var username = Tab.ConnectedUsername;
         var cachedResult = await ExecuteSuggestedCommandAsync(secureCommand, cancellationToken, authenticateSudo: true);
         if (!TerminalAiSecureInputPolicy.RequiresSudoPassword(commandText, cachedResult)) return cachedResult;
+        var savedInput = await AdministratorCredentials.ResolveAsync(Tab.HostId, username, cancellationToken);
+        EnsureCurrentTerminalContext(requestTab, sessionId, username, cancellationToken);
+        if (savedInput is not null)
+        {
+            var savedResult = await ExecuteSuggestedCommandAsync(secureCommand, cancellationToken, savedInput);
+            if (!TerminalAiSecureInputPolicy.RequiresSudoPassword(commandText, savedResult)) return savedResult;
+        }
         var password = await RequestSecureInputAsync(commandText, cancellationToken);
         try
         {
@@ -1214,8 +1224,17 @@ Selected terminal content:
                 throw new InvalidOperationException("Enter a single password without line breaks.");
             agentStatus = "Authenticating on the connected host...";
             await InvokeAsync(StateHasChanged);
-            return await ExecuteSuggestedCommandAsync(secureCommand, cancellationToken,
+            var result = await ExecuteSuggestedCommandAsync(secureCommand, cancellationToken,
                 new CommandExecutionInput(password + "\n", true));
+            if (saveAdministratorPassword && result.AdministratorAuthenticated)
+            {
+                try { await AdministratorCredentials.SaveAsync(Tab.HostId, username, password, cancellationToken); }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    panelInfo = "Authentication succeeded, but the password could not be saved. " + exception.Message;
+                }
+            }
+            return result;
         }
         finally { password = null; }
     }
@@ -1227,6 +1246,7 @@ Selected terminal content:
         var source = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
         pendingSecureInputSource = source;
         pendingSecureCommand = commandText;
+        saveAdministratorPassword = false;
         secureInputText = string.Empty;
         agentStatus = "Waiting for local secure input.";
         await InvokeAsync(StateHasChanged);

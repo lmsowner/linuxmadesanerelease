@@ -16,4 +16,5 @@ public sealed record TerminalAiCommandResult(
     DateTimeOffset CompletedAtUtc)
 {
     public bool IsSuccess => ExitCode == 0;
+    public bool AdministratorAuthenticated { get; init; }
 }

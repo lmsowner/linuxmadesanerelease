@@ -5,6 +5,8 @@ namespace LinuxMadeSane.Application.Contracts;
 
 public sealed class ManagedHostLmsInstallOptions
 {
+    // Private, server-side input; never supplied to the AI or rendered in progress.
+    public LinuxMadeSane.Core.Models.CommandExecutionInput? AdministratorInput { get; set; }
     public string InstallUrl { get; set; } = "https://www.linuxmadesane.com/install.sh";
 
     public bool StartService { get; set; } = true;

@@ -74,6 +74,14 @@ public sealed class RemoteLmsTunnelAccessService
                session.ExpiresAtUtc > DateTimeOffset.UtcNow;
     }
 
+    internal bool AuthorizeUpdate(IPAddress? remoteAddress, string host, string? token)
+    {
+        if (remoteAddress is null || !IPAddress.IsLoopback(remoteAddress.IsIPv4MappedToIPv6 ? remoteAddress.MapToIPv4() : remoteAddress)) return false;
+        if (!host.Equals("localhost", StringComparison.OrdinalIgnoreCase) &&
+            (!IPAddress.TryParse(host.Trim('[', ']'), out var address) || !IPAddress.IsLoopback(address))) return false;
+        return ConsumeGrant(token) is not null;
+    }
+
     public static string NormalizeReturnUrl(string? returnUrl)
     {
         if (string.IsNullOrWhiteSpace(returnUrl))

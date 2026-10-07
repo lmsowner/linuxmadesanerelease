@@ -36,6 +36,59 @@ public sealed class RemoteLmsSshTunnelService(
         string path = "/",
         CancellationToken cancellationToken = default)
     {
+        return await WithTunnelAsync(hostId,
+            (tunnel, reused) => BuildRelayConnectionAsync(tunnel, path, reused, cancellationToken), cancellationToken);
+    }
+
+    public async Task<ApplicationUpdateStatus?> UpdateAsync(Guid hostId, CancellationToken token = default)
+    {
+        var connection = await WithTunnelAsync(hostId,
+            (tunnel, _) => Task.FromResult(tunnel.ToConnection("/", false)), token);
+        using var client = httpClientFactory.CreateClient();
+        return await UpdateThroughTunnelAsync(client, new Uri(connection.BaseUrl), token);
+    }
+
+    internal static async Task<ApplicationUpdateStatus?> UpdateThroughTunnelAsync(HttpClient client, Uri origin, CancellationToken token = default)
+    {
+            using var health = await client.GetAsync(new Uri(origin, "/healthz"), token);
+            health.EnsureSuccessStatusCode();
+            using var document = JsonDocument.Parse(await health.Content.ReadAsStringAsync(token));
+            if (!document.RootElement.TryGetProperty("supportsManagedUpdates", out var supported) || supported.ValueKind != JsonValueKind.True)
+                return null; // Older LMS: caller uses the existing SSH installer.
+            var grant = await IssueTunnelGrantAsync(client, origin.ToString(), "/", token);
+            using var response = await client.PostAsJsonAsync(new Uri(origin, "/internal/lms-tunnel/update"), new RemoteLmsUpdateRequest(grant.Token), token);
+            response.EnsureSuccessStatusCode();
+            var status = await response.Content.ReadFromJsonAsync<ApplicationUpdateStatus>(cancellationToken: token)
+                ?? throw new InvalidOperationException("The remote LMS returned no update result.");
+            if (status.State == ApplicationUpdateState.Failed)
+                throw new InvalidOperationException($"Remote LMS update failed: {status.Summary} {status.Detail}");
+            if (status.State == ApplicationUpdateState.UpToDate) return status;
+            if (status.State is not ApplicationUpdateState.Installing and not ApplicationUpdateState.Completed)
+                throw new InvalidOperationException($"The remote LMS did not start an update: {status.Summary} {status.Detail}");
+            // A queued update is not a completed update. Verify the new running
+            // version over the same SSH tunnel after the remote service restarts.
+            var deadline = DateTimeOffset.UtcNow.AddMinutes(5);
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(3), token);
+                try
+                {
+                    using var attempt = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    attempt.CancelAfter(TimeSpan.FromSeconds(4));
+                    using var result = await client.GetAsync(new Uri(origin, "/healthz"), attempt.Token);
+                    result.EnsureSuccessStatusCode();
+                    using var data = JsonDocument.Parse(await result.Content.ReadAsStringAsync(attempt.Token));
+                    var version = data.RootElement.GetProperty("version").GetString() ?? "";
+                    if (version == status.LatestVersion || version.StartsWith(status.LatestVersion + "-", StringComparison.Ordinal))
+                        return status with { State = ApplicationUpdateState.Completed, CurrentVersion = version, Summary = "Update completed; remote LMS health verified." };
+                }
+                catch (Exception ex) when (!token.IsCancellationRequested && ex is HttpRequestException or OperationCanceledException or JsonException) { }
+            }
+            throw new InvalidOperationException("The remote LMS accepted the update, but its new running version could not be verified within five minutes. Open its terminal to inspect the updater; no second update was started.");
+    }
+
+    private async Task<T> WithTunnelAsync<T>(Guid hostId, Func<RemoteLmsSshTunnel, bool, Task<T>> action, CancellationToken cancellationToken)
+    {
         ObjectDisposedException.ThrowIf(disposed, this);
 
         await gate.WaitAsync(cancellationToken);
@@ -49,7 +102,7 @@ public sealed class RemoteLmsSshTunnelService(
                     // An SSH transport can survive an LMS update/restart, but the
                     // remote in-memory login session cannot. Every Connect must
                     // refresh the relay and obtain a new one-time login grant.
-                    return await BuildRelayConnectionAsync(existing, path, reused: true, cancellationToken);
+                    return await action(existing, true);
                 }
 
                 tunnels.Remove(hostId);
@@ -84,7 +137,7 @@ public sealed class RemoteLmsSshTunnelService(
 
                 try
                 {
-                    return await BuildRelayConnectionAsync(tunnel, path, reused: false, cancellationToken);
+                    return await action(tunnel, false);
                 }
                 catch
                 {
@@ -520,3 +573,5 @@ public sealed record RemoteLmsSshTunnelConnection(
     int LocalPort,
     bool Reused,
     DateTimeOffset LastUsedUtc);
+
+public sealed record RemoteLmsUpdateRequest(string Token);

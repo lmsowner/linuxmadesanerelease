@@ -435,7 +435,7 @@ public sealed class SshTerminalSessionService(
                     output,
                     error,
                     startedAt,
-                    completedAt);
+                    completedAt) { AdministratorAuthenticated = errorBuilder.ToString().Split('\n').Any(line => line.TrimEnd('\r') == TerminalSudoAuthentication.SuccessMarker) };
             }
             catch (Exception exception) when (hostIdentityChanged)
             {
