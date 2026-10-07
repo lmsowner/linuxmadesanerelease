@@ -42,7 +42,7 @@
     [Parameter(CaptureUnmatchedValues = true)] public IReadOnlyDictionary<string, object>? AdditionalAttributes { get; set; }
 
     private IReadOnlyDictionary<string, object>? SanitizedAdditionalAttributes => UiAdditionalAttributes.Sanitize(AdditionalAttributes);
-    private string FormattedValue => Convert.ToString(Value, CultureInfo.CurrentCulture) ?? string.Empty;
+    private string FormattedValue => Value is bool flag ? (flag ? "true" : "false") : Convert.ToString(Value, CultureInfo.CurrentCulture) ?? string.Empty;
     private string ShellClass => string.IsNullOrWhiteSpace(Class)
         ? "ui-combobox-shell ui-select-shell"
         : $"ui-combobox-shell ui-select-shell {Class}";
@@ -51,6 +51,12 @@
 
     private Task HandleChangedAsync(ChangeEventArgs args)
     {
+        // Select elements send strings; BindConverter's boolean conversion expects
+        // a checkbox boolean and otherwise throws, terminating the Blazor circuit.
+        if (typeof(TValue) == typeof(bool) && bool.TryParse(args.Value?.ToString(), out var flag))
+        {
+            return ValueChanged.InvokeAsync((TValue)(object)flag);
+        }
         if (!BindConverter.TryConvertTo<TValue>(args.Value, CultureInfo.CurrentCulture, out var nextValue))
         {
             throw new InvalidOperationException($"The selected value could not be converted to {typeof(TValue).Name}.");

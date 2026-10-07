@@ -1955,7 +1955,7 @@ public class Program
 
     private static bool TryHandlePrivilegedDriveUsageCommand(string[] args)
     {
-        if (args.Length != 2 ||
+        if (args.Length is not (2 or 3) ||
             !args[0].Equals(LocalDriveUsageService.PrivilegedScanCommand, StringComparison.Ordinal))
         {
             return false;
@@ -1963,10 +1963,10 @@ public class Program
 
         try
         {
-            var snapshot = new LocalDriveUsageService()
-                .ScanAsync(args[1])
-                .GetAwaiter()
-                .GetResult();
+            var scanner = new LocalDriveUsageService();
+            var snapshot = (args.Length == 3
+                ? scanner.EstimateAsync(args[1], TimeSpan.FromMilliseconds(int.Parse(args[2], System.Globalization.CultureInfo.InvariantCulture)))
+                : scanner.ScanAsync(args[1])).GetAwaiter().GetResult();
             Console.WriteLine(JsonSerializer.Serialize(snapshot));
         }
         catch (Exception exception)

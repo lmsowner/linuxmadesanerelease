@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Reflection;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using LinuxMadeSane.Core.Abstractions;
@@ -57,9 +58,20 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
         this.isRunningAsRoot = isRunningAsRoot;
     }
 
-    public async Task<LocalDriveUsageSnapshot> ScanAsync(
+    public Task<LocalDriveUsageSnapshot> ScanAsync(string path, CancellationToken cancellationToken = default) =>
+        ScanAsync(path, null, cancellationToken);
+
+    public Task<LocalDriveUsageSnapshot> EstimateAsync(string path, TimeSpan budget, CancellationToken cancellationToken = default)
+    {
+        if (budget <= TimeSpan.Zero || budget > TimeSpan.FromSeconds(10))
+            throw new ArgumentOutOfRangeException(nameof(budget));
+        return ScanAsync(path, budget, cancellationToken);
+    }
+
+    private async Task<LocalDriveUsageSnapshot> ScanAsync(
         string path,
-        CancellationToken cancellationToken = default)
+        TimeSpan? budget,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path))
         {
@@ -68,28 +80,35 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
 
         var normalizedPath = NormalizePath(path);
 
-        await scanGate.WaitAsync(cancellationToken);
+        if (budget is not null)
+        {
+            if (!await scanGate.WaitAsync(budget.Value, cancellationToken))
+                throw new IOException("Another disk scan is running. Try the size estimate again when it finishes.");
+        }
+        else await scanGate.WaitAsync(cancellationToken);
         try
         {
-            if (commandRunner is not null && OperatingSystem.IsLinux() && !isRunningAsRoot())
+            if (commandRunner is not null && OperatingSystem.IsLinux() && (!isRunningAsRoot() || budget is not null))
             {
-                var privilegedSnapshot = await TryScanWithPrivilegeAsync(normalizedPath, cancellationToken);
+                var privilegedSnapshot = await TryScanWithPrivilegeAsync(normalizedPath, budget, cancellationToken);
                 if (privilegedSnapshot is not null)
                 {
                     return privilegedSnapshot;
                 }
 
+                if (budget is not null)
+                    throw new IOException("The folder-size estimate could not finish within its limit or privileged access is unavailable. No size is assumed.");
                 return await Task.Run(
                     () => Scan(
                         normalizedPath,
                         cancellationToken,
                         accessWasPrivileged: false,
-                        "The privileged drive scan is unavailable. Results use the LMS service account and may be incomplete."),
+                        "The privileged drive scan is unavailable. Results use the LMS service account and may be incomplete.", budget),
                     cancellationToken);
             }
 
             return await Task.Run(
-                () => Scan(normalizedPath, cancellationToken, isRunningAsRoot(), accessWarning: null),
+                () => Scan(normalizedPath, cancellationToken, isRunningAsRoot(), accessWarning: null, budget),
                 cancellationToken);
         }
         finally
@@ -100,6 +119,7 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
 
     private async Task<LocalDriveUsageSnapshot?> TryScanWithPrivilegeAsync(
         string path,
+        TimeSpan? budget,
         CancellationToken cancellationToken)
     {
         var launch = ResolvePrivilegedScanLaunch();
@@ -109,14 +129,14 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
         }
 
         var arguments = launch.PrefixArguments
-            .Concat([PrivilegedScanCommand, path])
+            .Concat(budget is null ? [PrivilegedScanCommand, path] : new[] { PrivilegedScanCommand, path, ((int)budget.Value.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture) })
             .ToArray();
         var result = await commandRunner!.RunAsync(
             new LinuxCommandRequest(
                 launch.FileName,
                 arguments,
                 RequiresSudo: true,
-                PrivilegedScanTimeout,
+                budget is null ? PrivilegedScanTimeout : budget.Value + TimeSpan.FromSeconds(3),
                 "Read local drive usage with elevated filesystem access"),
             dryRun: false,
             cancellationToken);
@@ -144,9 +164,12 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
         string path,
         CancellationToken cancellationToken,
         bool accessWasPrivileged,
-        string? accessWarning)
+        string? accessWarning,
+        TimeSpan? budget)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (budget is not null && ReadExcludedMountPoints("/").Any(mount => IsPathWithin(path, mount)))
+            throw new IOException("Quick size estimates are unavailable for network or virtual filesystems; no size is assumed.");
         if (!Directory.Exists(path))
         {
             throw new DirectoryNotFoundException($"The folder '{path}' does not exist or cannot be accessed.");
@@ -158,7 +181,7 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
         }
 
         var excludedMountPoints = ReadExcludedMountPoints(path);
-        var scan = ScanDirectory(path, excludedMountPoints, cancellationToken, 0, includeChildren: true);
+        var scan = ScanDirectory(path, excludedMountPoints, cancellationToken, 0, includeChildren: true, new ScanLimit(budget));
         var totalBytes = scan.Entries.Sum(entry => entry.UsedBytes);
         var items = scan.Entries
             .Select(entry => new LocalDriveUsageItem(
@@ -231,10 +254,11 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
         IReadOnlySet<string> excludedMountPoints,
         CancellationToken cancellationToken,
         int depth,
-        bool includeChildren)
+        bool includeChildren,
+        ScanLimit limit)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (depth > MaximumScanDepth)
+        if (depth > MaximumScanDepth || limit.Expired)
         {
             return DirectoryScanResult.Partial();
         }
@@ -261,6 +285,8 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
             foreach (var child in children)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (limit.Expired) { isPartial = true; break; }
+                limit.Visited++;
                 try
                 {
                     if (IsSymbolicLink(child))
@@ -283,7 +309,7 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
                             excludedMountPoints,
                             cancellationToken,
                             depth + 1,
-                            includeChildren: false);
+                            includeChildren: false, limit);
                         directoryCount += 1 + nested.DirectoryCount;
                         fileCount += nested.FileCount;
                         totalBytes += nested.TotalBytes;
@@ -467,6 +493,13 @@ public sealed class LocalDriveUsageService : ILocalDriveUsageService
 
     private static bool IsRecoverableFileSystemException(Exception exception) =>
         exception is UnauthorizedAccessException or IOException;
+
+    private sealed class ScanLimit(TimeSpan? budget)
+    {
+        private readonly Stopwatch clock = Stopwatch.StartNew();
+        public int Visited;
+        public bool Expired => budget is not null && (clock.Elapsed >= budget || Visited >= 100_000);
+    }
 
     private sealed record MeasuredEntry(
         string Name,

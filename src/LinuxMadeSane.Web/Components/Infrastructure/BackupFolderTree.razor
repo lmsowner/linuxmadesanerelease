@@ -6,7 +6,11 @@
 @using LinuxMadeSane.Core.Models.Ai
 @using LinuxMadeSane.Core.Enums
 @inject IManagedHostFileAccessService FileAccess
+@inject ILocalDriveUsageService DriveUsage
+@implements IDisposable
 
+<p class="folder-summary">Select <strong>Size</strong> for a 3-second estimate. “≥” means incomplete; sizes exclude links and nested network mounts, before compression.</p>
+@if (sizeStatus is not null) { <p class="folder-summary" role="status">@sizeStatus</p> }
 <div class="backup-folder-tree" aria-label="Folders to back up">
     @foreach (var row in Visible(root, 0))
     {
@@ -16,6 +20,10 @@
             <button type="button" class="folder-expand" aria-label="@((node.Expanded ? "Collapse " : "Expand ") + node.Path)" aria-expanded="@node.Expanded" disabled="@node.Loading" @onclick="(() => Expand(node))">@(node.Loading ? "…" : node.Expanded ? "▾" : "▸")</button>
             <UiGlyphIcon Glyph="UiIconGlyph.FolderClosed" />
             <UiCheckboxField Compact="true" Class="folder-choice" title="@(node.LinkTarget.Length == 0 ? node.Path : node.Path + " → " + node.LinkTarget)" Label="@(node.Path == "/" ? "This host — /" : System.IO.Path.GetFileName(node.Path))" Value="@(inherited || Selected.Contains(node.Path))" Disabled="@(Disabled || inherited || node.LinkTarget.Length > 0)" ValueChanged="(value => Select(node.Path, value))" />
+            @if (node.Path != "/" && node.LinkTarget.Length == 0)
+            {
+                <button type="button" class="folder-size" disabled="@(Disabled || sizing is not null)" title="@(node.SizeDetail ?? "Estimate this folder; scan limited to 3 seconds")" @onclick="(() => Estimate(node))">@(node.Sizing ? "Measuring…" : node.SizeLabel ?? "Size")</button>
+            }
             @if (node.Path == "/") { <small>Full system + boot recovery</small> }
             else if (node.LinkTarget.Length > 0) { <small title="@node.LinkTarget">Folder link — select its target</small> }
             else if (inherited) { <small>Included by parent</small> }
@@ -31,9 +39,12 @@
     [Parameter] public EventCallback<IReadOnlyList<string>> SelectedChanged { get; set; }
     [Parameter] public bool Disabled { get; set; }
     [Parameter] public EventCallback SelectFullSystem { get; set; }
+    private readonly CancellationTokenSource lifetime = new();
+    private Folder? sizing;
+    private string? sizeStatus;
     private readonly Folder root = new("/");
     private readonly ManagedHost host = AiLocalMachine.CreateManagedHost();
-    private sealed class Folder(string path, string linkTarget = "") { public string Path = path; public string LinkTarget = linkTarget; public bool Expanded, Loading, Loaded; public string? Error; public List<Folder> Children = []; }
+    private sealed class Folder(string path, string linkTarget = "") { public string Path = path; public string LinkTarget = linkTarget; public bool Expanded, Loading, Loaded; public string? Error, SizeLabel, SizeDetail; public bool Sizing; public List<Folder> Children = []; }
     private static bool Contains(string parent, string child) => parent == "/" || child.StartsWith(parent.TrimEnd('/') + "/", StringComparison.Ordinal);
     private static IEnumerable<(Folder Node, int Depth)> Visible(Folder node, int depth)
     {
@@ -64,7 +75,7 @@
         node.Loading = true; node.Error = null;
         try
         {
-            var items = await FileAccess.ListItemsAsync(host, node.Path, new(host.Username, null, true, UseSudo: true));
+            var items = await FileAccess.ListItemsAsync(host, node.Path, new(host.Username, null, true, UseSudo: true), lifetime.Token);
             node.Children = items.Where(item => item.ItemType == SftpItemType.Folder && item.Name is not ("." or ".."))
                 .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).Select(item => new Folder(item.FullPath.TrimEnd('/'), item.LinkTarget)).ToList();
             node.Loaded = true;
@@ -72,6 +83,24 @@
         catch (Exception exception) { node.Error = exception.Message; }
         finally { node.Loading = false; }
     }
+    private async Task Estimate(Folder node)
+    {
+        if (sizing is not null) return;
+        sizing = node; node.Sizing = true; sizeStatus = $"Measuring {node.Path} — limited to 3 seconds…";
+        try
+        {
+            var result = await DriveUsage.EstimateAsync(node.Path, TimeSpan.FromSeconds(3), lifetime.Token);
+            var partial = result.IsPartial || !string.IsNullOrEmpty(result.AccessWarning);
+            node.SizeLabel = (partial ? "≥ " : "") + FormatSize(result.TotalBytes);
+            node.SizeDetail = partial ? "Partial estimate: time/work limit or inaccessible files. Actual size may be larger." : "Uncompressed file size; links and nested network mounts excluded.";
+            sizeStatus = $"{node.Path}: {node.SizeLabel}. {node.SizeDetail}";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception e) { node.SizeLabel = "Unavailable"; node.SizeDetail = e.Message; sizeStatus = $"{node.Path}: {e.Message}"; }
+        finally { node.Sizing = false; sizing = null; }
+    }
+    private static string FormatSize(long bytes) => bytes >= 1_000_000_000 ? $"{bytes / 1_000_000_000d:0.##} GB" : bytes >= 1_000_000 ? $"{bytes / 1_000_000d:0.##} MB" : bytes >= 1_000 ? $"{bytes / 1_000d:0.##} KB" : $"{bytes} B";
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
     private Task Select(string path, bool selected)
     {
         if (path == "/" && selected) return SelectFullSystem.InvokeAsync();

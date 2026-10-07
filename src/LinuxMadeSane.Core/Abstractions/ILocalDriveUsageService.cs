@@ -7,6 +7,9 @@ namespace LinuxMadeSane.Core.Abstractions;
 
 public interface ILocalDriveUsageService
 {
+    Task<LocalDriveUsageSnapshot> EstimateAsync(
+        string path, TimeSpan budget, CancellationToken cancellationToken = default);
+
     Task<LocalDriveUsageSnapshot> ScanAsync(
         string path,
         CancellationToken cancellationToken = default);
