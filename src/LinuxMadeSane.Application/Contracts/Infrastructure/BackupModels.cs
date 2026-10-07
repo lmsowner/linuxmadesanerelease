@@ -20,6 +20,7 @@ public sealed class BackupSet
     public string Name { get; set; } = "";
     public string Notes { get; set; } = "";
     public List<string> Sources { get; set; } = [];
+    public bool FullSystem { get; set; }
     public bool IncludeLms { get; set; } = true;
     public int KeepDaily { get; set; } = 7;
     public int KeepWeekly { get; set; } = 4;
@@ -35,6 +36,9 @@ public sealed class BackupSet
     public string ScheduleSummary { get; set; } = "No schedule";
     public DateTimeOffset? LastFinishedUtc { get; set; }
     public bool? LastRunSucceeded { get; set; }
+    public DateTimeOffset? RecoveryTestRecordedUtc { get; set; }
+    public string RecoveryTestSnapshotId { get; set; } = "";
+    public string RecoveryTestNotes { get; set; } = "";
     public DateTimeOffset? LastSuccessfulBackupUtc { get; set; }
 }
 public sealed record BackupOperation(Guid Id, Guid RepositoryId, Guid? SetId, string Kind,

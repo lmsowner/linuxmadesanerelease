@@ -30,19 +30,21 @@
             var lastSucceeded = set.LastRunSucceeded ?? last?.Success;
             var lastSuccess = workspace.History.FirstOrDefault(item => item.SetId == set.Id && item.Kind.StartsWith("Backup", StringComparison.Ordinal) && item.Success);
             <section class="surface-card backup-plan-card"><h3>@set.Name</h3>
-                <p><strong>Protects:</strong> @(set.IncludeLms ? "LMS configuration, credentials & database" : "Selected folders")@((set.IncludeLms && set.Sources.Count > 0) ? "; " : "")@string.Join("; ", set.Sources)</p>
+                <p><strong>Protects:</strong> @(set.FullSystem ? "Full system + ReaR boot recovery" : set.IncludeLms ? "LMS configuration, credentials & database" : "Selected folders")@((set.IncludeLms && set.Sources.Count > 0) ? "; " : "")@string.Join("; ", set.Sources)</p>
                 <p><strong>Destination:</strong> @(destination?.Name ?? "Storage location missing") · @destination?.Path</p>
                 <p><strong>Schedule:</strong> @(set.ScheduleEnabled ? set.ScheduleSummary : "Manual — scheduled backups off")</p>
                 <p><strong>Retention:</strong> @set.KeepDaily daily · @set.KeepWeekly weekly · @set.KeepMonthly monthly</p>
+                @if (set.FullSystem) { <p><strong>Restore test:</strong> @(set.RecoveryTestRecordedUtc is null ? "Not recorded — test on disposable disks" : $"User-reported · {set.RecoveryTestRecordedUtc.Value.ToLocalTime():g} · {set.RecoveryTestSnapshotId[..8]}")</p> }
                 <p><strong>Last run:</strong> @(lastFinished is null ? "Not run yet" : $"{lastFinished.Value.ToLocalTime():g} · {(lastSucceeded == true ? "Success" : "Failed — open history for details")}")</p>
                 <p><strong>Last successful backup:</strong> @((set.LastSuccessfulBackupUtc ?? lastSuccess?.FinishedUtc)?.ToLocalTime().ToString("g") ?? "None recorded")</p>
-                @if (!string.IsNullOrWhiteSpace(set.Notes)) { <p class="backup-plan-notes"><strong>Notes:</strong> @set.Notes</p> }
                 <div class="infrastructure-actions">
                     <UiCommandButton Label="Edit plan" HideIcon="true" Disabled="@busy" OnClick="(() => EditSet(set))" />
                     <UiCommandButton Label="Back up now" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="(() => Run(set.Id))" />
                     <UiCommandButton Label="Restore" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ShowSnapshots(destination!, set))" />
                     <UiCommandButton Label="History & logs" HideIcon="true" Disabled="@busy" OnClick="(() => ShowHistory(set.Id, null, set.Name))" />
+                    @if (set.FullSystem && destination is not null) { <UiCommandButton Label="Record restore test" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryTest(set))" /> }
                 </div>
+                @if (!string.IsNullOrWhiteSpace(set.Notes)) { <details><summary>Notes & recovery instructions</summary><p class="backup-plan-notes">@set.Notes</p></details> }
             </section>
         }
         </div>
@@ -50,13 +52,13 @@
         @foreach (var repository in workspace.Repositories)
         {
             <section class="surface-card"><h3>@repository.Name</h3><p>@repository.Path</p>
-                @if (!string.IsNullOrWhiteSpace(repository.Notes)) { <p class="backup-plan-notes">@repository.Notes</p> }
                 <div class="infrastructure-actions"><UiCommandButton Label="Edit storage" HideIcon="true" Disabled="@busy" OnClick="(() => EditRepository(repository))" />
                 <UiCommandButton Label="Add backup plan" HideIcon="true" Disabled="@busy" OnClick="(() => NewSetForRepository(repository.Id))" />
                 <UiCommandButton Label="All snapshots / restore" HideIcon="true" Disabled="@busy" OnClick="(() => ShowSnapshots(repository))" />
                 <UiCommandButton Label="History & logs" HideIcon="true" Disabled="@busy" OnClick="(() => ShowHistory(null, repository.Id, repository.Name))" />
                 <UiCommandButton Label="Statistics" HideIcon="true" Disabled="@busy" OnClick="(() => Inspect(repository, false))" />
                 <UiCommandButton Label="Integrity check" HideIcon="true" Disabled="@busy" OnClick="(() => Inspect(repository, true))" /></div>
+                @if (!string.IsNullOrWhiteSpace(repository.Notes)) { <details><summary>Storage notes</summary><p class="backup-plan-notes">@repository.Notes</p></details> }
             </section>
         }
         </details>
@@ -69,7 +71,7 @@
         <p class="backup-introduction">This chooses where backups are stored. You will choose the files and schedule next.</p>
         <section class="backup-setup-step">
             <h3>1. Choose where to keep backups</h3>
-            <UiTextAreaField Label="Storage notes (optional)" Helper="For example, NAS ownership or where the recovery password is kept. Do not put passwords in notes." Rows="2" @bind-Value="repositoryEditor.Notes" />
+            <div class="backup-two-columns">
             <UiTextField Label="Name for this backup location" Placeholder="For example: NAS backups" Disabled="@busy" @bind-Value="repositoryEditor.Name" />
             @if (!editingRepository)
             {
@@ -78,6 +80,7 @@
                     <option value="false">Connect an existing restic backup</option>
                 </UiSelectField>
             }
+            </div>
             <UiSelectField TValue="string" Label="Store backups on" Disabled="@busy" @bind-Value="backupDestination">
                 <option value="">Choose a network share</option>
                 @foreach (var destination in workspace?.NetworkDestinations ?? [])
@@ -111,11 +114,14 @@
         </section>
         <section class="backup-setup-step">
             <h3>2. Protect your backups</h3>
-            <UiTextField Label="Backup encryption password" Type="password" Autocomplete="new-password" Helper="@(editingRepository ? "Leave blank to keep the saved password. This is separate from your Linux or LMS login." : initialize ? "Choose a password of at least 12 characters for these encrypted backups. This is separate from your Linux or LMS login." : "Enter the encryption password used when this restic backup was created.")" Disabled="@busy" @bind-Value="password" />
+            <div class="backup-two-columns">
+            <UiTextField Label="Backup encryption password" Type="password" Autocomplete="new-password" Disabled="@busy" @bind-Value="password" />
             @if (initialize || password.Length > 0)
             {
                 <UiTextField Label="Repeat backup password" Type="password" Autocomplete="new-password" Disabled="@busy" @bind-Value="passwordConfirmation" />
             }
+            </div>
+            <p>@(editingRepository ? "Leave blank to keep the saved password. This is separate from your Linux or LMS login." : initialize ? "Choose a password of at least 12 characters. This is separate from your Linux or LMS login." : "Enter the encryption password used when this restic backup was created.")</p>
             <p class="backup-password-guide"><strong>The whole backup is encrypted and password protected, including configuration, credentials and recovery keys.</strong> LMS stores this password encrypted. Keep a recovery copy in your password manager: you need it to restore backups if this LMS host is lost.</p>
         </section>
         <section class="backup-setup-step">
@@ -123,6 +129,7 @@
             @if (BackupPathPreview is { } preview) { <p class="backup-location-preview">Backups will be stored in <strong>@preview</strong>.</p> }
             else { <p>Choose a destination and backup folder above.</p> }
             <p>@(initialize ? "LMS will create encrypted backup storage here. Existing backups are not overwritten." : "LMS will check that it can open the existing backup with this password.") No backup runs at this step.</p>
+            <UiTextAreaField Label="Storage notes (optional)" Helper="For example, NAS ownership or where the recovery password is kept. Do not put passwords in notes." Rows="2" @bind-Value="repositoryEditor.Notes" />
             <div class="infrastructure-actions">
                 <UiCommandButton Label="@(initialize ? "Create backup storage" : "Check & save backup storage")" HideIcon="true" Disabled="@(busy || BackupPathPreview is null || (backupDestination != "local" && SelectedNetworkDestination is not { IsMounted: true, IsReadOnly: false }) || string.IsNullOrWhiteSpace(repositoryEditor.Name) || (!editingRepository && password.Length == 0) || ((initialize || password.Length > 0) && password != passwordConfirmation))" OnClick="SaveRepository" />
                 <UiCommandButton Label="Cancel" Variant="UiButtonVariant.Ghost" HideIcon="true" Disabled="@busy" OnClick="CloseRepository" />
@@ -131,6 +138,33 @@
             @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
         </section>
         @if (error is not null) { <p class="callout error">@error</p> }
+    }
+</ChildContent></UiModal>
+<UiModal Class="backup-compact-modal" IsOpen="@(recoveryMediaSnapshot is not null)" Title="Prepare boot recovery media" OnClose="CloseRecoveryMedia"><ChildContent>
+    @if (recoveryMediaSnapshot is not null)
+    {
+        <p class="backup-introduction">The recovery ISO boots the tools that rebuild disks and restore this encrypted backup. Prepare it before the original server fails.</p>
+        <UiTextField Label="New private export folder on this LMS host" Helper="Exported files are decrypted. Keep recovery media private and offline." @bind-Value="recoveryMediaTarget" />
+        <UiCommandButton Label="Extract recovery ISO & guide" HideIcon="true" Disabled="@busy" OnClick="ExtractRecoveryMedia" />
+        @if (busy) { <p role="status" aria-busy="true">@progress</p> }
+        @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+        @if (recoveryMediaExported)
+        {
+            <p><strong>Media extracted.</strong> Use Files below to download the ISO and recovery guide. Keep the repository password independently of LMS.</p>
+            <UiCommandButton Label="Open exported files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/file-browser-window?hostId={LinuxMadeSane.Core.Models.Ai.AiLocalMachine.ManagedHostId}&path={Uri.EscapeDataString(recoveryMediaTarget)}")" Target="_blank" Rel="noopener noreferrer" OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,this.target))return false;" />
+        }
+        <details><summary>Restore on a replacement machine</summary><p>Use the same CPU architecture and BIOS/UEFI mode as the original. Attach the ISO as a virtual CD or compatible recovery medium. Boot it, connect the backup storage and follow FULL-SYSTEM-RECOVERY.txt. Review target disks before running rear recover: disk contents will be replaced. Test in isolation, then record Linux boot, LMS login and workload checks against this snapshot.</p></details>
+    }
+</ChildContent></UiModal>
+<UiModal Class="backup-compact-modal" IsOpen="@(recoveryTestSet is not null)" Title="Record a successful restore test" OnClose="CloseRecoveryTest"><ChildContent>
+    @if (recoveryTestSet is not null)
+    {
+        <p class="backup-introduction">Only record this after booting a restored disposable machine and checking LMS login, credentials and required workloads. This is your test record, not an automatic certification.</p>
+        @if (busy) { <p role="status">@progress</p> }
+        @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+        <UiSelectField TValue="string" Label="Tested full-system snapshot" @bind-Value="recoveryTestSnapshot"><option value="">Choose the snapshot you restored</option>@foreach (var item in recoveryTestSnapshots) { <option value="@item.Id">@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]</option> }</UiSelectField>
+        <UiTextAreaField Label="Test machine & results" Helper="Include Linux boot, LMS login, credential and workload checks. No passwords." Rows="3" @bind-Value="recoveryTestEvidence" />
+        <UiCommandButton Label="Save test record" HideIcon="true" Disabled="@(busy || recoveryTestSnapshot.Length == 0 || recoveryTestEvidence.Trim().Length < 20)" OnClick="SaveRecoveryTest" />
     }
 </ChildContent></UiModal>
 <UiModal Class="share-mapping-modal" IsOpen="@showNetworkMount" Title="Add network share for backups" Subtitle="Choose saved server credentials and a share. LMS saves a permanent mount so scheduled backups can use it after a restart." OnClose="CloseNetworkMount">
@@ -144,23 +178,35 @@
 <UiModal Class="backup-compact-modal" IsOpen="@(setEditor is not null)" Title="Choose what to back up" OnClose="CloseSet"><ChildContent>
     @if (setEditor is not null)
     {
-        <p class="backup-introduction"><strong>Start with LMS itself.</strong> Leave it selected below to protect LMS settings, saved credentials and its database. You do not need to enter a folder for this.</p>
-        <UiTextField Label="Name for this backup plan" @bind-Value="setEditor.Name" />
-        <UiTextAreaField Label="Notes & recovery instructions (optional)" Helper="Explain what this plan protects and how to recover it. Notes are included inside its encrypted backup. Do not enter passwords here." Rows="3" @bind-Value="setEditor.Notes" />
-        <UiSelectField TValue="Guid" Label="Backup location" @bind-Value="setEditor.RepositoryId">@foreach (var repo in workspace?.Repositories ?? []) { <option value="@repo.Id">@repo.Name — @repo.Path</option> }</UiSelectField>
-        <UiCheckboxField Label="LMS configuration, credentials & database (recommended)" Helper="Includes the LMS database, credential protection keys, persistent LMS configuration files, host configuration and a recovery inventory. Everything is stored inside the encrypted backup. Linux and application data require separate backups." @bind-Value="setEditor.IncludeLms" />
+        <div class="backup-two-columns"><UiTextField Label="Plan name" @bind-Value="setEditor.Name" />
+        <UiSelectField TValue="Guid" Label="Backup location" Disabled="@busy" Value="@setEditor.RepositoryId" ValueChanged="ChangeBackupRepository">@foreach (var repo in workspace?.Repositories ?? []) { <option value="@repo.Id">@repo.Name — @repo.Path</option> }</UiSelectField></div>
+        <UiSelectField TValue="bool" Label="Backup type" Disabled="@busy" Value="@setEditor.FullSystem" ValueChanged="ChangeBackupType"><option value="false">LMS configuration / selected folders</option><option value="true">Full system + boot recovery</option></UiSelectField>
+        @if (setEditor.FullSystem)
+        {
+            <UiCommandButton Label="Check disks & recovery readiness" HideIcon="true" Disabled="@busy" OnClick="CheckFullSystem" />
+            @if (!fullSystemReady && busy) { <p role="status">@progress</p> }
+            @if (!fullSystemReady && error is not null) { <p class="callout error" role="alert">@error</p> }
+            @if (fullSystemReady)
+            {
+            <FeaturePackageGate Feature="FullBackup" Label="Full-system recovery" OnInstalled="CheckFullSystem"><p class="backup-introduction">Encrypted backup of Linux, LMS and local disks, with ReaR boot recovery media. Network shares and the backup disk are excluded. A restore drill is required to prove recovery.</p></FeaturePackageGate>
+            }
+            @if (fullSystemCheck is not null) { <details><summary>Detected filesystems & exclusions</summary><pre class="backup-readiness">@fullSystemCheck</pre></details> }
+        }
+        else
+        {
+        <UiCheckboxField Label="LMS configuration, credentials & database (recommended)" Helper="Encrypted database, saved credentials, recovery keys and configuration. No folder entry needed." @bind-Value="setEditor.IncludeLms" />
         <section class="backup-setup-step">
-            <h3>Want to protect more than LMS?</h3>
-            <p>These are optional. Select only the folders you need; their contents and subfolders are included.</p>
-            <UiCheckboxField Label="Host configuration — /etc" Helper="Includes SSH and other Linux service configuration. Restoring files does not reinstall those services." Value='@HasSource("/etc")' ValueChanged='(value => ToggleSource("/etc", value))' />
-            <UiCheckboxField Label="Users’ files — /home" Helper="Includes home folders, documents and users’ SSH keys. This can be large." Value='@HasSource("/home")' ValueChanged='(value => ToggleSource("/home", value))' />
-            <UiTextAreaField Label="Folders to include, in addition to LMS" Helper="The choices above appear here. Add other full folder paths, one per line, such as your Docker compose or app-data folder. Leave blank for LMS only." @bind-Value="sources" Rows="3" />
-            <p><strong>Do not select / (the whole filesystem).</strong> This is a backup of selected files, not a full disk image. Keep the backup destination out of this list. Running applications may need their own backup procedure for consistent data.</p>
+            <strong>Choose folders to back up</strong>
+            <p>Tick a folder to include everything inside it. Expand it to select individual subfolders instead.</p>
+            <BackupFolderTree @key="setEditor.Id" Selected="@SelectedSources" SelectedChanged="SetSelectedSources" SelectFullSystem="(() => ChangeBackupType(true))" Disabled="@busy" />
+            <p>For Linux and boot recovery, choose <strong>Full system + boot recovery</strong> above.</p>
         </section>
-        <div class="infrastructure-grid"><UiNumberField TValue="int" Label="Daily snapshots" @bind-Value="setEditor.KeepDaily" min="0" /><UiNumberField TValue="int" Label="Weekly" @bind-Value="setEditor.KeepWeekly" min="0" /><UiNumberField TValue="int" Label="Monthly" @bind-Value="setEditor.KeepMonthly" min="0" /></div>
+        }
+        <div class="infrastructure-grid"><UiNumberField TValue="int" Label="Keep daily" @bind-Value="setEditor.KeepDaily" min="0" /><UiNumberField TValue="int" Label="Weekly" @bind-Value="setEditor.KeepWeekly" min="0" /><UiNumberField TValue="int" Label="Monthly" @bind-Value="setEditor.KeepMonthly" min="0" /></div>
         <UiCheckboxField Label="Enable scheduled backups" Helper="This schedule applies only to this plan, in the host’s local timezone." @bind-Value="schedule" />
         @if (schedule)
         {
+            <div class="backup-schedule-grid">
             <UiSelectField TValue="ScheduledTaskScheduleMode" Label="How often?" @bind-Value="setEditor.ScheduleMode">
                 <option value="@ScheduledTaskScheduleMode.Hourly">Hourly</option>
                 <option value="@ScheduledTaskScheduleMode.Daily">Daily</option>
@@ -179,23 +225,22 @@
             @if (setEditor.ScheduleMode == ScheduledTaskScheduleMode.Monthly) { <UiNumberField TValue="int" Label="Day of month" @bind-Value="setEditor.ScheduleDayOfMonth" min="1" max="31" /> }
             @if (setEditor.ScheduleMode is ScheduledTaskScheduleMode.Hourly or ScheduledTaskScheduleMode.Daily or ScheduledTaskScheduleMode.Weekly or ScheduledTaskScheduleMode.Monthly)
             {
-                <div class="infrastructure-grid">
                     @if (setEditor.ScheduleMode != ScheduledTaskScheduleMode.Hourly) { <UiNumberField TValue="int" Label="Hour" @bind-Value="hour" min="0" max="23" /> }
                     <UiNumberField TValue="int" Label="Minute" @bind-Value="minute" min="0" max="59" />
-                </div>
             }
+            </div>
             <p><a href="/scheduling">Advanced schedules</a></p>
         }
-        <p>Choose <strong>Save & back up now</strong> to protect these files straight away, or save the plan for later.</p>
+        <UiTextAreaField Label="Notes & recovery instructions" Helper="Stored inside the encrypted backup. Do not enter passwords." Rows="2" @bind-Value="setEditor.Notes" />
         <div class="infrastructure-actions">
-            <UiCommandButton Label="Save & back up now" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="(() => SaveSet(true))" />
-            <UiCommandButton Label="Save plan only" HideIcon="true" Disabled="@busy" OnClick="(() => SaveSet(false))" />
+            <UiCommandButton Label="Save & back up now" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@(busy || (setEditor.FullSystem && (!fullSystemReady || !fullSystemPackagesReady)))" OnClick="(() => SaveSet(true))" />
+            <UiCommandButton Label="Save plan only" HideIcon="true" Disabled="@(busy || (setEditor.FullSystem && (!fullSystemReady || !fullSystemPackagesReady)))" OnClick="(() => SaveSet(false))" />
         </div>
         @if (busy) { <p class="callout" role="status">@progress</p> }
         @if (error is not null) { <p class="callout error">@error</p> }
     }
 </ChildContent></UiModal>
-<UiModal IsOpen="@(snapshotRepository is not null)" Title="@(snapshotPlan is null ? "Snapshots & restore" : $"Restore: {snapshotPlan.Name}")" OnClose="CloseSnapshots"><ChildContent>
+<UiModal IsOpen="@(snapshotRepository is not null && recoveryMediaSnapshot is null)" Title="@(snapshotPlan is null ? "Snapshots & restore" : $"Restore: {snapshotPlan.Name}")" OnClose="CloseSnapshots"><ChildContent>
     @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
     @if (error is not null)
     {
@@ -211,9 +256,16 @@
     }
     @if (snapshotPlan is not null) { <p>Showing only snapshots for <strong>@snapshotPlan.Name</strong>. Each new backup includes a <strong>backup-plan.json</strong> recovery record with the settings and notes at backup time.</p> }
     @foreach (var item in snapshots.OrderByDescending(item => item.Time))
-    { <div class="infrastructure-actions"><span>@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]</span><UiCommandButton Label="Browse snapshot" Disabled="@busy" OnClick="(() => Browse(item.Id))" /></div> }
+    { <div class="infrastructure-actions"><span>@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]@(item.Tags.Contains("lms-full-system") && !item.Tags.Contains("lms-backup-complete") ? " · Incomplete — boot recovery unavailable" : "")</span><UiCommandButton Label="Browse snapshot" Disabled="@busy" OnClick="(() => Browse(item.Id))" />@if (item.Tags.Contains("lms-full-system") && item.Tags.Contains("lms-backup-complete")) { <UiCommandButton Label="Recovery media" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryMedia(item))" /> }</div> }
     @if (snapshot is not null)
     {
+        @if (snapshots.FirstOrDefault(item => item.Id == snapshot)?.Tags.Contains("lms-full-system") == true)
+        {
+            <details class="backup-recovery-guide"><summary><strong>Full-system / bare-metal recovery</strong></summary>
+                <ol><li>Before failure, restore the boot-recovery ISO from this snapshot to a private folder and keep boot media offline.</li><li>Boot that ISO on the replacement machine. Connect the backup storage; keep the encryption password independently of LMS.</li><li>Run <code>rear recover</code> at its console. Enter the repository path and password privately. The ISO finds its matching completed backup and checks its data before any disk changes. Review the proposed target disks carefully before approving recreation.</li><li>Check Linux boot, LMS login, saved credentials and required workloads. Record the test against this plan. See FULL-SYSTEM-RECOVERY.txt in the encrypted snapshot.</li></ol>
+                <p>Different hardware needs review. Live databases and containers need application-consistent backups. A successful backup does not prove a successful restore.</p>
+            </details>
+        }
         <div class="snapshot-files">@foreach (var file in files.Take(1000)) { <UiCheckboxField Label="@(file.Path + (file.Type == "dir" ? "/" : ""))" Value="@selection.Contains(file.Path)" ValueChanged="(value => Select(file.Path, value))" /> }</div>
         @if (files.Count > 1000) { <p>Showing the first 1,000 entries. Selecting a directory includes its contents.</p> }
         <UiTextField Label="Restore destination" Helper="Use an alternate directory. Live LMS data and system roots are protected." @bind-Value="restoreTarget" />
@@ -255,6 +307,31 @@
 @code {
     private BackupWorkspace? workspace;
     private BackupRepository? repositoryEditor, snapshotRepository;
+    private BackupSnapshot? recoveryMediaSnapshot;
+    private string recoveryMediaTarget = "";
+    private bool recoveryMediaExported;
+    private void OpenRecoveryMedia(BackupSnapshot item) { recoveryMediaSnapshot = item; recoveryMediaTarget = "/var/tmp/lms-recovery-media-" + item.Id[..8]; recoveryMediaExported = false; error = null; }
+    private void CloseRecoveryMedia() { if (!busy) recoveryMediaSnapshot = null; }
+    private Task ExtractRecoveryMedia() => Operation("Extracting recovery media from the encrypted backup…", async () =>
+    {
+        var bundle = recoveryMediaSnapshot!.Paths.SingleOrDefault(path => path.Contains("/lms-backup-staging-", StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("This snapshot has no LMS recovery bundle.");
+        await Backup.RestoreAsync(snapshotRepository!.Id, recoveryMediaSnapshot.Id, recoveryMediaTarget,
+            [bundle + "/boot-recovery", bundle + "/FULL-SYSTEM-RECOVERY.txt", bundle + "/full-system-recovery.json", bundle + "/backup-plan.json"], false);
+        recoveryMediaExported = true;
+    });
+    private BackupSet? recoveryTestSet;
+    private IReadOnlyList<BackupSnapshot> recoveryTestSnapshots = [];
+    private string recoveryTestSnapshot = "", recoveryTestEvidence = "";
+    private Task OpenRecoveryTest(BackupSet set) { recoveryTestSet = set; recoveryTestSnapshot = ""; recoveryTestEvidence = ""; recoveryTestSnapshots = []; return Operation("Reading full-system snapshots…", async () => recoveryTestSnapshots = (await Backup.SnapshotsAsync(set.RepositoryId)).Where(item => item.Tags.Contains("lms-full-system") && item.Tags.Contains("lms-backup-complete") && item.Tags.Contains("lms-set-" + set.Id.ToString("N"))).ToArray()); }
+    private void CloseRecoveryTest() { if (!busy) recoveryTestSet = null; }
+    private Task SaveRecoveryTest() => Operation("Saving recovery test record…", async () => { await Backup.RecordRecoveryTestAsync(recoveryTestSet!.Id, recoveryTestSnapshot, recoveryTestEvidence); recoveryTestSet = null; workspace = await Backup.GetAsync(); });
+    private string? fullSystemCheck;
+    private bool fullSystemReady;
+    private bool fullSystemPackagesReady;
+    private Task ChangeBackupType(bool full) { setEditor!.FullSystem = full; fullSystemReady = false; fullSystemCheck = null; return full ? CheckFullSystem() : Task.CompletedTask; }
+    private Task ChangeBackupRepository(Guid id) { setEditor!.RepositoryId = id; fullSystemReady = false; fullSystemCheck = null; return setEditor.FullSystem ? CheckFullSystem() : Task.CompletedTask; }
+    private Task CheckFullSystem() { fullSystemReady = false; fullSystemPackagesReady = false; fullSystemCheck = null; return Operation("Checking disks and recovery readiness…", async () => { fullSystemCheck = await Backup.InspectFullSystemAsync(setEditor!.RepositoryId); fullSystemReady = true; fullSystemPackagesReady = (await Diagnostics.GetPackageStatusAsync("FullBackup")).Installed; }); }
     private BackupSet? setEditor, snapshotPlan;
     private bool showHistory;
     private Guid? historySetId, historyRepositoryId;
@@ -351,19 +428,15 @@
         if (!editingRepository) NewSetForRepository(repositoryId);
     });
     private void NewSet() => NewSetForRepository(workspace!.Repositories[0].Id);
-    private void NewSetForRepository(Guid repositoryId) { error = null; setEditor = new() { Name = "LMS configuration backup", RepositoryId = repositoryId }; sources = ""; schedule = false; hour = 2; minute = 0; }
-    private bool HasSource(string path) => sources.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Contains(path, StringComparer.Ordinal);
-    private void ToggleSource(string path, bool selected)
-    {
-        var paths = sources.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(item => item != path).ToList();
-        if (selected) paths.Add(path);
-        sources = string.Join('\n', paths);
-    }
-    private void EditSet(BackupSet set) { setEditor = System.Text.Json.JsonSerializer.Deserialize<BackupSet>(System.Text.Json.JsonSerializer.Serialize(set)); sources = string.Join('\n', set.Sources); schedule = set.ScheduleEnabled; hour = set.ScheduleHour; minute = set.ScheduleMinute; }
+    private void NewSetForRepository(Guid repositoryId) { error = null; fullSystemReady = false; fullSystemCheck = null; setEditor = new() { Name = "LMS configuration backup", RepositoryId = repositoryId }; sources = ""; schedule = false; hour = 2; minute = 0; }
+    private IReadOnlyList<string> SelectedSources => sources.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    private void SetSelectedSources(IReadOnlyList<string> paths) => sources = string.Join('\n', paths);
+    private async Task EditSet(BackupSet set) { fullSystemReady = false; fullSystemCheck = null; setEditor = System.Text.Json.JsonSerializer.Deserialize<BackupSet>(System.Text.Json.JsonSerializer.Serialize(set)); sources = string.Join('\n', set.Sources); schedule = set.ScheduleEnabled; hour = set.ScheduleHour; minute = set.ScheduleMinute; if (set.FullSystem) await CheckFullSystem(); }
     private void CloseSet() { if (!busy) setEditor = null; }
     private Task SaveSet(bool runNow) => Operation(runNow ? "Saving the plan and taking your backup…" : "Saving backup plan…", async () =>
     {
-        setEditor!.Sources = sources.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        if (setEditor!.FullSystem) { setEditor.IncludeLms = true; sources = ""; }
+        setEditor.Sources = sources.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
         await Backup.SaveSetAsync(setEditor, schedule, hour, minute);
         var setId = setEditor.Id;
         setEditor = null;

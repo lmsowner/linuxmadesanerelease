@@ -116,6 +116,19 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         finally { Gate.Release(); }
     }
 
+    public async Task<string> InspectFullSystemAsync(Guid repositoryId, CancellationToken token = default)
+    {
+        if (!OperatingSystem.IsLinux()) throw new InvalidOperationException("Full-system recovery requires a Linux host.");
+        var repo = await Repository(repositoryId, token);
+        var result = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.FullSystemScript, "--repository", repo.Path], true,
+            TimeSpan.FromSeconds(30), "Check full-system recovery disks and backup destination"), false, token);
+        if (result.ExitCode != 0) throw new InvalidOperationException(result.StandardError);
+        using var plan = JsonDocument.Parse(result.StandardOutput);
+        return "Local filesystems: " + string.Join(", ", plan.RootElement.GetProperty("sources").EnumerateArray().Select(x => x.GetString())) +
+            "\nExcluded: " + string.Join(", ", plan.RootElement.GetProperty("excludes").EnumerateArray().Select(x => x.GetString())) +
+            "\n" + plan.RootElement.GetProperty("warning").GetString();
+    }
+
     public async Task SaveSetAsync(BackupSet set, bool schedule, int hour, int minute, CancellationToken token = default)
     {
         await Gate.WaitAsync(token);
@@ -124,6 +137,13 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             if (string.IsNullOrWhiteSpace(set.Name)) throw new InvalidOperationException("Name this backup set.");
             if (set.Notes.Length > 8000) throw new InvalidOperationException("Keep backup notes within 8,000 characters.");
             var repo = await Repository(set.RepositoryId, token);
+            if (set.FullSystem)
+            {
+                var packageStatus = await provider.GetRequiredService<IInfrastructureDiagnosticsService>().GetPackageStatusAsync("FullBackup", token);
+                if (!packageStatus.Installed) throw new InvalidOperationException("Select Install & Configure for full-system recovery first. Required: " + string.Join(", ", packageStatus.Packages));
+                await InspectFullSystemAsync(set.RepositoryId, token);
+                set.IncludeLms = true; set.Sources = [];
+            }
             foreach (var path in set.Sources)
             {
                 ValidatePath(path);
@@ -140,6 +160,9 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             set.LastFinishedUtc = old?.LastFinishedUtc;
             set.LastRunSucceeded = old?.LastRunSucceeded;
             set.LastSuccessfulBackupUtc = old?.LastSuccessfulBackupUtc;
+            set.RecoveryTestRecordedUtc = old?.RecoveryTestRecordedUtc;
+            set.RecoveryTestSnapshotId = old?.RecoveryTestSnapshotId ?? "";
+            set.RecoveryTestNotes = old?.RecoveryTestNotes ?? "";
             var scheduler = provider.GetRequiredService<IScheduledTaskService>();
             if (schedule || set.ScheduleId is not null)
             {
@@ -167,7 +190,28 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                 await Write("backup-sets", sets, token);
             }
             await History(repo.Id, set.Id, old is null ? "Plan created" : "Plan updated", DateTimeOffset.UtcNow, true,
-                $"Sources: {(set.IncludeLms ? "LMS configuration; " : "")}{string.Join("; ", set.Sources)}\nDestination: {repo.Name} ({repo.Path})\nScheduled backups: {(schedule ? "Enabled" : "Disabled")}", token);
+                $"Sources: {(set.FullSystem ? "All supported local filesystems and ReaR boot recovery; " : set.IncludeLms ? "LMS configuration; " : "")}{string.Join("; ", set.Sources)}\nDestination: {repo.Name} ({repo.Path})\nScheduled backups: {(schedule ? "Enabled" : "Disabled")}", token);
+        }
+        finally { Gate.Release(); }
+    }
+
+    public async Task RecordRecoveryTestAsync(Guid setId, string snapshotId, string evidence, CancellationToken token = default)
+    {
+        ValidateSnapshot(snapshotId);
+        if (string.IsNullOrWhiteSpace(evidence) || evidence.Trim().Length < 20 || evidence.Length > 8000)
+            throw new InvalidOperationException("Record the test machine, successful Linux boot, LMS login and credential/workload checks (20–8,000 characters). Never include passwords.");
+        await Gate.WaitAsync(token);
+        try
+        {
+            var sets = await Read<BackupSet>("backup-sets", token);
+            var set = sets.Single(item => item.Id == setId);
+            if (!set.FullSystem) throw new InvalidOperationException("Select a full-system backup plan.");
+            var snapshot = (await SnapshotsAsync(set.RepositoryId, token)).SingleOrDefault(item => item.Id == snapshotId && item.Tags.Contains("lms-full-system") && item.Tags.Contains("lms-backup-complete") && item.Tags.Contains("lms-set-" + setId.ToString("N")))
+                ?? throw new InvalidOperationException("Choose a completed full-system snapshot belonging to this plan.");
+            set.RecoveryTestSnapshotId = snapshot.Id; set.RecoveryTestRecordedUtc = DateTimeOffset.UtcNow; set.RecoveryTestNotes = evidence.Trim();
+            await Write("backup-sets", sets, token);
+            await History(set.RepositoryId, set.Id, "Recovery test recorded", DateTimeOffset.UtcNow, true,
+                "User-reported successful recovery drill. Snapshot: " + snapshot.Id + "\n" + evidence.Trim(), token);
         }
         finally { Gate.Release(); }
     }
@@ -189,10 +233,10 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             await File.WriteAllTextAsync(Path.Combine(scratch, "backup-plan.json"), JsonSerializer.Serialize(new
             {
                 SchemaVersion = 1, Host = Environment.MachineName, CreatedUtc = start,
-                PlanId = set.Id, set.Name, set.Notes, set.IncludeLms, set.Sources,
+                PlanId = set.Id, set.Name, set.Notes, set.FullSystem, set.IncludeLms, set.Sources,
                 DestinationName = repository.Name, DestinationPath = repository.Path,
                 set.ScheduleSummary, set.ScheduleEnabled, set.KeepDaily, set.KeepWeekly, set.KeepMonthly,
-                Recovery = "Restore to an alternate directory. This is a file/configuration backup, not bootable bare-metal recovery."
+                Recovery = set.FullSystem ? "Full system with ReaR boot recovery media. See FULL-SYSTEM-RECOVERY.txt. Restore drill not recorded." : "Restore to an alternate directory. This is a file/configuration backup, not bootable bare-metal recovery."
             }), token);
             sources.Add(scratch);
             if (set.IncludeLms)
@@ -229,14 +273,37 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                 var specificationPath = Path.Combine(scratch, "recovery-specification.json");
                 await File.WriteAllTextAsync(specificationPath, JsonSerializer.Serialize(LmsConfigurationRecovery.Specification(provider, hostPaths, DataDirectory,
                     Path.GetFileName(new SqliteConnectionStringBuilder(database.Database.GetConnectionString()).DataSource))), token);
+                if (set.FullSystem)
+                {
+                    var media = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.FullSystemScript, "--repository", repository.Path, "--bundle", scratch], true,
+                        TimeSpan.FromMinutes(35), "Create ReaR boot recovery media; no disks will be formatted"), false, token);
+                    if (media.ExitCode != 0) throw new InvalidOperationException("Boot recovery media failed. No full-system backup was saved: " + media.StandardError);
+                    using var full = JsonDocument.Parse(media.StandardOutput);
+                    sources.AddRange(full.RootElement.GetProperty("sources").EnumerateArray().Select(item => item.GetString()!));
+                }
                 var captured = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.Script, "--bundle", scratch, "--collect", specificationPath], true,
                     TimeSpan.FromMinutes(10), "Capture and validate LMS configuration recovery bundle"), false, token);
                 if (captured.ExitCode != 0) throw new InvalidOperationException("Configuration recovery capture failed: " + captured.StandardError);
 
             }
-            var args = new List<string> { "backup", "--json", "--tag", "lms-set-" + set.Id.ToString("N"), "--" };
+            var args = new List<string> { "backup", "--json", "--tag", "lms-set-" + set.Id.ToString("N") };
+            if (set.FullSystem)
+            {
+                args.AddRange(["--tag", "lms-full-system", "--one-file-system"]);
+                using var full = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(scratch, "full-system-recovery.json"), token));
+                // Explicitly include the RAM-backed recovery bundle. Root traversal
+                // skips virtual mounts through --one-file-system instead of excluding that bundle.
+                foreach (var excluded in full.RootElement.GetProperty("excludes").EnumerateArray().Select(item => item.GetString()!).Where(path => !IsWithin(scratch, path)))
+                    args.AddRange(["--exclude", EscapeRestorePattern(excluded)]);
+                var dbFile = Path.GetFullPath(new SqliteConnectionStringBuilder(database.Database.GetConnectionString()).DataSource);
+                foreach (var path in new[] { dbFile, dbFile + "-wal", dbFile + "-shm" }) args.AddRange(["--exclude", EscapeRestorePattern(path)]);
+            }
+            args.Add("--");
             args.AddRange(sources);
-            var output = await Restic(repository, args.ToArray(), token);
+            var output = await Restic(repository, args.ToArray(), token, set.FullSystem);
+            if (set.FullSystem)
+                output += "\nCompletion marker:\n" + await Restic(repository, ["tag", "--add", "lms-backup-complete", "--path", scratch,
+                    "--tag", "lms-full-system,lms-set-" + set.Id.ToString("N"), "--json"], token);
             // Retention is scoped to this set. Failed/partial backup never triggers forgetting.
             var retention = await Restic(repository, ["forget", "--tag", "lms-set-" + set.Id.ToString("N"), "--group-by", "host,tags",
                 "--keep-daily", set.KeepDaily.ToString(), "--keep-weekly", set.KeepWeekly.ToString(), "--keep-monthly", set.KeepMonthly.ToString(), "--prune", "--json"], token);
@@ -342,7 +409,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
     public static string EscapeRestorePattern(string path) =>
         path.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("*", "\\*", StringComparison.Ordinal)
             .Replace("?", "\\?", StringComparison.Ordinal).Replace("[", "\\[", StringComparison.Ordinal);
-    private async Task<string> Restic(BackupRepository repository, string[] arguments, CancellationToken token)
+    private async Task<string> Restic(BackupRepository repository, string[] arguments, CancellationToken token, bool fullSystem = false)
     {
         if (repository.MountPath.Length > 0)
         {
@@ -355,7 +422,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         var path = Path.Combine(OperatingSystem.IsLinux() ? "/dev/shm" : Path.GetTempPath(), "lms-restic-" + Guid.NewGuid().ToString("N"));
         try
         {
-            var canonical = await runner.RunAsync(new("python3", ["-c", "import pathlib,sys; paths=[pathlib.Path(x).resolve() for x in sys.argv[1:]]; repo=paths[0]; assert all(repo!=p and repo not in p.parents and p not in repo.parents for p in paths[1:]), 'Source and repository resolve to overlapping directories'", repository.Path, ..arguments.SkipWhile(value => value != "--").Skip(1)],
+            var canonical = await runner.RunAsync(new("python3", ["-c", "import pathlib,sys; full=sys.argv[1]=='full'; paths=[pathlib.Path(x).resolve() for x in sys.argv[2:]]; repo=paths[0]; assert all(repo!=p and repo not in p.parents and (full or p not in repo.parents) for p in paths[1:]), 'Source and repository resolve to overlapping directories'", fullSystem ? "full" : "files", repository.Path, ..arguments.SkipWhile(value => value != "--").Skip(1)],
                 true, TimeSpan.FromSeconds(15), "Validate backup repository path"), false, token);
             if (canonical.ExitCode != 0) throw new InvalidOperationException("Unsafe repository/source paths: " + canonical.StandardError);
             var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };

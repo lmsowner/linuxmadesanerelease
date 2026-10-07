@@ -28,7 +28,7 @@ public sealed class InfrastructureDiagnosticsService(
     internal static readonly IReadOnlyDictionary<string, string[]> FeaturePackages = new Dictionary<string, string[]>
     {
         ["SMART"] = ["smartmontools"], ["DHCP"] = ["kea-dhcp4-server"],
-        ["Backup"] = ["restic"], ["UPS"] = ["nut-client", "nut-server"], ["Discovery"] = ["fping"]
+        ["Backup"] = ["restic"], ["FullBackup"] = ["rear", "xorriso", "isolinux", "syslinux-common", "gdisk", "parted", "dosfstools", "xfsprogs", "jq", "grub-pc-bin", "grub-efi-amd64-bin"], ["UPS"] = ["nut-client", "nut-server"], ["Discovery"] = ["fping"]
     };
     private static readonly SemaphoreSlim InventoryGate = new(1, 1);
 

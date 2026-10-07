@@ -9,16 +9,15 @@ namespace LinuxMadeSane.Infrastructure.Services.Infrastructure;
 
 internal static class LmsConfigurationRecovery
 {
-    internal static string Script
+    internal static string Script => ReadScript("lms_config_recovery.py");
+    internal static string FullSystemScript => ReadScript("lms_full_system.py");
+    private static string ReadScript(string name)
     {
-        get
-        {
-            using var stream = typeof(LmsConfigurationRecovery).Assembly.GetManifestResourceStream(
-                "LinuxMadeSane.Infrastructure.Services.Infrastructure.Recovery.lms_config_recovery.py")
-                ?? throw new InvalidOperationException("The LMS configuration recovery tool is missing.");
-            using var reader = new StreamReader(stream);
-            return reader.ReadToEnd();
-        }
+        using var stream = typeof(LmsConfigurationRecovery).Assembly.GetManifestResourceStream(
+            "LinuxMadeSane.Infrastructure.Services.Infrastructure.Recovery." + name)
+            ?? throw new InvalidOperationException("The LMS recovery tool is missing.");
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
     }
 
     internal static object Specification(IServiceProvider provider, InfrastructureHostPaths paths, string dataDirectory, string databaseFileName)
