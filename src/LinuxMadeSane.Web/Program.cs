@@ -427,7 +427,6 @@ public class Program
             {
                 status = "ok",
                 product = "linux-made-sane",
-            supportsManagedUpdates = true,
                 requiresAuthentication
             });
         });
@@ -436,6 +435,7 @@ public class Program
             status = "ok",
             product = "linux-made-sane",
             name = "Linux Made Sane",
+            supportsManagedUpdates = true,
             version = ResolveProductVersion(),
             releaseChannel = updates.GetStatus().Channel
         }));
