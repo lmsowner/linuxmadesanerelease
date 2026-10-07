@@ -2,4 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 namespace LinuxMadeSane.Infrastructure.Services.Infrastructure;
-public sealed record InfrastructureHostPaths(string ProtectionKeyDirectory, string ApplicationDirectory);
+public sealed record InfrastructureHostPaths(string ProtectionKeyDirectory, string ApplicationDirectory)
+{
+    public string HostConfigurationDirectory { get; init; } = "/etc";
+}

@@ -60,7 +60,8 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         var managed = await shares.ListManagedRemoteMountsAsync(token);
         return new(repositories, sets, await Read<BackupOperation>("backup-history", token),
             mounts.Select(mount => mount.LocalMountPath).Distinct().Order().ToArray())
-        { NetworkDestinations = BuildNetworkDestinations(mounts, managed) };
+        { NetworkDestinations = BuildNetworkDestinations(mounts, managed), DataDirectory = DataDirectory,
+            ApplicationDirectory = hostPaths.ApplicationDirectory, ProtectionKeyDirectory = hostPaths.ProtectionKeyDirectory };
     }
 
     public static IReadOnlyList<BackupNetworkDestination> BuildNetworkDestinations(
@@ -97,6 +98,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             // Never trust a secret reference submitted by the caller.
             repository.PasswordReference = existing?.PasswordReference ?? "";
             if (password?.IndexOfAny(['\r', '\n', '\0']) >= 0) throw new InvalidOperationException("Repository passwords must be a single line without control characters.");
+            if (initialize && (string.IsNullOrWhiteSpace(password) || password.Length < 12)) throw new InvalidOperationException("Choose a backup encryption password with at least 12 characters. Recovery requires this password.");
             if (!string.IsNullOrEmpty(password)) repository.PasswordReference = newReference = await secrets.StoreSecretAsync(password, "Restic repository " + repository.Name, token);
             if (repository.PasswordReference.Length == 0) throw new InvalidOperationException("Enter the repository password. Keep a recovery copy somewhere safe.");
             if (initialize)
@@ -179,7 +181,8 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             var set = (await Read<BackupSet>("backup-sets", token)).Single(item => item.Id == setId);
             var repository = await Repository(set.RepositoryId, token); repositoryId = repository.Id;
             var sources = set.Sources.ToList();
-            scratch = Path.Combine(DataDirectory, "backup-staging", set.Id.ToString("N"));
+            var stagingRoot = OperatingSystem.IsLinux() ? "/dev/shm" : Path.GetTempPath();
+            scratch = Path.Combine(stagingRoot, "lms-backup-staging-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(scratch);
             if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(scratch, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             // This recovery record travels with the encrypted snapshot, independently of the live LMS database.
@@ -200,7 +203,11 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                 var snapshotPath = Path.Combine(scratch, "linuxmadesane.db");
                 if (File.Exists(snapshotPath)) File.Delete(snapshotPath);
                 using (var destination = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = snapshotPath }.ToString()))
-                { destination.Open(); sqlite.BackupDatabase(destination); }
+                {
+                    destination.Open(); sqlite.BackupDatabase(destination);
+                    using var standalone = destination.CreateCommand();
+                    standalone.CommandText = "PRAGMA journal_mode=DELETE"; standalone.ExecuteNonQuery();
+                }
                 if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(snapshotPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
                 var keysPath = hostPaths.ProtectionKeyDirectory;
                 if (!Directory.Exists(keysPath)) throw new InvalidOperationException("The LMS protection key directory could not be found. A database backup without its keys would not recover saved credentials.");
@@ -218,6 +225,14 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                     if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
                 }
                 await File.WriteAllTextAsync(Path.Combine(scratch, "restore-info.json"), JsonSerializer.Serialize(new { Database = "linuxmadesane.db", Keys = "protection-keys", CreatedUtc = DateTimeOffset.UtcNow }), token);
+                await LmsConfigurationRecovery.WriteRecoveryFilesAsync(scratch, token);
+                var specificationPath = Path.Combine(scratch, "recovery-specification.json");
+                await File.WriteAllTextAsync(specificationPath, JsonSerializer.Serialize(LmsConfigurationRecovery.Specification(provider, hostPaths, DataDirectory,
+                    Path.GetFileName(new SqliteConnectionStringBuilder(database.Database.GetConnectionString()).DataSource))), token);
+                var captured = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.Script, "--bundle", scratch, "--collect", specificationPath], true,
+                    TimeSpan.FromMinutes(10), "Capture and validate LMS configuration recovery bundle"), false, token);
+                if (captured.ExitCode != 0) throw new InvalidOperationException("Configuration recovery capture failed: " + captured.StandardError);
+
             }
             var args = new List<string> { "backup", "--json", "--tag", "lms-set-" + set.Id.ToString("N"), "--" };
             args.AddRange(sources);
@@ -302,10 +317,25 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
     public async Task<string> ValidateLmsRestoreAsync(string restoredDirectory, CancellationToken token = default)
     {
         ValidatePath(restoredDirectory);
-        var result = await runner.RunAsync(new("python3", ["-c", "import pathlib,sqlite3,sys; p=pathlib.Path(sys.argv[1]); db=p/'linuxmadesane.db'; assert db.is_file(), 'Choose the restored LMS staging folder containing linuxmadesane.db'; c=sqlite3.connect('file:'+str(db)+'?mode=ro',uri=True); assert c.execute('pragma integrity_check').fetchone()[0]=='ok', 'Database integrity failed'; assert c.execute(\"select count(*) from sqlite_master where type='table' and name='protected_secrets'\").fetchone()[0]>0, 'Not an LMS database'; assert list((p/'protection-keys').glob('key-*.xml')), 'LMS protection keys missing'; print('Database integrity checked and protection keys present. Stop LMS before replacing its database and keys. Keep a copy of current data, retain service ownership and permissions, then start LMS and verify login and saved credentials. This validation has not changed live LMS data.')", restoredDirectory],
-            true, TimeSpan.FromSeconds(30), "Validate staged LMS restore"), false, token);
+        var result = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.Script, "--bundle", restoredDirectory],
+            true, TimeSpan.FromMinutes(2), "Validate complete staged LMS configuration recovery"), false, token);
         if (result.ExitCode != 0) throw new InvalidOperationException(result.StandardError); return result.StandardOutput;
     }
+    public async Task<string> PrepareLmsRestoreAsync(string restoredDirectory, string preparationDirectory,
+        string targetDataDirectory, string targetApplicationDirectory, string targetKeyDirectory, CancellationToken token = default)
+    {
+        foreach (var path in new[] { restoredDirectory, preparationDirectory, targetDataDirectory, targetApplicationDirectory, targetKeyDirectory }) ValidatePath(path);
+        if (IsWithin(preparationDirectory, restoredDirectory) || IsWithin(restoredDirectory, preparationDirectory) ||
+            IsWithin(preparationDirectory, DataDirectory) || IsWithin(DataDirectory, preparationDirectory) ||
+            IsWithin(preparationDirectory, hostPaths.ApplicationDirectory) || IsWithin(hostPaths.ApplicationDirectory, preparationDirectory))
+            throw new InvalidOperationException("Prepare recovery in a new private folder outside the bundle and live LMS directories.");
+        var result = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.Script, "--bundle", restoredDirectory,
+            "--prepare", preparationDirectory, "--data-root", targetDataDirectory, "--app-root", targetApplicationDirectory, "--keys-root", targetKeyDirectory, "--database-file-name", Path.GetFileName(new SqliteConnectionStringBuilder(database.Database.GetConnectionString()).DataSource)],
+            true, TimeSpan.FromMinutes(5), "Prepare replacement-host LMS configuration recovery"), false, token);
+        if (result.ExitCode != 0) throw new InvalidOperationException(result.StandardError);
+        return result.StandardOutput + "\nReview " + preparationDirectory + "/restore-plan.json and RECOVERY.txt in the restored bundle. Live files and services have not been changed.";
+    }
+
     private async Task<BackupRepository> Repository(Guid id, CancellationToken token) =>
         (await Read<BackupRepository>("backup-repositories", token)).Single(item => item.Id == id);
 
@@ -321,7 +351,8 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                 throw new InvalidOperationException("The repository's original destination mount is unavailable or changed. Reconnect it before continuing; LMS will not write into the empty mount directory.");
         }
         var password = await secrets.ResolveSecretAsync(repository.PasswordReference, token) ?? throw new InvalidOperationException("The repository password cannot be resolved.");
-        var path = Path.Combine(Path.GetTempPath(), "lms-restic-" + Guid.NewGuid().ToString("N"));
+        if (string.IsNullOrWhiteSpace(password)) throw new InvalidOperationException("An encryption password is required to open this backup repository.");
+        var path = Path.Combine(OperatingSystem.IsLinux() ? "/dev/shm" : Path.GetTempPath(), "lms-restic-" + Guid.NewGuid().ToString("N"));
         try
         {
             var canonical = await runner.RunAsync(new("python3", ["-c", "import pathlib,sys; paths=[pathlib.Path(x).resolve() for x in sys.argv[1:]]; repo=paths[0]; assert all(repo!=p and repo not in p.parents and p not in repo.parents for p in paths[1:]), 'Source and repository resolve to overlapping directories'", repository.Path, ..arguments.SkipWhile(value => value != "--").Skip(1)],

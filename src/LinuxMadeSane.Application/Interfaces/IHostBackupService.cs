@@ -15,4 +15,6 @@ public interface IHostBackupService
     Task RestoreAsync(Guid repositoryId, string snapshot, string target, IReadOnlyList<string> include,
         bool overwriteConfirmed, CancellationToken token = default);
     Task<string> ValidateLmsRestoreAsync(string restoredDirectory, CancellationToken token = default);
+    Task<string> PrepareLmsRestoreAsync(string restoredDirectory, string preparationDirectory,
+        string targetDataDirectory, string targetApplicationDirectory, string targetKeyDirectory, CancellationToken token = default);
 }

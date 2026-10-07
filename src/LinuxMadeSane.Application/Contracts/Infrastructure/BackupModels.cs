@@ -43,6 +43,9 @@ public sealed record BackupWorkspace(IReadOnlyList<BackupRepository> Repositorie
     IReadOnlyList<BackupOperation> History, IReadOnlyList<string> Destinations)
 {
     public IReadOnlyList<BackupNetworkDestination> NetworkDestinations { get; init; } = [];
+    public string DataDirectory { get; init; } = "";
+    public string ApplicationDirectory { get; init; } = "";
+    public string ProtectionKeyDirectory { get; init; } = "";
 }
 public sealed record BackupNetworkDestination(string Path, string Share, bool IsMounted, bool IsReadOnly, Guid? ManagedMountId);
 public sealed record BackupSnapshot(string Id, DateTimeOffset Time, IReadOnlyList<string> Paths)

@@ -111,12 +111,12 @@
         </section>
         <section class="backup-setup-step">
             <h3>2. Protect your backups</h3>
-            <UiTextField Label="Backup encryption password" Type="password" Autocomplete="new-password" Helper="@(editingRepository ? "Leave blank to keep the saved password. This is separate from your Linux or LMS login." : initialize ? "Choose a new password for these backups. This is separate from your Linux or LMS login." : "Enter the encryption password used when this restic backup was created.")" Disabled="@busy" @bind-Value="password" />
+            <UiTextField Label="Backup encryption password" Type="password" Autocomplete="new-password" Helper="@(editingRepository ? "Leave blank to keep the saved password. This is separate from your Linux or LMS login." : initialize ? "Choose a password of at least 12 characters for these encrypted backups. This is separate from your Linux or LMS login." : "Enter the encryption password used when this restic backup was created.")" Disabled="@busy" @bind-Value="password" />
             @if (initialize || password.Length > 0)
             {
                 <UiTextField Label="Repeat backup password" Type="password" Autocomplete="new-password" Disabled="@busy" @bind-Value="passwordConfirmation" />
             }
-            <p class="backup-password-guide">LMS stores this password encrypted. Keep a recovery copy in your password manager: you need it to restore backups if this LMS host is lost.</p>
+            <p class="backup-password-guide"><strong>The whole backup is encrypted and password protected, including configuration, credentials and recovery keys.</strong> LMS stores this password encrypted. Keep a recovery copy in your password manager: you need it to restore backups if this LMS host is lost.</p>
         </section>
         <section class="backup-setup-step">
             <h3>3. Check and save</h3>
@@ -148,7 +148,7 @@
         <UiTextField Label="Name for this backup plan" @bind-Value="setEditor.Name" />
         <UiTextAreaField Label="Notes & recovery instructions (optional)" Helper="Explain what this plan protects and how to recover it. Notes are included inside its encrypted backup. Do not enter passwords here." Rows="3" @bind-Value="setEditor.Notes" />
         <UiSelectField TValue="Guid" Label="Backup location" @bind-Value="setEditor.RepositoryId">@foreach (var repo in workspace?.Repositories ?? []) { <option value="@repo.Id">@repo.Name — @repo.Path</option> }</UiSelectField>
-        <UiCheckboxField Label="LMS configuration, credentials & database (recommended)" Helper="Includes LMS settings stored in its database, application configuration files and the protection keys needed to recover saved credentials. LMS prepares a consistent database copy automatically." @bind-Value="setEditor.IncludeLms" />
+        <UiCheckboxField Label="LMS configuration, credentials & database (recommended)" Helper="Includes the LMS database, credential protection keys, persistent LMS configuration files, host configuration and a recovery inventory. Everything is stored inside the encrypted backup. Linux and application data require separate backups." @bind-Value="setEditor.IncludeLms" />
         <section class="backup-setup-step">
             <h3>Want to protect more than LMS?</h3>
             <p>These are optional. Select only the folders you need; their contents and subfolders are included.</p>
@@ -220,8 +220,21 @@
         <UiCheckboxField Label="I explicitly allow existing files at this destination to be overwritten" @bind-Value="overwrite" />
         <p>@(selection.Count == 0 ? "All snapshot files will be restored." : $"{selection.Count} selected file(s) or directory(s) will be restored.")</p>
         <UiCommandButton Label="Restore to destination" HideIcon="true" Disabled="@busy" OnClick="Restore" />
-        <details><summary>Restoring LMS itself</summary><p>Restore the snapshot to an alternate directory first. Find its LMS staging folder containing linuxmadesane.db and protection-keys. Validate it below before a maintenance restore. LMS must be stopped before its live database and keys are replaced.</p>
-        <UiTextField Label="Restored LMS staging folder" @bind-Value="lmsRestorePath" /><UiCommandButton Label="Validate staged LMS restore" HideIcon="true" Disabled="@busy" OnClick="ValidateRestore" /></details>
+        <section class="backup-setup-step">
+            <h3>Recover LMS configuration on a replacement host</h3>
+            <p>First restore the snapshot above to a private alternate folder. New LMS configuration backups include <strong>RECOVERY.txt</strong>, a recovery tool, host configuration and an inventory. Restored files are decrypted: keep this folder private.</p>
+            <UiTextField Label="Restored recovery bundle folder" Helper="The folder containing linuxmadesane.db, protection-keys and recovery-manifest.json. LMS fills this in after restoring a new recovery bundle." @bind-Value="lmsRestorePath" />
+            <UiCommandButton Label="Validate recovery bundle" HideIcon="true" Disabled="@busy" OnClick="ValidateRestore" />
+            <details><summary>Prepare configuration for this replacement host</summary>
+                <p>Use the replacement installation’s paths. The tool creates a separate review tree; it cannot overwrite live LMS files or start services.</p>
+                <UiTextField Label="New private folder for the recovery plan" @bind-Value="recoveryPreparationPath" />
+                <UiTextField Label="Replacement LMS data directory" @bind-Value="recoveryDataDirectory" />
+                <UiTextField Label="Replacement LMS application directory" @bind-Value="recoveryApplicationDirectory" />
+                <UiTextField Label="Replacement credential protection key directory" @bind-Value="recoveryKeyDirectory" />
+                <UiCommandButton Label="Prepare recovery plan" HideIcon="true" Disabled="@busy" OnClick="PrepareRecovery" />
+            </details>
+            <p><strong>Review before applying:</strong> interface names, disk UUIDs, mounts, Linux users, SSH identity, schedules and Edge Gateway routes may differ. Follow RECOVERY.txt; keep a rollback copy and stop LMS before replacing its database and keys. Do not copy the old /etc wholesale.</p>
+        </section>
     }
     @if (output is not null) { <pre>@output</pre> }
 </ChildContent></UiModal>
@@ -251,6 +264,7 @@
     private Task ShowHistory(Guid? setId, Guid? repositoryId, string title) => Operation("Reading backup history…", async () => { historySetId = setId; historyRepositoryId = repositoryId; historyTitle = title; showHistory = true; workspace = await Backup.GetAsync(); });
     private bool initialize, schedule, busy, overwrite, showOutput;
     private int hour = 2, minute;
+    private string recoveryPreparationPath = "", recoveryDataDirectory = "", recoveryApplicationDirectory = "", recoveryKeyDirectory = "";
     private string password = "", sources = "", restoreTarget = "", lmsRestorePath = "", progress = "";
     private string backupDestination = "", backupFolder = "lms-backups", localBackupPath = "", passwordConfirmation = "";
     private string? repositoryNotice;
@@ -359,7 +373,7 @@
         if (runNow) repositoryNotice = "Backup completed. Select ‘Snapshots / restore’ on its backup location to browse or restore it.";
     });
     private Task Run(Guid id) => Operation("Backup running… You can find its result in History.", async () => { try { await Backup.RunBackupAsync(id); } finally { workspace = await Backup.GetAsync(); } });
-    private Task ShowSnapshots(BackupRepository repo, BackupSet? plan = null) => Operation("Reading snapshots…", async () => { snapshotRepository = repo; snapshotPlan = plan; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); snapshots = (await Backup.SnapshotsAsync(repo.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); });
+    private Task ShowSnapshots(BackupRepository repo, BackupSet? plan = null) => Operation("Reading snapshots…", async () => { recoveryDataDirectory = workspace?.DataDirectory ?? ""; recoveryApplicationDirectory = workspace?.ApplicationDirectory ?? ""; recoveryKeyDirectory = workspace?.ProtectionKeyDirectory ?? ""; snapshotRepository = repo; snapshotPlan = plan; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); snapshots = (await Backup.SnapshotsAsync(repo.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); });
     private void ChooseSnapshotBackup()
     {
         var repositoryId = snapshotRepository!.Id;
@@ -369,7 +383,10 @@
     private Task Browse(string id) => Operation("Reading snapshot files…", async () => { snapshot = id; files = await Backup.FilesAsync(snapshotRepository!.Id, id); selection.Clear(); });
     private void Select(string path, bool selected) { if (selected) selection.Add(path); else selection.Remove(path); }
     private void CloseSnapshots() { if (!busy) { snapshotRepository = null; snapshotPlan = null; } }
-    private Task Restore() => Operation("Restoring selected snapshot…", async () => { await Backup.RestoreAsync(snapshotRepository!.Id, snapshot!, restoreTarget, selection.ToArray(), overwrite); output = "Restore completed at " + restoreTarget + ". Live LMS data was not changed."; });
+    private Task Restore() => Operation("Restoring selected snapshot…", async () => { await Backup.RestoreAsync(snapshotRepository!.Id, snapshot!, restoreTarget, selection.ToArray(), overwrite); var recoveryFolder = snapshots.FirstOrDefault(item => item.Id == snapshot)?.Paths.FirstOrDefault(path => path.Contains("/lms-backup-staging-", StringComparison.Ordinal));
+        if (recoveryFolder is not null && (selection.Count == 0 || selection.Contains(recoveryFolder))) lmsRestorePath = Path.Combine(restoreTarget, recoveryFolder.TrimStart('/'));
+        output = "Restore completed at " + restoreTarget + ". Restored files are decrypted; keep this directory private. Live LMS data was not changed."; });
+    private Task PrepareRecovery() => Operation("Validating and preparing configuration recovery…", async () => output = await Backup.PrepareLmsRestoreAsync(lmsRestorePath, recoveryPreparationPath, recoveryDataDirectory, recoveryApplicationDirectory, recoveryKeyDirectory));
     private Task ValidateRestore() => Operation("Validating LMS restore…", async () => output = await Backup.ValidateLmsRestoreAsync(lmsRestorePath));
     private Task Inspect(BackupRepository repo, bool check) => Operation(check ? "Checking repository data integrity…" : "Reading repository statistics…", async () => { output = await Backup.InspectRepositoryAsync(repo.Id, check); showOutput = true; });
 }
