@@ -19,6 +19,7 @@
         {
             <section class="surface-card"><h3>@repository.Name</h3><p>@repository.Path</p>
                 <div class="infrastructure-actions"><UiCommandButton Label="Edit" Disabled="@busy" OnClick="(() => EditRepository(repository))" />
+                <UiCommandButton Label="Back up LMS configuration" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="(() => NewSetForRepository(repository.Id))" />
                 <UiCommandButton Label="Snapshots / restore" Disabled="@busy" OnClick="(() => ShowSnapshots(repository))" />
                 <UiCommandButton Label="Statistics" Disabled="@busy" OnClick="(() => Inspect(repository, false))" />
                 <UiCommandButton Label="Integrity check" Disabled="@busy" OnClick="(() => Inspect(repository, true))" /></div>
@@ -119,21 +120,45 @@
 <UiModal Class="backup-compact-modal" IsOpen="@(setEditor is not null)" Title="Choose what to back up" OnClose="CloseSet"><ChildContent>
     @if (setEditor is not null)
     {
-        <p class="backup-introduction">Choose the files to protect and when to back them up. The backup location stores the encrypted copies.</p>
+        <p class="backup-introduction"><strong>Start with LMS itself.</strong> Leave it selected below to protect LMS settings, saved credentials and its database. You do not need to enter a folder for this.</p>
         <UiTextField Label="Name for this backup" @bind-Value="setEditor.Name" />
         <UiSelectField TValue="Guid" Label="Backup location" @bind-Value="setEditor.RepositoryId">@foreach (var repo in workspace?.Repositories ?? []) { <option value="@repo.Id">@repo.Name — @repo.Path</option> }</UiSelectField>
-        <UiCheckboxField Label="Back up LMS itself" Helper="Includes a consistent copy of the LMS database and the protection keys needed to recover saved credentials." @bind-Value="setEditor.IncludeLms" />
-        <UiTextAreaField Label="Additional source directories" Helper="One absolute directory per line, for example /etc/ssh or your Docker compose directory" @bind-Value="sources" Rows="3" />
+        <UiCheckboxField Label="LMS configuration, credentials & database (recommended)" Helper="Includes LMS settings stored in its database, application configuration files and the protection keys needed to recover saved credentials. LMS prepares a consistent database copy automatically." @bind-Value="setEditor.IncludeLms" />
+        <section class="backup-setup-step">
+            <h3>Want to protect more than LMS?</h3>
+            <p>These are optional. Select only the folders you need; their contents and subfolders are included.</p>
+            <UiCheckboxField Label="Host configuration — /etc" Helper="Includes SSH and other Linux service configuration. Restoring files does not reinstall those services." Value='@HasSource("/etc")' ValueChanged='(value => ToggleSource("/etc", value))' />
+            <UiCheckboxField Label="Users’ files — /home" Helper="Includes home folders, documents and users’ SSH keys. This can be large." Value='@HasSource("/home")' ValueChanged='(value => ToggleSource("/home", value))' />
+            <UiTextAreaField Label="Folders to include, in addition to LMS" Helper="The choices above appear here. Add other full folder paths, one per line, such as your Docker compose or app-data folder. Leave blank for LMS only." @bind-Value="sources" Rows="3" />
+            <p><strong>Do not select / (the whole filesystem).</strong> This is a backup of selected files, not a full disk image. Keep the backup destination out of this list. Running applications may need their own backup procedure for consistent data.</p>
+        </section>
         <div class="infrastructure-grid"><UiNumberField TValue="int" Label="Daily snapshots" @bind-Value="setEditor.KeepDaily" min="0" /><UiNumberField TValue="int" Label="Weekly" @bind-Value="setEditor.KeepWeekly" min="0" /><UiNumberField TValue="int" Label="Monthly" @bind-Value="setEditor.KeepMonthly" min="0" /></div>
         <UiCheckboxField Label="Enable scheduled backups" Helper="New schedules run daily in the host's local timezone. Other schedules can be edited in Scheduling." @bind-Value="schedule" />
         @if (schedule && setEditor.ScheduleUsesDaily) { <div class="infrastructure-grid"><UiNumberField TValue="int" Label="Hour" @bind-Value="hour" min="0" max="23" /><UiNumberField TValue="int" Label="Minute" @bind-Value="minute" min="0" max="59" /></div> }
         @if (setEditor.ScheduleId.HasValue && !setEditor.ScheduleUsesDaily) { <p>@setEditor.ScheduleSummary · <a href="/scheduling">Edit schedule</a></p> }
-        <UiCommandButton Label="Save backup plan" HideIcon="true" Disabled="@busy" OnClick="SaveSet" />
+        <p>Choose <strong>Save & back up now</strong> to protect these files straight away, or save the plan for later.</p>
+        <div class="infrastructure-actions">
+            <UiCommandButton Label="Save & back up now" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="(() => SaveSet(true))" />
+            <UiCommandButton Label="Save plan only" HideIcon="true" Disabled="@busy" OnClick="(() => SaveSet(false))" />
+        </div>
         @if (busy) { <p class="callout" role="status">@progress</p> }
         @if (error is not null) { <p class="callout error">@error</p> }
     }
 </ChildContent></UiModal>
 <UiModal IsOpen="@(snapshotRepository is not null)" Title="Snapshots & restore" OnClose="CloseSnapshots"><ChildContent>
+    @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
+    @if (error is not null)
+    {
+        <p class="callout error" role="alert">@error</p>
+        @if (snapshotRepository is { } repository)
+        { <UiCommandButton Label="Try again" Disabled="@busy" OnClick="(() => ShowSnapshots(repository))" /> }
+    }
+    @if (!busy && error is null && snapshots.Count == 0)
+    {
+        <p><strong>No backups have been saved here yet.</strong></p>
+        <p>Choose what to back up, then select “Back up now” on your backup plan. Once a backup succeeds, it will appear here for browsing and restoring.</p>
+        <UiCommandButton Label="Choose what to back up" HideIcon="true" OnClick="ChooseSnapshotBackup" />
+    }
     @foreach (var item in snapshots.OrderByDescending(item => item.Time))
     { <div class="infrastructure-actions"><span>@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]</span><UiCommandButton Label="Browse snapshot" Disabled="@busy" OnClick="(() => Browse(item.Id))" /></div> }
     @if (snapshot is not null)
@@ -147,8 +172,6 @@
         <details><summary>Restoring LMS itself</summary><p>Restore the snapshot to an alternate directory first. Find its LMS staging folder containing linuxmadesane.db and protection-keys. Validate it below before a maintenance restore. LMS must be stopped before its live database and keys are replaced.</p>
         <UiTextField Label="Restored LMS staging folder" @bind-Value="lmsRestorePath" /><UiCommandButton Label="Validate staged LMS restore" HideIcon="true" Disabled="@busy" OnClick="ValidateRestore" /></details>
     }
-    @if (busy) { <p class="callout">@progress</p> }
-    @if (error is not null) { <p class="callout error">@error</p> }
     @if (output is not null) { <pre>@output</pre> }
 </ChildContent></UiModal>
 <UiModal IsOpen="@showOutput" Title="Repository operation" OnClose="(() => showOutput = false)"><ChildContent><pre>@output</pre></ChildContent></UiModal>
@@ -239,15 +262,41 @@
         }
         if ((initialize || password.Length > 0) && password != passwordConfirmation) throw new InvalidOperationException("The passwords do not match.");
         await Backup.SaveRepositoryAsync(repositoryEditor, password, initialize);
-        repositoryNotice = $"Backup storage is ready at {repositoryEditor.Path}. Next, select ‘Choose what to back up’ to choose files and a schedule. No backup has run yet.";
+        var repositoryId = repositoryEditor.Id;
+        repositoryNotice = $"Backup storage is ready at {repositoryEditor.Path}. Choose the files and schedule in the next step. No backup has run yet.";
         repositoryEditor = null; password = passwordConfirmation = ""; workspace = await Backup.GetAsync();
+        if (!editingRepository) NewSetForRepository(repositoryId);
     });
-    private void NewSet() { error = null; setEditor = new() { RepositoryId = workspace!.Repositories[0].Id }; sources = ""; schedule = false; hour = 2; minute = 0; }
+    private void NewSet() => NewSetForRepository(workspace!.Repositories[0].Id);
+    private void NewSetForRepository(Guid repositoryId) { error = null; setEditor = new() { Name = "LMS configuration backup", RepositoryId = repositoryId }; sources = ""; schedule = false; hour = 2; minute = 0; }
+    private bool HasSource(string path) => sources.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Contains(path, StringComparer.Ordinal);
+    private void ToggleSource(string path, bool selected)
+    {
+        var paths = sources.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(item => item != path).ToList();
+        if (selected) paths.Add(path);
+        sources = string.Join('\n', paths);
+    }
     private void EditSet(BackupSet set) { setEditor = System.Text.Json.JsonSerializer.Deserialize<BackupSet>(System.Text.Json.JsonSerializer.Serialize(set)); sources = string.Join('\n', set.Sources); schedule = set.ScheduleEnabled; hour = set.ScheduleHour; minute = set.ScheduleMinute; }
     private void CloseSet() { if (!busy) setEditor = null; }
-    private Task SaveSet() => Operation("Saving backup set…", async () => { setEditor!.Sources = sources.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList(); await Backup.SaveSetAsync(setEditor, schedule, hour, minute); setEditor = null; workspace = await Backup.GetAsync(); });
+    private Task SaveSet(bool runNow) => Operation(runNow ? "Saving the plan and taking your backup…" : "Saving backup plan…", async () =>
+    {
+        setEditor!.Sources = sources.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        await Backup.SaveSetAsync(setEditor, schedule, hour, minute);
+        var setId = setEditor.Id;
+        setEditor = null;
+        repositoryNotice = runNow ? "Your backup is running. Its result will appear in History." : "Backup plan saved. Select ‘Back up now’ on the plan to take a backup, or wait for its enabled schedule.";
+        try { if (runNow) await Backup.RunBackupAsync(setId); }
+        finally { workspace = await Backup.GetAsync(); }
+        if (runNow) repositoryNotice = "Backup completed. Select ‘Snapshots / restore’ on its backup location to browse or restore it.";
+    });
     private Task Run(Guid id) => Operation("Backup running… You can find its result in History.", async () => { try { await Backup.RunBackupAsync(id); } finally { workspace = await Backup.GetAsync(); } });
-    private Task ShowSnapshots(BackupRepository repo) => Operation("Reading snapshots…", async () => { snapshotRepository = repo; snapshot = null; output = null; snapshots = await Backup.SnapshotsAsync(repo.Id); });
+    private Task ShowSnapshots(BackupRepository repo) => Operation("Reading snapshots…", async () => { snapshotRepository = repo; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); snapshots = await Backup.SnapshotsAsync(repo.Id); });
+    private void ChooseSnapshotBackup()
+    {
+        var repositoryId = snapshotRepository!.Id;
+        CloseSnapshots();
+        NewSetForRepository(repositoryId);
+    }
     private Task Browse(string id) => Operation("Reading snapshot files…", async () => { snapshot = id; files = await Backup.FilesAsync(snapshotRepository!.Id, id); selection.Clear(); });
     private void Select(string path, bool selected) { if (selected) selection.Add(path); else selection.Remove(path); }
     private void CloseSnapshots() { if (!busy) snapshotRepository = null; }
