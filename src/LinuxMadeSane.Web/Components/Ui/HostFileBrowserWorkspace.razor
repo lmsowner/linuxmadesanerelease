@@ -1259,6 +1259,7 @@ else
     private bool isSavingShareFolder;
     private bool isDeletingShareFolder;
     private bool ancillaryNavigationLookupsEnabled;
+    private bool directoryTreeRefreshPending;
     private bool previewPanelOpen;
     private bool previewPanelFocused;
     private bool previewIsLoading;
@@ -1616,6 +1617,8 @@ else
         selectedPaths.Clear();
         accessDeniedPath = string.Empty;
         ancillaryNavigationLookupsEnabled = false;
+        directoryTreeRefreshPending = false;
+        directoryTreeRefreshVersion++;
 
         DetachedFileBrowserState? detachedState = null;
         DetachedFileSearchState? detachedSearchState = null;
@@ -1781,6 +1784,14 @@ else
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        // Keep the first listing fast. Populate its ancestor/sibling tree only
+        // after the completed main listing has actually rendered.
+        if (directoryTreeRefreshPending && canBrowse && !isBusy)
+        {
+            EnableAncillaryNavigationLookups();
+            QueueDirectoryTreeRefresh(currentPath);
+        }
+
         if (contextMenuRequest is not null || shortcutContextShortcut is not null)
         {
             try
@@ -4884,11 +4895,13 @@ else
     private void QueueDirectoryTreeRefresh(string path)
     {
         RebuildDirectoryTree();
-        if (!ancillaryNavigationLookupsEnabled)
+        if (!ancillaryNavigationLookupsEnabled || isBusy)
         {
+            directoryTreeRefreshPending = true;
             return;
         }
 
+        directoryTreeRefreshPending = false;
         var requestVersion = ++directoryTreeRefreshVersion;
         _ = RefreshDirectoryTreeAsync(requestVersion, path);
     }
@@ -6800,6 +6813,8 @@ else
 
     public async ValueTask DisposeAsync()
     {
+        directoryTreeRefreshPending = false;
+        directoryTreeRefreshVersion++;
         FileActionQueueService.Changed -= HandleFileActionChanged;
 
         if (uploadTargetRegistered)
