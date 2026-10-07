@@ -905,6 +905,30 @@ public class Program
             var result = await edgeGatewayService.ApproveTemporaryIpAsync(token ?? string.Empty, cancellationToken);
             return Results.Content(BuildTemporaryIpApprovalHtml(result), "text/html", Encoding.UTF8);
         });
+        app.MapGet("/edge-auth/block-ip", async (
+            string? token, HttpContext context, IAntiforgery antiforgery,
+            IEdgeGatewayService edgeGatewayService, CancellationToken cancellationToken) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers["Referrer-Policy"] = "no-referrer";
+            var result = await edgeGatewayService.BlockTemporaryIpAsync(token ?? string.Empty, false, cancellationToken);
+            var protection = result.Success ? antiforgery.GetAndStoreTokens(context) : null;
+            return Results.Content(BuildTemporaryIpApprovalHtml(result, result.Success ? token : null,
+                protection?.FormFieldName, protection?.RequestToken), "text/html", Encoding.UTF8);
+        });
+        app.MapPost("/edge-auth/block-ip", async (
+            HttpContext context, IAntiforgery antiforgery, IEdgeGatewayService edgeGatewayService,
+            CancellationToken cancellationToken) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers["Referrer-Policy"] = "no-referrer";
+            if (!context.Request.HasFormContentType) return Results.BadRequest("Open the block link from your email to confirm.");
+            try { await antiforgery.ValidateRequestAsync(context); }
+            catch (AntiforgeryValidationException) { return Results.BadRequest("Confirmation expired. Reopen the block link from your email."); }
+            var form = await context.Request.ReadFormAsync(cancellationToken);
+            var result = await edgeGatewayService.BlockTemporaryIpAsync(form["token"].ToString(), true, cancellationToken);
+            return Results.Content(BuildTemporaryIpApprovalHtml(result), "text/html", Encoding.UTF8);
+        });
         app.MapGet("/edge-auth/return", async (
             string? target,
             IEdgeGatewayService edgeGatewayService,
@@ -2270,9 +2294,12 @@ public class Program
     private static bool IsEdgeGatewayReturnUrl(string? returnUrl) =>
         NormalizeReturnUrl(returnUrl).StartsWith("/edge-auth/return", StringComparison.OrdinalIgnoreCase);
 
-    private static string BuildTemporaryIpApprovalHtml(EdgeGatewayTemporaryIpApprovalCompletionViewModel result)
+    private static string BuildTemporaryIpApprovalHtml(EdgeGatewayTemporaryIpApprovalCompletionViewModel result,
+        string? blockToken = null, string? antiforgeryFieldName = null, string? antiforgeryToken = null)
     {
-        var statusColor = result.Success ? "#0f7b57" : "#a33d2f";
+        var blockView = result.IsBlocked || blockToken is not null;
+        var statusColor = result.Success && !blockView ? "#0f7b57" : "#a33d2f";
+        var statusText = result.IsBlocked ? "Blocked" : blockToken is not null ? "Not blocked yet" : result.Success ? "Approved" : "Not approved";
         var eyebrow = result.Success ? "Linux Made Sane - Edge Gateway" : "Approval unavailable";
         var title = WebUtility.HtmlEncode(result.Title);
         var message = WebUtility.HtmlEncode(result.Message);
@@ -2285,6 +2312,15 @@ public class Program
         var action = result.Success && !string.IsNullOrWhiteSpace(result.ApprovedUrl)
             ? $"""<a class="button" href="{approvedUrl}">Open approved app</a>"""
             : """<a class="button secondary" href="/">Return to LMS</a>""";
+        if (blockToken is not null && result.Success && !string.IsNullOrWhiteSpace(antiforgeryToken))
+            action = $"""
+                <form method="post" action="/edge-auth/block-ip">
+                  <input type="hidden" name="token" value="{WebUtility.HtmlEncode(blockToken)}">
+                  <input type="hidden" name="{WebUtility.HtmlEncode(antiforgeryFieldName)}" value="{WebUtility.HtmlEncode(antiforgeryToken)}">
+                  <button class="button" type="submit">Block this IP for this app</button>
+                </form>
+                <p>You can unblock it later in LMS. Closing this page makes no change.</p>
+                """;
 
         return $$"""
             <!doctype html>
@@ -2292,6 +2328,7 @@ public class Program
             <head>
               <meta charset="utf-8">
               <meta name="viewport" content="width=device-width, initial-scale=1">
+              <meta name="referrer" content="no-referrer">
               <title>{{title}}</title>
               <style>
                 :root { color-scheme: light; }
@@ -2309,7 +2346,7 @@ public class Program
                 .detail { border: 1px solid #e3edf7; border-radius: 14px; background: #f7f9fc; padding: 12px 14px; }
                 .detail span { display: block; color: #607089; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
                 .detail strong { display: block; margin-top: 4px; word-break: break-word; }
-                .button { display: inline-block; margin-top: 8px; padding: 13px 18px; border-radius: 12px; background: {{statusColor}}; color: #fff; font-weight: 900; text-decoration: none; }
+                .button { display: inline-block; margin-top: 8px; padding: 13px 18px; border-radius: 12px; background: {{statusColor}}; color: #fff; font:inherit; font-weight: 900; text-decoration: none; border:0; cursor:pointer; }
                 .button.secondary { background: #526070; }
               </style>
             </head>
@@ -2321,15 +2358,15 @@ public class Program
                     <h1>{{title}}</h1>
                   </header>
                   <div class="body">
-                    <div class="status"><span class="dot" aria-hidden="true"></span><span>{{(result.Success ? "Approved" : "Not approved")}}</span></div>
+                    <div class="status"><span class="dot" aria-hidden="true"></span><span>{{statusText}}</span></div>
                     <p>{{message}}</p>
                     {{(result.Success ? $"""
                     <div class="details">
                       {BuildApprovalDetail("Route", routeName)}
                       {BuildApprovalDetail("Source IP", sourceIp)}
                       {BuildApprovalDetail("Country", country)}
-                      {BuildApprovalDetail("Idle expiry", idleExpiry)}
-                      {BuildApprovalDetail("Maximum expiry", maxExpiry)}
+                      {(blockView ? string.Empty : BuildApprovalDetail("Idle expiry", idleExpiry))}
+                      {(blockView ? string.Empty : BuildApprovalDetail("Maximum expiry", maxExpiry))}
                     </div>
                     """ : string.Empty)}}
                     {{action}}

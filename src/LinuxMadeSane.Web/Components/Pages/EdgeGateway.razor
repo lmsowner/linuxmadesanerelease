@@ -682,6 +682,20 @@
                                                  OnClick="RefreshApprovalStatusAsync" />
                             </div>
 
+                            @if (BlockedRequests.Count > 0)
+                            {
+                                <h3>IP block list</h3>
+                                <p class="meta-text">These exact IPs cannot receive email-approved access to the named app. Blocks stay until you unblock them.</p>
+                                @foreach (var blocked in BlockedRequests)
+                                {
+                                    <div class="edge-approval-item-header">
+                                        <span><strong>@blocked.RouteName</strong> · <code>@blocked.SourceIp</code> · blocked @FormatApprovalTimestamp(blocked.BlockedUtc!.Value)</span>
+                                        <UiCommandButton Label="Unblock" Glyph="UiIconGlyph.Unlock" Variant="UiButtonVariant.Ghost"
+                                            Disabled="@(isDashboardLoading || releasingApprovalRequestId.HasValue)"
+                                            OnClick="(() => ReleaseApprovalLockoutAsync(blocked.Id))" />
+                                    </div>
+                                }
+                            }
                             @if (ApprovalRequests.Count == 0 && ApprovalGrants.Count == 0)
                             {
                                 <p class="meta-text">No temporary approval requests or active grants are recorded.</p>
@@ -1402,11 +1416,16 @@
 
     private IReadOnlyList<EdgeGatewayTemporaryIpApprovalRequest> ApprovalRequests =>
         temporaryIpApprovalState.Requests
+            .Where(request => request.BlockedUtc is null)
             .Where(request => request.ApprovedUtc is null || ApprovalGrants.Any(grant =>
                 grant.RouteId == request.RouteId &&
                 grant.SourceIp.Equals(request.SourceIp, StringComparison.OrdinalIgnoreCase)))
             .OrderByDescending(request => request.UpdatedUtc)
             .ToArray();
+
+    private IReadOnlyList<EdgeGatewayTemporaryIpApprovalRequest> BlockedRequests =>
+        temporaryIpApprovalState.Requests.Where(request => request.BlockedUtc is not null)
+            .OrderByDescending(request => request.BlockedUtc).ToArray();
 
     private IReadOnlyList<EdgeGatewayTemporaryIpApprovalGrant> ApprovalGrants =>
         temporaryIpApprovalState.Grants
@@ -1758,6 +1777,7 @@
             return;
         }
 
+        var unblocking = BlockedRequests.Any(request => request.Id == requestId);
         releasingApprovalRequestId = requestId;
         userMessage = string.Empty;
         await InvokeAsync(StateHasChanged);
@@ -1765,7 +1785,7 @@
         {
             var released = await TemporaryIpApprovalService.ReleaseAsync(requestId);
             userMessage = released
-                ? "Temporary approval lockout released. The next request can send a fresh approval email."
+                ? unblocking ? "IP unblocked for this app. Its next request still needs fresh email approval." : "Temporary approval lockout released. The next request can send a fresh approval email."
                 : "That approval request no longer exists. Refresh the status panel.";
             await LoadAsync();
         }

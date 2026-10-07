@@ -62,7 +62,7 @@ public sealed class SqliteEdgeGatewayTemporaryIpApprovalStore(LinuxMadeSaneDbCon
                 ApprovalTokenExpiresAtUtc = null,
                 ApprovedUtc = null,
                 UpdatedUtc = resetAtUtc,
-                LastEmailStatus = "Approval state reset after LMS restart."
+                LastEmailStatus = request.BlockedUtc is not null ? "Blocked until manually unblocked." : "Approval state reset after LMS restart."
             })
             .ToArray();
 
@@ -138,7 +138,8 @@ public sealed class SqliteEdgeGatewayTemporaryIpApprovalStore(LinuxMadeSaneDbCon
             entity.ApprovalTokenHash,
             entity.ApprovalTokenExpiresAtUtc,
             entity.ApprovedUtc,
-            entity.LastEmailStatus);
+            entity.LastEmailStatus,
+            entity.BlockedUtc);
 
     private static EdgeGatewayTemporaryIpApprovalRequestEntity Map(EdgeGatewayTemporaryIpApprovalRequest request) =>
         new()
@@ -159,7 +160,8 @@ public sealed class SqliteEdgeGatewayTemporaryIpApprovalStore(LinuxMadeSaneDbCon
             ApprovalTokenHash = request.ApprovalTokenHash,
             ApprovalTokenExpiresAtUtc = request.ApprovalTokenExpiresAtUtc,
             ApprovedUtc = request.ApprovedUtc,
-            LastEmailStatus = request.LastEmailStatus
+            LastEmailStatus = request.LastEmailStatus,
+            BlockedUtc = request.BlockedUtc
         };
 
     private static EdgeGatewayTemporaryIpApprovalGrant Map(EdgeGatewayTemporaryIpApprovalGrantEntity entity) =>

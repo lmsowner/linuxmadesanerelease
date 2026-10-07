@@ -28,7 +28,8 @@ public sealed record EdgeGatewayTemporaryIpApprovalRequest(
     string ApprovalTokenHash,
     DateTimeOffset? ApprovalTokenExpiresAtUtc,
     DateTimeOffset? ApprovedUtc,
-    string LastEmailStatus);
+    string LastEmailStatus,
+    DateTimeOffset? BlockedUtc = null);
 
 public sealed record EdgeGatewayTemporaryIpApprovalGrant(
     Guid Id,
@@ -68,4 +69,5 @@ public sealed record EdgeGatewayTemporaryIpApprovalCompletionResult(
     string PublicHostname = "",
     string ApprovedUrl = "",
     DateTimeOffset? IdleExpiresAtUtc = null,
-    DateTimeOffset? ExpiresAtUtc = null);
+    DateTimeOffset? ExpiresAtUtc = null,
+    bool IsBlocked = false);

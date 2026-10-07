@@ -22,4 +22,5 @@ public sealed class EdgeGatewayTemporaryIpApprovalRequestEntity
     public DateTimeOffset? ApprovalTokenExpiresAtUtc { get; set; }
     public DateTimeOffset? ApprovedUtc { get; set; }
     public string LastEmailStatus { get; set; } = string.Empty;
+    public DateTimeOffset? BlockedUtc { get; set; }
 }

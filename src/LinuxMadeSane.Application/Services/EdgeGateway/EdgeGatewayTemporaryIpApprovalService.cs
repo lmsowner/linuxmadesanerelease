@@ -20,7 +20,9 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
     IEmailDeliveryService emailDeliveryService,
     EdgeGatewayOptions options) : IEdgeGatewayTemporaryIpApprovalService
 {
-    private readonly SemaphoreSlim sync = new(1, 1);
+    // The service/store are scoped: serialize decisions across HTTP scopes so
+    // a simultaneous approval cannot overwrite a confirmed block.
+    private static readonly SemaphoreSlim sync = new(1, 1);
 
     public async Task<EdgeGatewayTemporaryIpApprovalEvaluationResult> EvaluateAsync(
         EdgeGatewayRoute route,
@@ -45,6 +47,8 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
         try
         {
             var state = CleanExpired(await approvalStore.LoadAsync(cancellationToken), now);
+            if (state.Requests.Any(request => request.BlockedUtc is not null && IsSameRouteAndIp(request, route.Id, context.SourceIp)))
+                return new(false, "This source IP is blocked for this app. An LMS administrator must unblock it.");
             var grants = state.Grants.ToList();
             var activeGrant = grants.FirstOrDefault(grant => IsSameRouteAndIp(grant, route.Id, context.SourceIp));
             if (activeGrant is not null)
@@ -235,6 +239,44 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
         }
     }
 
+    public async Task<EdgeGatewayTemporaryIpApprovalCompletionResult> BlockAsync(
+        string token, bool confirmed, CancellationToken cancellationToken = default)
+    {
+        var hash = HashToken((token ?? string.Empty).Trim());
+        await sync.WaitAsync(cancellationToken);
+        try
+        {
+            var state = await approvalStore.LoadAsync(cancellationToken);
+            var now = DateTimeOffset.UtcNow;
+            var request = state.Requests.FirstOrDefault(item => item.ApprovalTokenHash.Length > 0 && item.ApprovalTokenHash == hash);
+            if (request is null || request.BlockedUtc is not null || request.ApprovalTokenExpiresAtUtc is null || request.ApprovalTokenExpiresAtUtc <= now)
+                return new(false, "Block link is not valid", "This link is unknown, expired, or already used. No block was added.");
+            var route = await edgeGatewayStore.GetRouteAsync(request.RouteId, cancellationToken);
+            if (route is null || !route.Enabled || route.AuthMode != EdgeGatewayAuthMode.TemporaryIpApproval || !IPAddress.TryParse(request.SourceIp, out _))
+                return new(false, "App is no longer available", "The published app was disabled or changed. No block was added.");
+            if (confirmed)
+            {
+                await approvalStore.SaveAsync(state with
+                {
+                    Requests = state.Requests.Select(item => item.Id == request.Id ? item with
+                    {
+                        BlockedUtc = now, ApprovedUtc = null, ApprovalTokenHash = string.Empty,
+                        ApprovalTokenExpiresAtUtc = null, UpdatedUtc = now,
+                        LastEmailStatus = "Blocked by email action until manually unblocked."
+                    } : item).ToArray(),
+                    Grants = state.Grants.Where(item => !IsSameRouteAndIp(item, request.RouteId, request.SourceIp)).ToArray(),
+                    UpdatedAtUtc = now
+                }, cancellationToken);
+            }
+            return new(true, confirmed ? "IP blocked" : "Block this IP?",
+                confirmed
+                    ? $"{request.SourceIp} is blocked for {route.DisplayName}. It cannot receive temporary access or generate more approval emails for this app. You can unblock it in Edge Gateway → Diagnostics → IP block list."
+                    : $"Block {request.SourceIp} from {route.DisplayName}? This stops temporary access and approval emails for this app until you unblock it in LMS. Other apps are unchanged.",
+                request.SourceIp, request.CountryCode, route.DisplayName, request.PublicHostname, IsBlocked: confirmed);
+        }
+        finally { sync.Release(); }
+    }
+
     public async Task<bool> ReleaseAsync(
         Guid requestId,
         CancellationToken cancellationToken = default)
@@ -344,7 +386,7 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
             .ToArray();
         var requests = state.Requests
             .Where(request =>
-                (request.CreatedUtc.AddDays(1) > now ||
+                request.BlockedUtc is not null || (request.CreatedUtc.AddDays(1) > now ||
                  request.ApprovedUtc is not null && request.ApprovedUtc.Value.AddDays(1) > now) &&
                 (request.ApprovedUtc is null || activeGrants.Any(grant =>
                     IsSameRouteAndIp(grant, request.RouteId, request.SourceIp))))
@@ -458,6 +500,7 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
         var encodedCountry = WebUtility.HtmlEncode(FormatCountry(context.CountryCode));
         var encodedUserAgent = WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(context.UserAgent) ? "Unknown" : context.UserAgent);
         var encodedApprovalUrl = WebUtility.HtmlEncode(approvalUrl);
+        var encodedBlockUrl = WebUtility.HtmlEncode(approvalUrl.Replace("/edge-auth/approve-ip?", "/edge-auth/block-ip?", StringComparison.Ordinal));
         return $$"""
             <!doctype html>
             <html lang="en">
@@ -484,9 +527,13 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
                               <td style="background:#0f7b57;border-radius:12px;">
                                 <a href="{{encodedApprovalUrl}}" style="display:inline-block;color:#ffffff;text-decoration:none;padding:14px 20px;font-weight:900;font-size:15px;">Approve this IP</a>
                               </td>
+                              <td style="width:12px;"></td>
+                              <td style="background:#a33d2f;border-radius:12px;">
+                                <a href="{{encodedBlockUrl}}" style="display:inline-block;color:#ffffff;text-decoration:none;padding:14px 20px;font-weight:900;font-size:15px;">Block this IP</a>
+                              </td>
                             </tr>
                           </table>
-                          <p style="color:#607089;font-size:13px;line-height:1.5;margin:0;">Approval is limited to this app and source IP. It expires after {{GetIdleTimeout(route).TotalMinutes:0}} minutes without traffic, or after {{GetMaxLifetime(route).TotalMinutes:0}} minutes at most.</p>
+                          <p style="color:#607089;font-size:13px;line-height:1.5;margin:0;">Both actions apply only to this app and exact source IP. Approval expires after {{GetIdleTimeout(route).TotalMinutes:0}} minutes without traffic, or after {{GetMaxLifetime(route).TotalMinutes:0}} minutes at most. Blocking requires confirmation and lasts until you unblock the IP in LMS.</p>
                         </td>
                       </tr>
                     </table>
@@ -561,11 +608,16 @@ public sealed class EdgeGatewayTemporaryIpApprovalService(
 
     private static bool IsSameRouteAndIp(EdgeGatewayTemporaryIpApprovalGrant grant, Guid routeId, string sourceIp) =>
         grant.RouteId == routeId &&
-        grant.SourceIp.Equals(sourceIp, StringComparison.OrdinalIgnoreCase);
+        SameIp(grant.SourceIp, sourceIp);
 
     private static bool IsSameRouteAndIp(EdgeGatewayTemporaryIpApprovalRequest request, Guid routeId, string sourceIp) =>
         request.RouteId == routeId &&
-        request.SourceIp.Equals(sourceIp, StringComparison.OrdinalIgnoreCase);
+        SameIp(request.SourceIp, sourceIp);
+
+    private static bool SameIp(string left, string right) =>
+        IPAddress.TryParse(left, out var first) && IPAddress.TryParse(right, out var second)
+            ? first.MapToIPv6().Equals(second.MapToIPv6())
+            : left.Equals(right, StringComparison.OrdinalIgnoreCase);
 
     private static string CreateToken()
     {

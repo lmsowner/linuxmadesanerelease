@@ -13,4 +13,5 @@ public sealed record EdgeGatewayTemporaryIpApprovalCompletionViewModel(
     string PublicHostname,
     string ApprovedUrl,
     DateTimeOffset? IdleExpiresAtUtc,
-    DateTimeOffset? ExpiresAtUtc);
+    DateTimeOffset? ExpiresAtUtc,
+    bool IsBlocked = false);

@@ -821,6 +821,7 @@ public sealed class SqliteDatabaseInitializer(
             """;
 
         await dbContext.Database.ExecuteSqlRawAsync(temporaryApprovalRequestsSql, cancellationToken);
+        await EnsureColumnExistsAsync("edge_gateway_temporary_ip_approval_requests", "BlockedUtc", "TEXT NULL", cancellationToken);
 
         const string temporaryApprovalGrantsSql = """
             CREATE TABLE IF NOT EXISTS edge_gateway_temporary_ip_approval_grants (

@@ -1729,7 +1729,16 @@ public sealed class EdgeGatewayService(
             result.PublicHostname,
             result.ApprovedUrl,
             result.IdleExpiresAtUtc,
-            result.ExpiresAtUtc);
+            result.ExpiresAtUtc,
+            result.IsBlocked);
+    }
+
+    public async Task<EdgeGatewayTemporaryIpApprovalCompletionViewModel> BlockTemporaryIpAsync(
+        string token, bool confirmed, CancellationToken cancellationToken = default)
+    {
+        var result = await temporaryIpApprovalService.BlockAsync(token, confirmed, cancellationToken);
+        return new(result.Success, result.Title, result.Message, result.SourceIp, result.CountryCode,
+            result.RouteName, result.PublicHostname, result.ApprovedUrl, result.IdleExpiresAtUtc, result.ExpiresAtUtc, result.IsBlocked);
     }
 
     public async Task<string> BuildSafeReturnPathAsync(string targetUrl, CancellationToken cancellationToken = default)
