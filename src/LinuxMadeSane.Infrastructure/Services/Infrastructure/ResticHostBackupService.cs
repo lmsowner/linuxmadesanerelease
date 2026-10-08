@@ -2,6 +2,7 @@
 // Licensed under the Business Source License 1.1. See LICENSE for details.
 
 using System.Text.Json;
+using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using LinuxMadeSane.Application.Contracts.Infrastructure;
 using LinuxMadeSane.Application.Contracts.Scheduling;
@@ -27,6 +28,102 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
 {
     // Cross-scope serialization also protects repository operations initiated by cron.
     private static readonly SemaphoreSlim Gate = new(1, 1);
+    private static readonly ConcurrentDictionary<string, BackupProgress> Active = new();
+    private static readonly ConcurrentDictionary<string, byte> Queued = new();
+    private Guid? progressSet;
+    private string ProgressKey(Guid id) => Path.GetFullPath(DataDirectory) + "/" + id;
+
+    public async Task<IReadOnlyList<BackupProgress>> GetProgressAsync(CancellationToken token = default)
+    {
+        var rows = await database.InfrastructureStates.AsNoTracking().Where(row => row.Key.StartsWith("backup-progress-")).ToListAsync(token);
+        return rows.Select(row => JsonSerializer.Deserialize<BackupProgress>(row.Json)!).Where(item => item is not null)
+            .Select(item => Active.TryGetValue(ProgressKey(item.SetId), out var live) ? live with { UpdatedUtc = DateTimeOffset.UtcNow } :
+                item.IsRunning && !Queued.ContainsKey(ProgressKey(item.SetId)) ? item with { State = "Interrupted", Action = "LMS restarted before this backup finished. Check History before retrying.", FinishedUtc = item.UpdatedUtc } : item.IsRunning ? item with { UpdatedUtc = DateTimeOffset.UtcNow } : item).ToArray();
+    }
+
+    public async Task StartBackupAsync(Guid setId, CancellationToken token = default)
+    {
+        if (!(await Read<BackupSet>("backup-sets", token)).Any(item => item.Id == setId)) throw new InvalidOperationException("Backup plan no longer exists.");
+        var key = ProgressKey(setId);
+        if (!Queued.TryAdd(key, 0)) throw new InvalidOperationException("This backup is already queued or running.");
+        if (Active.ContainsKey(key)) { Queued.TryRemove(key, out _); throw new InvalidOperationException("This backup is already running."); }
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            await Write("backup-progress-" + setId, new BackupProgress(setId, "Waiting", "Waiting for the backup worker…", now, now, now), token);
+            var factory = provider.GetRequiredService<IServiceScopeFactory>();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await using var scope = factory.CreateAsyncScope();
+                    await scope.ServiceProvider.GetRequiredService<IHostBackupService>().RunBackupAsync(setId);
+                }
+                catch (Exception e)
+                {
+                    // RunBackupAsync records failures; also cover errors before its gate is acquired.
+                    await using var scope = factory.CreateAsyncScope();
+                    var db = scope.ServiceProvider.GetRequiredService<LinuxMadeSaneDbContext>();
+                    var row = await db.InfrastructureStates.FindAsync("backup-progress-" + setId);
+                    if (row is not null)
+                    {
+                        var status = JsonSerializer.Deserialize<BackupProgress>(row.Json)!;
+                        if (status.IsRunning) { row.Json = JsonSerializer.Serialize(status with { State = "Failed", Action = "Backup failed: " + e.Message[..Math.Min(e.Message.Length, 500)] + " Open History & logs for details.", FinishedUtc = DateTimeOffset.UtcNow, UpdatedUtc = DateTimeOffset.UtcNow }); await db.SaveChangesAsync(); }
+                    }
+                }
+                finally { Queued.TryRemove(key, out _); }
+            });
+        }
+        catch { Queued.TryRemove(key, out _); throw; }
+    }
+
+    private async Task Stage(string action, CancellationToken token)
+    {
+        if (progressSet is not { } id) return;
+        var key = ProgressKey(id); var now = DateTimeOffset.UtcNow;
+        var status = Active[key] with { Action = action, UpdatedUtc = now, LastActivityUtc = now, Fraction = null, RemainingSeconds = null, BytesDone = null, TotalBytes = null };
+        Active[key] = status;
+        await Write("backup-progress-" + id, status, token);
+    }
+
+    internal static BackupProgress ParseProgress(BackupProgress status, LinuxCommandOutput output)
+    {
+        var updated = status with { UpdatedUtc = DateTimeOffset.UtcNow, LastActivityUtc = output.OccurredAt };
+        if (output.Text.StartsWith("LMS_PROGRESS|", StringComparison.Ordinal)) return updated with { Action = output.Text[13..] };
+        try
+        {
+            using var document = JsonDocument.Parse(output.Text);
+            var root = document.RootElement;
+            if (root.TryGetProperty("message_type", out var kind) && kind.GetString() == "status")
+            {
+                double? fraction = root.TryGetProperty("percent_done", out var p) && p.TryGetDouble(out var f) && double.IsFinite(f) ? Math.Clamp(f, 0, 1) : null;
+                double? remaining = root.TryGetProperty("seconds_remaining", out var r) && r.TryGetDouble(out var seconds) && double.IsFinite(seconds) && seconds >= 0 ? seconds : null;
+                return updated with { Fraction = fraction, RemainingSeconds = remaining,
+                    BytesDone = root.TryGetProperty("bytes_done", out var done) && done.TryGetInt64(out var d) ? d : null,
+                    TotalBytes = root.TryGetProperty("total_bytes", out var total) && total.TryGetInt64(out var t) ? t : null };
+            }
+        }
+        catch (JsonException) { }
+        // Do not store command lines, secrets, file lists or unfiltered logs in the status card.
+        return updated;
+    }
+
+    private async Task<LinuxCommandResult> ProgressCommand(LinuxCommandRequest request, CancellationToken token)
+    {
+        if (progressSet is not { } id) return await runner.RunAsync(request, false, token);
+        var key = ProgressKey(id);
+        var task = runner is IStreamingLinuxCommandRunner streaming
+            ? streaming.RunStreamingAsync(request, false, output => Active.AddOrUpdate(key, _ => throw new InvalidOperationException(), (_, status) => ParseProgress(status, output)), token)
+            : runner.RunAsync(request, false, token);
+        while (!task.IsCompleted)
+        {
+            await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5)));
+            var status = Active.AddOrUpdate(key, _ => throw new InvalidOperationException(), (_, current) => current with { UpdatedUtc = DateTimeOffset.UtcNow });
+            await Write("backup-progress-" + id, status, CancellationToken.None);
+        }
+        return await task;
+    }
+
     private string DataDirectory => Path.GetDirectoryName(new SqliteConnectionStringBuilder(database.Database.GetConnectionString()).DataSource)!;
     private async Task<List<T>> Read<T>(string key, CancellationToken token)
     {
@@ -253,12 +350,16 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
     {
         await Gate.WaitAsync(token);
         var start = DateTimeOffset.UtcNow; Guid repositoryId = Guid.Empty; string? scratch = null;
+        progressSet = setId;
+        Active[ProgressKey(setId)] = new(setId, "Running", "Reading the backup plan…", start, start, start);
         try
         {
+            await Stage("Reading the backup plan…", token);
             var set = (await Read<BackupSet>("backup-sets", token)).Single(item => item.Id == setId);
             var repository = await Repository(set.RepositoryId, token); repositoryId = repository.Id;
             if (set.FullSystem)
             {
+                await Stage("Checking and installing recovery tools…", token);
                 // Existing plans may predate newly identified recovery dependencies.
                 // Install missing packages at use, before producing any recovery media.
                 await provider.GetRequiredService<IInfrastructureDiagnosticsService>().InstallPackagesAsync("FullBackup", token);
@@ -277,11 +378,13 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             {
                 // Reuse the selected backup mount for bulky recovery build data.
                 // An encrypted loop filesystem supplies POSIX semantics even on SMB.
-                var prepared = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.FullSystemScript,
+                await Stage("Checking space and preparing encrypted workspace on backup storage…", token);
+                var prepared = await ProgressCommand(new("python3", ["-c", LmsConfigurationRecovery.FullSystemScript,
                     "--repository", repository.Path, "--bundle", scratch, "--prepare-workspace"], true,
-                    TimeSpan.FromMinutes(5), "Prepare encrypted recovery workspace on the selected backup destination"), false, token);
+                    TimeSpan.FromMinutes(5), "Prepare encrypted recovery workspace on the selected backup destination"), token);
                 if (prepared.ExitCode != 0) throw RecoveryMediaFailure(prepared.StandardError);
             }
+            await Stage("Preparing the backup and copying LMS configuration…", token);
             // This recovery record travels with the encrypted snapshot, independently of the live LMS database.
             await File.WriteAllTextAsync(Path.Combine(scratch, "backup-plan.json"), JsonSerializer.Serialize(new
             {
@@ -328,14 +431,16 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                     Path.GetFileName(new SqliteConnectionStringBuilder(database.Database.GetConnectionString()).DataSource))), token);
                 if (set.FullSystem)
                 {
-                    var media = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.FullSystemScript, "--repository", repository.Path, "--bundle", scratch], true,
-                        TimeSpan.FromMinutes(35), "Create ReaR boot recovery media; no disks will be formatted"), false, token);
+                    await Stage("Building boot recovery media… This stage has no reliable time estimate.", token);
+                    var media = await ProgressCommand(new("python3", ["-c", LmsConfigurationRecovery.FullSystemScript, "--repository", repository.Path, "--bundle", scratch], true,
+                        TimeSpan.FromMinutes(35), "Create ReaR boot recovery media; no disks will be formatted"), token);
                     if (media.ExitCode != 0) throw RecoveryMediaFailure(media.StandardError);
                     using var full = JsonDocument.Parse(media.StandardOutput);
                     sources.AddRange(full.RootElement.GetProperty("sources").EnumerateArray().Select(item => item.GetString()!));
                 }
-                var captured = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.Script, "--bundle", scratch, "--collect", specificationPath], true,
-                    TimeSpan.FromMinutes(10), "Capture and validate LMS configuration recovery bundle"), false, token);
+                await Stage("Collecting and validating LMS recovery configuration…", token);
+                var captured = await ProgressCommand(new("python3", ["-c", LmsConfigurationRecovery.Script, "--bundle", scratch, "--collect", specificationPath], true,
+                    TimeSpan.FromMinutes(10), "Capture and validate LMS configuration recovery bundle"), token);
                 if (captured.ExitCode != 0) throw new InvalidOperationException("Configuration recovery capture failed: " + captured.StandardError);
 
             }
@@ -353,21 +458,24 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             }
             args.Add("--");
             args.AddRange(sources);
+            await Stage("Backing up files to the repository…", token);
             var output = await Restic(repository, args.ToArray(), token, set.FullSystem);
+            await Stage("Verifying the completion marker…", token);
             if (set.FullSystem)
                 output += "\nCompletion marker:\n" + await Restic(repository, ["tag", "--add", "lms-backup-complete", "--path", scratch,
                     "--tag", "lms-full-system,lms-set-" + set.Id.ToString("N"), "--json"], token);
+            await Stage("Applying retention and removing expired backup data…", token);
             // Retention is scoped to this set. Failed/partial backup never triggers forgetting.
             var retention = await Restic(repository, ["forget", "--tag", "lms-set-" + set.Id.ToString("N"), "--group-by", "host,tags",
                 "--keep-daily", set.KeepDaily.ToString(), "--keep-weekly", set.KeepWeekly.ToString(), "--keep-monthly", set.KeepMonthly.ToString(), "--prune", "--json"], token);
             await History(repositoryId, setId, "Backup & retention", start, true, output + "\n" + retention, CancellationToken.None);
         }
-        catch (Exception e) { await History(repositoryId, setId, "Backup", start, false, e.InnerException is null ? e.Message : e.Message + "\n\nBuild details:\n" + e.InnerException.Message, CancellationToken.None); throw; }
+        catch (Exception e) { Active[ProgressKey(setId)] = Active[ProgressKey(setId)] with { State = "Failed", Action = "Backup failed: " + e.Message[..Math.Min(e.Message.Length, 500)] + " Open History & logs for details." }; await History(repositoryId, setId, "Backup", start, false, e.InnerException is null ? e.Message : e.Message + "\n\nBuild details:\n" + e.InnerException.Message, CancellationToken.None); throw; }
         finally
         {
             try
             {
-                if (scratch is not null) await CleanupStagingAsync(scratch);
+                if (scratch is not null) { if (Active[ProgressKey(setId)].State != "Failed") await Stage("Cleaning up temporary backup files…", CancellationToken.None); await CleanupStagingAsync(scratch); }
             }
             catch (Exception cleanupError)
             {
@@ -376,7 +484,13 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                     "Backup staging cleanup failed: " + cleanupError.Message, CancellationToken.None); }
                 catch { /* Retain the original operation result even if logging is unavailable. */ }
             }
-            finally { Gate.Release(); }
+            finally
+            {
+                var final = Active[ProgressKey(setId)];
+                final = final with { State = final.State == "Failed" ? "Failed" : "Succeeded", Action = final.State == "Failed" ? final.Action : "Backup completed. Open History & logs for details.", FinishedUtc = DateTimeOffset.UtcNow, UpdatedUtc = DateTimeOffset.UtcNow, Fraction = null, RemainingSeconds = null };
+                try { await Write("backup-progress-" + setId, final, CancellationToken.None); }
+                finally { Active.TryRemove(ProgressKey(setId), out _); progressSet = null; Gate.Release(); }
+            }
         }
     }
 
@@ -530,8 +644,8 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                     throw new InvalidOperationException("This password-free backup requires restic 0.17 or newer. Upgrade restic on this host before opening it.");
                 passwordOptions = ["--insecure-no-password"];
             }
-            var result = await runner.RunAsync(new(InfrastructureDiagnosticsService.ResticExecutable, ["--repo", repository.Path, "--password-file", path, "--no-cache", ..passwordOptions, ..arguments],
-                true, TimeSpan.FromHours(12), "Restic " + arguments[0]), false, token);
+            var result = await ProgressCommand(new(InfrastructureDiagnosticsService.ResticExecutable, ["--repo", repository.Path, "--password-file", path, "--no-cache", ..passwordOptions, ..arguments],
+                true, TimeSpan.FromHours(12), "Restic " + arguments[0]), token);
             if (result.ExitCode != 0) throw new InvalidOperationException($"Restic {arguments[0]} failed (exit {result.ExitCode}): {result.StandardError} {result.StandardOutput}");
             return result.StandardOutput;
         }

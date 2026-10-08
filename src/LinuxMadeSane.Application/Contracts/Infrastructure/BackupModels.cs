@@ -64,3 +64,10 @@ public sealed record BackupSnapshot(string Id, DateTimeOffset Time, IReadOnlyLis
     public IReadOnlyList<string> Tags { get; init; } = [];
 }
 public sealed record BackupFile(string Path, string Type, long Size);
+
+public sealed record BackupProgress(Guid SetId, string State, string Action, DateTimeOffset StartedUtc,
+    DateTimeOffset UpdatedUtc, DateTimeOffset LastActivityUtc, DateTimeOffset? FinishedUtc = null,
+    double? Fraction = null, double? RemainingSeconds = null, long? BytesDone = null, long? TotalBytes = null)
+{
+    public bool IsRunning => State is "Running" or "Waiting";
+}

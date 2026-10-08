@@ -11,9 +11,34 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+import threading
+import collections
+import signal
+import sys
 
 
 def run(arguments, timeout=30, environment=None):
+    if arguments[0] == 'rear':
+        # Keep JSON stdout intact; send only safe, readable stage labels to LMS.
+        stages = [('root filesystem', 'Assembling the recovery filesystem…'), ('copying files', 'Copying recovery tools and libraries…'),
+                  ('kernel modules', 'Copying Linux kernel modules…'), ('initramfs', 'Compressing the recovery boot image…'),
+                  ('making iso', 'Writing the recovery ISO…'), ('iso image', 'Writing and validating the recovery ISO…')]
+        lines = collections.deque(maxlen=200)
+        process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=environment, start_new_session=True)
+        def read():
+            for line in process.stdout:
+                lines.append(line)
+                stage = next((label for phrase, label in stages if phrase in line.lower()), None)
+                print('LMS_PROGRESS|' + stage if stage else 'LMS_ACTIVITY|', file=sys.stderr, flush=True)
+        reader = threading.Thread(target=read, daemon=True); reader.start()
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL); process.wait(); reader.join(timeout=5); process.stdout.close()
+            raise ValueError('ReaR recovery build timed out. No full-system backup was saved.')
+        reader.join(timeout=5); process.stdout.close()
+        if code: raise ValueError('rear failed: ' + ''.join(lines)[-4000:])
+        return ''.join(lines)
     result = subprocess.run(arguments, capture_output=True, text=True, timeout=timeout, env=environment)
     if result.returncode:
         raise ValueError(" ".join(arguments[:2]) + " failed: " + result.stderr[-4000:])

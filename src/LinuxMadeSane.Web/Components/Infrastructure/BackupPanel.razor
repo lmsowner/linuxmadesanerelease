@@ -5,6 +5,8 @@
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Application.Contracts.Shares
 @using LinuxMadeSane.Core.Enums
+@implements IAsyncDisposable
+@inject IServiceScopeFactory ScopeFactory
 @inject IHostBackupService Backup
 @inject IInfrastructureDiagnosticsService Diagnostics
 @inject ShareMountsWorkspaceService ShareWorkspace
@@ -17,6 +19,8 @@
     @if (repositoryNotice is not null) { <p class="callout" role="status">@repositoryNotice</p> }
     @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
     @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+    @if (monitoringUnavailable) { <p class="callout error" role="alert">Backup status could not be refreshed. Reconnecting… The backup may still be running.</p> }
+    @foreach (var job in jobs.Where(job => job.IsRunning)) { <BackupProgressView Progress="job" Name="@(workspace?.Sets.FirstOrDefault(set => set.Id == job.SetId)?.Name ?? "Backup")" /> }
     @if (workspace is not null)
     {
         <h3>Backup plans</h3>
@@ -25,6 +29,7 @@
         <div class="backup-plan-grid">
         @foreach (var set in workspace.Sets)
         {
+            var job = jobs.FirstOrDefault(job => job.SetId == set.Id);
             var destination = workspace.Repositories.FirstOrDefault(repo => repo.Id == set.RepositoryId);
             var last = workspace.History.FirstOrDefault(item => item.SetId == set.Id && item.Kind.StartsWith("Backup", StringComparison.Ordinal));
             var lastFinished = set.LastFinishedUtc ?? last?.FinishedUtc;
@@ -40,11 +45,12 @@
                 <p><strong>Last successful backup:</strong> @((set.LastSuccessfulBackupUtc ?? lastSuccess?.FinishedUtc)?.ToLocalTime().ToString("g") ?? "None recorded")</p>
                 <div class="infrastructure-actions">
                     <UiCommandButton Label="Edit plan" HideIcon="true" Disabled="@busy" OnClick="(() => EditSet(set))" />
-                    <UiCommandButton Label="Back up now" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="(() => Run(set.Id))" />
+                    <UiCommandButton Label="@(job?.IsRunning == true ? "Backup running…" : "Back up now")" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@(busy || job?.IsRunning == true)" OnClick="(() => Run(set.Id))" />
                     <UiCommandButton Label="Restore" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ShowSnapshots(destination!, set))" />
                     <UiCommandButton Label="History & logs" HideIcon="true" Disabled="@busy" OnClick="(() => ShowHistory(set.Id, null, set.Name))" />
                     @if (set.FullSystem && destination is not null) { <UiCommandButton Label="Record restore test" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryTest(set))" /> }
                 </div>
+                @if (job is not null) { <BackupProgressView Progress="job" /> }
                 @if (!string.IsNullOrWhiteSpace(set.Notes)) { <details><summary>Notes & recovery instructions</summary><p class="backup-plan-notes">@set.Notes</p></details> }
             </section>
         }
@@ -387,7 +393,43 @@
     private IReadOnlyList<BackupSnapshot> snapshots = [];
     private IReadOnlyList<BackupFile> files = [];
     private readonly HashSet<string> selection = [];
-    protected override async Task OnInitializedAsync() { if ((await Diagnostics.GetPackageStatusAsync("Backup")).Installed) await Load(); }
+    private IReadOnlyList<BackupProgress> jobs = [];
+    private readonly CancellationTokenSource polling = new();
+    private Task? pollTask;
+    protected override async Task OnInitializedAsync()
+    {
+        if ((await Diagnostics.GetPackageStatusAsync("Backup")).Installed) await Load();
+        await RefreshProgress();
+        pollTask = PollProgress();
+    }
+    private async Task RefreshProgress()
+    {
+        await using var scope = ScopeFactory.CreateAsyncScope();
+        var fresh = await scope.ServiceProvider.GetRequiredService<IHostBackupService>().GetProgressAsync(polling.Token);
+        if (!busy && jobs.Any(old => old.IsRunning && fresh.Any(current => current.SetId == old.SetId && !current.IsRunning)))
+        {
+            var updatedWorkspace = await scope.ServiceProvider.GetRequiredService<IHostBackupService>().GetAsync(polling.Token);
+            await InvokeAsync(() => workspace = updatedWorkspace);
+        }
+        await InvokeAsync(() => { jobs = fresh; monitoringUnavailable = false; StateHasChanged(); });
+    }
+    private async Task PollProgress()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(polling.Token))
+            {
+                try { await RefreshProgress(); }
+                catch (OperationCanceledException) when (polling.IsCancellationRequested) { break; }
+                catch { await InvokeAsync(() => { monitoringUnavailable = true; StateHasChanged(); }); }
+            }
+        }
+        catch (OperationCanceledException) when (polling.IsCancellationRequested) { }
+    }
+    private bool monitoringUnavailable;
+    public async ValueTask DisposeAsync() { polling.Cancel(); if (pollTask is not null) await pollTask; polling.Dispose(); }
+
     private async Task Operation(string label, Func<Task> operation)
     { busy = true; progress = label; error = null; await InvokeAsync(StateHasChanged); await Task.Yield(); try { await operation(); } catch (Exception e) { repositoryNotice = null; error = e.Message; } finally { busy = false; } }
     private Task UpdateRestic() => Operation("Installing the latest stable restic release and verifying its signature…", async () =>
@@ -481,11 +523,11 @@
         var setId = setEditor.Id;
         setEditor = null;
         repositoryNotice = runNow ? "Your backup is running. Its result will appear in History." : "Backup plan saved. Select ‘Back up now’ on the plan to take a backup, or wait for its enabled schedule.";
-        try { if (runNow) await Backup.RunBackupAsync(setId); }
+        try { if (runNow) { await Backup.StartBackupAsync(setId); await RefreshProgress(); } }
         finally { workspace = await Backup.GetAsync(); }
-        if (runNow) repositoryNotice = "Backup completed. Select ‘Snapshots / restore’ on its backup location to browse or restore it.";
+        if (runNow) repositoryNotice = "Backup started. You can leave this page and return to see its progress.";
     });
-    private Task Run(Guid id) => Operation(workspace?.Sets.FirstOrDefault(set => set.Id == id)?.FullSystem == true ? "Checking recovery dependencies and free space, building boot media, then backing up…" : "Backup running… You can find its result in History.", async () => { try { await Backup.RunBackupAsync(id); } finally { workspace = await Backup.GetAsync(); } });
+    private Task Run(Guid id) => Operation("Starting your backup…", async () => { await Backup.StartBackupAsync(id); await RefreshProgress(); repositoryNotice = null; });
     private Task ShowSnapshots(BackupRepository repo, BackupSet? plan = null) => Operation("Reading snapshots…", async () => { recoveryDataDirectory = workspace?.DataDirectory ?? ""; recoveryApplicationDirectory = workspace?.ApplicationDirectory ?? ""; recoveryKeyDirectory = workspace?.ProtectionKeyDirectory ?? ""; snapshotRepository = repo; snapshotPlan = plan; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); snapshots = (await Backup.SnapshotsAsync(repo.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); });
     private void ChooseSnapshotBackup()
     {

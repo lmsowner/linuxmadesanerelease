@@ -1,0 +1,27 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@using LinuxMadeSane.Application.Contracts.Infrastructure
+<div class="callout backup-live @(Progress.State is "Failed" or "Interrupted" ? "error" : "")" role="status" aria-live="polite">
+    @if (Name is not null) { <strong>@Name</strong> }
+    <div><strong>@Progress.Action</strong></div>
+    <div class="backup-live-meta">
+        <span>@Progress.State · Elapsed @Duration(((Progress.FinishedUtc ?? DateTimeOffset.UtcNow) - Progress.StartedUtc).TotalSeconds)</span>
+        @if (Progress.IsRunning)
+        {
+            <span>Last activity @Progress.LastActivityUtc.ToLocalTime().ToString("HH:mm:ss")</span>
+            <span>@(Progress.RemainingSeconds is { } seconds ? $"File backup estimate: {Duration(seconds)} remaining" : "Time remaining: not yet available")</span>
+            <span>@(DateTimeOffset.UtcNow - Progress.UpdatedUtc > TimeSpan.FromSeconds(30) ? "No recent monitoring update — status may be stale." : "LMS is monitoring this backup. You can leave and return.")</span>
+        }
+    </div>
+    @if (Progress.Fraction is { } fraction && Progress.IsRunning)
+    {
+        <progress max="1" value="@fraction" aria-label="File backup progress"></progress><span>@fraction.ToString("P0") of scanned data</span>
+    }
+    @if (Progress.BytesDone is { } bytes && Progress.TotalBytes is > 0)
+    { <div>@((bytes / 1_000_000d).ToString("N0")) / @((Progress.TotalBytes.Value / 1_000_000d).ToString("N0")) MB</div> }
+</div>
+@code {
+    [Parameter, EditorRequired] public BackupProgress Progress { get; set; } = default!;
+    [Parameter] public string? Name { get; set; }
+    private static string Duration(double seconds) => TimeSpan.FromSeconds(Math.Max(0, seconds)).ToString(seconds >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
+}
