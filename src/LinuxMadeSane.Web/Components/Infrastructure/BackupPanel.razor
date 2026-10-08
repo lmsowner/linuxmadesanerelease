@@ -115,27 +115,37 @@
         </section>
         <section class="backup-setup-step">
             <h3>2. Protect your backups</h3>
-            <div class="backup-two-columns">
-            <UiTextField Label="Backup encryption password" Type="password" Autocomplete="new-password" Disabled="@busy" @bind-Value="password" />
-            @if (initialize || password.Length > 0)
+            @if (!editingRepository)
             {
-                <UiTextField Label="Repeat backup password" Type="password" Autocomplete="new-password" Disabled="@busy" @bind-Value="passwordConfirmation" />
+                <label class="infrastructure-check"><input type="checkbox" disabled="@busy" @bind="protectBackupWithPassword" /> Protect backups with a password</label>
             }
-            </div>
-            <p>@(editingRepository ? "Leave blank to keep the saved password. This is separate from your Linux or LMS login." : initialize ? "Choose a password of at least 12 characters. This is separate from your Linux or LMS login." : "Enter the encryption password used when this restic backup was created.")</p>
-            <p class="backup-password-guide"><strong>The whole backup is encrypted and password protected, including configuration, credentials and recovery keys.</strong> LMS stores this password encrypted. Keep a recovery copy in your password manager: you need it to restore backups if this LMS host is lost.</p>
+            @if (protectBackupWithPassword)
+            {
+                <div class="backup-two-columns">
+                    <UiTextField Label="Backup encryption password" Type="password" Autocomplete="new-password" Disabled="@busy" @bind-Value="password" />
+                    @if (initialize || password.Length > 0)
+                    {
+                        <UiTextField Label="Repeat backup password" Type="password" Autocomplete="new-password" Disabled="@busy" @bind-Value="passwordConfirmation" />
+                    }
+                </div>
+                <p>@(editingRepository ? "Leave blank to keep the saved password." : initialize ? "Choose a password of at least 12 characters." : "Enter this backup's existing password.") Keep a recovery copy independently of LMS.</p>
+            }
+            else
+            {
+                <p>No password needed. Anyone with access to this backup folder can restore its contents.</p>
+            }
         </section>
         <section class="backup-setup-step">
             <h3>3. Check and save</h3>
             @if (BackupPathPreview is { } preview) { <p class="backup-location-preview">Backups will be stored in <strong>@preview</strong>.</p> }
             else { <p>Choose a destination and backup folder above.</p> }
-            <p>@(initialize ? "LMS will create encrypted backup storage here. Existing backups are not overwritten." : "LMS will check that it can open the existing backup with this password.") No backup runs at this step.</p>
+            <p>@(initialize ? "LMS will create encrypted backup storage here. Existing backups are not overwritten." : "LMS will check that it can open the existing backup.") No backup runs at this step.</p>
             <UiTextAreaField Label="Storage notes (optional)" Helper="For example, NAS ownership or where the recovery password is kept. Do not put passwords in notes." Rows="2" @bind-Value="repositoryEditor.Notes" />
             <div class="infrastructure-actions">
-                <UiCommandButton Label="@(initialize ? "Create backup storage" : "Check & save backup storage")" HideIcon="true" Disabled="@(busy || BackupPathPreview is null || (backupDestination != "local" && SelectedNetworkDestination is not { IsMounted: true, IsReadOnly: false }) || string.IsNullOrWhiteSpace(repositoryEditor.Name) || (!editingRepository && password.Length == 0) || ((initialize || password.Length > 0) && password != passwordConfirmation))" OnClick="SaveRepository" />
+                <UiCommandButton Label="@(initialize ? "Create backup storage" : "Check & save backup storage")" HideIcon="true" Disabled="@(busy || BackupPathPreview is null || (backupDestination != "local" && SelectedNetworkDestination is not { IsMounted: true, IsReadOnly: false }) || string.IsNullOrWhiteSpace(repositoryEditor.Name) || (protectBackupWithPassword && ((!editingRepository && password.Length == 0) || ((initialize || password.Length > 0) && password != passwordConfirmation))))" OnClick="SaveRepository" />
                 <UiCommandButton Label="Cancel" Variant="UiButtonVariant.Ghost" HideIcon="true" Disabled="@busy" OnClick="CloseRepository" />
             </div>
-            @if (passwordConfirmation.Length > 0 && password != passwordConfirmation) { <p class="callout error" role="alert">The passwords do not match.</p> }
+            @if (protectBackupWithPassword && passwordConfirmation.Length > 0 && password != passwordConfirmation) { <p class="callout error" role="alert">The passwords do not match.</p> }
             @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
         </section>
         @if (error is not null) { <p class="callout error">@error</p> }
@@ -264,7 +274,7 @@
         @if (snapshots.FirstOrDefault(item => item.Id == snapshot)?.Tags.Contains("lms-full-system") == true)
         {
             <details class="backup-recovery-guide"><summary><strong>Full-system / bare-metal recovery</strong></summary>
-                <ol><li>Before failure, restore the boot-recovery ISO from this snapshot to a private folder and keep boot media offline.</li><li>Boot that ISO on the replacement machine. Connect the backup storage; keep the encryption password independently of LMS.</li><li>Run <code>rear recover</code> at its console. Enter the repository path and password privately. The ISO finds its matching completed backup and checks its data before any disk changes. Review the proposed target disks carefully before approving recreation.</li><li>Check Linux boot, LMS login, saved credentials and required workloads. Record the test against this plan. See FULL-SYSTEM-RECOVERY.txt in the encrypted snapshot.</li></ol>
+                <ol><li>Before failure, restore the boot-recovery ISO from this snapshot to a private folder and keep boot media offline.</li><li>Boot that ISO on the replacement machine. Connect the backup storage; if password protected, keep the password independently of LMS.</li><li>Run <code>rear recover</code> at its console. Enter the repository path; enter its password privately, or press Enter for password-free storage. The ISO finds its matching completed backup and checks its data before any disk changes. Review the proposed target disks carefully before approving recreation.</li><li>Check Linux boot, LMS login, saved credentials and required workloads. Record the test against this plan. See FULL-SYSTEM-RECOVERY.txt in the encrypted snapshot.</li></ol>
                 <p>Different hardware needs review. Live databases and containers need application-consistent backups. A successful backup does not prove a successful restore.</p>
             </details>
         }
@@ -344,6 +354,7 @@
     private bool initialize, schedule, busy, overwrite, showOutput;
     private int hour = 2, minute;
     private string recoveryPreparationPath = "", recoveryDataDirectory = "", recoveryApplicationDirectory = "", recoveryKeyDirectory = "";
+    private bool protectBackupWithPassword;
     private string password = "", sources = "", restoreTarget = "", lmsRestorePath = "", progress = "";
     private string backupDestination = "", backupFolder = "lms-backups", localBackupPath = "", passwordConfirmation = "";
     private bool createHostBackupFolder = true;
@@ -374,7 +385,7 @@
     private async Task Operation(string label, Func<Task> operation)
     { busy = true; progress = label; error = null; await InvokeAsync(StateHasChanged); await Task.Yield(); try { await operation(); } catch (Exception e) { error = e.Message; } finally { busy = false; } }
     private Task Load() => Operation("Reading backup configuration…", async () => workspace = await Backup.GetAsync());
-    private void NewRepository() { error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = true; editingRepository = false; backupDestination = localBackupPath = ""; backupFolder = "lms-backups"; createHostBackupFolder = true; hostBackupFolder = BackupDestinationSelection.SuggestHostSubfolder(Environment.MachineName, workspace?.Repositories.Select(item => item.Path) ?? [], (workspace?.Sets.Count ?? 0) + 1); repositoryEditor = new() { Name = "LMS backup" }; }
+    private void NewRepository() { error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = true; editingRepository = false; protectBackupWithPassword = false; backupDestination = localBackupPath = ""; backupFolder = "lms-backups"; createHostBackupFolder = true; hostBackupFolder = BackupDestinationSelection.SuggestHostSubfolder(Environment.MachineName, workspace?.Repositories.Select(item => item.Path) ?? [], (workspace?.Sets.Count ?? 0) + 1); repositoryEditor = new() { Name = "LMS backup" }; }
     private void EditRepository(BackupRepository repo)
     {
         error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = false; editingRepository = true;
@@ -382,7 +393,8 @@
             .OrderByDescending(item => item.Path.Length).FirstOrDefault();
         backupDestination = share?.Path ?? "local"; localBackupPath = repo.Path;
         backupFolder = share is null ? "lms-backups" : repo.Path[(share.Path.TrimEnd('/').Length + 1)..];
-        repositoryEditor = new() { Id = repo.Id, Name = repo.Name, Path = repo.Path, Notes = repo.Notes };
+        protectBackupWithPassword = !repo.NoPassword;
+        repositoryEditor = new() { Id = repo.Id, Name = repo.Name, Path = repo.Path, Notes = repo.Notes, NoPassword = repo.NoPassword };
     }
     private void CloseRepository() { if (!busy) { repositoryEditor = null; password = passwordConfirmation = ""; } }
     private Task RefreshDestinations() => Operation("Refreshing connected disks and shares…", async () => workspace = await Backup.GetAsync());
@@ -434,8 +446,9 @@
             if (SelectedNetworkDestination is not { IsMounted: true, IsReadOnly: false })
                 throw new InvalidOperationException("Connect this network share before saving. LMS will not put backups in an empty mount folder.");
         }
-        if ((initialize || password.Length > 0) && password != passwordConfirmation) throw new InvalidOperationException("The passwords do not match.");
-        await Backup.SaveRepositoryAsync(repositoryEditor, password, initialize);
+        if (protectBackupWithPassword && (initialize || password.Length > 0) && password != passwordConfirmation) throw new InvalidOperationException("The passwords do not match.");
+        repositoryEditor.NoPassword = !protectBackupWithPassword;
+        await Backup.SaveRepositoryAsync(repositoryEditor, protectBackupWithPassword ? password : null, initialize);
         var repositoryId = repositoryEditor.Id;
         repositoryNotice = $"Backup storage is ready at {repositoryEditor.Path}. Choose the files and schedule in the next step. No backup has run yet.";
         repositoryEditor = null; password = passwordConfirmation = ""; workspace = await Backup.GetAsync();

@@ -121,18 +121,19 @@ if [[ "${1:-}" == prepare ]]; then
     printf '%s' 'Repository path: ' > /dev/tty
     read -r repository < /dev/tty
     [[ "$repository" == /* && -d "$repository" && -f "$repository/config" ]] || { echo 'Enter the full repository path; mount the backup storage first.' > /dev/tty; exit 1; }
-    printf '%s' 'Backup encryption password: ' > /dev/tty
+    printf '%s' 'Backup password (Enter if not password protected): ' > /dev/tty
     IFS= read -r -s password < /dev/tty
     printf '\\n' > /dev/tty
-    [[ -n "$password" ]] || { echo 'The encryption password is required.' > /dev/tty; exit 1; }
     printf '%s' "$password" > "$state/password"
     unset password
     export RESTIC_PASSWORD_FILE="$state/password"
-    snapshot=$(restic --repo "$repository" snapshots --path "$bundle" --tag lms-full-system,lms-backup-complete --json 2> /dev/tty | jq -er 'if length == 1 then .[0].id else error("No unique completed backup matches this recovery image. Use its matching ISO and repository.") end' 2> /dev/tty)
+    password_options=()
+    if [[ ! -s "$state/password" ]] && restic help | grep -q -- '--insecure-no-password'; then password_options=(--insecure-no-password); fi
+    snapshot=$(restic "${password_options[@]}" --repo "$repository" snapshots --path "$bundle" --tag lms-full-system,lms-backup-complete --json 2> /dev/tty | jq -er 'if length == 1 then .[0].id else error("No unique completed backup matches this recovery image. Use its matching ISO and repository.") end' 2> /dev/tty)
     [[ "$snapshot" =~ ^[a-f0-9]{64}$ ]] || exit 1
     printf '%s\\n' 'Checking encrypted backup data before any disk changes; this may take time.' > /dev/tty
-    restic --repo "$repository" check --read-data < /dev/tty > /dev/tty 2>&1
-    restic --repo "$repository" dump "$snapshot" "$bundle/FULL-SYSTEM-RECOVERY.txt" > /dev/null 2> /dev/tty
+    restic "${password_options[@]}" --repo "$repository" check --read-data < /dev/tty > /dev/tty 2>&1
+    restic "${password_options[@]}" --repo "$repository" dump "$snapshot" "$bundle/FULL-SYSTEM-RECOVERY.txt" > /dev/null 2> /dev/tty
     printf '%s' "$repository" > "$state/repository"
     printf '%s' "$snapshot" > "$state/snapshot"
     printf 'Verified matching completed snapshot: %s\\nReview the target disk mapping before approving recreation.\\n' "$snapshot" > /dev/tty
@@ -146,7 +147,9 @@ target="${1:-/mnt/local}"
 [[ -f "$state/password" && -f "$state/repository" && -f "$state/snapshot" ]] || { echo 'Run recovery authentication before disk recreation.' > /dev/tty; exit 1; }
 repository=$(cat "$state/repository"); snapshot=$(cat "$state/snapshot")
 export RESTIC_PASSWORD_FILE="$state/password"
-restic --repo "$repository" restore "$snapshot" --target "$target" < /dev/tty > /dev/tty 2>&1
+password_options=()
+if [[ ! -s "$state/password" ]] && restic help | grep -q -- '--insecure-no-password'; then password_options=(--insecure-no-password); fi
+restic "${password_options[@]}" --repo "$repository" restore "$snapshot" --target "$target" < /dev/tty > /dev/tty 2>&1
 unset RESTIC_PASSWORD_FILE
 ''')
         specification = json.loads((bundle / "recovery-specification.json").read_text())
@@ -205,7 +208,7 @@ unset RESTIC_PASSWORD_FILE
             path.chmod(0o700 if path.is_dir() else 0o600)
         (bundle / "full-system-recovery.json").write_text(json.dumps(plan, indent=2))
         (bundle / "FULL-SYSTEM-RECOVERY.txt").write_text('''FULL SYSTEM RECOVERY — ReaR + encrypted restic
-Keep the repository password and access to its storage independently of this host.
+If password protected, keep the repository password and access to its storage independently of this host.
 For NAS storage, also keep its server/share and NAS credentials independently.
 Saved NAS passwords are not embedded in the ISO; mount the share at the rescue
 console before entering the repository path. The matching mount helper is included.

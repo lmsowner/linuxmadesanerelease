@@ -78,8 +78,8 @@ public static class LmsConfigurationRecovery
         await File.WriteAllTextAsync(Path.Combine(scratch, "RECOVERY.txt"), """
             LMS CONFIGURATION RECOVERY
 
-            This bundle is stored inside your password-protected encrypted restic repository.
-            Keep the repository password independently of this LMS host. Without it, the
+            This bundle is stored inside your restic repository. If password protection was disabled, anyone with access to the repository can restore it.
+            For password-protected storage, keep the repository password independently of this LMS host. Without it, the
             repository cannot be opened after the original host is lost. Restored files are
             decrypted: keep the recovery directory private and remove it after recovery.
 
@@ -97,7 +97,7 @@ public static class LmsConfigurationRecovery
                snapshot to a PRIVATE alternate directory. If LMS is unavailable, run:
                    restic --repo /path/to/repository snapshots
                    restic --repo /path/to/repository restore SNAPSHOT_ID --target /private/recovery
-               Restic asks for the password privately. Never put it in chat or command arguments.
+               Restic asks for the password privately. For password-free storage, use --insecure-no-password with restic 0.17 or newer. Never put passwords in chat or command arguments.
 
             2. Find this RECOVERY.txt in the restored snapshot and validate its bundle:
                    python3 recover-lms-config.py --bundle /path/to/this/bundle

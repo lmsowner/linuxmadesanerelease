@@ -14,6 +14,7 @@ public sealed class BackupRepository
     public bool CreateNewDirectory { get; set; }
     [System.Text.Json.Serialization.JsonIgnore]
     public string RequiredNetworkMountPath { get; set; } = "";
+    public bool NoPassword { get; set; }
     public string PasswordReference { get; set; } = "";
     public string MountPath { get; set; } = "";
     public string MountSource { get; set; } = "";
