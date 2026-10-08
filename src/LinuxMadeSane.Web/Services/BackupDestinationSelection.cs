@@ -23,6 +23,23 @@ public static class BackupDestinationSelection
         return destination.TrimEnd('/') + "/" + folder;
     }
 
+    public static string WithHostSubfolder(string basePath, string folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || folder.Contains('/') || folder.Contains('\\') || folder is "." or ".." || folder.IndexOfAny(['\0', '\n', '\r']) >= 0)
+            throw new InvalidOperationException("Enter one subfolder name for this host and backup plan.");
+        return Resolve(basePath, folder, "");
+    }
+
+    public static string SuggestHostSubfolder(string hostname, IEnumerable<string> existingPaths, int firstNumber)
+    {
+        var host = new string(hostname.Where(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.').ToArray()).Trim('.');
+        if (host.Length == 0) host = "lms-host";
+        var names = existingPaths.Select(path => Path.GetFileName(path.TrimEnd('/'))).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var number = Math.Max(1, firstNumber);
+        while (names.Contains($"{host}_{number}")) number++;
+        return $"{host}_{number}";
+    }
+
     private static void ValidateAbsolute(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || !path.StartsWith('/') || path.Trim('/') == "" ||

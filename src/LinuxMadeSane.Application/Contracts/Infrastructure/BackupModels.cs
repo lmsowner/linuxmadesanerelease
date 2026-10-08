@@ -9,6 +9,11 @@ public sealed class BackupRepository
     public string Name { get; set; } = "";
     public string Notes { get; set; } = "";
     public string Path { get; set; } = "";
+    // Creation-only instructions; never persisted with repository configuration.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool CreateNewDirectory { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string RequiredNetworkMountPath { get; set; } = "";
     public string PasswordReference { get; set; } = "";
     public string MountPath { get; set; } = "";
     public string MountSource { get; set; } = "";

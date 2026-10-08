@@ -84,6 +84,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
     {
         await Gate.WaitAsync(token);
         string? newReference = null;
+        bool directoryCreated = false;
         try
         {
             if (string.IsNullOrWhiteSpace(repository.Name)) throw new InvalidOperationException("Name this repository.");
@@ -91,6 +92,9 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             if (repository.Path.Trim('/') == "") throw new InvalidOperationException("Choose a dedicated backup folder, not the filesystem root (/).");
             var mounts = await shares.ListCurrentMountsAsync(token);
             var mount = mounts.Where(item => IsWithin(repository.Path, item.LocalMountPath)).OrderByDescending(item => item.LocalMountPath.Length).FirstOrDefault();
+            if (repository.RequiredNetworkMountPath.Length > 0 &&
+                (mount is not { IsNetworkMount: true } || mount.LocalMountPath != repository.RequiredNetworkMountPath))
+                throw new InvalidOperationException("This network share is no longer connected. Reconnect it before creating backup storage.");
             if (mount?.IsReadOnly == true) throw new InvalidOperationException("This destination is mounted read-only.");
             repository.MountPath = mount?.LocalMountPath ?? ""; repository.MountSource = mount?.SourcePath ?? "";
             var repositories = await Read<BackupRepository>("backup-repositories", token);
@@ -101,6 +105,20 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             if (initialize && (string.IsNullOrWhiteSpace(password) || password.Length < 12)) throw new InvalidOperationException("Choose a backup encryption password with at least 12 characters. Recovery requires this password.");
             if (!string.IsNullOrEmpty(password)) repository.PasswordReference = newReference = await secrets.StoreSecretAsync(password, "Restic repository " + repository.Name, token);
             if (repository.PasswordReference.Length == 0) throw new InvalidOperationException("Enter the repository password. Keep a recovery copy somewhere safe.");
+            if (repository.CreateNewDirectory)
+            {
+                if (!initialize || existing is not null)
+                    throw new InvalidOperationException("Separate subfolders are only created for new backup storage.");
+                var parent = await runner.RunAsync(new("mkdir", ["-p", "--", Path.GetDirectoryName(repository.Path)!], true,
+                    TimeSpan.FromSeconds(15), "Create backup parent folder"), false, token);
+                if (parent.ExitCode != 0) throw new InvalidOperationException("Could not create the backup parent folder: " + parent.StandardError);
+                // Exclusive mkdir is atomic even when another LMS host uses this share.
+                var created = await runner.RunAsync(new("mkdir", ["-m", "700", "--", repository.Path], true,
+                    TimeSpan.FromSeconds(15), "Create separate host backup folder without reusing existing data"), false, token);
+                if (created.ExitCode != 0)
+                    throw new InvalidOperationException($"Could not create {repository.Path}. If this folder already exists, edit the host / plan subfolder name. Existing data has not been changed. " + created.StandardError);
+                directoryCreated = true;
+            }
             if (initialize)
             {
                 // restic itself refuses init over an existing repository. Never remove existing data.
@@ -112,7 +130,18 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             var storedReference = newReference; newReference = null;
             if (storedReference is not null && existing?.PasswordReference is { Length: > 0 } old) await secrets.DeleteSecretAsync(old, token);
         }
-        catch { if (newReference is not null) await secrets.DeleteSecretAsync(newReference, CancellationToken.None); throw; }
+        catch
+        {
+            if (newReference is not null) await secrets.DeleteSecretAsync(newReference, CancellationToken.None);
+            if (directoryCreated)
+            {
+                // Remove only an empty directory created by this attempt. Never remove
+                // partial repository data or anything another process has written.
+                try { await runner.RunAsync(new("rmdir", ["--", repository.Path], true, TimeSpan.FromSeconds(5), "Remove empty backup folder after failed creation"), false, CancellationToken.None); }
+                catch { /* Preserve the original failure and any remaining data. */ }
+            }
+            throw;
+        }
         finally { Gate.Release(); }
     }
 

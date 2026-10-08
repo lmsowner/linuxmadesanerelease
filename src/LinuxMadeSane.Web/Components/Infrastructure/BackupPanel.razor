@@ -111,6 +111,7 @@
             {
                 <UiTextField Label="Backup folder inside this share" Placeholder="lms-backups" Helper="Use a dedicated folder. To connect an existing backup, enter its existing folder name." Disabled="@busy" @bind-Value="backupFolder" />
             }
+            @if (!editingRepository && initialize && backupDestination != "local") { @HostBackupFolderOptions }
         </section>
         <section class="backup-setup-step">
             <h3>2. Protect your backups</h3>
@@ -170,6 +171,7 @@
 <UiModal Class="share-mapping-modal" IsOpen="@showNetworkMount" Title="Add network share for backups" Subtitle="Choose saved server credentials and a share. LMS saves a permanent mount so scheduled backups can use it after a restart." OnClose="CloseNetworkMount">
     @if (showNetworkMount)
     {
+        @if (!editingRepository && initialize) { @HostBackupFolderOptions }
         <ShareMappingForm Editor="@networkMountEditor" EnableRemoteShareDiscovery="true" ShowPersistenceToggle="false" PreferLmsDefaultMountPath="true"
                           IsBusy="@connectingNetworkMount" StatusMessage="@networkMountStatus" StatusTone="error"
                           PermanentSubmitLabel="Connect share & use for backups" OnCreateMount="CreateBackupNetworkMount" />
@@ -344,6 +346,9 @@
     private string recoveryPreparationPath = "", recoveryDataDirectory = "", recoveryApplicationDirectory = "", recoveryKeyDirectory = "";
     private string password = "", sources = "", restoreTarget = "", lmsRestorePath = "", progress = "";
     private string backupDestination = "", backupFolder = "lms-backups", localBackupPath = "", passwordConfirmation = "";
+    private bool createHostBackupFolder = true;
+    private string hostBackupFolder = "";
+    private bool UseHostBackupFolder => initialize && !editingRepository && createHostBackupFolder && backupDestination != "local";
     private string? repositoryNotice;
     private bool editingRepository;
     private bool showNetworkMount, connectingNetworkMount;
@@ -352,8 +357,16 @@
     private BackupNetworkDestination? SelectedNetworkDestination => workspace?.NetworkDestinations.FirstOrDefault(item => item.Path == backupDestination);
     private string? BackupPathPreview
     {
-        get { try { return BackupDestinationSelection.Resolve(backupDestination, backupFolder, localBackupPath); } catch (InvalidOperationException) { return null; } }
+        get { try { var path = BackupDestinationSelection.Resolve(backupDestination, backupFolder, localBackupPath); return UseHostBackupFolder ? BackupDestinationSelection.WithHostSubfolder(path, hostBackupFolder) : path; } catch (InvalidOperationException) { return null; } }
     }
+    private RenderFragment HostBackupFolderOptions => @<div>
+        <UiCheckboxField Label="Create a separate subfolder for this host and backup plan" Disabled="@(busy || connectingNetworkMount)" @bind-Value="createHostBackupFolder" />
+        @if (createHostBackupFolder)
+        {
+            <UiTextField Label="Host / plan subfolder (editable)" Helper="Created inside the backup folder. Existing folders are never reused by this option." Disabled="@(busy || connectingNetworkMount)" @bind-Value="hostBackupFolder" />
+            @if (showNetworkMount) { <p class="backup-location-preview">Backup folder on this share: <strong>@backupFolder/@hostBackupFolder</strong></p> }
+        }
+    </div>;
     private string? error, output, snapshot;
     private IReadOnlyList<BackupSnapshot> snapshots = [];
     private IReadOnlyList<BackupFile> files = [];
@@ -362,7 +375,7 @@
     private async Task Operation(string label, Func<Task> operation)
     { busy = true; progress = label; error = null; await InvokeAsync(StateHasChanged); await Task.Yield(); try { await operation(); } catch (Exception e) { error = e.Message; } finally { busy = false; } }
     private Task Load() => Operation("Reading backup configuration…", async () => workspace = await Backup.GetAsync());
-    private void NewRepository() { error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = true; editingRepository = false; backupDestination = localBackupPath = ""; backupFolder = "lms-backups"; repositoryEditor = new() { Name = "LMS backup" }; }
+    private void NewRepository() { error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = true; editingRepository = false; backupDestination = localBackupPath = ""; backupFolder = "lms-backups"; createHostBackupFolder = true; hostBackupFolder = BackupDestinationSelection.SuggestHostSubfolder(Environment.MachineName, workspace?.Repositories.Select(item => item.Path) ?? [], (workspace?.Sets.Count ?? 0) + 1); repositoryEditor = new() { Name = "LMS backup" }; }
     private void EditRepository(BackupRepository repo)
     {
         error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = false; editingRepository = true;
@@ -413,7 +426,9 @@
     });
     private Task SaveRepository() => Operation(initialize ? "Creating encrypted backup storage…" : "Checking the backup password and location…", async () =>
     {
-        repositoryEditor!.Path = BackupDestinationSelection.Resolve(backupDestination, backupFolder, localBackupPath);
+        repositoryEditor!.Path = BackupPathPreview ?? throw new InvalidOperationException("Choose a backup destination and a valid folder name.");
+        repositoryEditor.CreateNewDirectory = UseHostBackupFolder;
+        repositoryEditor.RequiredNetworkMountPath = backupDestination == "local" ? "" : backupDestination;
         if (backupDestination != "local")
         {
             workspace = await Backup.GetAsync();
