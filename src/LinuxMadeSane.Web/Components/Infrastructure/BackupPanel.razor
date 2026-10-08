@@ -107,7 +107,7 @@
             {
                 <UiTextField Label="Full path to the backup folder" Placeholder="/var/backups/lms" Helper="Backups on the same disk cannot protect you if that disk fails. A separate disk or network share is safer." Disabled="@busy" @bind-Value="localBackupPath" />
             }
-            else if (backupDestination.Length > 0)
+            else if (backupDestination.Length > 0 && !UseHostBackupFolder)
             {
                 <UiTextField Label="Backup folder inside this share" Placeholder="lms-backups" Helper="Use a dedicated folder. To connect an existing backup, enter its existing folder name." Disabled="@busy" @bind-Value="backupFolder" />
             }
@@ -168,13 +168,13 @@
         <UiCommandButton Label="Save test record" HideIcon="true" Disabled="@(busy || recoveryTestSnapshot.Length == 0 || recoveryTestEvidence.Trim().Length < 20)" OnClick="SaveRecoveryTest" />
     }
 </ChildContent></UiModal>
-<UiModal Class="share-mapping-modal" IsOpen="@showNetworkMount" Title="Add network share for backups" Subtitle="Choose the server, share and folder, then review the backup location. The share stays connected after restart." OnClose="CloseNetworkMount">
+<UiModal Class="share-mapping-modal" IsOpen="@showNetworkMount" Title="Add network share for backups" Subtitle="Connect the share and folder. Choose the backup subfolder in the backup setup after connecting." OnClose="CloseNetworkMount">
     @if (showNetworkMount)
     {
         <ShareMappingForm Editor="@networkMountEditor" EnableRemoteShareDiscovery="true" ShowPersistenceToggle="false" PreferLmsDefaultMountPath="true"
                           IsBusy="@connectingNetworkMount" StatusMessage="@networkMountStatus" StatusTone="error"
                           PermanentSubmitLabel="Connect share & use for backups" OnCreateMount="CreateBackupNetworkMount"
-                          RemoteFolderDetails="@BackupShareFolderDetails" ReviewAtEnd="true" ReviewContent="@BackupShareReview" />
+                          ReviewAtEnd="true" />
     }
 </UiModal>
 <UiModal Class="backup-compact-modal" IsOpen="@(setEditor is not null)" Title="Choose what to back up" OnClose="CloseSet"><ChildContent>
@@ -357,40 +357,13 @@
     private BackupNetworkDestination? SelectedNetworkDestination => workspace?.NetworkDestinations.FirstOrDefault(item => item.Path == backupDestination);
     private string? BackupPathPreview
     {
-        get { try { var path = BackupDestinationSelection.Resolve(backupDestination, backupFolder, localBackupPath); return UseHostBackupFolder ? BackupDestinationSelection.WithHostSubfolder(path, hostBackupFolder) : path; } catch (InvalidOperationException) { return null; } }
+        get { try { return UseHostBackupFolder ? BackupDestinationSelection.WithHostSubfolder(backupDestination, hostBackupFolder) : BackupDestinationSelection.Resolve(backupDestination, backupFolder, localBackupPath); } catch (InvalidOperationException) { return null; } }
     }
-    private RenderFragment BackupShareFolderDetails => @<section class="backup-setup-step">
-        @if (!editingRepository && initialize)
-        {
-            <strong>Backup folders inside the selected remote folder</strong>
-            <UiTextField Label="Backup folder" Helper="Created inside the remote folder selected above." Disabled="@(busy || connectingNetworkMount)" @bind-Value="backupFolder" />
-            @HostBackupFolderOptions
-        }
-    </section>;
-    private string? BackupSharePathPreview
-    {
-        get
-        {
-            try
-            {
-                var path = BackupDestinationSelection.Resolve(networkMountEditor.LocalMountPath, backupFolder, "");
-                return initialize && !editingRepository && createHostBackupFolder ? BackupDestinationSelection.WithHostSubfolder(path, hostBackupFolder) : path;
-            }
-            catch (InvalidOperationException) { return null; }
-        }
-    }
-    private RenderFragment BackupShareReview => @<div class="backup-location-preview">
-        @if (!editingRepository && initialize && BackupSharePathPreview is { } path)
-        {
-            <strong>Backup data will be stored at:</strong> <span>@path</span>
-            <p class="meta-text">Connect the share, then confirm the backup storage and encryption password.</p>
-        }
-    </div>;
     private RenderFragment HostBackupFolderOptions => @<div>
         <UiCheckboxField Label="Create a separate subfolder for this host and backup plan" Disabled="@(busy || connectingNetworkMount)" @bind-Value="createHostBackupFolder" />
         @if (createHostBackupFolder)
         {
-            <UiTextField Label="Host / plan subfolder (editable)" Helper="Created inside the backup folder. Existing folders are never reused by this option." Disabled="@(busy || connectingNetworkMount)" @bind-Value="hostBackupFolder" />
+            <UiTextField Label="Backup subfolder (editable)" Helper="Created directly inside the connected share / folder selected above. Existing folders are not reused." Disabled="@(busy || connectingNetworkMount)" @bind-Value="hostBackupFolder" />
         }
     </div>;
     private string? error, output, snapshot;

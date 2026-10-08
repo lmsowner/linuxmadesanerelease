@@ -116,7 +116,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                 var created = await runner.RunAsync(new("mkdir", ["-m", "700", "--", repository.Path], true,
                     TimeSpan.FromSeconds(15), "Create separate host backup folder without reusing existing data"), false, token);
                 if (created.ExitCode != 0)
-                    throw new InvalidOperationException($"Could not create {repository.Path}. If this folder already exists, edit the host / plan subfolder name. Existing data has not been changed. " + created.StandardError);
+                    throw new InvalidOperationException($"Could not create {repository.Path}. If this folder already exists, edit the backup subfolder name. Existing data has not been changed. " + created.StandardError);
                 directoryCreated = true;
             }
             if (initialize)
