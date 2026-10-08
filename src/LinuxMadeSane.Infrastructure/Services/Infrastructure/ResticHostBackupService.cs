@@ -257,6 +257,12 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         {
             var set = (await Read<BackupSet>("backup-sets", token)).Single(item => item.Id == setId);
             var repository = await Repository(set.RepositoryId, token); repositoryId = repository.Id;
+            if (set.FullSystem)
+            {
+                // Existing plans may predate newly identified recovery dependencies.
+                // Install missing packages at use, before producing any recovery media.
+                await provider.GetRequiredService<IInfrastructureDiagnosticsService>().InstallPackagesAsync("FullBackup", token);
+            }
             var sources = set.Sources.ToList();
             var stagingRoot = OperatingSystem.IsLinux() ? "/dev/shm" : Path.GetTempPath();
             scratch = Path.Combine(stagingRoot, "lms-backup-staging-" + Guid.NewGuid().ToString("N"));
