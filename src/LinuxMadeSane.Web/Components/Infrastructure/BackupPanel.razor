@@ -12,7 +12,7 @@
 @inject ShareMountsWorkspaceService ShareWorkspace
 <FeaturePackageGate Feature="Backup" OnInstalled="Load">
     <p>Protect LMS and your chosen folders. Each run saves a dated recovery point; restic reuses unchanged data.</p>
-    <UiCommandButton Label="How backups & recovery work" Glyph="UiIconGlyph.FolderOpen" OnClick="(() => showBackupGuide = true)" />
+    <UiCommandButton Label="How backups & recovery work" Glyph="UiIconGlyph.FolderOpen" OnClick="(() => OpenBackupGuide())" />
     <div class="infrastructure-actions"><UiCommandButton Label="Refresh" Disabled="@busy" OnClick="Load" />
     <UiCommandButton Label="Install / update restic" HideIcon="true" Disabled="@busy" OnClick="UpdateRestic" />
     <UiCommandButton Label="Set up backup storage" HideIcon="true" Disabled="@busy" OnClick="NewRepository" />
@@ -43,7 +43,7 @@
                 <p><strong>Destination:</strong> @(destination?.Name ?? "Storage location missing") · @destination?.Path</p>
                 <p><strong>Schedule:</strong> @(set.ScheduleEnabled ? set.ScheduleSummary : "Manual — scheduled backups off")</p>
                 <p><strong>Retention:</strong> @set.KeepDaily daily · @set.KeepWeekly weekly · @set.KeepMonthly monthly</p>
-                @if (set.FullSystem) { <p><strong>Restore test:</strong> @(set.RecoveryTestRecordedUtc is null ? "Not recorded — test on disposable disks" : $"User-reported · {set.RecoveryTestRecordedUtc.Value.ToLocalTime():g} · {set.RecoveryTestSnapshotId[..8]}")</p> }
+                @if (set.FullSystem) { <p><strong>Restore notes:</strong> @(set.RecoveryTestRecordedUtc is null ? "No notes saved" : $"Notes saved · {set.RecoveryTestRecordedUtc.Value.ToLocalTime():g} · {set.RecoveryTestSnapshotId[..8]}")</p> }
 
                 @if (lastSucceeded != true) { <p><strong>Last successful backup:</strong> @((set.LastSuccessfulBackupUtc ?? lastSuccess?.FinishedUtc)?.ToLocalTime().ToString("g") ?? "None recorded")</p> }
                 </details>
@@ -53,7 +53,7 @@
                     <UiCommandButton Label="@(job?.IsRunning == true ? "Backup running…" : "Back up now")" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@(busy || job?.IsRunning == true)" OnClick="(() => Run(set.Id))" />
                     <UiCommandButton Label="Backups & restore" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ShowSnapshots(destination!, set))" />
                     <UiCommandButton Label="History & logs" HideIcon="true" Disabled="@busy" OnClick="(() => ShowHistory(set.Id, null, set.Name))" />
-                    @if (set.FullSystem && destination is not null) { <UiCommandButton Label="Record my recovery test" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryTest(set))" /> }
+                    @if (set.FullSystem && destination is not null) { <UiCommandButton Label="Recovery guide" HideIcon="true" Disabled="@busy" OnClick="(() => OpenBackupGuide(set))" /> }
                     <UiCommandButton Label="Delete plan" HideIcon="true" Variant="UiButtonVariant.Ghost" Disabled="@(busy || job?.IsRunning == true)" OnClick="(() => RequestDeletePlan(set))" />
                 </div>
                 @if (job is not null) { <BackupProgressView Progress="job" /> }
@@ -78,7 +78,7 @@
     }
 </FeaturePackageGate>
 <div class="backup-dialogs">
-<UiModal Class="backup-compact-modal" IsOpen="@showBackupGuide" Title="Backups & recovery — a simple guide" OnClose="(() => showBackupGuide = false)"><ChildContent>
+<UiModal Class="backup-compact-modal" IsOpen="@(showBackupGuide && recoveryTestSet is null)" Title="Backups & recovery — a simple guide" OnClose="(() => showBackupGuide = false)"><ChildContent>
     <h3>Your plans and your backups are different</h3>
     <p>A plan chooses files, storage, schedule and retention. Each run creates a dated snapshot. Open <strong>Backups & restore</strong> to see recovery points. Deleting a plan stops its schedule but keeps those backups.</p>
     <h3>Does every backup copy everything again?</h3>
@@ -89,7 +89,13 @@
     <p>Select dated snapshots and choose Delete selected snapshots. This permanently removes those recovery points, without breaking remaining snapshots. Then Reclaim unused space removes data no remaining backup needs. Shared data is kept, so the space reclaimed may be smaller than a snapshot's file sizes. Backups must wait during repository maintenance.</p>
     <h3>If the whole server fails</h3>
     <ol><li>Make a <strong>Full system + boot recovery</strong> backup. A folders-only or LMS configuration plan cannot recreate bootable disks.</li><li>Open its completed snapshot and select Recovery media. Export and keep its matching ISO and FULL-SYSTEM-RECOVERY.txt privately, away from the original server. Keep the repository location, share credentials and backup password (if protected) independently of LMS.</li><li>Boot the matching ISO on the replacement machine, using the same CPU architecture and BIOS/UEFI mode. Follow the exported guide to connect the backup storage. Keep that storage separate from disks being rebuilt.</li><li>Run <code>rear recover</code> in the recovery console. Enter credentials privately. Review disk mappings carefully: approving disk recreation replaces their contents. Different disks, controllers and network interfaces may require adjustments.</li><li>Verify Linux boots, LMS login works, saved credentials decrypt, mounts reconnect and essential workloads run. Test first on disposable disks or an isolated VM. <strong>A successful backup alone does not prove bare-metal recovery.</strong></li></ol>
-    <p><strong>Record my recovery test</strong> saves your notes about a test you performed. It does not perform or certify a restore. Include the snapshot, test hardware and checks that succeeded.</p>
+    @if (backupGuidePlan is { FullSystem: true } plan)
+    {
+        <details><summary>Already tested restoring this backup? Save your notes (optional)</summary>
+            <p>After you have restored onto a spare machine or isolated VM, you can save what you checked and whether it worked. These are your notes; this button does not test or restore anything.</p>
+            <UiCommandButton Label="Add restore test notes" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryTest(plan))" />
+        </details>
+    }
 </ChildContent></UiModal>
 <UiModal Class="backup-compact-modal" IsOpen="@(pendingDeletion is not null)" Title="@deletionTitle" OnClose="CloseDeletion"><ChildContent>
     <p>@deletionExplanation</p>
@@ -205,15 +211,15 @@
         <details><summary>Restore on a replacement machine</summary><p>Use the same CPU architecture and BIOS/UEFI mode as the original. Attach the ISO as a virtual CD or compatible recovery medium. Boot it, connect the backup storage and follow FULL-SYSTEM-RECOVERY.txt. Review target disks before running rear recover: disk contents will be replaced. Test in isolation, then record Linux boot, LMS login and workload checks against this snapshot.</p></details>
     }
 </ChildContent></UiModal>
-<UiModal Class="backup-compact-modal" IsOpen="@(recoveryTestSet is not null)" Title="Record a successful restore test" OnClose="CloseRecoveryTest"><ChildContent>
+<UiModal Class="backup-compact-modal" IsOpen="@(recoveryTestSet is not null)" Title="Notes from a restore you tested" OnClose="CloseRecoveryTest"><ChildContent>
     @if (recoveryTestSet is not null)
     {
-        <p class="backup-introduction">Only record this after booting a restored disposable machine and checking LMS login, credentials and required workloads. This is your test record, not an automatic certification.</p>
+        <p class="backup-introduction">Use this only after you have restored onto a spare machine or isolated VM. Choose that backup and describe what worked. Saving notes does not run a restore or check the backup.</p>
         @if (busy) { <p role="status">@progress</p> }
         @if (error is not null) { <p class="callout error" role="alert">@error</p> }
-        <UiSelectField TValue="string" Label="Tested full-system snapshot" @bind-Value="recoveryTestSnapshot"><option value="">Choose the snapshot you restored</option>@foreach (var item in recoveryTestSnapshots) { <option value="@item.Id">@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]</option> }</UiSelectField>
-        <UiTextAreaField Label="Test machine & results" Helper="Include Linux boot, LMS login, credential and workload checks. No passwords." Rows="3" @bind-Value="recoveryTestEvidence" />
-        <UiCommandButton Label="Save test record" HideIcon="true" Disabled="@(busy || recoveryTestSnapshot.Length == 0 || recoveryTestEvidence.Trim().Length < 20)" OnClick="SaveRecoveryTest" />
+        <UiSelectField TValue="string" Label="Which backup did you restore?" @bind-Value="recoveryTestSnapshot"><option value="">Choose the snapshot you restored</option>@foreach (var item in recoveryTestSnapshots) { <option value="@item.Id">@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]</option> }</UiSelectField>
+        <UiTextAreaField Label="Where did you restore it, and what worked?" Helper="Include Linux boot, LMS login, credential and workload checks. No passwords." Rows="3" @bind-Value="recoveryTestEvidence" />
+        <UiCommandButton Label="Save notes" HideIcon="true" Disabled="@(busy || recoveryTestSnapshot.Length == 0 || recoveryTestEvidence.Trim().Length < 20)" OnClick="SaveRecoveryTest" />
     }
 </ChildContent></UiModal>
 <UiModal Class="share-mapping-modal" IsOpen="@showNetworkMount" Title="Add network share for backups" Subtitle="Connect the share and folder. Choose the backup subfolder in the backup setup after connecting." OnClose="CloseNetworkMount">
@@ -309,7 +315,7 @@
     <div class="infrastructure-actions">
         <UiCommandButton Label="Delete selected snapshots" HideIcon="true" Disabled="@(busy || selectedSnapshots.Count == 0)" OnClick="RequestDeleteSnapshots" />
         <UiCommandButton Label="Reclaim unused space" HideIcon="true" Disabled="@busy" OnClick="RequestReclaimSpace" />
-        <UiCommandButton Label="Recovery guide" HideIcon="true" OnClick="(() => showBackupGuide = true)" />
+        <UiCommandButton Label="Recovery guide" HideIcon="true" OnClick="(() => OpenBackupGuide(snapshotPlan))" />
     </div>
     @if (output is not null && snapshot is null) { <p class="callout" role="status">@output</p> }
     <div class="snapshot-list">
@@ -399,6 +405,8 @@
 <UiModal IsOpen="@showOutput" Title="Repository operation" OnClose="(() => showOutput = false)"><ChildContent><pre>@output</pre></ChildContent></UiModal>
 </div>
 @code {
+    private BackupSet? backupGuidePlan;
+    private void OpenBackupGuide(BackupSet? plan = null) { backupGuidePlan = plan; showBackupGuide = true; }
     private bool showBackupGuide, deletionConfirmed, restoreEverything;
     private Func<Task>? pendingDeletion;
     private string deletionTitle = "", deletionExplanation = "", deletionConfirmation = "";
@@ -456,7 +464,7 @@
     private string recoveryTestSnapshot = "", recoveryTestEvidence = "";
     private Task OpenRecoveryTest(BackupSet set) { recoveryTestSet = set; recoveryTestSnapshot = ""; recoveryTestEvidence = ""; recoveryTestSnapshots = []; return Operation("Reading full-system snapshots…", async () => recoveryTestSnapshots = (await Backup.SnapshotsAsync(set.RepositoryId)).Where(item => item.Tags.Contains("lms-full-system") && item.Tags.Contains("lms-backup-complete") && item.Tags.Contains("lms-set-" + set.Id.ToString("N"))).ToArray()); }
     private void CloseRecoveryTest() { if (!busy) recoveryTestSet = null; }
-    private Task SaveRecoveryTest() => Operation("Saving recovery test record…", async () => { await Backup.RecordRecoveryTestAsync(recoveryTestSet!.Id, recoveryTestSnapshot, recoveryTestEvidence); recoveryTestSet = null; workspace = await Backup.GetAsync(); });
+    private Task SaveRecoveryTest() => Operation("Saving your restore notes…", async () => { await Backup.RecordRecoveryTestAsync(recoveryTestSet!.Id, recoveryTestSnapshot, recoveryTestEvidence); recoveryTestSet = null; workspace = await Backup.GetAsync(); });
     private string? fullSystemCheck;
     private bool fullSystemReady;
     private bool fullSystemPackagesReady;
