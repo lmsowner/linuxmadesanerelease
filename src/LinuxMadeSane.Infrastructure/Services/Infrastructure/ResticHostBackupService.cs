@@ -345,9 +345,35 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         catch (Exception e) { await History(repositoryId, setId, "Backup", start, false, e.Message, CancellationToken.None); throw; }
         finally
         {
-            try { if (scratch is not null && Directory.Exists(scratch)) Directory.Delete(scratch, true); }
+            try
+            {
+                if (scratch is not null) await CleanupStagingAsync(scratch);
+            }
+            catch (Exception cleanupError)
+            {
+                // Cleanup must not hide a capture/backup failure or mark a completed backup as failed.
+                try { await History(repositoryId, setId, "Temporary backup cleanup", DateTimeOffset.UtcNow, false,
+                    "Backup staging cleanup failed: " + cleanupError.Message, CancellationToken.None); }
+                catch { /* Retain the original operation result even if logging is unavailable. */ }
+            }
             finally { Gate.Release(); }
         }
+    }
+
+    internal async Task CleanupStagingAsync(string scratch)
+    {
+        var stagingRoot = OperatingSystem.IsLinux() ? "/dev/shm" : Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
+        if (Path.GetDirectoryName(scratch) != stagingRoot ||
+            !Regex.IsMatch(Path.GetFileName(scratch), "^lms-backup-staging-[0-9a-f]{32}$"))
+            throw new InvalidOperationException("Refusing cleanup outside an LMS backup staging directory.");
+        if (OperatingSystem.IsLinux())
+        {
+            // ReaR may leave root-owned private files even when media creation fails.
+            var result = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.BackupCleanupScript, scratch], true,
+                TimeSpan.FromMinutes(2), "Remove temporary LMS backup staging files"), false, CancellationToken.None);
+            if (result.ExitCode != 0) throw new InvalidOperationException(result.StandardError);
+        }
+        else if (Directory.Exists(scratch)) Directory.Delete(scratch, true);
     }
 
     public async Task<IReadOnlyList<BackupSnapshot>> SnapshotsAsync(Guid repositoryId, CancellationToken token = default)
