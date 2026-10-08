@@ -80,8 +80,11 @@ def discover(repository):
     local = []
     excluded = ["/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", repository, "/var/lib/rear", "/var/log/rear"]
     excluded_mounts = []
+    excluded_components = set(backup_disks)
     for item in entries:
         target, source, kind = item["target"], item["source"], item["fstype"]
+        if source.startswith("/dev/mapper/lms-recovery-"):
+            excluded_components.add(source)
         if target != "/" and (inside(target, destination["target"]) or (source.startswith("/dev/") and backup_disks and disk_ancestors(source) & backup_disks) or source.startswith("/dev/mapper/lms-recovery-") or (kind == "squashfs" and source.startswith("/dev/loop")) or kind in ("nfs", "nfs4", "cifs", "smb3", "fuse.sshfs") or not source.startswith("/dev/")):
             excluded.append(target)
             excluded_mounts.append(target)
@@ -90,7 +93,7 @@ def discover(repository):
             if kind not in ("ext2", "ext3", "ext4", "xfs", "vfat"):
                 raise ValueError("Local filesystem " + target + " uses " + kind + "; recovery support has not been verified. No full-system backup was started.")
             local.append(target)
-    return {"architecture": "x86_64", "firmware": "UEFI" if pathlib.Path("/sys/firmware/efi").exists() else "BIOS", "destinationFilesystem": destination["fstype"], "sources": sorted(set(local)), "excludes": sorted(set(excluded)), "excludedMounts": sorted(set(excluded_mounts)), "backupDisks": sorted(backup_disks), "protectedBackupIds": sorted(protected_ids), "repository": repository,
+    return {"architecture": "x86_64", "firmware": "UEFI" if pathlib.Path("/sys/firmware/efi").exists() else "BIOS", "destinationFilesystem": destination["fstype"], "sources": sorted(set(local)), "excludes": sorted(set(excluded)), "excludedMounts": sorted(set(excluded_mounts)), "backupDisks": sorted(backup_disks), "excludedComponents": sorted(excluded_components), "protectedBackupIds": sorted(protected_ids), "repository": repository,
             "warning": "Live backup: running databases and Docker workloads need an application-consistent backup or must be stopped. A restore drill has not been performed."}
 
 
@@ -284,7 +287,7 @@ unset RESTIC_PASSWORD_FILE
         # in rescue RAM only, leaving an existing host's ReaR state untouched.
         prepare_recovery = 'test -f /etc/rear-release || { echo "Recovery is only allowed from the boot recovery image." >&2; exit 1; }; cp -a -- ' + quoted(str(state) + '/.') + ' "$VAR_DIR/" || exit 1; /bin/bash ' + quoted(str(restore)) + ' prepare || exit 1'
         prepare_recovery += '; AddExitTask ' + quoted('rm -rf -- ' + quoted('/run/' + workspace.name + '-restore'))
-        lines = ["VAR_DIR=" + quoted(str(state)), "DISKLAYOUT_FILE=" + quoted(str(state / "layout/disklayout.conf")), "OUTPUT=ISO", "BACKUP=EXTERNAL", "OUTPUT_URL=", "BACKUP_URL=", "ISO_DIR=" + quoted(str(media)), "SSH_FILES=no", "SSH_UNPROTECTED_PRIVATE_KEYS=no", "USE_STATIC_NETWORKING=no", "USE_DHCLIENT=yes", "REQUIRED_PROGS+=( restic findmnt )", "COPY_AS_IS=( \"$SHARE_DIR\" \"$VAR_DIR\" " + quoted(str(restore)) + " )", "EXTERNAL_RESTORE=" + quoted("/bin/bash " + quoted(str(restore)) + ' "$TARGET_FS_ROOT"'), "AUTOEXCLUDE_PATH=()", "EXCLUDE_MOUNTPOINTS+=( " + " ".join(quoted(x) for x in plan["excludedMounts"]) + " )", "EXCLUDE_COMPONENTS+=( " + " ".join(quoted(x) for x in plan["backupDisks"]) + " )", "COPY_AS_IS_EXCLUDE+=( 'etc/linuxmadesane/*' 'var/lib/linuxmadesane/*' 'root/.ssh/*' 'home/*/.ssh/*' 'etc/shadow' 'etc/gshadow' 'etc/ssl/private/*' 'etc/NetworkManager/system-connections/*' )"]
+        lines = ["VAR_DIR=" + quoted(str(state)), "DISKLAYOUT_FILE=" + quoted(str(state / "layout/disklayout.conf")), "OUTPUT=ISO", "BACKUP=EXTERNAL", "OUTPUT_URL=", "BACKUP_URL=", "ISO_DIR=" + quoted(str(media)), "SSH_FILES=no", "SSH_UNPROTECTED_PRIVATE_KEYS=no", "USE_STATIC_NETWORKING=no", "USE_DHCLIENT=yes", "REQUIRED_PROGS+=( restic findmnt )", "COPY_AS_IS=( \"$SHARE_DIR\" \"$VAR_DIR\" " + quoted(str(restore)) + " )", "EXTERNAL_RESTORE=" + quoted("/bin/bash " + quoted(str(restore)) + ' "$TARGET_FS_ROOT"'), "AUTOEXCLUDE_PATH=()", "EXCLUDE_MOUNTPOINTS+=( " + " ".join(quoted(x) for x in plan["excludedMounts"]) + " )", "EXCLUDE_COMPONENTS+=( " + " ".join(quoted(x) for x in plan.get("excludedComponents", plan["backupDisks"])) + " )", "COPY_AS_IS_EXCLUDE+=( 'etc/linuxmadesane/*' 'var/lib/linuxmadesane/*' 'root/.ssh/*' 'home/*/.ssh/*' 'etc/shadow' 'etc/gshadow' 'etc/ssl/private/*' 'etc/NetworkManager/system-connections/*' )"]
         if pathlib.Path("/usr/local/bin/restic").is_file():
             lines.append("COPY_AS_IS+=( '/usr/local/bin/restic' )")
         lines.append("PRE_RECOVERY_SCRIPT=" + quoted(prepare_recovery))
