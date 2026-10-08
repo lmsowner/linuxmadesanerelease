@@ -1,12 +1,12 @@
 @* Copyright (c) Linux Made Sane.
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
-@using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.JSInterop
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Web.Services
 @implements IAsyncDisposable
 @inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject LinuxMadeSane.Core.Abstractions.ISavedCredentialAccessContext DisplayPreferenceAccess
 @inject DesktopAssistantNativeThemeStore NativeThemeStore
 @inject IJSRuntime JSRuntime
 
@@ -50,7 +50,6 @@ else
         return HandleFontScaleChangedAsync(options[Math.Clamp(index + direction, 0, options.Count - 1)].Percent);
     }
 
-    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
 
     private Guid? userId;
     private bool initialized;
@@ -89,6 +88,16 @@ else
         }
 
         initialized = true;
+
+        // Both toolbar variants restore the same account/verified-host profile.
+        // The sidebar exists on every page, including the CE layout.
+        if (!string.IsNullOrWhiteSpace(storedThemeMode))
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTheme.applyUserPreferences", new
+            {
+                paletteId, mode = storedThemeMode, fontScalePercent
+            });
+        }
 
         var settings = await JSRuntime.InvokeAsync<ThemePreferenceState>("lmsTheme.getThemeSettings");
         if (string.IsNullOrWhiteSpace(storedThemeMode))
@@ -133,17 +142,8 @@ else
         await ApplyAndSaveAsync();
     }
 
-    private async Task<Guid?> ResolveUserIdAsync()
-    {
-        var authenticationState = AuthenticationStateTask is null
-            ? null
-            : await AuthenticationStateTask;
-        var userIdValue = authenticationState?.User?.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-
-        return Guid.TryParse(userIdValue, out var parsedUserId)
-            ? parsedUserId
-            : null;
-    }
+    private Task<Guid?> ResolveUserIdAsync() =>
+        DisplayPreferenceAccess.GetAuthenticatedUserIdAsync();
 
     private async Task ApplyAndSaveAsync()
     {
