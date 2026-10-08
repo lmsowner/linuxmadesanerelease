@@ -11,7 +11,8 @@
 @inject IInfrastructureDiagnosticsService Diagnostics
 @inject ShareMountsWorkspaceService ShareWorkspace
 <FeaturePackageGate Feature="Backup" OnInstalled="Load">
-    <p>Keep an encrypted copy of LMS and your chosen folders. First choose where to keep backups, then choose what to back up.</p>
+    <p>Protect LMS and your chosen folders. Each run saves a dated recovery point; restic reuses unchanged data.</p>
+    <UiCommandButton Label="How backups & recovery work" Glyph="UiIconGlyph.FolderOpen" OnClick="(() => showBackupGuide = true)" />
     <div class="infrastructure-actions"><UiCommandButton Label="Refresh" Disabled="@busy" OnClick="Load" />
     <UiCommandButton Label="Install / update restic" HideIcon="true" Disabled="@busy" OnClick="UpdateRestic" />
     <UiCommandButton Label="Set up backup storage" HideIcon="true" Disabled="@busy" OnClick="NewRepository" />
@@ -36,19 +37,24 @@
             var lastSucceeded = set.LastRunSucceeded ?? last?.Success;
             var lastSuccess = workspace.History.FirstOrDefault(item => item.SetId == set.Id && item.Kind.StartsWith("Backup", StringComparison.Ordinal) && item.Success);
             <section class="surface-card backup-plan-card"><h3>@set.Name</h3>
-                <p><strong>Protects:</strong> @(set.FullSystem ? "Full system + ReaR boot recovery" : set.IncludeLms ? "LMS configuration, credentials & database" : "Selected folders")@((set.IncludeLms && set.Sources.Count > 0) ? "; " : "")@string.Join("; ", set.Sources)</p>
+                <p><strong>Protects:</strong> @(set.FullSystem ? "Full system + ReaR boot recovery" : set.IncludeLms ? "LMS configuration, credentials & database" : "Selected folders")</p>
+                <details><summary>Destination, retention & recovery details</summary>
+                @if (set.Sources.Count > 0) { <p><strong>Folders:</strong> @string.Join("; ", set.Sources)</p> }
                 <p><strong>Destination:</strong> @(destination?.Name ?? "Storage location missing") · @destination?.Path</p>
                 <p><strong>Schedule:</strong> @(set.ScheduleEnabled ? set.ScheduleSummary : "Manual — scheduled backups off")</p>
                 <p><strong>Retention:</strong> @set.KeepDaily daily · @set.KeepWeekly weekly · @set.KeepMonthly monthly</p>
                 @if (set.FullSystem) { <p><strong>Restore test:</strong> @(set.RecoveryTestRecordedUtc is null ? "Not recorded — test on disposable disks" : $"User-reported · {set.RecoveryTestRecordedUtc.Value.ToLocalTime():g} · {set.RecoveryTestSnapshotId[..8]}")</p> }
-                <p><strong>Last run:</strong> @(lastFinished is null ? "Not run yet" : $"{lastFinished.Value.ToLocalTime():g} · {(lastSucceeded == true ? "Success" : "Failed — open history for details")}")</p>
-                <p><strong>Last successful backup:</strong> @((set.LastSuccessfulBackupUtc ?? lastSuccess?.FinishedUtc)?.ToLocalTime().ToString("g") ?? "None recorded")</p>
+
+                @if (lastSucceeded != true) { <p><strong>Last successful backup:</strong> @((set.LastSuccessfulBackupUtc ?? lastSuccess?.FinishedUtc)?.ToLocalTime().ToString("g") ?? "None recorded")</p> }
+                </details>
+                <p><strong>Latest backup:</strong> @(lastFinished is null ? "Not run yet" : $"{lastFinished.Value.ToLocalTime():g} · {(lastSucceeded == true ? "Success" : "Failed — open history")}") · @(set.ScheduleEnabled ? set.ScheduleSummary : "Manual")</p>
                 <div class="infrastructure-actions">
                     <UiCommandButton Label="Edit plan" HideIcon="true" Disabled="@busy" OnClick="(() => EditSet(set))" />
                     <UiCommandButton Label="@(job?.IsRunning == true ? "Backup running…" : "Back up now")" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@(busy || job?.IsRunning == true)" OnClick="(() => Run(set.Id))" />
-                    <UiCommandButton Label="Restore" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ShowSnapshots(destination!, set))" />
+                    <UiCommandButton Label="Backups & restore" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ShowSnapshots(destination!, set))" />
                     <UiCommandButton Label="History & logs" HideIcon="true" Disabled="@busy" OnClick="(() => ShowHistory(set.Id, null, set.Name))" />
-                    @if (set.FullSystem && destination is not null) { <UiCommandButton Label="Record restore test" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryTest(set))" /> }
+                    @if (set.FullSystem && destination is not null) { <UiCommandButton Label="Record my recovery test" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryTest(set))" /> }
+                    <UiCommandButton Label="Delete plan" HideIcon="true" Variant="UiButtonVariant.Ghost" Disabled="@(busy || job?.IsRunning == true)" OnClick="(() => RequestDeletePlan(set))" />
                 </div>
                 @if (job is not null) { <BackupProgressView Progress="job" /> }
                 @if (!string.IsNullOrWhiteSpace(set.Notes)) { <details><summary>Notes & recovery instructions</summary><p class="backup-plan-notes">@set.Notes</p></details> }
@@ -72,6 +78,26 @@
     }
 </FeaturePackageGate>
 <div class="backup-dialogs">
+<UiModal Class="backup-compact-modal" IsOpen="@showBackupGuide" Title="Backups & recovery — a simple guide" OnClose="(() => showBackupGuide = false)"><ChildContent>
+    <h3>Your plans and your backups are different</h3>
+    <p>A plan chooses files, storage, schedule and retention. Each run creates a dated snapshot. Open <strong>Backups & restore</strong> to see recovery points. Deleting a plan stops its schedule but keeps those backups.</p>
+    <h3>Does every backup copy everything again?</h3>
+    <p>No. Restic stores new or changed pieces and reuses existing data. Each snapshot still shows the complete files as they were at that time. You do not need to restore a chain of earlier backups. New boot recovery media can add significant data.</p>
+    <h3>Recover one file</h3>
+    <ol><li>Open Backups & restore and choose the date you need.</li><li>Browse folders or search for a file. Tick the files or folders to restore.</li><li>Choose a new private folder on this host and restore. Check the recovered files before copying them into their original location.</li></ol>
+    <h3>Delete backups and recover storage space</h3>
+    <p>Select dated snapshots and choose Delete selected snapshots. This permanently removes those recovery points, without breaking remaining snapshots. Then Reclaim unused space removes data no remaining backup needs. Shared data is kept, so the space reclaimed may be smaller than a snapshot's file sizes. Backups must wait during repository maintenance.</p>
+    <h3>If the whole server fails</h3>
+    <ol><li>Make a <strong>Full system + boot recovery</strong> backup. A folders-only or LMS configuration plan cannot recreate bootable disks.</li><li>Open its completed snapshot and select Recovery media. Export and keep its matching ISO and FULL-SYSTEM-RECOVERY.txt privately, away from the original server. Keep the repository location, share credentials and backup password (if protected) independently of LMS.</li><li>Boot the matching ISO on the replacement machine, using the same CPU architecture and BIOS/UEFI mode. Follow the exported guide to connect the backup storage. Keep that storage separate from disks being rebuilt.</li><li>Run <code>rear recover</code> in the recovery console. Enter credentials privately. Review disk mappings carefully: approving disk recreation replaces their contents. Different disks, controllers and network interfaces may require adjustments.</li><li>Verify Linux boots, LMS login works, saved credentials decrypt, mounts reconnect and essential workloads run. Test first on disposable disks or an isolated VM. <strong>A successful backup alone does not prove bare-metal recovery.</strong></li></ol>
+    <p><strong>Record my recovery test</strong> saves your notes about a test you performed. It does not perform or certify a restore. Include the snapshot, test hardware and checks that succeeded.</p>
+</ChildContent></UiModal>
+<UiModal Class="backup-compact-modal" IsOpen="@(pendingDeletion is not null)" Title="@deletionTitle" OnClose="CloseDeletion"><ChildContent>
+    <p>@deletionExplanation</p>
+    <UiCheckboxField Label="@deletionConfirmation" Disabled="@busy" @bind-Value="deletionConfirmed" />
+    <div class="infrastructure-actions"><UiCommandButton Label="@deletionTitle" HideIcon="true" Disabled="@(busy || !deletionConfirmed)" OnClick="ConfirmDeletion" /><UiCommandButton Label="Cancel" HideIcon="true" Disabled="@busy" OnClick="CloseDeletion" /></div>
+    @if (busy) { <p class="callout" role="status">@progress</p> }
+    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+</ChildContent></UiModal>
 <UiModal Class="backup-compact-modal" IsOpen="@(repositoryEditor is not null && !showNetworkMount)" Title="@(editingRepository ? "Edit backup storage" : "Set up backup storage")" OnClose="CloseRepository"><ChildContent>
     @if (repositoryEditor is not null)
     {
@@ -264,7 +290,7 @@
         @if (error is not null) { <p class="callout error">@error</p> }
     }
 </ChildContent></UiModal>
-<UiModal IsOpen="@(snapshotRepository is not null && recoveryMediaSnapshot is null)" Title="@(snapshotPlan is null ? "Snapshots & restore" : $"Restore: {snapshotPlan.Name}")" OnClose="CloseSnapshots"><ChildContent>
+<UiModal IsOpen="@(snapshotRepository is not null && recoveryMediaSnapshot is null && pendingDeletion is null)" Title="@(snapshotPlan is null ? "Backups & restore" : $"Backups: {snapshotPlan.Name}")" OnClose="CloseSnapshots"><ChildContent>
     @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
     @if (error is not null)
     {
@@ -279,8 +305,22 @@
         <UiCommandButton Label="Choose what to back up" HideIcon="true" OnClick="ChooseSnapshotBackup" />
     }
     @if (snapshotPlan is not null) { <p>Showing only snapshots for <strong>@snapshotPlan.Name</strong>. Each new backup includes a <strong>backup-plan.json</strong> recovery record with the settings and notes at backup time.</p> }
+    <p>Choose a dated recovery point. Deleting a snapshot is permanent; remaining snapshots are kept.</p>
+    <div class="infrastructure-actions">
+        <UiCommandButton Label="Delete selected snapshots" HideIcon="true" Disabled="@(busy || selectedSnapshots.Count == 0)" OnClick="RequestDeleteSnapshots" />
+        <UiCommandButton Label="Reclaim unused space" HideIcon="true" Disabled="@busy" OnClick="RequestReclaimSpace" />
+        <UiCommandButton Label="Recovery guide" HideIcon="true" OnClick="(() => showBackupGuide = true)" />
+    </div>
+    @if (output is not null && snapshot is null) { <p class="callout" role="status">@output</p> }
+    <div class="snapshot-list">
     @foreach (var item in snapshots.OrderByDescending(item => item.Time))
-    { <div class="infrastructure-actions"><span>@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]@(item.Tags.Contains("lms-full-system") && !item.Tags.Contains("lms-backup-complete") ? " · Incomplete — boot recovery unavailable" : "")</span><UiCommandButton Label="Browse snapshot" Disabled="@busy" OnClick="(() => Browse(item.Id))" />@if (item.Tags.Contains("lms-full-system") && item.Tags.Contains("lms-backup-complete")) { <UiCommandButton Label="Recovery media" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryMedia(item))" /> }</div> }
+    { <div class="snapshot-row">
+        <UiCheckboxField Label="@(item.Time.ToLocalTime().ToString("g") + " · " + item.Id[..8])" Disabled="@busy" Value="@selectedSnapshots.Contains(item.Id)" ValueChanged="(value => SelectSnapshot(item.Id, value))" />
+        <UiCommandButton Label="@(snapshot == item.Id ? "Browsing" : "Browse files")" HideIcon="true" Disabled="@busy" OnClick="(() => Browse(item.Id))" />
+        @if (item.Tags.Contains("lms-full-system") && item.Tags.Contains("lms-backup-complete")) { <UiCommandButton Label="Recovery media" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryMedia(item))" /> }
+        else if (item.Tags.Contains("lms-full-system")) { <small>Incomplete — boot recovery unavailable</small> }
+    </div> }
+    </div>
     @if (snapshot is not null)
     {
         @if (snapshots.FirstOrDefault(item => item.Id == snapshot)?.Tags.Contains("lms-full-system") == true)
@@ -290,17 +330,44 @@
                 <p>Different hardware needs review. Live databases and containers need application-consistent backups. A successful backup does not prove a successful restore.</p>
             </details>
         }
-        <div class="snapshot-files">@foreach (var file in files.Take(1000)) { <UiCheckboxField Label="@(file.Path + (file.Type == "dir" ? "/" : ""))" Value="@selection.Contains(file.Path)" ValueChanged="(value => Select(file.Path, value))" /> }</div>
-        @if (files.Count > 1000) { <p>Showing the first 1,000 entries. Selecting a directory includes its contents.</p> }
-        <UiTextField Label="Restore destination" Helper="Use an alternate directory. Live LMS data and system roots are protected." @bind-Value="restoreTarget" />
-        <UiCheckboxField Label="I explicitly allow existing files at this destination to be overwritten" @bind-Value="overwrite" />
-        <p>@(selection.Count == 0 ? "All snapshot files will be restored." : $"{selection.Count} selected file(s) or directory(s) will be restored.")</p>
-        <UiCommandButton Label="Restore to destination" HideIcon="true" Disabled="@busy" OnClick="Restore" />
+        <h3>Files at @snapshots.First(item => item.Id == snapshot).Time.ToLocalTime().ToString("g")</h3>
+        <UiCheckboxField Label="Restore everything in this snapshot" Disabled="@busy" @bind-Value="restoreEverything" />
+        @if (!restoreEverything)
+        {
+            <UiTextField Label="Search all files and folders in this snapshot" Value="@fileSearch" ValueChanged="ChangeFileSearch" Disabled="@busy" />
+            <div class="infrastructure-actions"><strong>@browseDirectory</strong><UiCommandButton Label="Parent folder" HideIcon="true" Disabled="@(busy || browseDirectory == "/")" OnClick="ParentSnapshotFolder" /></div>
+            var visibleFiles = VisibleSnapshotFiles;
+            <div class="snapshot-files">
+            @foreach (var file in visibleFiles.Skip(filePage * 100).Take(100))
+            { <div class="snapshot-file-row">
+                <UiCheckboxField Label="@(fileSearch.Length == 0 ? System.IO.Path.GetFileName(file.Path) : file.Path)" Disabled="@busy" Value="@selection.Contains(file.Path)" ValueChanged="(value => Select(file.Path, value))" />
+                @if (file.Type == "dir") { <UiCommandButton Label="Open folder" HideIcon="true" Disabled="@busy" OnClick="(() => OpenSnapshotFolder(file.Path))" /> }
+                else { <small>@FormatFileSize(file.Size)</small> }
+            </div> }
+            </div>
+            <div class="infrastructure-actions">
+                <UiCommandButton Label="Previous" HideIcon="true" Disabled="@(busy || filePage == 0)" OnClick="(() => filePage--)" />
+                <span>Page @(filePage + 1) of @Math.Max(1, (visibleFiles.Count + 99) / 100) · @visibleFiles.Count entries</span>
+                <UiCommandButton Label="Next" HideIcon="true" Disabled="@(busy || (filePage + 1) * 100 >= visibleFiles.Count)" OnClick="(() => filePage++)" />
+                <UiCommandButton Label="Clear selection" HideIcon="true" Disabled="@busy" OnClick="(() => selection.Clear())" />
+            </div>
+        }
+        <UiTextField Label="Restore into a new private folder on this LMS host" Helper="For example /var/tmp/recovered-files. Original paths are recreated inside this folder; live files are not replaced." Disabled="@busy" @bind-Value="restoreTarget" />
+        <UiCheckboxField Label="I explicitly allow existing files at this destination to be overwritten" Disabled="@busy" @bind-Value="overwrite" />
+        <p>@(restoreEverything ? "All files in this dated snapshot will be restored." : $"{selection.Count} selected file(s) or folder(s). Selecting a folder includes its contents.")</p>
+        <UiCommandButton Label="Restore to destination" HideIcon="true" Disabled="@(busy || string.IsNullOrWhiteSpace(restoreTarget) || (!restoreEverything && selection.Count == 0))" OnClick="Restore" />
+        @if (busy) { <p class="callout" role="status">@progress</p> }
+        @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+        @if (output is not null) { <p class="callout" role="status">@output</p> }
+        <details><summary>Recover LMS configuration on a replacement host</summary>
         <section class="backup-setup-step">
             <h3>Recover LMS configuration on a replacement host</h3>
             <p>First restore the snapshot above to a private alternate folder. New LMS configuration backups include <strong>RECOVERY.txt</strong>, a recovery tool, host configuration and an inventory. Restored files are decrypted: keep this folder private.</p>
             <UiTextField Label="Restored recovery bundle folder" Helper="The folder containing linuxmadesane.db, protection-keys and recovery-manifest.json. LMS fills this in after restoring a new recovery bundle." @bind-Value="lmsRestorePath" />
             <UiCommandButton Label="Validate recovery bundle" HideIcon="true" Disabled="@busy" OnClick="ValidateRestore" />
+            @if (busy) { <p role="status">@progress</p> }
+            @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+            @if (output is not null) { <pre role="status">@output</pre> }
             <details><summary>Prepare configuration for this replacement host</summary>
                 <p>Use the replacement installation’s paths. The tool creates a separate review tree; it cannot overwrite live LMS files or start services.</p>
                 <UiTextField Label="New private folder for the recovery plan" @bind-Value="recoveryPreparationPath" />
@@ -308,11 +375,14 @@
                 <UiTextField Label="Replacement LMS application directory" @bind-Value="recoveryApplicationDirectory" />
                 <UiTextField Label="Replacement credential protection key directory" @bind-Value="recoveryKeyDirectory" />
                 <UiCommandButton Label="Prepare recovery plan" HideIcon="true" Disabled="@busy" OnClick="PrepareRecovery" />
+                @if (busy) { <p role="status">@progress</p> }
+                @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+                @if (output is not null) { <pre role="status">@output</pre> }
             </details>
             <p><strong>Review before applying:</strong> interface names, disk UUIDs, mounts, Linux users, SSH identity, schedules and Edge Gateway routes may differ. Follow RECOVERY.txt; keep a rollback copy and stop LMS before replacing its database and keys. Do not copy the old /etc wholesale.</p>
         </section>
+        </details>
     }
-    @if (output is not null) { <pre>@output</pre> }
 </ChildContent></UiModal>
 <UiModal Class="backup-compact-modal" IsOpen="@showHistory" Title="@($"History & logs: {historyTitle}")" OnClose="(() => showHistory = false)"><ChildContent>
     @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
@@ -329,6 +399,43 @@
 <UiModal IsOpen="@showOutput" Title="Repository operation" OnClose="(() => showOutput = false)"><ChildContent><pre>@output</pre></ChildContent></UiModal>
 </div>
 @code {
+    private bool showBackupGuide, deletionConfirmed, restoreEverything;
+    private Func<Task>? pendingDeletion;
+    private string deletionTitle = "", deletionExplanation = "", deletionConfirmation = "";
+    private readonly HashSet<string> selectedSnapshots = [];
+    private string browseDirectory = "/", fileSearch = "";
+    private int filePage;
+    private IReadOnlyList<BackupFile> VisibleSnapshotFiles => files.Where(file => fileSearch.Length > 0
+        ? file.Path.Contains(fileSearch, StringComparison.OrdinalIgnoreCase)
+        : file.Path != "/" && System.IO.Path.GetDirectoryName(file.Path.TrimEnd('/')) == browseDirectory)
+        .OrderBy(file => file.Type != "dir").ThenBy(file => file.Path, StringComparer.OrdinalIgnoreCase).ToArray();
+    private void ChangeFileSearch(string value) { fileSearch = value; filePage = 0; }
+    private void OpenSnapshotFolder(string path) { browseDirectory = path; fileSearch = ""; filePage = 0; }
+    private void ParentSnapshotFolder() => OpenSnapshotFolder(System.IO.Path.GetDirectoryName(browseDirectory.TrimEnd('/')) ?? "/");
+    private static string FormatFileSize(long bytes) => bytes >= 1_000_000_000 ? $"{bytes / 1_000_000_000d:0.##} GB" : bytes >= 1_000_000 ? $"{bytes / 1_000_000d:0.##} MB" : bytes >= 1_000 ? $"{bytes / 1_000d:0.##} KB" : $"{bytes} B";
+    private void SelectSnapshot(string id, bool value) { if (value) selectedSnapshots.Add(id); else selectedSnapshots.Remove(id); }
+    private void CloseDeletion() { if (!busy) pendingDeletion = null; }
+    private void RequestDeletePlan(BackupSet set)
+    {
+        deletionTitle = "Delete plan"; deletionExplanation = $"Delete {set.Name} and its schedule? Its stored backups, storage credentials and history will remain available under Backup storage locations → All snapshots / restore.";
+        deletionConfirmation = "Delete this plan and schedule; keep its stored backups"; deletionConfirmed = false; error = null;
+        pendingDeletion = async () => { await Backup.DeleteSetAsync(set.Id, true); workspace = await Backup.GetAsync(); repositoryNotice = "Plan deleted. Stored backups are still available in Backup storage locations."; };
+    }
+    private void RequestDeleteSnapshots()
+    {
+        var ids = selectedSnapshots.ToArray(); var repository = snapshotRepository!; var plan = snapshotPlan;
+        deletionTitle = "Delete selected snapshots"; deletionExplanation = $"Permanently delete {ids.Length} selected recovery point(s) from {repository.Name}? Other snapshots are preserved. Shared data is kept until no remaining backup needs it. Reclaim unused space afterwards if needed.";
+        deletionConfirmation = "Permanently delete the selected recovery points"; deletionConfirmed = false; error = null;
+        pendingDeletion = async () => { await Backup.DeleteSnapshotsAsync(repository.Id, ids, true); snapshot = null; files = []; selection.Clear(); selectedSnapshots.Clear(); snapshots = (await Backup.SnapshotsAsync(repository.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); output = "Selected snapshots deleted. Remaining backups are preserved. Reclaim unused space to remove unreferenced data."; };
+    }
+    private void RequestReclaimSpace()
+    {
+        var id = snapshotRepository!.Id;
+        deletionTitle = "Reclaim unused space"; deletionExplanation = "Restic will remove only data no remaining snapshot needs. This can take a long time and locks this repository against backups. It does not remove recovery points.";
+        deletionConfirmation = "Remove unused data; keep all remaining snapshots"; deletionConfirmed = false; error = null;
+        pendingDeletion = async () => output = await Backup.ReclaimSpaceAsync(id, true);
+    }
+    private Task ConfirmDeletion() => Operation(deletionTitle + " — restic is working; please wait…", async () => { await pendingDeletion!(); pendingDeletion = null; });
     private BackupWorkspace? workspace;
     private BackupRepository? repositoryEditor, snapshotRepository;
     private BackupSnapshot? recoveryMediaSnapshot;
@@ -528,18 +635,18 @@
         if (runNow) repositoryNotice = "Backup started. You can leave this page and return to see its progress.";
     });
     private Task Run(Guid id) => Operation("Starting your backup…", async () => { await Backup.StartBackupAsync(id); await RefreshProgress(); repositoryNotice = null; });
-    private Task ShowSnapshots(BackupRepository repo, BackupSet? plan = null) => Operation("Reading snapshots…", async () => { recoveryDataDirectory = workspace?.DataDirectory ?? ""; recoveryApplicationDirectory = workspace?.ApplicationDirectory ?? ""; recoveryKeyDirectory = workspace?.ProtectionKeyDirectory ?? ""; snapshotRepository = repo; snapshotPlan = plan; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); snapshots = (await Backup.SnapshotsAsync(repo.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); });
+    private Task ShowSnapshots(BackupRepository repo, BackupSet? plan = null) => Operation("Reading snapshots…", async () => { recoveryDataDirectory = workspace?.DataDirectory ?? ""; recoveryApplicationDirectory = workspace?.ApplicationDirectory ?? ""; recoveryKeyDirectory = workspace?.ProtectionKeyDirectory ?? ""; snapshotRepository = repo; snapshotPlan = plan; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); selectedSnapshots.Clear(); snapshots = (await Backup.SnapshotsAsync(repo.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); });
     private void ChooseSnapshotBackup()
     {
         var repositoryId = snapshotRepository!.Id;
         CloseSnapshots();
         NewSetForRepository(repositoryId);
     }
-    private Task Browse(string id) => Operation("Reading snapshot files…", async () => { snapshot = id; files = await Backup.FilesAsync(snapshotRepository!.Id, id); selection.Clear(); });
+    private Task Browse(string id) => Operation("Reading snapshot files…", async () => { snapshot = null; files = []; output = null; files = await Backup.FilesAsync(snapshotRepository!.Id, id); snapshot = id; selection.Clear(); browseDirectory = "/"; fileSearch = ""; filePage = 0; restoreEverything = false; overwrite = false; });
     private void Select(string path, bool selected) { if (selected) selection.Add(path); else selection.Remove(path); }
     private void CloseSnapshots() { if (!busy) { snapshotRepository = null; snapshotPlan = null; } }
-    private Task Restore() => Operation("Restoring selected snapshot…", async () => { await Backup.RestoreAsync(snapshotRepository!.Id, snapshot!, restoreTarget, selection.ToArray(), overwrite); var recoveryFolder = snapshots.FirstOrDefault(item => item.Id == snapshot)?.Paths.FirstOrDefault(path => path.Contains("/lms-backup-staging-", StringComparison.Ordinal));
-        if (recoveryFolder is not null && (selection.Count == 0 || selection.Contains(recoveryFolder))) lmsRestorePath = Path.Combine(restoreTarget, recoveryFolder.TrimStart('/'));
+    private Task Restore() => Operation("Restoring selected snapshot…", async () => { await Backup.RestoreAsync(snapshotRepository!.Id, snapshot!, restoreTarget, restoreEverything ? [] : selection.ToArray(), overwrite); var recoveryFolder = snapshots.FirstOrDefault(item => item.Id == snapshot)?.Paths.FirstOrDefault(path => path.Contains("/lms-backup-staging-", StringComparison.Ordinal));
+        if (recoveryFolder is not null && (restoreEverything || selection.Contains(recoveryFolder))) lmsRestorePath = Path.Combine(restoreTarget, recoveryFolder.TrimStart('/'));
         output = "Restore completed at " + restoreTarget + ". Restored files are decrypted; keep this directory private. Live LMS data was not changed."; });
     private Task PrepareRecovery() => Operation("Validating and preparing configuration recovery…", async () => output = await Backup.PrepareLmsRestoreAsync(lmsRestorePath, recoveryPreparationPath, recoveryDataDirectory, recoveryApplicationDirectory, recoveryKeyDirectory));
     private Task ValidateRestore() => Operation("Validating LMS restore…", async () => output = await Backup.ValidateLmsRestoreAsync(lmsRestorePath));

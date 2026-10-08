@@ -9,6 +9,9 @@ public interface IHostBackupService
     Task SaveRepositoryAsync(BackupRepository repository, string? password, bool initialize, CancellationToken token = default);
     Task<string> InspectFullSystemAsync(Guid repositoryId, CancellationToken token = default);
     Task SaveSetAsync(BackupSet set, bool schedule, int hour, int minute, CancellationToken token = default);
+    Task DeleteSetAsync(Guid setId, bool confirmed, CancellationToken token = default);
+    Task DeleteSnapshotsAsync(Guid repositoryId, IReadOnlyList<string> snapshotIds, bool confirmed, CancellationToken token = default);
+    Task<string> ReclaimSpaceAsync(Guid repositoryId, bool confirmed, CancellationToken token = default);
     Task RecordRecoveryTestAsync(Guid setId, string snapshotId, string evidence, CancellationToken token = default);
     Task StartBackupAsync(Guid setId, CancellationToken token = default);
     Task<IReadOnlyList<BackupProgress>> GetProgressAsync(CancellationToken token = default);

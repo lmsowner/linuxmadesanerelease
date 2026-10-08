@@ -328,6 +328,61 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         finally { Gate.Release(); }
     }
 
+    public async Task DeleteSetAsync(Guid setId, bool confirmed, CancellationToken token = default)
+    {
+        if (!confirmed) throw new InvalidOperationException("Confirm deleting this plan. Stored snapshots will be kept.");
+        if (!await Gate.WaitAsync(0, token)) throw new InvalidOperationException("A backup or repository operation is running. Wait before deleting a plan.");
+        try
+        {
+            if (Queued.ContainsKey(ProgressKey(setId))) throw new InvalidOperationException("This backup is queued. Wait until it finishes.");
+            var sets = await Read<BackupSet>("backup-sets", token);
+            var set = sets.SingleOrDefault(item => item.Id == setId) ?? throw new InvalidOperationException("Backup plan no longer exists.");
+            if (set.ScheduleId is { } taskId) await provider.GetRequiredService<IScheduledTaskService>().DeleteTaskAsync(taskId, token);
+            await History(set.RepositoryId, set.Id, "Plan deleted", DateTimeOffset.UtcNow, true,
+                "Deleted plan and schedule. Repository, credentials, snapshots and audit history preserved.", CancellationToken.None);
+            sets.Remove(set);
+            await Write("backup-sets", sets, token);
+        }
+        finally { Gate.Release(); }
+    }
+
+    public async Task DeleteSnapshotsAsync(Guid repositoryId, IReadOnlyList<string> snapshotIds, bool confirmed, CancellationToken token = default)
+    {
+        if (!confirmed) throw new InvalidOperationException("Confirm deleting the selected recovery points. This cannot be undone.");
+        var ids = snapshotIds.Distinct(StringComparer.Ordinal).ToArray();
+        if (ids.Length == 0 || ids.Any(id => !Regex.IsMatch(id, "^[a-f0-9]{64}$")))
+            throw new InvalidOperationException("Select one or more complete snapshot IDs, not prefixes or latest.");
+        if (!await Gate.WaitAsync(0, token)) throw new InvalidOperationException("A backup or repository operation is running. Wait before deleting snapshots.");
+        var start = DateTimeOffset.UtcNow;
+        try
+        {
+            var available = await SnapshotsAsync(repositoryId, token);
+            if (ids.Any(id => !available.Any(item => item.Id == id))) throw new InvalidOperationException("A selected snapshot no longer exists. Refresh the list; nothing was deleted.");
+            // Exact full IDs only: never infer a retention policy or operate on unselected snapshots.
+            await Restic(await Repository(repositoryId, token), ["forget", .. ids], token);
+            await History(repositoryId, null, "Snapshots deleted", start, true,
+                "Deleted recovery points: " + string.Join(", ", ids) + ". Remaining snapshots are preserved. Reclaim unused space separately.", CancellationToken.None);
+        }
+        catch (Exception e) { await History(repositoryId, null, "Snapshot deletion", start, false, e.Message, CancellationToken.None); throw; }
+        finally { Gate.Release(); }
+    }
+
+    public async Task<string> ReclaimSpaceAsync(Guid repositoryId, bool confirmed, CancellationToken token = default)
+    {
+        if (!confirmed) throw new InvalidOperationException("Confirm reclaiming unused repository data. Remaining snapshots will be kept.");
+        if (!await Gate.WaitAsync(0, token)) throw new InvalidOperationException("A backup or repository operation is running. Wait before reclaiming space.");
+        var start = DateTimeOffset.UtcNow;
+        try
+        {
+            var repo = await Repository(repositoryId, token);
+            var output = await Restic(repo, ["prune"], token);
+            await History(repositoryId, null, "Unused space reclaimed", start, true, output, CancellationToken.None);
+            return "Unused space reclaimed. Remaining snapshots are preserved.\n" + output;
+        }
+        catch (Exception e) { await History(repositoryId, null, "Reclaim unused space", start, false, e.Message, CancellationToken.None); throw; }
+        finally { Gate.Release(); }
+    }
+
     public async Task RecordRecoveryTestAsync(Guid setId, string snapshotId, string evidence, CancellationToken token = default)
     {
         ValidateSnapshot(snapshotId);
