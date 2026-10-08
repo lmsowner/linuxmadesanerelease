@@ -69,5 +69,5 @@ public sealed record BackupProgress(Guid SetId, string State, string Action, Dat
     DateTimeOffset UpdatedUtc, DateTimeOffset LastActivityUtc, DateTimeOffset? FinishedUtc = null,
     double? Fraction = null, double? RemainingSeconds = null, long? BytesDone = null, long? TotalBytes = null)
 {
-    public bool IsRunning => State is "Running" or "Waiting";
+    public bool IsRunning => State is "Running" or "Waiting" or "Finishing";
 }

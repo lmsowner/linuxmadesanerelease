@@ -37,7 +37,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
     {
         var rows = await database.InfrastructureStates.AsNoTracking().Where(row => row.Key.StartsWith("backup-progress-")).ToListAsync(token);
         return rows.Select(row => JsonSerializer.Deserialize<BackupProgress>(row.Json)!).Where(item => item is not null)
-            .Select(item => Active.TryGetValue(ProgressKey(item.SetId), out var live) ? live with { UpdatedUtc = DateTimeOffset.UtcNow } :
+            .Select(item => Active.TryGetValue(ProgressKey(item.SetId), out var live) ? live with { State = live.State == "Failed" ? "Finishing" : live.State, UpdatedUtc = DateTimeOffset.UtcNow } :
                 item.IsRunning && !Queued.ContainsKey(ProgressKey(item.SetId)) ? item with { State = "Interrupted", Action = "LMS restarted before this backup finished. Check History before retrying.", FinishedUtc = item.UpdatedUtc } : item.IsRunning ? item with { UpdatedUtc = DateTimeOffset.UtcNow } : item).ToArray();
     }
 
@@ -94,13 +94,16 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         {
             using var document = JsonDocument.Parse(output.Text);
             var root = document.RootElement;
-            if (root.TryGetProperty("message_type", out var kind) && kind.GetString() == "status")
+            // Retention emits arrays; other commands may emit scalars or summaries.
+            // Progress parsing must never change a command's execution result.
+            if (root.ValueKind != JsonValueKind.Object) return updated;
+            if (root.TryGetProperty("message_type", out var kind) && kind.ValueKind == JsonValueKind.String && kind.GetString() == "status")
             {
-                double? fraction = root.TryGetProperty("percent_done", out var p) && p.TryGetDouble(out var f) && double.IsFinite(f) ? Math.Clamp(f, 0, 1) : null;
-                double? remaining = root.TryGetProperty("seconds_remaining", out var r) && r.TryGetDouble(out var seconds) && double.IsFinite(seconds) && seconds >= 0 ? seconds : null;
+                double? fraction = root.TryGetProperty("percent_done", out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetDouble(out var f) && double.IsFinite(f) ? Math.Clamp(f, 0, 1) : null;
+                double? remaining = root.TryGetProperty("seconds_remaining", out var r) && r.ValueKind == JsonValueKind.Number && r.TryGetDouble(out var seconds) && double.IsFinite(seconds) && seconds >= 0 ? seconds : null;
                 return updated with { Fraction = fraction, RemainingSeconds = remaining,
-                    BytesDone = root.TryGetProperty("bytes_done", out var done) && done.TryGetInt64(out var d) ? d : null,
-                    TotalBytes = root.TryGetProperty("total_bytes", out var total) && total.TryGetInt64(out var t) ? t : null };
+                    BytesDone = root.TryGetProperty("bytes_done", out var done) && done.ValueKind == JsonValueKind.Number && done.TryGetInt64(out var d) ? d : null,
+                    TotalBytes = root.TryGetProperty("total_bytes", out var total) && total.ValueKind == JsonValueKind.Number && total.TryGetInt64(out var t) ? t : null };
             }
         }
         catch (JsonException) { }
