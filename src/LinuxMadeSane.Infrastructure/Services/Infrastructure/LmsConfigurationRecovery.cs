@@ -13,9 +13,11 @@ public static class LmsConfigurationRecovery
     {
         _ = Script;
         _ = FullSystemScript;
+        _ = ResticInstallScript;
     }
 
     internal static string Script => ReadScript("lms_config_recovery.py");
+    internal static string ResticInstallScript => ReadScript("lms_restic_install.py");
     internal static string FullSystemScript => ReadScript("lms_full_system.py");
     private static string ReadScript(string name)
     {

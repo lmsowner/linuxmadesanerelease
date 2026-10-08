@@ -110,6 +110,8 @@ def build(bundle, plan):
 set -euo pipefail
 set +x
 unset RESTIC_PASSWORD RESTIC_PASSWORD_FILE RESTIC_PASSWORD_COMMAND
+restic_binary=restic
+if [[ -x /usr/local/bin/restic ]]; then restic_binary=/usr/local/bin/restic; fi
 if [[ "${1:-}" == prepare ]]; then
     [[ -f /etc/rear-release ]] || { echo 'Boot the recovery image first.' >&2; exit 1; }
     [[ "$(findmnt -rn -T /run -o FSTYPE)" == tmpfs ]] || { echo 'Private recovery authentication requires the RAM-backed /run filesystem.' >&2; exit 1; }
@@ -128,12 +130,12 @@ if [[ "${1:-}" == prepare ]]; then
     unset password
     export RESTIC_PASSWORD_FILE="$state/password"
     password_options=()
-    if [[ ! -s "$state/password" ]] && restic help | grep -q -- '--insecure-no-password'; then password_options=(--insecure-no-password); fi
-    snapshot=$(restic "${password_options[@]}" --repo "$repository" snapshots --path "$bundle" --tag lms-full-system,lms-backup-complete --json 2> /dev/tty | jq -er 'if length == 1 then .[0].id else error("No unique completed backup matches this recovery image. Use its matching ISO and repository.") end' 2> /dev/tty)
+    if [[ ! -s "$state/password" ]] && "$restic_binary" help | grep -q -- '--insecure-no-password'; then password_options=(--insecure-no-password); fi
+    snapshot=$("$restic_binary" "${password_options[@]}" --repo "$repository" snapshots --path "$bundle" --tag lms-full-system,lms-backup-complete --json 2> /dev/tty | jq -er 'if length == 1 then .[0].id else error("No unique completed backup matches this recovery image. Use its matching ISO and repository.") end' 2> /dev/tty)
     [[ "$snapshot" =~ ^[a-f0-9]{64}$ ]] || exit 1
     printf '%s\\n' 'Checking encrypted backup data before any disk changes; this may take time.' > /dev/tty
-    restic "${password_options[@]}" --repo "$repository" check --read-data < /dev/tty > /dev/tty 2>&1
-    restic "${password_options[@]}" --repo "$repository" dump "$snapshot" "$bundle/FULL-SYSTEM-RECOVERY.txt" > /dev/null 2> /dev/tty
+    "$restic_binary" "${password_options[@]}" --repo "$repository" check --read-data < /dev/tty > /dev/tty 2>&1
+    "$restic_binary" "${password_options[@]}" --repo "$repository" dump "$snapshot" "$bundle/FULL-SYSTEM-RECOVERY.txt" > /dev/null 2> /dev/tty
     printf '%s' "$repository" > "$state/repository"
     printf '%s' "$snapshot" > "$state/snapshot"
     printf 'Verified matching completed snapshot: %s\\nReview the target disk mapping before approving recreation.\\n' "$snapshot" > /dev/tty
@@ -148,8 +150,8 @@ target="${1:-/mnt/local}"
 repository=$(cat "$state/repository"); snapshot=$(cat "$state/snapshot")
 export RESTIC_PASSWORD_FILE="$state/password"
 password_options=()
-if [[ ! -s "$state/password" ]] && restic help | grep -q -- '--insecure-no-password'; then password_options=(--insecure-no-password); fi
-restic "${password_options[@]}" --repo "$repository" restore "$snapshot" --target "$target" < /dev/tty > /dev/tty 2>&1
+if [[ ! -s "$state/password" ]] && "$restic_binary" help | grep -q -- '--insecure-no-password'; then password_options=(--insecure-no-password); fi
+"$restic_binary" "${password_options[@]}" --repo "$repository" restore "$snapshot" --target "$target" < /dev/tty > /dev/tty 2>&1
 unset RESTIC_PASSWORD_FILE
 ''')
         specification = json.loads((bundle / "recovery-specification.json").read_text())
@@ -185,6 +187,8 @@ unset RESTIC_PASSWORD_FILE
         prepare_recovery = 'test -f /etc/rear-release || { echo "Recovery is only allowed from the boot recovery image." >&2; exit 1; }; cp -a -- ' + quoted(str(state) + '/.') + ' "$VAR_DIR/" || exit 1; /bin/bash ' + quoted(str(restore)) + ' prepare || exit 1'
         prepare_recovery += '; AddExitTask ' + quoted('rm -rf -- ' + quoted('/run/' + workspace.name + '-restore'))
         lines = ["VAR_DIR=" + quoted(str(state)), "DISKLAYOUT_FILE=" + quoted(str(state / "layout/disklayout.conf")), "OUTPUT=ISO", "BACKUP=EXTERNAL", "OUTPUT_URL=", "BACKUP_URL=", "ISO_DIR=" + quoted(str(media)), "SSH_FILES=no", "SSH_UNPROTECTED_PRIVATE_KEYS=no", "USE_STATIC_NETWORKING=no", "USE_DHCLIENT=yes", "REQUIRED_PROGS+=( restic findmnt )", "COPY_AS_IS=( \"$SHARE_DIR\" \"$VAR_DIR\" " + quoted(str(restore)) + " )", "EXTERNAL_RESTORE=" + quoted("/bin/bash " + quoted(str(restore)) + ' "$TARGET_FS_ROOT"'), "AUTOEXCLUDE_PATH=()", "EXCLUDE_MOUNTPOINTS+=( " + " ".join(quoted(x) for x in plan["excludedMounts"]) + " )", "EXCLUDE_COMPONENTS+=( " + " ".join(quoted(x) for x in plan["backupDisks"]) + " )", "COPY_AS_IS_EXCLUDE+=( 'etc/linuxmadesane/*' 'var/lib/linuxmadesane/*' 'root/.ssh/*' 'home/*/.ssh/*' 'etc/shadow' 'etc/gshadow' 'etc/ssl/private/*' 'etc/NetworkManager/system-connections/*' )"]
+        if pathlib.Path("/usr/local/bin/restic").is_file():
+            lines.append("COPY_AS_IS+=( '/usr/local/bin/restic' )")
         lines.append("PRE_RECOVERY_SCRIPT=" + quoted(prepare_recovery))
         lines.append("REQUIRED_PROGS+=( jq chroot )")
         # ReaR persists these stable IDs in rescue.conf and removes the matching

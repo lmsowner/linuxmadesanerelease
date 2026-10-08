@@ -11,6 +11,7 @@
 <FeaturePackageGate Feature="Backup" OnInstalled="Load">
     <p>Keep an encrypted copy of LMS and your chosen folders. First choose where to keep backups, then choose what to back up.</p>
     <div class="infrastructure-actions"><UiCommandButton Label="Refresh" Disabled="@busy" OnClick="Load" />
+    <UiCommandButton Label="Install / update restic" HideIcon="true" Disabled="@busy" OnClick="UpdateRestic" />
     <UiCommandButton Label="Set up backup storage" HideIcon="true" Disabled="@busy" OnClick="NewRepository" />
     <UiCommandButton Label="Add backup plan" HideIcon="true" Disabled="@(busy || workspace?.Repositories.Count is null or 0)" OnClick="NewSet" /></div>
     @if (repositoryNotice is not null) { <p class="callout" role="status">@repositoryNotice</p> }
@@ -120,7 +121,8 @@
                 <UiCheckboxField Label="Protect backups with a password" Disabled="@(busy || workspace?.SupportsPasswordFree != true)" @bind-Value="protectBackupWithPassword" />
                 @if (workspace?.SupportsPasswordFree != true)
                 {
-                    <p class="callout" role="status"><strong>A backup password is required on this host.</strong> Its installed restic does not support password-free backups. Restic 0.17 or newer supports leaving this option unchecked.</p>
+                    <p class="callout" role="status"><strong>A backup password is required on this host.</strong> Its installed restic does not support password-free backups. Install the latest stable restic release to enable password-free backups.</p>
+                    <UiCommandButton Label="Install latest restic" HideIcon="true" Disabled="@busy" OnClick="UpdateRestic" />
                 }
             }
             @if (protectBackupWithPassword)
@@ -388,6 +390,13 @@
     protected override async Task OnInitializedAsync() { if ((await Diagnostics.GetPackageStatusAsync("Backup")).Installed) await Load(); }
     private async Task Operation(string label, Func<Task> operation)
     { busy = true; progress = label; error = null; await InvokeAsync(StateHasChanged); await Task.Yield(); try { await operation(); } catch (Exception e) { error = e.Message; } finally { busy = false; } }
+    private Task UpdateRestic() => Operation("Installing the latest stable restic release and verifying its signature…", async () =>
+    {
+        await Diagnostics.InstallPackagesAsync("Backup");
+        workspace = await Backup.GetAsync();
+        if (!editingRepository && repositoryEditor is not null) protectBackupWithPassword = !workspace.SupportsPasswordFree;
+        repositoryNotice = (await Diagnostics.GetPackageStatusAsync("Backup")).Explanation;
+    });
     private Task Load() => Operation("Reading backup configuration…", async () => workspace = await Backup.GetAsync());
     private void NewRepository() { error = null; repositoryNotice = null; password = passwordConfirmation = ""; initialize = true; editingRepository = false; protectBackupWithPassword = workspace?.SupportsPasswordFree != true; backupDestination = localBackupPath = ""; backupFolder = "lms-backups"; createHostBackupFolder = true; hostBackupFolder = BackupDestinationSelection.SuggestHostSubfolder(Environment.MachineName, workspace?.Repositories.Select(item => item.Path) ?? [], (workspace?.Sets.Count ?? 0) + 1); repositoryEditor = new() { Name = "LMS backup" }; }
     private void EditRepository(BackupRepository repo)

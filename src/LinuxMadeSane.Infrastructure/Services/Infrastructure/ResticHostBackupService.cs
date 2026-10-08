@@ -444,7 +444,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             .Replace("?", "\\?", StringComparison.Ordinal).Replace("[", "\\[", StringComparison.Ordinal);
     private async Task<bool> SupportsPasswordFree(CancellationToken token)
     {
-        var help = await runner.RunAsync(new("restic", ["help"], false, TimeSpan.FromSeconds(10), "Check restic password-free support"), false, token);
+        var help = await runner.RunAsync(new(InfrastructureDiagnosticsService.ResticExecutable, ["help"], false, TimeSpan.FromSeconds(10), "Check restic password-free support"), false, token);
         return help.ExitCode == 0 && (help.StandardOutput + help.StandardError).Contains("--insecure-no-password", StringComparison.Ordinal);
     }
     private async Task<string> Restic(BackupRepository repository, string[] arguments, CancellationToken token, bool fullSystem = false)
@@ -474,7 +474,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                     throw new InvalidOperationException("This password-free backup requires restic 0.17 or newer. Upgrade restic on this host before opening it.");
                 passwordOptions = ["--insecure-no-password"];
             }
-            var result = await runner.RunAsync(new("restic", ["--repo", repository.Path, "--password-file", path, "--no-cache", ..passwordOptions, ..arguments],
+            var result = await runner.RunAsync(new(InfrastructureDiagnosticsService.ResticExecutable, ["--repo", repository.Path, "--password-file", path, "--no-cache", ..passwordOptions, ..arguments],
                 true, TimeSpan.FromHours(12), "Restic " + arguments[0]), false, token);
             if (result.ExitCode != 0) throw new InvalidOperationException($"Restic {arguments[0]} failed (exit {result.ExitCode}): {result.StandardError} {result.StandardOutput}");
             return result.StandardOutput;

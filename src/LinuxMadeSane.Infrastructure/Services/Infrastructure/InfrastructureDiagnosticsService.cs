@@ -30,6 +30,7 @@ public sealed class InfrastructureDiagnosticsService(
         ["SMART"] = ["smartmontools"], ["DHCP"] = ["kea-dhcp4-server"],
         ["Backup"] = ["restic"], ["FullBackup"] = ["rear", "xorriso", "isolinux", "syslinux-common", "gdisk", "parted", "dosfstools", "xfsprogs", "jq", "grub-pc-bin", "grub-efi-amd64-bin"], ["UPS"] = ["nut-client", "nut-server"], ["Discovery"] = ["fping"]
     };
+    internal static string ResticExecutable => File.Exists("/usr/local/bin/restic") ? "/usr/local/bin/restic" : "restic";
     private static readonly SemaphoreSlim InventoryGate = new(1, 1);
 
     internal Task<LinuxCommandResult> Run(string executable, string[] args, bool sudo = false,
@@ -43,6 +44,13 @@ public sealed class InfrastructureDiagnosticsService(
         var os = File.Exists("/etc/os-release") ? await File.ReadAllTextAsync("/etc/os-release", cancellationToken) : "";
         var apt = Regex.IsMatch(os, @"(?m)^(ID|ID_LIKE)=[""']?(ubuntu|debian)\b") ||
             Regex.IsMatch(os, @"(?m)^ID_LIKE=.*\b(ubuntu|debian)\b");
+        if (feature == "Backup")
+        {
+            var version = await Run(ResticExecutable, ["version"], token: cancellationToken);
+            var available = version.ExitCode == 0;
+            return new(feature, ["restic (latest stable official release)"], available, apt,
+                available ? version.StandardOutput.Trim() : "Install the latest stable restic release from its official project. LMS verifies the signing key, release signature, checksum and executable. Existing backup storage is preserved.");
+        }
         var states = await packages.InspectAsync(names, cancellationToken);
         var installed = states.Count == names.Length && states.All(item => item.IsInstalled);
         return new(feature, names, installed, apt, installed ? "Required packages are installed." :
@@ -53,6 +61,23 @@ public sealed class InfrastructureDiagnosticsService(
     public async Task InstallPackagesAsync(string feature, CancellationToken cancellationToken = default)
     {
         var status = await GetPackageStatusAsync(feature, cancellationToken);
+        if (feature == "Backup")
+        {
+            if (!status.CanInstall) throw new InvalidOperationException(status.Explanation);
+            var dependencies = await packages.InspectAsync(["gnupg", "python3"], cancellationToken);
+            var missing = new[] { "gnupg", "python3" }.Where(name => !dependencies.Any(item => item.Name == name && item.IsInstalled)).ToArray();
+            if (missing.Length > 0)
+            {
+                var logs = await packages.ApplyActionsAsync(missing.Select(name => new PackageAction(PackageActionKind.Install, name, "Verify official restic releases", false, "")).ToArray(), false, cancellationToken);
+                if (logs.Any(log => log.Level == OperationLogLevel.Error))
+                    throw new InvalidOperationException("Could not install restic verification tools: " + string.Join("; ", logs.Where(log => log.Level == OperationLogLevel.Error).Select(log => log.Message)));
+            }
+            var installed = await Run("python3", ["-c", LmsConfigurationRecovery.ResticInstallScript], true, 600, cancellationToken);
+            if (installed.ExitCode != 0) throw new InvalidOperationException("Could not install the latest stable restic release: " + installed.StandardError);
+            var verified = await Run(ResticExecutable, ["version"], token: cancellationToken);
+            if (verified.ExitCode != 0) throw new InvalidOperationException("Restic installation finished, but LMS could not run the installed executable: " + verified.StandardError);
+            return;
+        }
         if (status.Installed) return;
         if (!status.CanInstall) throw new InvalidOperationException(status.Explanation);
         // Debian packages can start daemons from their post-install scripts. A new DHCP
