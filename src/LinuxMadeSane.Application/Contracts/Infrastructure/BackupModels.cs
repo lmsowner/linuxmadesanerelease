@@ -52,6 +52,7 @@ public sealed record BackupOperation(Guid Id, Guid RepositoryId, Guid? SetId, st
 public sealed record BackupWorkspace(IReadOnlyList<BackupRepository> Repositories, IReadOnlyList<BackupSet> Sets,
     IReadOnlyList<BackupOperation> History, IReadOnlyList<string> Destinations)
 {
+    public bool SupportsPasswordFree { get; init; }
     public IReadOnlyList<BackupNetworkDestination> NetworkDestinations { get; init; } = [];
     public string DataDirectory { get; init; } = "";
     public string ApplicationDirectory { get; init; } = "";

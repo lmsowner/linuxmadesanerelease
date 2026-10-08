@@ -60,7 +60,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         var managed = await shares.ListManagedRemoteMountsAsync(token);
         return new(repositories, sets, await Read<BackupOperation>("backup-history", token),
             mounts.Select(mount => mount.LocalMountPath).Distinct().Order().ToArray())
-        { NetworkDestinations = BuildNetworkDestinations(mounts, managed), DataDirectory = DataDirectory,
+        { SupportsPasswordFree = await SupportsPasswordFree(token), NetworkDestinations = BuildNetworkDestinations(mounts, managed), DataDirectory = DataDirectory,
             ApplicationDirectory = hostPaths.ApplicationDirectory, ProtectionKeyDirectory = hostPaths.ProtectionKeyDirectory };
     }
 
@@ -104,6 +104,8 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             // Never trust a secret reference submitted by the caller.
             repository.PasswordReference = existing?.PasswordReference ?? "";
             if (password?.IndexOfAny(['\r', '\n', '\0']) >= 0) throw new InvalidOperationException("Repository passwords must be a single line without control characters.");
+            if (repository.NoPassword && !await SupportsPasswordFree(token))
+                throw new InvalidOperationException("This host's installed restic requires a backup password. Select Protect backups with a password, or upgrade restic to 0.17 or newer for password-free backups. No backup storage was created.");
             if (!repository.NoPassword && initialize && (string.IsNullOrWhiteSpace(password) || password.Length < 12)) throw new InvalidOperationException("Choose a backup encryption password with at least 12 characters. Recovery requires this password.");
             if (!repository.NoPassword && !string.IsNullOrEmpty(password)) repository.PasswordReference = newReference = await secrets.StoreSecretAsync(password, "Restic repository " + repository.Name, token);
             if (!repository.NoPassword && repository.PasswordReference.Length == 0) throw new InvalidOperationException("Enter the repository password. Keep a recovery copy somewhere safe.");
@@ -440,6 +442,11 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
     public static string EscapeRestorePattern(string path) =>
         path.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("*", "\\*", StringComparison.Ordinal)
             .Replace("?", "\\?", StringComparison.Ordinal).Replace("[", "\\[", StringComparison.Ordinal);
+    private async Task<bool> SupportsPasswordFree(CancellationToken token)
+    {
+        var help = await runner.RunAsync(new("restic", ["help"], false, TimeSpan.FromSeconds(10), "Check restic password-free support"), false, token);
+        return help.ExitCode == 0 && (help.StandardOutput + help.StandardError).Contains("--insecure-no-password", StringComparison.Ordinal);
+    }
     private async Task<string> Restic(BackupRepository repository, string[] arguments, CancellationToken token, bool fullSystem = false)
     {
         if (repository.MountPath.Length > 0)
@@ -463,10 +470,9 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             string[] passwordOptions = [];
             if (repository.NoPassword)
             {
-                // Older restic accepts empty password files; 0.17+ requires explicit opt-in.
-                var help = await runner.RunAsync(new("restic", ["help"], false, TimeSpan.FromSeconds(10), "Check restic password-free support"), false, token);
-                if (help.ExitCode != 0) throw new InvalidOperationException("Could not check restic password-free support: " + help.StandardError);
-                if (help.StandardOutput.Contains("--insecure-no-password", StringComparison.Ordinal)) passwordOptions = ["--insecure-no-password"];
+                if (!await SupportsPasswordFree(token))
+                    throw new InvalidOperationException("This password-free backup requires restic 0.17 or newer. Upgrade restic on this host before opening it.");
+                passwordOptions = ["--insecure-no-password"];
             }
             var result = await runner.RunAsync(new("restic", ["--repo", repository.Path, "--password-file", path, "--no-cache", ..passwordOptions, ..arguments],
                 true, TimeSpan.FromHours(12), "Restic " + arguments[0]), false, token);
