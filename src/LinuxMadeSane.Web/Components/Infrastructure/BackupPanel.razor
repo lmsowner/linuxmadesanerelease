@@ -485,7 +485,7 @@
         finally { workspace = await Backup.GetAsync(); }
         if (runNow) repositoryNotice = "Backup completed. Select ‘Snapshots / restore’ on its backup location to browse or restore it.";
     });
-    private Task Run(Guid id) => Operation("Backup running… You can find its result in History.", async () => { try { await Backup.RunBackupAsync(id); } finally { workspace = await Backup.GetAsync(); } });
+    private Task Run(Guid id) => Operation(workspace?.Sets.FirstOrDefault(set => set.Id == id)?.FullSystem == true ? "Checking recovery dependencies and free space, building boot media, then backing up…" : "Backup running… You can find its result in History.", async () => { try { await Backup.RunBackupAsync(id); } finally { workspace = await Backup.GetAsync(); } });
     private Task ShowSnapshots(BackupRepository repo, BackupSet? plan = null) => Operation("Reading snapshots…", async () => { recoveryDataDirectory = workspace?.DataDirectory ?? ""; recoveryApplicationDirectory = workspace?.ApplicationDirectory ?? ""; recoveryKeyDirectory = workspace?.ProtectionKeyDirectory ?? ""; snapshotRepository = repo; snapshotPlan = plan; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); snapshots = (await Backup.SnapshotsAsync(repo.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); });
     private void ChooseSnapshotBackup()
     {

@@ -264,10 +264,24 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                 await provider.GetRequiredService<IInfrastructureDiagnosticsService>().InstallPackagesAsync("FullBackup", token);
             }
             var sources = set.Sources.ToList();
-            var stagingRoot = OperatingSystem.IsLinux() ? "/dev/shm" : Path.GetTempPath();
+            var stagingRoot = OperatingSystem.IsLinux()
+                ? set.FullSystem ? Path.Combine(DataDirectory, "backup-staging") : "/dev/shm"
+                : Path.GetTempPath();
+            Directory.CreateDirectory(stagingRoot);
+            if (set.FullSystem && !OperatingSystem.IsWindows())
+                File.SetUnixFileMode(stagingRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             scratch = Path.Combine(stagingRoot, "lms-backup-staging-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(scratch);
             if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(scratch, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            if (set.FullSystem && OperatingSystem.IsLinux())
+            {
+                // Reuse the selected backup mount for bulky recovery build data.
+                // An encrypted loop filesystem supplies POSIX semantics even on SMB.
+                var prepared = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.FullSystemScript,
+                    "--repository", repository.Path, "--bundle", scratch, "--prepare-workspace"], true,
+                    TimeSpan.FromMinutes(5), "Prepare encrypted recovery workspace on the selected backup destination"), false, token);
+                if (prepared.ExitCode != 0) throw RecoveryMediaFailure(prepared.StandardError);
+            }
             // This recovery record travels with the encrypted snapshot, independently of the live LMS database.
             await File.WriteAllTextAsync(Path.Combine(scratch, "backup-plan.json"), JsonSerializer.Serialize(new
             {
@@ -316,7 +330,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                 {
                     var media = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.FullSystemScript, "--repository", repository.Path, "--bundle", scratch], true,
                         TimeSpan.FromMinutes(35), "Create ReaR boot recovery media; no disks will be formatted"), false, token);
-                    if (media.ExitCode != 0) throw new InvalidOperationException("Boot recovery media failed. No full-system backup was saved: " + media.StandardError);
+                    if (media.ExitCode != 0) throw RecoveryMediaFailure(media.StandardError);
                     using var full = JsonDocument.Parse(media.StandardOutput);
                     sources.AddRange(full.RootElement.GetProperty("sources").EnumerateArray().Select(item => item.GetString()!));
                 }
@@ -330,7 +344,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
             {
                 args.AddRange(["--tag", "lms-full-system", "--one-file-system"]);
                 using var full = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(scratch, "full-system-recovery.json"), token));
-                // Explicitly include the RAM-backed recovery bundle. Root traversal
+                // Explicitly include the separately mounted recovery bundle. Root traversal
                 // skips virtual mounts through --one-file-system instead of excluding that bundle.
                 foreach (var excluded in full.RootElement.GetProperty("excludes").EnumerateArray().Select(item => item.GetString()!).Where(path => !IsWithin(scratch, path)))
                     args.AddRange(["--exclude", EscapeRestorePattern(excluded)]);
@@ -348,7 +362,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
                 "--keep-daily", set.KeepDaily.ToString(), "--keep-weekly", set.KeepWeekly.ToString(), "--keep-monthly", set.KeepMonthly.ToString(), "--prune", "--json"], token);
             await History(repositoryId, setId, "Backup & retention", start, true, output + "\n" + retention, CancellationToken.None);
         }
-        catch (Exception e) { await History(repositoryId, setId, "Backup", start, false, e.Message, CancellationToken.None); throw; }
+        catch (Exception e) { await History(repositoryId, setId, "Backup", start, false, e.InnerException is null ? e.Message : e.Message + "\n\nBuild details:\n" + e.InnerException.Message, CancellationToken.None); throw; }
         finally
         {
             try
@@ -366,16 +380,26 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         }
     }
 
+    internal static InvalidOperationException RecoveryMediaFailure(string detail)
+    {
+        var message = detail.Contains("No space left on device", StringComparison.OrdinalIgnoreCase)
+            ? "Boot recovery build ran out of temporary disk space. Free space on the selected backup destination and retry. No full-system backup was saved. See History & logs for the full build output."
+            : detail.StartsWith("Not enough temporary space", StringComparison.Ordinal) || detail.StartsWith("The local disk needs", StringComparison.Ordinal)
+                ? detail.Trim()
+                : "Boot recovery media could not be created. No full-system backup was saved. See History & logs for the full build output.";
+        return new InvalidOperationException(message, new InvalidOperationException(detail));
+    }
+
     internal async Task CleanupStagingAsync(string scratch)
     {
         var stagingRoot = OperatingSystem.IsLinux() ? "/dev/shm" : Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
-        if (Path.GetDirectoryName(scratch) != stagingRoot ||
+        if ((Path.GetDirectoryName(scratch) != stagingRoot && Path.GetDirectoryName(scratch) != Path.Combine(DataDirectory, "backup-staging")) ||
             !Regex.IsMatch(Path.GetFileName(scratch), "^lms-backup-staging-[0-9a-f]{32}$"))
             throw new InvalidOperationException("Refusing cleanup outside an LMS backup staging directory.");
         if (OperatingSystem.IsLinux())
         {
             // ReaR may leave root-owned private files even when media creation fails.
-            var result = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.BackupCleanupScript, scratch], true,
+            var result = await runner.RunAsync(new("python3", ["-c", LmsConfigurationRecovery.BackupCleanupScript, scratch, Path.GetDirectoryName(scratch)!], true,
                 TimeSpan.FromMinutes(2), "Remove temporary LMS backup staging files"), false, CancellationToken.None);
             if (result.ExitCode != 0) throw new InvalidOperationException(result.StandardError);
         }

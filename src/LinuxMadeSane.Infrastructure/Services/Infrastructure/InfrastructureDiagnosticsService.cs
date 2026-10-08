@@ -28,7 +28,7 @@ public sealed class InfrastructureDiagnosticsService(
     internal static readonly IReadOnlyDictionary<string, string[]> FeaturePackages = new Dictionary<string, string[]>
     {
         ["SMART"] = ["smartmontools"], ["DHCP"] = ["kea-dhcp4-server"],
-        ["Backup"] = ["restic"], ["FullBackup"] = ["less", "cpio", "file", "procps", "diffutils", "sysvinit-utils", "coreutils", "bash", "sed", "grep", "tar", "util-linux", "mount", "rear", "xorriso", "isolinux", "syslinux-common", "gdisk", "parted", "dosfstools", "xfsprogs", "jq", "grub-pc-bin", "grub-efi-amd64-bin"], ["UPS"] = ["nut-client", "nut-server"], ["Discovery"] = ["fping"]
+        ["Backup"] = ["restic"], ["FullBackup"] = ["cryptsetup", "e2fsprogs", "less", "cpio", "file", "procps", "diffutils", "sysvinit-utils", "coreutils", "bash", "sed", "grep", "tar", "util-linux", "mount", "rear", "xorriso", "isolinux", "syslinux-common", "gdisk", "parted", "dosfstools", "xfsprogs", "jq", "grub-pc-bin", "grub-efi-amd64-bin"], ["UPS"] = ["nut-client", "nut-server"], ["Discovery"] = ["fping"]
     };
     internal static string ResticExecutable => File.Exists("/usr/local/bin/restic") ? "/usr/local/bin/restic" : "restic";
     private static readonly SemaphoreSlim InventoryGate = new(1, 1);

@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import uuid
 
 
 def run(arguments, timeout=30, environment=None):
@@ -81,7 +82,7 @@ def discover(repository):
     excluded_mounts = []
     for item in entries:
         target, source, kind = item["target"], item["source"], item["fstype"]
-        if target != "/" and (inside(target, destination["target"]) or (source.startswith("/dev/") and backup_disks and disk_ancestors(source) & backup_disks) or (kind == "squashfs" and source.startswith("/dev/loop")) or kind in ("nfs", "nfs4", "cifs", "smb3", "fuse.sshfs") or not source.startswith("/dev/")):
+        if target != "/" and (inside(target, destination["target"]) or (source.startswith("/dev/") and backup_disks and disk_ancestors(source) & backup_disks) or source.startswith("/dev/mapper/lms-recovery-") or (kind == "squashfs" and source.startswith("/dev/loop")) or kind in ("nfs", "nfs4", "cifs", "smb3", "fuse.sshfs") or not source.startswith("/dev/")):
             excluded.append(target)
             excluded_mounts.append(target)
             continue
@@ -93,14 +94,111 @@ def discover(repository):
             "warning": "Live backup: running databases and Docker workloads need an application-consistent backup or must be stopped. A restore drill has not been performed."}
 
 
+def space_requirements():
+    # Conservative working-space estimate, not the final ISO size.
+    roots = [pathlib.Path('/lib/modules') / os.uname().release, pathlib.Path('/lib/firmware'), pathlib.Path('/usr/lib/systemd')]
+    sizes = 0
+    for root in roots:
+        if root.exists():
+            sizes += int(run(['du', '-sx', '-B1', '--', str(root)], 60).split()[0])
+    return max(4 * 1000**3, sizes * 3 + 1000**3), max(1000**3, sizes + 500 * 1000**2)
+
+
+def check_build_space(bundle, work_root=pathlib.Path('/var/lib/rear')):
+    required_work, required_media = space_requirements()
+    locations = {}
+    for path, needed in [(work_root, required_work), (bundle, required_media)]:
+        device = path.stat().st_dev
+        if device in locations:
+            locations[device][1] += needed
+        else:
+            locations[device] = [path, needed]
+    for path, needed in locations.values():
+        available = shutil.disk_usage(path).free
+        if available < needed:
+            raise ValueError(f'Not enough temporary space to build boot recovery media on {path}: {available / 1000**3:.1f} GB free; estimated working space needed {needed / 1000**3:.1f} GB. Free space on this filesystem and retry. No recovery build was started.')
+
+
+def prepare_workspace(repository, bundle):
+    # The file lives beside the repository, never inside restic's data structure.
+    # Encryption protects temporary host configuration even on a shared SMB destination.
+    if not re.fullmatch(r'lms-backup-staging-[0-9a-f]{32}', bundle.name) or bundle.parent.name != 'backup-staging' or bundle.is_symlink():
+        raise ValueError('Refusing an unrecognized recovery staging directory')
+    owner = bundle.stat()
+    if any(bundle.iterdir()):
+        raise ValueError('Recovery staging must be empty before attaching temporary storage')
+    required_work, required_media = space_requirements()
+    size = required_work + required_media + 1000**3
+    destination = pathlib.Path(repository).resolve(strict=True).parent
+    free = shutil.disk_usage(destination).free
+    if free < size + 500 * 1000**2:
+        raise ValueError(f'Not enough temporary space on the backup destination {destination}: {free / 1000**3:.1f} GB free; estimated working space needed {(size + 500 * 1000**2) / 1000**3:.1f} GB. Free space on the backup share and retry. No recovery build was started.')
+    suffix = bundle.name.removeprefix('lms-backup-staging-')
+    image_dir = destination / ('.lms-recovery-work-' + suffix)
+    image_dir.mkdir(mode=0o700)
+    image = image_dir / 'work.luks'
+    mapper = 'lms-recovery-' + suffix
+    key = pathlib.Path('/dev/shm') / ('lms-recovery-key-' + uuid.uuid4().hex)
+    marker = bundle.with_name(bundle.name + '.workspace.json')
+    mount_info = json.loads(run(['findmnt', '--json', '--target', str(destination), '--output', 'TARGET,SOURCE,FSTYPE']))['filesystems'][0]
+    state = {'image': str(image), 'mapper': mapper, 'loop': '', 'storageMount': mount_info}
+    def persist():
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'w') as output:
+            json.dump(state, output)
+            output.flush()
+            os.fsync(output.fileno())
+    loop = ''
+    mounted = False
+    try:
+        persist()
+        with image.open('xb') as output: output.truncate(size)
+        descriptor = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'wb') as output: output.write(os.urandom(64))
+        loop = run(['losetup', '--find', '--show', '--nooverlap', str(image)]).strip()
+        if not re.fullmatch(r'/dev/loop[0-9]+', loop): raise ValueError('No safe loop device was returned for the temporary image')
+        state['loop'] = loop
+        persist()
+        if run(['losetup', '--noheadings', '--output', 'BACK-FILE', loop]).strip() != str(image):
+            raise ValueError('Refusing to format a loop device not backed by the temporary image')
+        run(['cryptsetup', 'luksFormat', '--batch-mode', '--type', 'luks2', '--pbkdf', 'pbkdf2', '--pbkdf-force-iterations', '1000', '--key-file', str(key), loop])
+        run(['cryptsetup', 'open', '--key-file', str(key), loop, mapper])
+        device = '/dev/mapper/' + mapper
+        run(['mkfs.ext4', '-q', '-m', '0', device])
+        run(['mount', '-o', 'nodev,nosuid', device, str(bundle)])
+        mounted = True
+        os.chown(bundle, owner.st_uid, owner.st_gid)
+        bundle.chmod(0o700)
+        check_build_space(bundle, bundle)
+        return {'temporaryStorage': str(destination), 'estimatedBytes': size, 'encrypted': True}
+    except Exception:
+        # Best effort only: the C# finally block runs the persistent cleanup helper too.
+        if mounted: subprocess.run(['umount', str(bundle)], capture_output=True)
+        if pathlib.Path('/dev/mapper/' + mapper).exists(): subprocess.run(['cryptsetup', 'close', mapper], capture_output=True)
+        if loop: subprocess.run(['losetup', '--detach', loop], capture_output=True)
+        raise
+    finally:
+        if key.exists(): key.unlink()
+
+
 def build(bundle, plan):
     owner = bundle.stat()
-    workspace = pathlib.Path(tempfile.mkdtemp(prefix="lms-", dir="/var/lib/rear"))
+    encrypted_workspace = bundle.with_name(bundle.name + '.workspace.json').is_file()
+    work_root = bundle if encrypted_workspace else pathlib.Path('/var/lib/rear')
+    work_root.mkdir(parents=True, exist_ok=True)
+    check_build_space(bundle, work_root)
+    # Keep tiny ReaR configuration/state outside LMS's excluded private-data tree;
+    # put its large rootfs/initramfs working directory on destination-backed storage.
+    metadata_root = pathlib.Path('/var/lib/rear')
+    metadata_root.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(metadata_root).free < 16 * 1000**2:
+        raise ValueError('The local disk needs 16 MB for recovery metadata. The bulky build data uses backup storage. Free a little local space and retry.')
+    workspace = pathlib.Path(tempfile.mkdtemp(prefix="lms-", dir=metadata_root))
     workspace.chmod(0o700)
     try:
         config = workspace / "config"
         state = workspace / "state"
-        work = workspace / "build"
+        work = bundle / "recovery-build" if encrypted_workspace else workspace / "build"
         config.mkdir(mode=0o700); state.mkdir(mode=0o700); work.mkdir(mode=0o700)
         media = bundle / "boot-recovery"
         media.mkdir(mode=0o700)
@@ -191,6 +289,10 @@ unset RESTIC_PASSWORD_FILE
             lines.append("COPY_AS_IS+=( '/usr/local/bin/restic' )")
         lines.append("PRE_RECOVERY_SCRIPT=" + quoted(prepare_recovery))
         lines.append("REQUIRED_PROGS+=( jq chroot )")
+        # These systemd libraries may be loaded dynamically and missed by ReaR's scanner.
+        systemd_libraries = sorted({str(path.resolve()) for pattern in ['*/systemd/libsystemd-shared-*.so', '*/systemd/libsystemd-core-*.so', 'systemd/libsystemd-shared-*.so', 'systemd/libsystemd-core-*.so'] for path in pathlib.Path('/usr/lib').glob(pattern) if path.is_file()})
+        if systemd_libraries:
+            lines.append("LIBS+=( " + " ".join(quoted(path) for path in systemd_libraries) + " )")
         # ReaR persists these stable IDs in rescue.conf and removes the matching
         # disks from target candidates, including when /dev names have changed.
         lines.append("WRITE_PROTECTED_IDS+=( " + " ".join(quoted(value) for value in plan.get("protectedBackupIds", [])) + " )")
@@ -243,6 +345,7 @@ Test on disposable disks/VMs; verify Linux boot, LMS login, credentials and work
 and retain the dated results and snapshot ID in the backup plan's recovery notes.
 ''')
     finally:
+        if encrypted_workspace and "work" in locals(): shutil.rmtree(work, ignore_errors=True)
         shutil.rmtree(workspace, ignore_errors=True)
 
 
@@ -250,9 +353,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository", required=True)
     parser.add_argument("--bundle")
+    parser.add_argument("--prepare-workspace", action="store_true")
     args = parser.parse_args()
     try:
         plan = discover(args.repository)
+        if args.prepare_workspace:
+            if not args.bundle: raise ValueError("A recovery staging directory is required")
+            print(json.dumps(prepare_workspace(args.repository, pathlib.Path(args.bundle))))
+            raise SystemExit(0)
         if args.bundle:
             build(pathlib.Path(args.bundle), plan)
         print(json.dumps(plan))
