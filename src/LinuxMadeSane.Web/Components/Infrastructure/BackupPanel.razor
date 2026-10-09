@@ -36,7 +36,7 @@
             var lastFinished = set.LastFinishedUtc ?? last?.FinishedUtc;
             var lastSucceeded = set.LastRunSucceeded ?? last?.Success;
             var lastSuccess = workspace.History.FirstOrDefault(item => item.SetId == set.Id && item.Kind.StartsWith("Backup", StringComparison.Ordinal) && item.Success);
-            <section class="surface-card backup-plan-card"><h3>@set.Name</h3>
+            <section class="@(IsSnapshotPanelOpen(set) ? "surface-card backup-plan-card backup-plan-expanded" : "surface-card backup-plan-card")" @key="set.Id"><h3><UiCommandButton Class="backup-plan-toggle" Label="@set.Name" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ToggleSnapshots(destination!, set))" AdditionalAttributes="@(new Dictionary<string, object> { ["aria-expanded"] = IsSnapshotPanelOpen(set).ToString().ToLowerInvariant() })" /></h3>
                 <p><strong>Protects:</strong> @(set.FullSystem ? "Full system + ReaR boot recovery" : set.IncludeLms ? "LMS configuration, credentials & database" : "Selected folders")</p>
                 <details><summary>Destination, retention & recovery details</summary>
                 @if (set.Sources.Count > 0) { <p><strong>Folders:</strong> @string.Join("; ", set.Sources)</p> }
@@ -51,11 +51,12 @@
                 <div class="infrastructure-actions">
                     <UiCommandButton Label="Edit plan" HideIcon="true" Disabled="@busy" OnClick="(() => EditSet(set))" />
                     <UiCommandButton Label="@(job?.IsRunning == true ? "Backup running…" : "Back up now")" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@(busy || job?.IsRunning == true)" OnClick="(() => Run(set.Id))" />
-                    <UiCommandButton Label="Backups & restore" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ShowSnapshots(destination!, set))" />
+                    <UiCommandButton Label="@(IsSnapshotPanelOpen(set) ? "Hide backups" : "Backups & restore")" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ToggleSnapshots(destination!, set))" />
                     <UiCommandButton Label="History & logs" HideIcon="true" Disabled="@busy" OnClick="(() => ShowHistory(set.Id, null, set.Name))" />
                     @if (set.FullSystem && destination is not null) { <UiCommandButton Label="Recovery guide" HideIcon="true" Disabled="@busy" OnClick="(() => OpenBackupGuide(set))" /> }
                     <UiCommandButton Label="Delete plan" HideIcon="true" Variant="UiButtonVariant.Ghost" Disabled="@(busy || job?.IsRunning == true)" OnClick="(() => RequestDeletePlan(set))" />
                 </div>
+                @if (IsSnapshotPanelOpen(set)) { @SnapshotPanel }
                 @if (job is not null) { <BackupProgressView Progress="job" /> }
                 @if (!string.IsNullOrWhiteSpace(set.Notes)) { <details><summary>Notes & recovery instructions</summary><p class="backup-plan-notes">@set.Notes</p></details> }
             </section>
@@ -71,6 +72,7 @@
                 <UiCommandButton Label="History & logs" HideIcon="true" Disabled="@busy" OnClick="(() => ShowHistory(null, repository.Id, repository.Name))" />
                 <UiCommandButton Label="Statistics" HideIcon="true" Disabled="@busy" OnClick="(() => Inspect(repository, false))" />
                 <UiCommandButton Label="Integrity check" HideIcon="true" Disabled="@busy" OnClick="(() => Inspect(repository, true))" /></div>
+                @if (snapshotRepository?.Id == repository.Id && snapshotPlan is null) { @SnapshotPanel }
                 @if (!string.IsNullOrWhiteSpace(repository.Notes)) { <details><summary>Storage notes</summary><p class="backup-plan-notes">@repository.Notes</p></details> }
             </section>
         }
@@ -86,7 +88,7 @@
     <h3>Recover one file</h3>
     <ol><li>Open Backups & restore and choose the date you need.</li><li>Browse folders or search for a file. Tick the files or folders to restore.</li><li>Choose a new private folder on this host and restore. Check the recovered files before copying them into their original location.</li></ol>
     <h3>Delete backups and recover storage space</h3>
-    <p>Select dated snapshots and choose Delete selected snapshots. This permanently removes those recovery points, without breaking remaining snapshots. Then Reclaim unused space removes data no remaining backup needs. Shared data is kept, so the space reclaimed may be smaller than a snapshot's file sizes. Backups must wait during repository maintenance.</p>
+    <p>Choose a date in the backup dropdown, then select Delete this snapshot. This permanently removes those recovery points, without breaking remaining snapshots. Then Reclaim unused space removes data no remaining backup needs. Shared data is kept, so the space reclaimed may be smaller than a snapshot's file sizes. Backups must wait during repository maintenance.</p>
     <h3>If the whole server fails</h3>
     <ol><li>Make a <strong>Full system + boot recovery</strong> backup. A folders-only or LMS configuration plan cannot recreate bootable disks.</li><li>Open its completed snapshot and select Recovery media. Export and keep its matching ISO and FULL-SYSTEM-RECOVERY.txt privately, away from the original server. Keep the repository location, share credentials and backup password (if protected) independently of LMS.</li><li>Boot the matching ISO on the replacement machine, using the same CPU architecture and BIOS/UEFI mode. Follow the exported guide to connect the backup storage. Keep that storage separate from disks being rebuilt.</li><li>Run <code>rear recover</code> in the recovery console. Enter credentials privately. Review disk mappings carefully: approving disk recreation replaces their contents. Different disks, controllers and network interfaces may require adjustments.</li><li>Verify Linux boots, LMS login works, saved credentials decrypt, mounts reconnect and essential workloads run. Test first on disposable disks or an isolated VM. <strong>A successful backup alone does not prove bare-metal recovery.</strong></li></ol>
     @if (backupGuidePlan is { FullSystem: true } plan)
@@ -195,22 +197,7 @@
         @if (error is not null) { <p class="callout error">@error</p> }
     }
 </ChildContent></UiModal>
-<UiModal Class="backup-compact-modal" IsOpen="@(recoveryMediaSnapshot is not null)" Title="Prepare boot recovery media" OnClose="CloseRecoveryMedia"><ChildContent>
-    @if (recoveryMediaSnapshot is not null)
-    {
-        <p class="backup-introduction">The recovery ISO boots the tools that rebuild disks and restore this encrypted backup. Prepare it before the original server fails.</p>
-        <UiTextField Label="New private export folder on this LMS host" Helper="Exported files are decrypted. Keep recovery media private and offline." @bind-Value="recoveryMediaTarget" />
-        <UiCommandButton Label="Extract recovery ISO & guide" HideIcon="true" Disabled="@busy" OnClick="ExtractRecoveryMedia" />
-        @if (busy) { <p role="status" aria-busy="true">@progress</p> }
-        @if (error is not null) { <p class="callout error" role="alert">@error</p> }
-        @if (recoveryMediaExported)
-        {
-            <p><strong>Media extracted.</strong> Use Files below to download the ISO and recovery guide. Keep the repository password independently of LMS.</p>
-            <UiCommandButton Label="Open exported files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/file-browser-window?hostId={LinuxMadeSane.Core.Models.Ai.AiLocalMachine.ManagedHostId}&path={Uri.EscapeDataString(recoveryMediaTarget)}")" Target="_blank" Rel="noopener noreferrer" OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,this.target))return false;" />
-        }
-        <details><summary>Restore on a replacement machine</summary><p>Use the same CPU architecture and BIOS/UEFI mode as the original. Attach the ISO as a virtual CD or compatible recovery medium. Boot it, connect the backup storage and follow FULL-SYSTEM-RECOVERY.txt. Review target disks before running rear recover: disk contents will be replaced. Test in isolation, then record Linux boot, LMS login and workload checks against this snapshot.</p></details>
-    }
-</ChildContent></UiModal>
+
 <UiModal Class="backup-compact-modal" IsOpen="@(recoveryTestSet is not null)" Title="Notes from a restore you tested" OnClose="CloseRecoveryTest"><ChildContent>
     @if (recoveryTestSet is not null)
     {
@@ -296,7 +283,27 @@
         @if (error is not null) { <p class="callout error">@error</p> }
     }
 </ChildContent></UiModal>
-<UiModal IsOpen="@(snapshotRepository is not null && recoveryMediaSnapshot is null && pendingDeletion is null && !showBackupGuide)" Title="@(snapshotPlan is null ? "Backups & restore" : $"Backups: {snapshotPlan.Name}")" OnClose="CloseSnapshots"><ChildContent>
+
+<UiModal Class="backup-compact-modal" IsOpen="@showHistory" Title="@($"History & logs: {historyTitle}")" OnClose="(() => showHistory = false)"><ChildContent>
+    @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
+    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+    <p>Times are shown in this host’s local timezone. Each entry records the operation’s result and command output.</p>
+    @if (!busy && error is null && !HistoryEntries.Any()) { <p>No operations have been recorded yet.</p> }
+    @foreach (var entry in HistoryEntries)
+    {
+        <details><summary>@entry.FinishedUtc.ToLocalTime().ToString("g") · @entry.Kind · @(entry.Success ? "Success" : "Failed")</summary>
+            <p>Started @entry.StartedUtc.ToLocalTime().ToString("g") · Duration @((entry.FinishedUtc - entry.StartedUtc).TotalSeconds.ToString("0")) seconds</p><pre>@entry.Detail</pre>
+        </details>
+    }
+</ChildContent></UiModal>
+<UiModal IsOpen="@showOutput" Title="Repository operation" OnClose="(() => showOutput = false)"><ChildContent><pre>@output</pre></ChildContent></UiModal>
+</div>
+@code {
+    private RenderFragment SnapshotPanel => @<section class="backup-snapshot-panel" aria-label="Backups and restore">
+        <div class="infrastructure-actions"><h3>@(snapshotPlan?.Name ?? snapshotRepository?.Name) — @(busy && snapshots.Count == 0 ? "Loading backups…" : $"{snapshots.Count} backup(s)")</h3>
+        <UiCommandButton Label="Refresh backups" HideIcon="true" Disabled="@busy" OnClick="(() => ShowSnapshots(snapshotRepository!, snapshotPlan))" />
+        <UiCommandButton Label="Collapse" HideIcon="true" Disabled="@busy" OnClick="CloseSnapshots" /></div>
+
     @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
     @if (error is not null)
     {
@@ -310,24 +317,30 @@
         <p>Choose what to back up, then select “Back up now” on your backup plan. Once a backup succeeds, it will appear here for browsing and restoring.</p>
         <UiCommandButton Label="Choose what to back up" HideIcon="true" OnClick="ChooseSnapshotBackup" />
     }
-    @if (snapshotPlan is not null) { <p>Showing only snapshots for <strong>@snapshotPlan.Name</strong>. Each new backup includes a <strong>backup-plan.json</strong> recovery record with the settings and notes at backup time.</p> }
-    <p>Choose a dated recovery point. Deleting a snapshot is permanent; remaining snapshots are kept.</p>
-    <div class="infrastructure-actions">
-        <UiCommandButton Label="Delete selected snapshots" HideIcon="true" Disabled="@(busy || selectedSnapshots.Count == 0)" OnClick="RequestDeleteSnapshots" />
-        <UiCommandButton Label="Reclaim unused space" HideIcon="true" Disabled="@busy" OnClick="RequestReclaimSpace" />
-        <UiCommandButton Label="Recovery guide" HideIcon="true" OnClick="(() => OpenBackupGuide(snapshotPlan))" />
-    </div>
+    @if (snapshots.Count > 0)
+    {
+        <UiSelectField TValue="string" Label="@($"Backup date ({snapshots.Count} available)")" Disabled="@busy" Value="@selectedSnapshotId" ValueExpression="@(() => selectedSnapshotId)" ValueChanged="ChooseSnapshot">
+            @foreach (var item in snapshots.OrderByDescending(item => item.Time))
+            { <option value="@item.Id">@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]@(item.Tags.Contains("lms-full-system") && !item.Tags.Contains("lms-backup-complete") ? " · Incomplete" : "")</option> }
+        </UiSelectField>
+        <div class="infrastructure-actions">
+            <UiCommandButton Label="Browse files" HideIcon="true" Disabled="@(busy || SelectedSnapshot is null)" OnClick="(() => Browse(selectedSnapshotId))" />
+            <UiCommandButton Label="Delete this snapshot" HideIcon="true" Disabled="@(busy || SelectedSnapshot is null)" OnClick="RequestDeleteSnapshots" />
+            @if (SelectedSnapshot is { } selected && selected.Tags.Contains("lms-full-system") && selected.Tags.Contains("lms-backup-complete"))
+            { <UiCommandButton Label="Recovery media" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryMedia(selected))" /> }
+            <UiCommandButton Label="Recovery guide" HideIcon="true" Disabled="@busy" OnClick="(() => OpenBackupGuide(snapshotPlan))" />
+            <UiCommandButton Label="Reclaim unused space" HideIcon="true" Disabled="@busy" OnClick="RequestReclaimSpace" />
+        </div>
+    }
     @if (output is not null && snapshot is null) { <p class="callout" role="status">@output</p> }
-    <div class="snapshot-list">
-    @foreach (var item in snapshots.OrderByDescending(item => item.Time))
-    { <div class="snapshot-row">
-        <UiCheckboxField Label="@(item.Time.ToLocalTime().ToString("g") + " · " + item.Id[..8])" Disabled="@busy" Value="@selectedSnapshots.Contains(item.Id)" ValueChanged="(value => SelectSnapshot(item.Id, value))" />
-        <UiCommandButton Label="@(snapshot == item.Id ? "Browsing" : "Browse files")" HideIcon="true" Disabled="@busy" OnClick="(() => Browse(item.Id))" />
-        @if (item.Tags.Contains("lms-full-system") && item.Tags.Contains("lms-backup-complete")) { <UiCommandButton Label="Recovery media" HideIcon="true" Disabled="@busy" OnClick="(() => OpenRecoveryMedia(item))" /> }
-        else if (item.Tags.Contains("lms-full-system")) { <small>Incomplete — boot recovery unavailable</small> }
-    </div> }
-    </div>
-    @if (snapshot is not null)
+    @if (recoveryMediaSnapshot is not null)
+    {
+        <section class="backup-setup-step backup-media-panel"><h3>Prepare recovery media for @recoveryMediaSnapshot.Time.ToLocalTime().ToString("g")</h3>
+        <UiCommandButton Label="Hide recovery media" HideIcon="true" Disabled="@busy" OnClick="CloseRecoveryMedia" />
+        @RecoveryMediaPanel
+        </section>
+    }
+    @if (snapshot is not null && SelectedSnapshot?.Id == snapshot)
     {
         @if (snapshots.FirstOrDefault(item => item.Id == snapshot)?.Tags.Contains("lms-full-system") == true)
         {
@@ -340,7 +353,7 @@
         <UiCheckboxField Label="Restore everything in this snapshot" Disabled="@busy" @bind-Value="restoreEverything" />
         @if (!restoreEverything)
         {
-            <UiTextField Label="Search all files and folders in this snapshot" Value="@fileSearch" ValueChanged="ChangeFileSearch" Disabled="@busy" />
+            <UiTextField Label="Search all files and folders in this snapshot" Value="@fileSearch" ValueExpression="@(() => fileSearch)" ValueChanged="ChangeFileSearch" Disabled="@busy" />
             <div class="infrastructure-actions"><strong>@browseDirectory</strong><UiCommandButton Label="Parent folder" HideIcon="true" Disabled="@(busy || browseDirectory == "/")" OnClick="ParentSnapshotFolder" /></div>
             var visibleFiles = VisibleSnapshotFiles;
             <div class="snapshot-files">
@@ -389,28 +402,41 @@
         </section>
         </details>
     }
-</ChildContent></UiModal>
-<UiModal Class="backup-compact-modal" IsOpen="@showHistory" Title="@($"History & logs: {historyTitle}")" OnClose="(() => showHistory = false)"><ChildContent>
-    @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
-    @if (error is not null) { <p class="callout error" role="alert">@error</p> }
-    <p>Times are shown in this host’s local timezone. Each entry records the operation’s result and command output.</p>
-    @if (!busy && error is null && !HistoryEntries.Any()) { <p>No operations have been recorded yet.</p> }
-    @foreach (var entry in HistoryEntries)
+    </section>;
+    private RenderFragment RecoveryMediaPanel => @<div>
+
+    @if (recoveryMediaSnapshot is not null)
     {
-        <details><summary>@entry.FinishedUtc.ToLocalTime().ToString("g") · @entry.Kind · @(entry.Success ? "Success" : "Failed")</summary>
-            <p>Started @entry.StartedUtc.ToLocalTime().ToString("g") · Duration @((entry.FinishedUtc - entry.StartedUtc).TotalSeconds.ToString("0")) seconds</p><pre>@entry.Detail</pre>
-        </details>
+        <p class="backup-introduction">The recovery ISO boots the tools that rebuild disks and restore this encrypted backup. Prepare it before the original server fails.</p>
+        <UiTextField Label="New private export folder on this LMS host" Helper="Exported files are decrypted. Keep recovery media private and offline." @bind-Value="recoveryMediaTarget" />
+        <UiCommandButton Label="Extract recovery ISO & guide" HideIcon="true" Disabled="@busy" OnClick="ExtractRecoveryMedia" />
+        @if (busy) { <p role="status" aria-busy="true">@progress</p> }
+        @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+        @if (recoveryMediaExported)
+        {
+            <p><strong>Media extracted.</strong> Use Files below to download the ISO and recovery guide. Keep the repository password independently of LMS.</p>
+            <UiCommandButton Label="Open exported files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/file-browser-window?hostId={LinuxMadeSane.Core.Models.Ai.AiLocalMachine.ManagedHostId}&path={Uri.EscapeDataString(recoveryMediaTarget)}")" Target="_blank" Rel="noopener noreferrer" OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,this.target))return false;" />
+        }
+        <details><summary>Restore on a replacement machine</summary><p>Use the same CPU architecture and BIOS/UEFI mode as the original. Attach the ISO as a virtual CD or compatible recovery medium. Boot it, connect the backup storage and follow FULL-SYSTEM-RECOVERY.txt. Review target disks before running rear recover: disk contents will be replaced. Test in isolation, then record Linux boot, LMS login and workload checks against this snapshot.</p></details>
     }
-</ChildContent></UiModal>
-<UiModal IsOpen="@showOutput" Title="Repository operation" OnClose="(() => showOutput = false)"><ChildContent><pre>@output</pre></ChildContent></UiModal>
-</div>
-@code {
+    </div>;
+    private string selectedSnapshotId = "";
+    private BackupSnapshot? SelectedSnapshot => snapshots.FirstOrDefault(item => item.Id == selectedSnapshotId);
+    private bool IsSnapshotPanelOpen(BackupSet set) => snapshotPlan?.Id == set.Id && snapshotRepository?.Id == set.RepositoryId;
+    private Task ToggleSnapshots(BackupRepository repository, BackupSet set)
+    { if (IsSnapshotPanelOpen(set)) { CloseSnapshots(); return Task.CompletedTask; } return ShowSnapshots(repository, set); }
+    private void ChooseSnapshot(string id)
+    {
+        if (busy || !snapshots.Any(item => item.Id == id)) return;
+        selectedSnapshotId = id; snapshot = null; files = []; selection.Clear(); output = null; error = null;
+        recoveryMediaSnapshot = null; restoreEverything = false; overwrite = false; fileSearch = ""; browseDirectory = "/"; filePage = 0;
+    }
+
     private BackupSet? backupGuidePlan;
     private void OpenBackupGuide(BackupSet? plan = null) { backupGuidePlan = plan; showBackupGuide = true; }
     private bool showBackupGuide, deletionConfirmed, restoreEverything;
     private Func<Task>? pendingDeletion;
     private string deletionTitle = "", deletionExplanation = "", deletionConfirmation = "";
-    private readonly HashSet<string> selectedSnapshots = [];
     private string browseDirectory = "/", fileSearch = "";
     private int filePage;
     private IReadOnlyList<BackupFile> VisibleSnapshotFiles => files.Where(file => fileSearch.Length > 0
@@ -421,7 +447,6 @@
     private void OpenSnapshotFolder(string path) { browseDirectory = path; fileSearch = ""; filePage = 0; }
     private void ParentSnapshotFolder() => OpenSnapshotFolder(System.IO.Path.GetDirectoryName(browseDirectory.TrimEnd('/')) ?? "/");
     private static string FormatFileSize(long bytes) => bytes >= 1_000_000_000 ? $"{bytes / 1_000_000_000d:0.##} GB" : bytes >= 1_000_000 ? $"{bytes / 1_000_000d:0.##} MB" : bytes >= 1_000 ? $"{bytes / 1_000d:0.##} KB" : $"{bytes} B";
-    private void SelectSnapshot(string id, bool value) { if (value) selectedSnapshots.Add(id); else selectedSnapshots.Remove(id); }
     private void CloseDeletion() { if (!busy) pendingDeletion = null; }
     private void RequestDeletePlan(BackupSet set)
     {
@@ -431,10 +456,11 @@
     }
     private void RequestDeleteSnapshots()
     {
-        var ids = selectedSnapshots.ToArray(); var repository = snapshotRepository!; var plan = snapshotPlan;
-        deletionTitle = "Delete selected snapshots"; deletionExplanation = $"Permanently delete {ids.Length} selected recovery point(s) from {repository.Name}? Other snapshots are preserved. Shared data is kept until no remaining backup needs it. Reclaim unused space afterwards if needed.";
-        deletionConfirmation = "Permanently delete the selected recovery points"; deletionConfirmed = false; error = null;
-        pendingDeletion = async () => { await Backup.DeleteSnapshotsAsync(repository.Id, ids, true); snapshot = null; files = []; selection.Clear(); selectedSnapshots.Clear(); snapshots = (await Backup.SnapshotsAsync(repository.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); output = "Selected snapshots deleted. Remaining backups are preserved. Reclaim unused space to remove unreferenced data."; };
+        var selected = SelectedSnapshot ?? throw new InvalidOperationException("Choose a backup date first.");
+        var ids = new[] { selected.Id }; var repository = snapshotRepository!; var plan = snapshotPlan;
+        deletionTitle = "Delete this snapshot"; deletionExplanation = $"Permanently delete the backup from {selected.Time.ToLocalTime():g} ({selected.Id[..8]}) in {repository.Name}? Other snapshots are preserved. Reclaim unused space afterwards if needed.";
+        deletionConfirmation = "Permanently delete this dated backup"; deletionConfirmed = false; error = null;
+        pendingDeletion = async () => { await Backup.DeleteSnapshotsAsync(repository.Id, ids, true); snapshot = null; files = []; selection.Clear(); selectedSnapshotId = ""; recoveryMediaSnapshot = null; snapshots = (await Backup.SnapshotsAsync(repository.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); selectedSnapshotId = snapshots.OrderByDescending(item => item.Time).FirstOrDefault()?.Id ?? ""; output = "Snapshot deleted. Remaining backups are preserved. Reclaim unused space to remove unreferenced data."; };
     }
     private void RequestReclaimSpace()
     {
@@ -443,7 +469,11 @@
         deletionConfirmation = "Remove unused data; keep all remaining snapshots"; deletionConfirmed = false; error = null;
         pendingDeletion = async () => output = await Backup.ReclaimSpaceAsync(id, true);
     }
-    private Task ConfirmDeletion() => Operation(deletionTitle + " — restic is working; please wait…", async () => { await pendingDeletion!(); pendingDeletion = null; });
+    private Task ConfirmDeletion()
+    {
+        if (busy || !deletionConfirmed || pendingDeletion is null) return Task.CompletedTask;
+        return Operation(deletionTitle + " — restic is working; please wait…", async () => { await pendingDeletion(); pendingDeletion = null; });
+    }
     private BackupWorkspace? workspace;
     private BackupRepository? repositoryEditor, snapshotRepository;
     private BackupSnapshot? recoveryMediaSnapshot;
@@ -643,16 +673,36 @@
         if (runNow) repositoryNotice = "Backup started. You can leave this page and return to see its progress.";
     });
     private Task Run(Guid id) => Operation("Starting your backup…", async () => { await Backup.StartBackupAsync(id); await RefreshProgress(); repositoryNotice = null; });
-    private Task ShowSnapshots(BackupRepository repo, BackupSet? plan = null) => Operation("Reading snapshots…", async () => { recoveryDataDirectory = workspace?.DataDirectory ?? ""; recoveryApplicationDirectory = workspace?.ApplicationDirectory ?? ""; recoveryKeyDirectory = workspace?.ProtectionKeyDirectory ?? ""; snapshotRepository = repo; snapshotPlan = plan; snapshot = null; output = null; snapshots = []; files = []; selection.Clear(); selectedSnapshots.Clear(); snapshots = (await Backup.SnapshotsAsync(repo.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray(); });
+    private async Task ShowSnapshots(BackupRepository repo, BackupSet? plan = null)
+    {
+        if (busy) return;
+        recoveryDataDirectory = workspace?.DataDirectory ?? ""; recoveryApplicationDirectory = workspace?.ApplicationDirectory ?? ""; recoveryKeyDirectory = workspace?.ProtectionKeyDirectory ?? "";
+        snapshotRepository = repo; snapshotPlan = plan; snapshot = null; selectedSnapshotId = "";
+        recoveryMediaSnapshot = null; output = null; snapshots = []; files = []; selection.Clear();
+        await Operation("Reading backups…", async () =>
+        {
+            snapshots = (await Backup.SnapshotsAsync(repo.Id)).Where(item => plan is null || item.Tags.Contains("lms-set-" + plan.Id.ToString("N"), StringComparer.Ordinal)).ToArray();
+            selectedSnapshotId = snapshots.OrderByDescending(item => item.Time).FirstOrDefault()?.Id ?? "";
+        });
+    }
     private void ChooseSnapshotBackup()
     {
         var repositoryId = snapshotRepository!.Id;
         CloseSnapshots();
         NewSetForRepository(repositoryId);
     }
-    private Task Browse(string id) => Operation("Reading snapshot files…", async () => { snapshot = null; files = []; output = null; files = await Backup.FilesAsync(snapshotRepository!.Id, id); snapshot = id; selection.Clear(); browseDirectory = "/"; fileSearch = ""; filePage = 0; restoreEverything = false; overwrite = false; });
+    private Task Browse(string id)
+    {
+        if (busy || snapshotRepository is null || SelectedSnapshot?.Id != id) return Task.CompletedTask;
+        snapshot = null; files = []; output = null; selection.Clear();
+        return Operation("Reading files in the selected backup…", async () =>
+        {
+            files = await Backup.FilesAsync(snapshotRepository.Id, id); snapshot = id;
+            browseDirectory = "/"; fileSearch = ""; filePage = 0; restoreEverything = false; overwrite = false;
+        });
+    }
     private void Select(string path, bool selected) { if (selected) selection.Add(path); else selection.Remove(path); }
-    private void CloseSnapshots() { if (!busy) { snapshotRepository = null; snapshotPlan = null; } }
+    private void CloseSnapshots() { if (!busy) { snapshotRepository = null; snapshotPlan = null; recoveryMediaSnapshot = null; snapshot = null; selectedSnapshotId = ""; files = []; selection.Clear(); } }
     private Task Restore() => Operation("Restoring selected snapshot…", async () => { await Backup.RestoreAsync(snapshotRepository!.Id, snapshot!, restoreTarget, restoreEverything ? [] : selection.ToArray(), overwrite); var recoveryFolder = snapshots.FirstOrDefault(item => item.Id == snapshot)?.Paths.FirstOrDefault(path => path.Contains("/lms-backup-staging-", StringComparison.Ordinal));
         if (recoveryFolder is not null && (restoreEverything || selection.Contains(recoveryFolder))) lmsRestorePath = Path.Combine(restoreTarget, recoveryFolder.TrimStart('/'));
         output = "Restore completed at " + restoreTarget + ". Restored files are decrypted; keep this directory private. Live LMS data was not changed."; });
