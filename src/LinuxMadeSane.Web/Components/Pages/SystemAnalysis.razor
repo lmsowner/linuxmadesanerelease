@@ -591,34 +591,6 @@
         }
 </div>
 
-<UiModal IsOpen="@(processPendingTermination is not null)"
-         Title="End process"
-         Subtitle="@(processPendingTermination is null ? string.Empty : $"{processPendingTermination.Name} · PID {processPendingTermination.ProcessId} · {processPendingTermination.User}")"
-         Class="system-analysis-maintenance-modal"
-         CloseOnBackdrop="false"
-         OnClose="CloseProcessTerminationDialog">
-    <div class="system-analysis-maintenance-dialog">
-        <p class="callout warning">This sends <strong>SIGTERM</strong> with sudo. Unsaved work can be lost, dependent services may fail, and Linux may automatically restart a managed service.</p>
-        <p>LMS verifies the process's kernel identity again before sending the signal, so a reused PID cannot end a different process.</p>
-        @if (!string.IsNullOrWhiteSpace(maintenanceDialogError))
-        {
-            <p class="callout error">@maintenanceDialogError</p>
-        }
-        <div class="toolbar-row">
-            <UiCommandButton Label="Cancel"
-                             Glyph="UiIconGlyph.Clear"
-                             Variant="UiButtonVariant.Ghost"
-                             Disabled="@isMaintenanceBusy"
-                             OnClick="CloseProcessTerminationDialog" />
-            <UiCommandButton Label="@(isMaintenanceBusy ? "Ending..." : "End process")"
-                             Glyph="UiIconGlyph.Stop"
-                             Variant="UiButtonVariant.Danger"
-                             Disabled="@isMaintenanceBusy"
-                             OnClick="ConfirmProcessTerminationAsync" />
-        </div>
-    </div>
-</UiModal>
-
 <UiModal IsOpen="@showDiskCleanupDialog"
          Title="Clean disk space"
          Subtitle="Remove standard Linux housekeeping data from the current LMS server."
@@ -694,6 +666,9 @@
     private LocalDriveUsageSnapshot? driveUsage;
     private LocalDiskCleanupResult? lastDiskCleanupResult;
     private LocalProcessMetric? processPendingTermination;
+    private int? processActionMessageId;
+    private string processActionMessage = string.Empty;
+    private bool processActionMessageIsError;
     private bool isRefreshing;
     private bool hasInitializedPolling;
     private bool isConfigurationLoading;
@@ -941,53 +916,44 @@
         return Task.CompletedTask;
     }
 
-    private void OpenProcessTerminationDialog(LocalProcessMetric process)
+    private bool IsProcessTerminationArmed(LocalProcessMetric process) =>
+        processPendingTermination is { } pending && pending.ProcessId == process.ProcessId &&
+        pending.ProcessStartTimeTicks == process.ProcessStartTimeTicks;
+
+    private async Task ConfirmOrEndProcessAsync(LocalProcessMetric process)
     {
-        if (isMaintenanceBusy || !CanEndProcess(process))
+        if (isMaintenanceBusy || !CanEndProcess(process)) return;
+        if (!IsProcessTerminationArmed(process))
         {
-            return;
-        }
-
-        maintenanceDialogError = string.Empty;
-        processPendingTermination = process;
-    }
-
-    private void CloseProcessTerminationDialog()
-    {
-        if (isMaintenanceBusy)
-        {
-            return;
-        }
-
-        processPendingTermination = null;
-        maintenanceDialogError = string.Empty;
-    }
-
-    private async Task ConfirmProcessTerminationAsync()
-    {
-        if (isMaintenanceBusy || processPendingTermination is not { } process)
-        {
+            processPendingTermination = process;
+            processActionMessage = string.Empty;
             return;
         }
 
         isMaintenanceBusy = true;
-        maintenanceDialogError = string.Empty;
+        processActionMessageId = process.ProcessId;
+        processActionMessage = $"Ending {process.Name} (PID {process.ProcessId})...";
+        processActionMessageIsError = false;
         try
         {
-            maintenanceMessage = await SystemMaintenance.EndProcessAsync(
+            processActionMessage = await SystemMaintenance.EndProcessAsync(
                 process.ProcessId,
                 process.ProcessStartTimeTicks,
                 process.Name);
+            maintenanceMessage = processActionMessage;
             maintenanceMessageIsError = false;
-            processPendingTermination = null;
             await RefreshSnapshotAsync(CancellationToken.None);
         }
         catch (Exception exception)
         {
-            maintenanceDialogError = exception.Message;
+            processActionMessage = exception.Message;
+            processActionMessageIsError = true;
+            maintenanceMessage = exception.Message;
+            maintenanceMessageIsError = true;
         }
         finally
         {
+            processPendingTermination = null;
             isMaintenanceBusy = false;
         }
     }
@@ -1258,13 +1224,17 @@
                             @if (showActions)
                             {
                                 <td class="actions-cell system-analysis-process-actions">
-                                    <UiCommandButton Label="End process"
+                                    <UiCommandButton Label="@(IsProcessTerminationArmed(process) ? isMaintenanceBusy ? "Ending..." : "Click to Confirm!" : "End process")"
                                                      HideIcon="true"
                                                      Class="process-end-button"
                                                      Variant="UiButtonVariant.Danger"
-                                                     Title="@GetEndProcessTitle(process)"
+                                                     Title="@(IsProcessTerminationArmed(process) ? $"Click again to end {process.Name} (PID {process.ProcessId}). Unsaved work may be lost." : GetEndProcessTitle(process))"
                                                      Disabled="@(isMaintenanceBusy || !CanEndProcess(process))"
-                                                     OnClick="@(() => OpenProcessTerminationDialog(process))" />
+                                                     OnClick="@(() => ConfirmOrEndProcessAsync(process))" />
+                                    @if (processActionMessageId == process.ProcessId && !string.IsNullOrWhiteSpace(processActionMessage))
+                                    {
+                                        <div class="process-end-feedback @(processActionMessageIsError ? "is-error" : null)" role="status">@processActionMessage</div>
+                                    }
                                 </td>
                             }
                         </tr>
