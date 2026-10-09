@@ -846,33 +846,21 @@ window.lmsLayout = (() => {
         setSidebarCollapsed(!getSidebarCollapsed());
     }
 
-    function bindSidebarToggles() {
-        document.querySelectorAll("[data-sidebar-toggle]").forEach(element => {
-            if (element.dataset.sidebarToggleBound === "true") {
-                return;
-            }
+    // Interactive rendering may add or replace the controls after initialization.
+    // Delegate clicks instead of attaching handlers to a particular button instance.
+    document.addEventListener("click", event => {
+        const target = event.target instanceof Element ? event.target : null;
+        const control = target?.closest("[data-sidebar-toggle]");
+        if (!control || control.disabled) return;
 
-            element.dataset.sidebarToggleBound = "true";
-            element.addEventListener("click", event => {
-                event.preventDefault();
-                const action = element.dataset.sidebarToggle;
-                if (action === "show") {
-                    setSidebarCollapsed(false);
-                    return;
-                }
-
-                if (action === "hide") {
-                    setSidebarCollapsed(true);
-                    return;
-                }
-
-                toggleSidebarCollapsed();
-            });
-        });
-    }
+        event.preventDefault();
+        const action = control.dataset.sidebarToggle;
+        if (action === "show") setSidebarCollapsed(false);
+        else if (action === "hide") setSidebarCollapsed(true);
+        else toggleSidebarCollapsed();
+    });
 
     function initializeSidebar() {
-        bindSidebarToggles();
         applySidebarCollapsed(getSidebarCollapsed());
     }
 
