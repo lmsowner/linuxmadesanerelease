@@ -11,12 +11,7 @@
 @inject IInfrastructureDiagnosticsService Diagnostics
 @inject ShareMountsWorkspaceService ShareWorkspace
 <FeaturePackageGate Feature="Backup" OnInstalled="Load">
-    <p>Protect LMS and your chosen folders. Each run saves a dated recovery point; restic reuses unchanged data.</p>
-    <UiCommandButton Label="How backups & recovery work" Glyph="UiIconGlyph.FolderOpen" OnClick="(() => OpenBackupGuide())" />
-    <div class="infrastructure-actions"><UiCommandButton Label="Refresh" Disabled="@busy" OnClick="Load" />
-    <UiCommandButton Label="Install / update restic" HideIcon="true" Disabled="@busy" OnClick="UpdateRestic" />
-    <UiCommandButton Label="Set up backup storage" HideIcon="true" Disabled="@busy" OnClick="NewRepository" />
-    <UiCommandButton Label="Add backup plan" HideIcon="true" Disabled="@(busy || workspace?.Repositories.Count is null or 0)" OnClick="NewSet" /></div>
+    @if (!HeaderActionsChanged.HasDelegate) { @HeaderActions }
     @if (repositoryNotice is not null) { <p class="callout" role="status">@repositoryNotice</p> }
     @if (busy) { <p class="callout" role="status" aria-busy="true">@progress</p> }
     @if (error is not null) { <p class="callout error" role="alert">@error</p> }
@@ -24,8 +19,6 @@
     @foreach (var job in jobs.Where(job => job.IsRunning)) { <BackupProgressView Progress="job" Name="@(workspace?.Sets.FirstOrDefault(set => set.Id == job.SetId)?.Name ?? "Backup")" /> }
     @if (workspace is not null)
     {
-        <h3>Backup plans</h3>
-        <p>Each plan has its own files, destination, schedule and retention. Several plans can share a storage location.</p>
         @if (workspace.Sets.Count == 0) { <p>No plans yet. Select <strong>Add backup plan</strong> above to choose what to protect.</p> }
         <div class="backup-plan-grid">
         @foreach (var set in workspace.Sets)
@@ -36,8 +29,9 @@
             var lastFinished = set.LastFinishedUtc ?? last?.FinishedUtc;
             var lastSucceeded = set.LastRunSucceeded ?? last?.Success;
             var lastSuccess = workspace.History.FirstOrDefault(item => item.SetId == set.Id && item.Kind.StartsWith("Backup", StringComparison.Ordinal) && item.Success);
-            <section class="@(IsSnapshotPanelOpen(set) ? "surface-card backup-plan-card backup-plan-expanded" : "surface-card backup-plan-card")" @key="set.Id"><h3><UiCommandButton Class="backup-plan-toggle" Label="@set.Name" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ToggleSnapshots(destination!, set))" AdditionalAttributes="@(new Dictionary<string, object> { ["aria-expanded"] = IsSnapshotPanelOpen(set).ToString().ToLowerInvariant() })" /></h3>
+            <section class="@(IsSnapshotPanelOpen(set) ? "surface-card backup-plan-card backup-plan-expanded" : "surface-card backup-plan-card")" @key="set.Id"><div class="backup-plan-summary"><div class="backup-plan-identity"><h3><UiCommandButton Class="backup-plan-toggle" Label="@set.Name" HideIcon="true" Disabled="@(busy || destination is null)" OnClick="(() => ToggleSnapshots(destination!, set))" AdditionalAttributes="@(new Dictionary<string, object> { ["aria-expanded"] = IsSnapshotPanelOpen(set).ToString().ToLowerInvariant() })" /></h3>
                 <p><strong>Protects:</strong> @(set.FullSystem ? "Full system + ReaR boot recovery" : set.IncludeLms ? "LMS configuration, credentials & database" : "Selected folders")</p>
+                </div><div class="backup-plan-management">
                 <details><summary>Destination, retention & recovery details</summary>
                 @if (set.Sources.Count > 0) { <p><strong>Folders:</strong> @string.Join("; ", set.Sources)</p> }
                 <p><strong>Destination:</strong> @(destination?.Name ?? "Storage location missing") · @destination?.Path</p>
@@ -56,6 +50,7 @@
                     @if (set.FullSystem && destination is not null) { <UiCommandButton Label="Recovery guide" HideIcon="true" Disabled="@busy" OnClick="(() => OpenBackupGuide(set))" /> }
                     <UiCommandButton Label="Delete plan" HideIcon="true" Variant="UiButtonVariant.Ghost" Disabled="@(busy || job?.IsRunning == true)" OnClick="(() => RequestDeletePlan(set))" />
                 </div>
+                </div></div>
                 @if (IsSnapshotPanelOpen(set)) { @SnapshotPanel }
                 @if (job is not null) { <BackupProgressView Progress="job" /> }
                 @if (!string.IsNullOrWhiteSpace(set.Notes)) { <details><summary>Notes & recovery instructions</summary><p class="backup-plan-notes">@set.Notes</p></details> }
@@ -218,11 +213,12 @@
                           ReviewAtEnd="true" />
     }
 </UiModal>
-<UiModal Class="backup-compact-modal" IsOpen="@(setEditor is not null)" Title="Choose what to back up" OnClose="CloseSet"><ChildContent>
+<UiModal Class="backup-compact-modal backup-plan-editor" IsOpen="@(setEditor is not null)" Title="Choose what to back up" OnClose="CloseSet"><ChildContent>
     @if (setEditor is not null)
     {
         <div class="backup-two-columns"><UiTextField Label="Plan name" @bind-Value="setEditor.Name" />
         <UiSelectField TValue="Guid" Label="Backup location" Disabled="@busy" Value="@setEditor.RepositoryId" ValueChanged="ChangeBackupRepository">@foreach (var repo in workspace?.Repositories ?? []) { <option value="@repo.Id">@repo.Name — @repo.Path</option> }</UiSelectField></div>
+        <div class="backup-editor-columns"><section class="backup-editor-sources">
         <UiSelectField TValue="bool" Label="Backup type" Disabled="@busy" Value="@setEditor.FullSystem" ValueChanged="ChangeBackupType"><option value="false">LMS configuration / selected folders</option><option value="true">Full system + boot recovery</option></UiSelectField>
         @if (setEditor.FullSystem)
         {
@@ -245,6 +241,7 @@
             <p>For Linux and boot recovery, choose <strong>Full system + boot recovery</strong> above.</p>
         </section>
         }
+        </section><section class="backup-editor-settings"><h3>Retention & schedule</h3>
         <div class="infrastructure-grid"><UiNumberField TValue="int" Label="Keep daily" @bind-Value="setEditor.KeepDaily" min="0" /><UiNumberField TValue="int" Label="Weekly" @bind-Value="setEditor.KeepWeekly" min="0" /><UiNumberField TValue="int" Label="Monthly" @bind-Value="setEditor.KeepMonthly" min="0" /></div>
         <UiCheckboxField Label="Enable scheduled backups" Helper="This schedule applies only to this plan, in the host’s local timezone." @bind-Value="schedule" />
         @if (schedule)
@@ -274,6 +271,7 @@
             </div>
             <p><a href="/scheduling">Advanced schedules</a></p>
         }
+        </section></div>
         <UiTextAreaField Label="Notes & recovery instructions" Helper="Stored inside the encrypted backup. Do not enter passwords." Rows="2" @bind-Value="setEditor.Notes" />
         <div class="infrastructure-actions">
             <UiCommandButton Label="Save & back up now" HideIcon="true" Variant="UiButtonVariant.Action" Disabled="@(busy || (setEditor.FullSystem && (!fullSystemReady || !fullSystemPackagesReady)))" OnClick="(() => SaveSet(true))" />
@@ -299,6 +297,16 @@
 <UiModal IsOpen="@showOutput" Title="Repository operation" OnClose="(() => showOutput = false)"><ChildContent><pre>@output</pre></ChildContent></UiModal>
 </div>
 @code {
+    [Parameter] public EventCallback<RenderFragment> HeaderActionsChanged { get; set; }
+    private Task NotifyHeader() => HeaderActionsChanged.HasDelegate ? HeaderActionsChanged.InvokeAsync(HeaderActions) : Task.CompletedTask;
+    private RenderFragment HeaderActions => @<div class="backup-header-actions">
+    <UiCommandButton Label="How backups & recovery work" Glyph="UiIconGlyph.FolderOpen" OnClick="(() => OpenBackupGuide())" />
+    <UiCommandButton Label="Refresh" Disabled="@busy" OnClick="Load" />
+    <UiCommandButton Label="Install / update restic" HideIcon="true" Disabled="@busy" OnClick="UpdateRestic" />
+    <UiCommandButton Label="Set up backup storage" HideIcon="true" Disabled="@busy" OnClick="NewRepository" />
+    <UiCommandButton Label="Add backup plan" HideIcon="true" Disabled="@(busy || workspace?.Repositories.Count is null or 0)" OnClick="NewSet" />
+    </div>;
+
     private RenderFragment SnapshotPanel => @<section class="backup-snapshot-panel" aria-label="Backups and restore">
         <div class="infrastructure-actions"><h3>@(snapshotPlan?.Name ?? snapshotRepository?.Name) — @(busy && snapshots.Count == 0 ? "Loading backups…" : $"{snapshots.Count} backup(s)")</h3>
         <UiCommandButton Label="Refresh backups" HideIcon="true" Disabled="@busy" OnClick="(() => ShowSnapshots(snapshotRepository!, snapshotPlan))" />
@@ -523,6 +531,7 @@
     private Task? pollTask;
     protected override async Task OnInitializedAsync()
     {
+        await NotifyHeader();
         if ((await Diagnostics.GetPackageStatusAsync("Backup")).Installed) await Load();
         await RefreshProgress();
         pollTask = PollProgress();
@@ -556,7 +565,7 @@
     public async ValueTask DisposeAsync() { polling.Cancel(); if (pollTask is not null) await pollTask; polling.Dispose(); }
 
     private async Task Operation(string label, Func<Task> operation)
-    { busy = true; progress = label; error = null; await InvokeAsync(StateHasChanged); await Task.Yield(); try { await operation(); } catch (Exception e) { repositoryNotice = null; error = e.Message; } finally { busy = false; } }
+    { busy = true; progress = label; error = null; await NotifyHeader(); await InvokeAsync(StateHasChanged); await Task.Yield(); try { await operation(); } catch (Exception e) { repositoryNotice = null; error = e.Message; } finally { busy = false; await NotifyHeader(); } }
     private Task UpdateRestic() => Operation("Installing the latest stable restic release and verifying its signature…", async () =>
     {
         await Diagnostics.InstallPackagesAsync("Backup");
