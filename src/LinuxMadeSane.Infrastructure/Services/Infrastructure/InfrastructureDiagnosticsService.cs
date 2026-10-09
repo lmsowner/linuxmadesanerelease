@@ -276,12 +276,17 @@ public sealed class InfrastructureDiagnosticsService(
 
     private async Task<IReadOnlyList<InterfaceDnsConfiguration>> ReadInterfaceDnsAsync(CancellationToken token)
     {
-        var resolved = await Run("resolvectl", ["dns"], seconds: 3, token: token);
-        var nm = await Run("nmcli", ["--terse", "--escape", "no", "--fields", "GENERAL.DEVICE,IP4.DNS,IP6.DNS,DHCP4.OPTION", "device", "show"], seconds: 3, token: token);
-        return ParseInterfaceDns(resolved.ExitCode == 0 ? resolved.StandardOutput : "", nm.ExitCode == 0 ? nm.StandardOutput : "");
+        var results = await Task.WhenAll(
+            Run("resolvectl", ["dns"], seconds: 3, token: token),
+            Run("nmcli", ["--terse", "--escape", "no", "--fields", "GENERAL.DEVICE,IP4.DNS,IP6.DNS,IP4.DOMAIN,IP6.DOMAIN,DHCP4.OPTION,DHCP6.OPTION", "device", "show"], seconds: 3, token: token),
+            Run("resolvectl", ["domain"], seconds: 3, token: token));
+        return ParseInterfaceDns(results[0].ExitCode == 0 ? results[0].StandardOutput : "",
+            results[1].ExitCode == 0 ? results[1].StandardOutput : "", results[2].ExitCode == 0 ? results[2].StandardOutput : "");
     }
 
-    internal static IReadOnlyList<InterfaceDnsConfiguration> ParseInterfaceDns(string resolved, string networkManager)
+    public Task<IReadOnlyList<InterfaceDnsConfiguration>> GetInterfaceDnsAsync(CancellationToken cancellationToken = default) => ReadInterfaceDnsAsync(cancellationToken);
+
+    internal static IReadOnlyList<InterfaceDnsConfiguration> ParseInterfaceDns(string resolved, string networkManager, string resolvedDomains = "")
     {
         var active = new Dictionary<string, InterfaceDnsConfiguration>(StringComparer.Ordinal);
         foreach (var line in resolved.Split('\n'))
@@ -289,15 +294,37 @@ public sealed class InfrastructureDiagnosticsService(
             var match = Regex.Match(line, @"^Link \d+ \(([^)]+)\):\s*(.*)$");
             if (match.Success) active[match.Groups[1].Value] = new(match.Groups[1].Value, DnsAddresses(match.Groups[2].Value), "systemd-resolved");
         }
+        string domainInterface = "";
+        foreach (var line in resolvedDomains.Split('\n'))
+        {
+            var match = Regex.Match(line, @"^Link \d+ \(([^)]+)\):\s*(.*)$");
+            if (match.Success) domainInterface = match.Groups[1].Value;
+            else if (!line.StartsWith(' ')) { domainInterface = ""; continue; }
+            if (domainInterface.Length == 0) continue;
+            var values = DomainNames(match.Success ? match.Groups[2].Value : line);
+            if (!active.TryGetValue(domainInterface, out var config)) config = new(domainInterface, [], "systemd-resolved");
+            active[domainInterface] = config with
+            {
+                SearchDomains = config.SearchDomains.Concat(values.Where(value => !value.StartsWith('~'))).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                RoutingDomains = config.RoutingDomains.Concat(values.Where(value => value.StartsWith('~')).Select(value => value[1..])).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+            };
+        }
         string current = "";
         var supplied = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         var leases = new Dictionary<string, string>(StringComparer.Ordinal);
+        var dhcpDomains = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var line in networkManager.Split('\n'))
         {
             var split = line.IndexOf(':'); if (split < 0) continue;
             var key = line[..split]; var value = line[(split + 1)..].Trim();
             if (key == "GENERAL.DEVICE") { current = value; continue; }
             if (current.Length == 0) continue;
+            if (!active.ContainsKey(current)) active[current] = new(current, [], "NetworkManager");
+            if (key.StartsWith("IP4.DOMAIN[", StringComparison.Ordinal) || key.StartsWith("IP6.DOMAIN[", StringComparison.Ordinal))
+            {
+                var config = active[current];
+                if (config.Source == "NetworkManager") active[current] = config with { SearchDomains = config.SearchDomains.Concat(DomainNames(value).Where(domain => !domain.StartsWith('~'))).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() };
+            }
             if (key.StartsWith("IP4.DNS[", StringComparison.Ordinal) || key.StartsWith("IP6.DNS[", StringComparison.Ordinal))
             {
                 if (!active.TryGetValue(current, out var config)) config = new(current, [], "NetworkManager");
@@ -308,9 +335,21 @@ public sealed class InfrastructureDiagnosticsService(
                 if (value.StartsWith("domain_name_servers = ", StringComparison.Ordinal)) supplied[current] = DnsAddresses(value[22..]).ToList();
                 if (value.StartsWith("dhcp_server_identifier = ", StringComparison.Ordinal)) leases[current] = value[25..];
             }
+            if (key.StartsWith("DHCP4.OPTION[", StringComparison.Ordinal) || key.StartsWith("DHCP6.OPTION[", StringComparison.Ordinal))
+            {
+                var option = value.Split(" = ", 2, StringSplitOptions.None);
+                if (option.Length == 2 && option[0] is "domain_name" or "domain_search" or "domain_search_list" or "dhcp6_domain_search")
+                {
+                    if (!dhcpDomains.TryGetValue(current, out var domains)) dhcpDomains[current] = domains = [];
+                    domains.AddRange(DomainNames(option[1]));
+                }
+            }
         }
-        return active.Values.Select(config => config with { DhcpServers = supplied.GetValueOrDefault(config.Interface) ?? [], DhcpServer = leases.GetValueOrDefault(config.Interface) ?? "" }).ToArray();
+        return active.Values.Select(config => config with { DhcpServers = supplied.GetValueOrDefault(config.Interface) ?? [], DhcpServer = leases.GetValueOrDefault(config.Interface) ?? "", DhcpDomains = dhcpDomains.GetValueOrDefault(config.Interface)?.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? [] }).ToArray();
     }
+
+    private static IReadOnlyList<string> DomainNames(string text) => text.Split([' ', '\t', '\r', ','], StringSplitOptions.RemoveEmptyEntries)
+        .Where(value => value.Length <= 254 && Regex.IsMatch(value, @"^~?(?:[a-zA-Z0-9_-]+\.)*[a-zA-Z0-9_-]+\.?$|^~\.$")).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
     private static IReadOnlyList<string> DnsAddresses(string text) => text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
         .Where(value => IPAddress.TryParse(value.Split('#')[0], out _) || IPEndPoint.TryParse(value.Split('#')[0], out _)).Distinct().ToArray();

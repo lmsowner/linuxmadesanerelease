@@ -31,6 +31,9 @@ public sealed class NetworkDevice
 
 public sealed record InterfaceDnsConfiguration(string Interface, IReadOnlyList<string> Servers, string Source)
 {
+    public IReadOnlyList<string> SearchDomains { get; init; } = [];
+    public IReadOnlyList<string> RoutingDomains { get; init; } = [];
+    public IReadOnlyList<string> DhcpDomains { get; init; } = [];
     public IReadOnlyList<string> DhcpServers { get; init; } = [];
     public string DhcpServer { get; init; } = "";
 }

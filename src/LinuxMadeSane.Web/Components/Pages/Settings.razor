@@ -14,10 +14,12 @@
 @using LinuxMadeSane.Core.Models
 @using LinuxMadeSane.Core.Models.Shares
 @using LinuxMadeSane.Application.Contracts.MailRelay
+@using LinuxMadeSane.Application.Contracts.Infrastructure
 @using LinuxMadeSane.Core.Models.MailRelay
 @using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.AspNetCore.Components.Forms
 @inject ISecuritySettingsService SecuritySettingsService
+@inject IInfrastructureDiagnosticsService InfrastructureDiagnostics
 @inject IShareManagementService ShareService
 @inject ITrustedNetworkAccessService TrustedNetworkAccessService
 @inject TrustedNetworkAccessTrialService NetworkAccessTrialService
@@ -233,6 +235,7 @@
                                 <div class="network-interface-list">
                                     @foreach (var networkInterface in networkInterfaces)
                                     {
+                                        var interfaceDns = interfaceDnsConfigurations.FirstOrDefault(item => item.Interface == networkInterface.Name);
                                         var interfaceRanges = GetTrustedNetworksForInterface(networkInterface);
 
                                         <article class="surface-subcard network-interface-card">
@@ -374,7 +377,17 @@
                                                     </div>
                                                     <div>
                                                         <dt>DNS</dt>
-                                                        <dd>@FormatStringList(networkInterface.DnsServers)</dd>
+                                                        <dd>@(interfaceDns is { Servers.Count: > 0 } ? FormatStringList(interfaceDns.Servers) : FormatStringList(networkInterface.DnsServers))</dd>
+                                                        @if (interfaceDns is not null) { <span class="meta-text">@interfaceDns.Source</span> }
+                                                    </div>
+                                                    <div>
+                                                        <dt>DNS search suffix</dt>
+                                                        <dd>@(interfaceDnsLoading ? "Loading…" : interfaceDns is { SearchDomains.Count: > 0 } ? FormatStringList(interfaceDns.SearchDomains) : "No interface search suffix reported")</dd>
+                                                        @if (interfaceDns is { DhcpDomains.Count: > 0 })
+                                                        { <span class="meta-text">DHCP offered: @FormatStringList(interfaceDns.DhcpDomains)</span> }
+                                                        @if (interfaceDns is { RoutingDomains.Count: > 0 })
+                                                        { <details><summary class="meta-text">DNS routing domains (not suffixes)</summary><span class="meta-text">@FormatStringList(interfaceDns.RoutingDomains)</span></details> }
+                                                        @if (interfaceDnsError) { <span class="meta-text">Interface DNS details could not be read.</span> }
                                                     </div>
                                                 </dl>
                                             </details>
@@ -1395,6 +1408,8 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
 
     private SecuritySettingsPageViewModel page = new([], [], BuildDefaultMessagingViewModel());
     private IReadOnlyList<LocalNetworkInterfaceView> networkInterfaces = [];
+    private IReadOnlyList<InterfaceDnsConfiguration> interfaceDnsConfigurations = [];
+    private bool interfaceDnsLoaded, interfaceDnsLoading, interfaceDnsError;
     private IReadOnlyList<LinuxShareUser> localLinuxUsers = [];
     private TrustedNetworkAccessResult currentAccess = new("unknown", "unknown", false, null, false, false, false, false, false);
     private TrustedNetworkEntryEditor networkEditor = new();
@@ -1540,6 +1555,14 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (isLoaded && activeTab == TrustedNetworksTabValue && !interfaceDnsLoaded)
+        {
+            interfaceDnsLoaded = true; interfaceDnsLoading = true; interfaceDnsError = false;
+            StateHasChanged();
+            try { interfaceDnsConfigurations = await InfrastructureDiagnostics.GetInterfaceDnsAsync(); }
+            catch { interfaceDnsError = true; }
+            finally { interfaceDnsLoading = false; StateHasChanged(); }
+        }
         if (!isLoaded || activeTab != FirewallTabValue || !HasAdministratorAccess || hasCheckedFirewallBrowserIp)
         {
             return;
@@ -1595,6 +1618,7 @@ Test-ApplicationAccessPolicy -Identity serviceaccount@example.com -AppId &lt;cli
         SyncSessionLifetimeEditors();
         SyncLinuxUsernameEditors();
         networkInterfaces = LoadNetworkInterfaces();
+        interfaceDnsLoaded = false;
         var httpContext = ResolveHttpContext();
         if (httpContext?.Items.TryGetValue("LmsTrustedNetworkAccess", out var cachedAccess) == true &&
             cachedAccess is TrustedNetworkAccessResult authorizedAccess)
