@@ -92,6 +92,7 @@ public sealed class SshForwardProcessFactory(SshForwardStore store, ILinuxComman
 }
 internal sealed class SshForwardProcess : ISshForwardProcess
 {
+    private readonly Stopwatch lifetime = Stopwatch.StartNew();
     private readonly Process process;
     private readonly string runtime, control;
     private readonly SshPortForward rule;
@@ -133,8 +134,12 @@ internal sealed class SshForwardProcess : ISshForwardProcess
     public async Task<string> GetDiagnosticsAsync()
     {
         if (process.HasExited) await errorTask;
-        var detail = diagnosticLines.IsEmpty ? failure : string.Join(Environment.NewLine, diagnosticLines);
-        return process.HasExited ? $"SSH exited with code {process.ExitCode}. {detail}" : detail;
+        var detail = diagnosticLines.IsEmpty ? "SSH produced no error output." : string.Join(Environment.NewLine, diagnosticLines);
+        if (!process.HasExited) return detail;
+        var duration = lifetime.Elapsed.TotalSeconds;
+        return process.ExitCode == 0
+            ? $"SSH ended normally (exit code 0) after {duration:F0} seconds. The persistent forward stopped unexpectedly. {detail}"
+            : $"SSH exited with code {process.ExitCode} after {duration:F0} seconds. {detail}";
     }
     public async Task<bool> IsConnectedAsync(CancellationToken token)
     {

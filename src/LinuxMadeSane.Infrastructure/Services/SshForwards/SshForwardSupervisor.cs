@@ -127,6 +127,8 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
     private static int RetryDelay(SshPortForward rule, int retries) => (int)Math.Min(300, Math.Clamp(rule.RetrySeconds, 1, 300) * Math.Pow(2, Math.Min(retries, 8)));
     public static string ExplainFailure(string error, SshPortForward rule)
     {
+        if (error.StartsWith("SSH ended normally", StringComparison.Ordinal))
+            return $"The SSH forward to {rule.Server}:{rule.SshPort} closed normally instead of remaining connected. {error}";
         var location = $"On {rule.Server}, for {rule.Username}";
         if (error.Contains("REMOTE HOST IDENTIFICATION", StringComparison.OrdinalIgnoreCase) || error.Contains("Host key verification failed", StringComparison.OrdinalIgnoreCase))
             return $"The saved identity for {rule.Server} changed. Verify the server fingerprint before updating LMS's trusted host key. Detail: {error}";

@@ -51,7 +51,7 @@ public static class SshForwardDefinition
     public static IReadOnlyList<string> Arguments(SshPortForward rule, string identityPath, string knownHosts, string controlSocket)
     {
         var args = new List<string> { "-N", "-T", "-F", "/dev/null", "-M", "-S", controlSocket,
-            "-o", "ControlPersist=no", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=15",
+            "-o", "ControlPersist=no", "-o", "LogLevel=VERBOSE", "-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=15",
             "-o", "ServerAliveInterval=" + rule.KeepAliveSeconds, "-o", "ServerAliveCountMax=" + rule.MissedKeepAlives,
             "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + knownHosts,
             "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ForwardAgent=no", "-o", "IdentityAgent=none",
