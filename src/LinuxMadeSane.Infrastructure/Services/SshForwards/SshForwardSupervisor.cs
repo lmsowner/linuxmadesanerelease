@@ -58,6 +58,7 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
             var revision = SshForwardDefinition.RuntimeRevision(rule) + await credentials.RevisionAsync(rule.CredentialId, token) + generations.GetValueOrDefault(rule.Id);
             if (workers.TryGetValue(rule.Id, out var current) && current.Revision == revision && !current.Task.IsCompleted) continue;
             await RemoveWorkerAsync(rule.Id);
+            await store.ClearDiagnosticsAsync(rule.Id, token);
             var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
             workers[rule.Id] = new(revision, stop, RunForwardAsync(rule, stop.Token));
         }
@@ -70,6 +71,7 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
     private async Task RunForwardAsync(SshPortForward input, CancellationToken token)
     {
         var retries = 0; DateTimeOffset? lastFailure = null; string? lastFailureDetail = null;
+        var recordedConnection = false; DateTimeOffset? lastWarning = null;
         while (!token.IsCancellationRequested)
         {
             ISshForwardProcess? process = null;
@@ -89,7 +91,11 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
                     var alive = connected is not null || await process.IsConnectedAsync(token);
                     if (alive)
                     {
-                        if (connected is null) await RecordDiagnosticAsync(rule, "Connected", $"SSH connected to {rule.Username}@{rule.Server}:{rule.SshPort}.");
+                        if (connected is null && !recordedConnection)
+                        {
+                            await RecordDiagnosticAsync(rule, "Connected", $"SSH connected to {rule.Username}@{rule.Server}:{rule.SshPort}.");
+                            recordedConnection = true;
+                        }
                         connected ??= DateTimeOffset.UtcNow;
                         if (process.TrafficError is { } forwardingError && forwardingError != recordedTrafficError)
                         {
@@ -110,7 +116,12 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
                 lastFailure = DateTimeOffset.UtcNow;
                 lastFailureDetail = exception.Message;
                 await RecordDiagnosticAsync(input, "Disconnected", lastFailureDetail + $" Retrying in {RetryDelay(input, retries)} seconds.");
-                logger.LogWarning("SSH forward {ForwardId} ({Name}) disconnected: {Reason}. Retrying in {Delay} seconds.", input.Id, input.Name, lastFailureDetail, RetryDelay(input, retries));
+                // Retry status remains current in the UI; do not flood the service journal.
+                if (lastWarning is null || lastFailure - lastWarning >= TimeSpan.FromMinutes(5))
+                {
+                    logger.LogWarning("SSH forward {ForwardId} ({Name}) disconnected: {Reason}. Retrying in {Delay} seconds.", input.Id, input.Name, lastFailureDetail, RetryDelay(input, retries));
+                    lastWarning = lastFailure;
+                }
                 statuses[input.Id] = new("Retrying", lastFailureDetail + $" Retrying in {RetryDelay(input, retries)} seconds.", null, lastFailure, retries, LastFailureDetail: lastFailureDetail);
             }
             finally { if (process is not null) await process.DisposeAsync(); }

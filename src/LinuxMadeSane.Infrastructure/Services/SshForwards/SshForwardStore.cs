@@ -16,13 +16,21 @@ public sealed class SshForwardStore(SshForwardStorageSettings settings)
         var path = DiagnosticPath(id);
         return File.Exists(path) ? JsonSerializer.Deserialize<SshForwardDiagnostic[]>(await File.ReadAllTextAsync(path, token), Json) ?? [] : [];
     }
+    public async Task ClearDiagnosticsAsync(Guid id, CancellationToken token)
+    {
+        await diagnosticGate.WaitAsync(token);
+        try { File.Delete(DiagnosticPath(id)); }
+        finally { diagnosticGate.Release(); }
+    }
     public async Task AppendDiagnosticAsync(Guid id, SshForwardDiagnostic entry, CancellationToken token)
     {
         await diagnosticGate.WaitAsync(token);
         var temporary = DiagnosticPath(id) + "." + Guid.NewGuid().ToString("N");
         try
         {
-            var entries = (await ReadDiagnosticsAsync(id, token)).Append(entry).TakeLast(50).ToArray();
+            // Keep the latest detail for each event type, rather than an accumulating retry log.
+            entry = entry with { Detail = entry.Detail.Length > 4000 ? entry.Detail[..4000] : entry.Detail };
+            var entries = (await ReadDiagnosticsAsync(id, token)).Where(x => x.State != entry.State).Append(entry).TakeLast(10).ToArray();
             Directory.CreateDirectory(DirectoryPath);
             if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(DirectoryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(entries, Json), token);

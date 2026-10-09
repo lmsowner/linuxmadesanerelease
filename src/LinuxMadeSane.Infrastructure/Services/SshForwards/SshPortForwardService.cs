@@ -118,6 +118,7 @@ public sealed class SshPortForwardService(SshForwardStore store, SshForwardSuper
             var rules = await store.ReadAsync(token); var rule = Find(rules, id);
             if (rule.EdgeGatewayRouteId is not null) throw new InvalidOperationException("Unlink its Caddy route before removing this SSH forward.");
             await store.WriteAsync(rules.Where(x => x.Id != id), token); await supervisor.StopForwardAsync(id, token);
+            await store.ClearDiagnosticsAsync(id, token);
         }
         finally { Operations.Release(); }
     }
