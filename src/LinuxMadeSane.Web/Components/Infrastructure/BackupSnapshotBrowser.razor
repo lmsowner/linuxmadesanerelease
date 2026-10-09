@@ -1,0 +1,98 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@using LinuxMadeSane.Application.Contracts.Infrastructure
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Enums
+
+<div class="snapshot-explorer">
+    <FileBrowserExplorer CanBrowse="true" IsBusy="@Disabled" BusyTitle="Backup operation running" BusyMessage="The current action is shown beside the backup controls." CurrentPath="@currentPath" RootPath="/"
+                         Items="@currentItems" DirectoryNodes="@directoryNodes" SelectedPaths="@selectedPaths" SelectedItem="@focusedItem"
+                         ShowDetailPanel="false" NavigateRequested="Navigate" ToggleDirectoryRequested="Toggle"
+                         GoUpRequested="GoUp" RefreshRequested="Refresh" SidebarCollapsed="@sidebarCollapsed" SidebarCollapsedChanged="(value => sidebarCollapsed = value)"
+                         ItemSelected="(item => focusedItem = item)" ItemSelectionToggled="ToggleItem" SelectAllRequested="SelectAll"
+                         MarqueeSelectionChanged="ChangeSelection">
+        <HeaderContent><div class="snapshot-location"><strong>@currentPath</strong><span>Files in this snapshot</span></div></HeaderContent>
+        <ToolbarContent>
+            <UiCompactCheckbox Label="Select this folder" Title="Restore this folder and all its contents" Disabled="@(Disabled || currentPath == "/" || !stored.Contains(currentPath))" Value="@Selected.Contains(currentPath)" ValueChanged="(value => SelectPath(currentPath, value))" />
+        </ToolbarContent>
+    </FileBrowserExplorer>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<BackupFile> Files { get; set; } = [];
+    [Parameter] public IReadOnlyCollection<string> Selected { get; set; } = [];
+    [Parameter] public EventCallback<IReadOnlyList<string>> SelectedChanged { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    private IReadOnlyList<BackupFile>? indexed;
+    private readonly Dictionary<string, List<SftpItem>> children = new(StringComparer.Ordinal);
+    private readonly HashSet<string> folders = new(StringComparer.Ordinal);
+    private readonly HashSet<string> stored = new(StringComparer.Ordinal);
+    private readonly HashSet<string> expanded = new(StringComparer.Ordinal) { "/" };
+    private IReadOnlyList<SftpItem> currentItems = [];
+    private IReadOnlyList<FileBrowserDirectoryNode> directoryNodes = [];
+    private IReadOnlySet<string> selectedPaths = new HashSet<string>();
+    private string currentPath = "/";
+    private bool sidebarCollapsed;
+    private SftpItem? focusedItem;
+    protected override void OnParametersSet()
+    {
+        selectedPaths = Selected.ToHashSet(StringComparer.Ordinal);
+        if (ReferenceEquals(indexed, Files)) return;
+        indexed = Files; children.Clear(); stored.Clear(); folders.Clear(); expanded.Clear(); expanded.Add("/"); currentPath = "/"; focusedItem = null;
+        var entries = new Dictionary<string, SftpItem>(StringComparer.Ordinal);
+        folders.Add("/");
+        foreach (var file in Files)
+        {
+            var path = file.Path.TrimEnd('/'); if (path.Length == 0) continue;
+            stored.Add(path);
+            var type = file.Type == "dir" ? SftpItemType.Folder : file.Type == "symlink" ? SftpItemType.Link : SftpItemType.File;
+            entries[path] = new(System.IO.Path.GetFileName(path), path, type, file.Size, null, "");
+            if (type == SftpItemType.Folder) folders.Add(path);
+            for (var parent = System.IO.Path.GetDirectoryName(path) ?? "/"; parent != "/"; parent = System.IO.Path.GetDirectoryName(parent) ?? "/") folders.Add(parent);
+        }
+        foreach (var folder in folders.Where(path => path != "/")) entries.TryAdd(folder, new(System.IO.Path.GetFileName(folder), folder, SftpItemType.Folder, 0, null, ""));
+        foreach (var item in entries.Values)
+        {
+            var parent = System.IO.Path.GetDirectoryName(item.FullPath) ?? "/";
+            if (!children.TryGetValue(parent, out var list)) children[parent] = list = [];
+            list.Add(item);
+        }
+        foreach (var list in children.Values) list.Sort((left, right) => left.ItemType != right.ItemType ? left.ItemType == SftpItemType.Folder ? -1 : right.ItemType == SftpItemType.Folder ? 1 : StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name) : StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name));
+        Refresh();
+    }
+    private void Refresh() { currentItems = children.TryGetValue(currentPath, out var list) ? list : []; directoryNodes = [BuildDirectory("/")]; }
+    private FileBrowserDirectoryNode BuildDirectory(string path)
+    {
+        var dirs = children.TryGetValue(path, out var list) ? list.Where(item => item.ItemType == SftpItemType.Folder).ToArray() : [];
+        return new(path == "/" ? "/" : System.IO.Path.GetFileName(path), path, expanded.Contains(path), currentPath == path,
+            path == "/" || currentPath.StartsWith(path + "/", StringComparison.Ordinal), false, dirs.Length > 0,
+            expanded.Contains(path) ? dirs.Select(item => BuildDirectory(item.FullPath)).ToArray() : []);
+    }
+    private void Navigate(string path)
+    {
+        if (Disabled || !folders.Contains(path)) return;
+        currentPath = path; focusedItem = null;
+        for (var parent = path; parent != "/"; parent = System.IO.Path.GetDirectoryName(parent) ?? "/") expanded.Add(parent);
+        expanded.Add("/"); Refresh();
+    }
+    private void Toggle(string path) { if (Disabled) return; if (!expanded.Add(path)) expanded.Remove(path); Refresh(); }
+    private void GoUp() => Navigate(System.IO.Path.GetDirectoryName(currentPath) ?? "/");
+    private Task ToggleItem((SftpItem Item, bool Selected) change) => SelectPath(change.Item.FullPath, change.Selected);
+    private Task SelectPath(string path, bool value)
+    {
+        if (Disabled || !stored.Contains(path)) return Task.CompletedTask;
+        var next = Selected.Where(item => item != path).ToList(); if (value) next.Add(path);
+        return ChangeSelection(next);
+    }
+    private Task SelectAll((bool Selected, IReadOnlyList<SftpItem> Items) change)
+    {
+        var paths = change.Items.Select(item => item.FullPath).ToHashSet(StringComparer.Ordinal);
+        return ChangeSelection(Selected.Where(path => !paths.Contains(path)).Concat(change.Selected ? paths : [] ).ToArray());
+    }
+    private Task ChangeSelection(IReadOnlyList<string> paths)
+    {
+        if (Disabled) return Task.CompletedTask;
+        var valid = paths.Where(stored.Contains).Distinct(StringComparer.Ordinal).ToArray();
+        return SelectedChanged.InvokeAsync(valid.Where(path => !valid.Any(parent => parent != path && path.StartsWith(parent + "/", StringComparison.Ordinal))).ToArray());
+    }
+}

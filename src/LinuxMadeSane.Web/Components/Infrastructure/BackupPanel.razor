@@ -319,6 +319,7 @@
     }
     @if (snapshots.Count > 0)
     {
+        <div class="backup-snapshot-toolbar">
         <UiSelectField TValue="string" Label="@($"Backup date ({snapshots.Count} available)")" Disabled="@busy" Value="@selectedSnapshotId" ValueExpression="@(() => selectedSnapshotId)" ValueChanged="ChooseSnapshot">
             @foreach (var item in snapshots.OrderByDescending(item => item.Time))
             { <option value="@item.Id">@item.Time.ToLocalTime().ToString("g") · @item.Id[..8]@(item.Tags.Contains("lms-full-system") && !item.Tags.Contains("lms-backup-complete") ? " · Incomplete" : "")</option> }
@@ -331,9 +332,10 @@
             <UiCommandButton Label="Recovery guide" HideIcon="true" Disabled="@busy" OnClick="(() => OpenBackupGuide(snapshotPlan))" />
             <UiCommandButton Label="Reclaim unused space" HideIcon="true" Disabled="@busy" OnClick="RequestReclaimSpace" />
         </div>
+        </div>
     }
     @if (output is not null && snapshot is null) { <p class="callout" role="status">@output</p> }
-    @if (recoveryMediaSnapshot is not null)
+    @if (recoveryMediaSnapshot is not null && snapshot is null)
     {
         <section class="backup-setup-step backup-media-panel"><h3>Prepare recovery media for @recoveryMediaSnapshot.Time.ToLocalTime().ToString("g")</h3>
         <UiCommandButton Label="Hide recovery media" HideIcon="true" Disabled="@busy" OnClick="CloseRecoveryMedia" />
@@ -342,42 +344,26 @@
     }
     @if (snapshot is not null && SelectedSnapshot?.Id == snapshot)
     {
-        @if (snapshots.FirstOrDefault(item => item.Id == snapshot)?.Tags.Contains("lms-full-system") == true)
-        {
-            <details class="backup-recovery-guide"><summary><strong>Full-system / bare-metal recovery</strong></summary>
-                <ol><li>Before failure, restore the boot-recovery ISO from this snapshot to a private folder and keep boot media offline.</li><li>Boot that ISO on the replacement machine. Connect the backup storage; if password protected, keep the password independently of LMS.</li><li>Run <code>rear recover</code> at its console. Enter the repository path; enter its password privately, or press Enter for password-free storage. The ISO finds its matching completed backup and checks its data before any disk changes. Review the proposed target disks carefully before approving recreation.</li><li>Check Linux boot, LMS login, saved credentials and required workloads. Record the test against this plan. See FULL-SYSTEM-RECOVERY.txt in the encrypted snapshot.</li></ol>
-                <p>Different hardware needs review. Live databases and containers need application-consistent backups. A successful backup does not prove a successful restore.</p>
-            </details>
-        }
-        <h3>Files at @snapshots.First(item => item.Id == snapshot).Time.ToLocalTime().ToString("g")</h3>
-        <UiCheckboxField Label="Restore everything in this snapshot" Disabled="@busy" @bind-Value="restoreEverything" />
-        @if (!restoreEverything)
-        {
-            <UiTextField Label="Search all files and folders in this snapshot" Value="@fileSearch" ValueExpression="@(() => fileSearch)" ValueChanged="ChangeFileSearch" Disabled="@busy" />
-            <div class="infrastructure-actions"><strong>@browseDirectory</strong><UiCommandButton Label="Parent folder" HideIcon="true" Disabled="@(busy || browseDirectory == "/")" OnClick="ParentSnapshotFolder" /></div>
-            var visibleFiles = VisibleSnapshotFiles;
-            <div class="snapshot-files">
-            @foreach (var file in visibleFiles.Skip(filePage * 100).Take(100))
-            { <div class="snapshot-file-row">
-                <UiCheckboxField Label="@(fileSearch.Length == 0 ? System.IO.Path.GetFileName(file.Path) : file.Path)" Disabled="@busy" Value="@selection.Contains(file.Path)" ValueChanged="(value => Select(file.Path, value))" />
-                @if (file.Type == "dir") { <UiCommandButton Label="Open folder" HideIcon="true" Disabled="@busy" OnClick="(() => OpenSnapshotFolder(file.Path))" /> }
-                else { <small>@FormatFileSize(file.Size)</small> }
-            </div> }
-            </div>
-            <div class="infrastructure-actions">
-                <UiCommandButton Label="Previous" HideIcon="true" Disabled="@(busy || filePage == 0)" OnClick="(() => filePage--)" />
-                <span>Page @(filePage + 1) of @Math.Max(1, (visibleFiles.Count + 99) / 100) · @visibleFiles.Count entries</span>
-                <UiCommandButton Label="Next" HideIcon="true" Disabled="@(busy || (filePage + 1) * 100 >= visibleFiles.Count)" OnClick="(() => filePage++)" />
-                <UiCommandButton Label="Clear selection" HideIcon="true" Disabled="@busy" OnClick="(() => selection.Clear())" />
-            </div>
-        }
-        <UiTextField Label="Restore into a new private folder on this LMS host" Helper="For example /var/tmp/recovered-files. Original paths are recreated inside this folder; live files are not replaced." Disabled="@busy" @bind-Value="restoreTarget" />
-        <UiCheckboxField Label="I explicitly allow existing files at this destination to be overwritten" Disabled="@busy" @bind-Value="overwrite" />
-        <p>@(restoreEverything ? "All files in this dated snapshot will be restored." : $"{selection.Count} selected file(s) or folder(s). Selecting a folder includes its contents.")</p>
+        <div class="backup-restore-grid">
+        <section class="backup-tree-column"><h3>Choose files or folders</h3>
+            <BackupSnapshotBrowser @key="snapshot" Files="@files" Selected="@selection" SelectedChanged="SetRestoreSelection" Disabled="@busy" />
+        </section>
+        <section class="backup-restore-controls"><h3>Restore selected files</h3>
+        <div class="infrastructure-actions">
+            <UiCheckboxField Compact="true" Label="Restore everything" Disabled="@busy" @bind-Value="restoreEverything" />
+            <UiCommandButton Label="Clear selection" HideIcon="true" Disabled="@busy" OnClick="ClearRestoreSelection" />
+        </div>
+        <p class="backup-selection-summary">@(restoreEverything ? "Entire snapshot selected." : $"{selection.Count} file(s) or folder(s) selected.")</p>
+        <UiTextField Label="Restore into a private folder on LMS" Placeholder="/var/tmp/recovered-files" Helper="Original paths are recreated inside this folder." Disabled="@busy" @bind-Value="restoreTarget" />
+        <UiCheckboxField Label="Allow overwriting files in this destination" Compact="true" Disabled="@busy" @bind-Value="overwrite" />
         <UiCommandButton Label="Restore to destination" HideIcon="true" Disabled="@(busy || string.IsNullOrWhiteSpace(restoreTarget) || (!restoreEverything && selection.Count == 0))" OnClick="Restore" />
         @if (busy) { <p class="callout" role="status">@progress</p> }
         @if (error is not null) { <p class="callout error" role="alert">@error</p> }
         @if (output is not null) { <p class="callout" role="status">@output</p> }
+        @if (recoveryMediaSnapshot is not null)
+        { <details open class="backup-media-panel"><summary>Recovery media</summary>@RecoveryMediaPanel</details> }
+        @if (SelectedSnapshot?.Tags.Contains("lms-full-system") == true)
+        { <details class="backup-recovery-guide"><summary>Recover the whole server</summary><p>Use Recovery media above to export this snapshot's boot ISO and guide. Keep these and your backup access details away from the original server. The Recovery guide walks you through booting replacement hardware and reviewing disks before restoring.</p></details> }
         <details><summary>Recover LMS configuration on a replacement host</summary>
         <section class="backup-setup-step">
             <h3>Recover LMS configuration on a replacement host</h3>
@@ -401,6 +387,8 @@
             <p><strong>Review before applying:</strong> interface names, disk UUIDs, mounts, Linux users, SSH identity, schedules and Edge Gateway routes may differ. Follow RECOVERY.txt; keep a rollback copy and stop LMS before replacing its database and keys. Do not copy the old /etc wholesale.</p>
         </section>
         </details>
+        </section>
+        </div>
     }
     </section>;
     private RenderFragment RecoveryMediaPanel => @<div>
@@ -429,7 +417,7 @@
     {
         if (busy || !snapshots.Any(item => item.Id == id)) return;
         selectedSnapshotId = id; snapshot = null; files = []; selection.Clear(); output = null; error = null;
-        recoveryMediaSnapshot = null; restoreEverything = false; overwrite = false; fileSearch = ""; browseDirectory = "/"; filePage = 0;
+        recoveryMediaSnapshot = null; restoreEverything = false; overwrite = false;
     }
 
     private BackupSet? backupGuidePlan;
@@ -437,16 +425,8 @@
     private bool showBackupGuide, deletionConfirmed, restoreEverything;
     private Func<Task>? pendingDeletion;
     private string deletionTitle = "", deletionExplanation = "", deletionConfirmation = "";
-    private string browseDirectory = "/", fileSearch = "";
-    private int filePage;
-    private IReadOnlyList<BackupFile> VisibleSnapshotFiles => files.Where(file => fileSearch.Length > 0
-        ? file.Path.Contains(fileSearch, StringComparison.OrdinalIgnoreCase)
-        : file.Path != "/" && System.IO.Path.GetDirectoryName(file.Path.TrimEnd('/')) == browseDirectory)
-        .OrderBy(file => file.Type != "dir").ThenBy(file => file.Path, StringComparer.OrdinalIgnoreCase).ToArray();
-    private void ChangeFileSearch(string value) { fileSearch = value; filePage = 0; }
-    private void OpenSnapshotFolder(string path) { browseDirectory = path; fileSearch = ""; filePage = 0; }
-    private void ParentSnapshotFolder() => OpenSnapshotFolder(System.IO.Path.GetDirectoryName(browseDirectory.TrimEnd('/')) ?? "/");
-    private static string FormatFileSize(long bytes) => bytes >= 1_000_000_000 ? $"{bytes / 1_000_000_000d:0.##} GB" : bytes >= 1_000_000 ? $"{bytes / 1_000_000d:0.##} MB" : bytes >= 1_000 ? $"{bytes / 1_000d:0.##} KB" : $"{bytes} B";
+    private void SetRestoreSelection(IReadOnlyList<string> paths) { restoreEverything = false; selection.Clear(); selection.UnionWith(paths); }
+    private void ClearRestoreSelection() { restoreEverything = false; selection.Clear(); }
     private void CloseDeletion() { if (!busy) pendingDeletion = null; }
     private void RequestDeletePlan(BackupSet set)
     {
@@ -698,7 +678,7 @@
         return Operation("Reading files in the selected backup…", async () =>
         {
             files = await Backup.FilesAsync(snapshotRepository.Id, id); snapshot = id;
-            browseDirectory = "/"; fileSearch = ""; filePage = 0; restoreEverything = false; overwrite = false;
+             restoreEverything = false; overwrite = false;
         });
     }
     private void Select(string path, bool selected) { if (selected) selection.Add(path); else selection.Remove(path); }
