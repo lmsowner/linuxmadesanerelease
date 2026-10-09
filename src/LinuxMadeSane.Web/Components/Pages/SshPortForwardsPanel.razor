@@ -32,12 +32,15 @@
                     @if (item.Status.ConnectedAtUtc is { } connected) { <span>Connected since @connected.ToLocalTime().ToString("g")</span> }
                     @if (item.Status.LastFailureAtUtc is { } failed) { <span>Last failure @failed.ToLocalTime().ToString("g")</span> }
                 </div>
+                @if (item.Status.LastFailureDetail is { Length: > 0 } failureReason)
+                { <p class="meta-text">Last reconnect reason: @failureReason</p> }
                 @if (rule.EdgeGatewayRouteId is not null)
                 {
                     <div class="ssh-forward-chain"><a href="@rule.PublicUrl" target="_blank" rel="noopener noreferrer">@rule.PublicUrl</a><span>→ Caddy → Listen on LMS @Listen(rule) → Forward to @Target(rule) via @rule.Server</span></div>
                 }
                 <div class="toolbar-row ssh-forward-actions">
                     <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" OnClick="() => EditAsync(rule)" Disabled="@(!CanAdminister || busy)" />
+                    <UiCommandButton Label="Create as duplicate" Glyph="UiIconGlyph.Copy" OnClick="() => DuplicateAsync(rule)" Disabled="@(!CanAdminister || busy)" />
                     <UiCommandButton Label="@(rule.Enabled ? "Stop" : "Start")" Glyph="@(rule.Enabled ? UiIconGlyph.Stop : UiIconGlyph.Run)" OnClick="() => ToggleAsync(rule)" Disabled="@(!CanAdminister || busy)" />
                     <UiCommandButton Label="Restart" Glyph="UiIconGlyph.Restart" OnClick="() => RestartAsync(rule)" Disabled="@(!CanAdminister || busy || !rule.Enabled)" />
                     @if (rule.EdgeGatewayRouteId is not null)
@@ -179,6 +182,13 @@
     }
     private Task NewAsync() { editor = new(); selected = null; loginTestMessage = null; editing = false; message = null; error = false; showEditor = true; return Task.CompletedTask; }
     private Task EditAsync(SshPortForward rule) { editor = rule with { }; selected = null; loginTestMessage = null; editing = true; message = null; error = false; showEditor = true; selectExisting = true; return Task.CompletedTask; }
+    private Task DuplicateAsync(SshPortForward rule)
+    {
+        editor = rule with { Id = Guid.NewGuid(), Name = rule.Name[..Math.Min(rule.Name.Length, 73)] + " (copy)", EdgeGatewayRouteId = null, PublicUrl = "" };
+        selected = null; loginTestMessage = "Copied settings. Choose a different listen port or socket before saving; the original forward stays unchanged.";
+        editing = false; message = null; error = false; showEditor = true; selectExisting = true;
+        return Task.CompletedTask;
+    }
     private void CloseEditor() { if (!busy) showEditor = false; }
     private void ModeChanged() { if (!editor.IsRemote && editor.ListenPort == 0) editor.ListenPort = 8080; if (editor.IsSocks) editor.ListenKind = SshForwardEndpointKind.Tcp; }
     private Task SelectCredentialAsync(SavedConnectionCredential credential)

@@ -40,7 +40,7 @@ public sealed record SshPortForward
         (ListenAddress == "localhost" || System.Net.IPAddress.TryParse(ListenAddress, out var address) && System.Net.IPAddress.IsLoopback(address));
 }
 public sealed record SshForwardStatus(string State, string Detail, DateTimeOffset? ConnectedAtUtc = null,
-    DateTimeOffset? LastFailureAtUtc = null, int Restarts = 0, int? ProcessId = null, int? AllocatedListenPort = null);
+    DateTimeOffset? LastFailureAtUtc = null, int Restarts = 0, int? ProcessId = null, int? AllocatedListenPort = null, string? LastFailureDetail = null);
 public sealed record SshForwardView(SshPortForward Forward, SshForwardStatus Status);
 public sealed record SshForwardCaddyLink(string Hostname, string DomainName,
     EdgeGatewayTargetScheme Scheme = EdgeGatewayTargetScheme.Http, EdgeGatewayAuthMode AuthMode = EdgeGatewayAuthMode.RequireMfa);

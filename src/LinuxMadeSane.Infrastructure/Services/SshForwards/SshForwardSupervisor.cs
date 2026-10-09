@@ -69,28 +69,29 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
     }
     private async Task RunForwardAsync(SshPortForward input, CancellationToken token)
     {
-        var retries = 0; DateTimeOffset? lastFailure = null;
+        var retries = 0; DateTimeOffset? lastFailure = null; string? lastFailureDetail = null;
         while (!token.IsCancellationRequested)
         {
             ISshForwardProcess? process = null;
             try
             {
                 var rule = SshForwardDefinition.Validate(input);
-                statuses[rule.Id] = new("Connecting", $"Connecting to {rule.Username}@{rule.Server}:{rule.SshPort}.", null, lastFailure, retries);
+                statuses[rule.Id] = new("Connecting", $"Connecting to {rule.Username}@{rule.Server}:{rule.SshPort}.", null, lastFailure, retries, LastFailureDetail: lastFailureDetail);
                 var credential = await credentials.ResolveAsync(rule.CredentialId, token);
                 SshPortForwardService.ValidateCredential(rule, credential);
                 process = await processes.StartAsync(rule, credential, token);
                 var deadline = DateTimeOffset.UtcNow.AddSeconds(35); DateTimeOffset? connected = null;
                 while (!process.HasExited)
                 {
-                    var alive = await process.IsConnectedAsync(token);
+                    // The control socket establishes readiness, not transport health. A busy
+                    // host can delay its reply while the tunnel is working. Once connected,
+                    // let OpenSSH's encrypted keepalives detect failure and exit naturally.
+                    var alive = connected is not null || await process.IsConnectedAsync(token);
                     if (alive)
                     {
                         connected ??= DateTimeOffset.UtcNow;
-                        statuses[rule.Id] = new("Connected", process.TrafficError is { } traffic ? "SSH remains connected. Last forwarding error: " + ExplainFailure(traffic, rule) : "SSH connection is active. Destination application health is separate.", connected, lastFailure, retries, process.ProcessId, process.AllocatedListenPort);
+                        statuses[rule.Id] = new("Connected", process.TrafficError is { } traffic ? "SSH remains connected. Last forwarding error: " + ExplainFailure(traffic, rule) : "SSH connection is active. Destination application health is separate.", connected, lastFailure, retries, process.ProcessId, process.AllocatedListenPort, lastFailureDetail);
                     }
-                    else if (connected is not null)
-                        throw new InvalidOperationException("The SSH control connection stopped responding. Reconnecting.");
                     else if (DateTimeOffset.UtcNow > deadline)
                         throw new InvalidOperationException("SSH did not establish a usable connection. Check credentials, the remote forwarding policy and the listen endpoint.");
                     await Task.Delay(TimeSpan.FromSeconds(2), token);
@@ -101,7 +102,9 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
             catch (Exception exception)
             {
                 lastFailure = DateTimeOffset.UtcNow;
-                statuses[input.Id] = new("Retrying", exception.Message + $" Retrying in {RetryDelay(input, retries)} seconds.", null, lastFailure, retries);
+                lastFailureDetail = exception.Message;
+                logger.LogWarning("SSH forward {ForwardId} ({Name}) disconnected: {Reason}. Retrying in {Delay} seconds.", input.Id, input.Name, lastFailureDetail, RetryDelay(input, retries));
+                statuses[input.Id] = new("Retrying", lastFailureDetail + $" Retrying in {RetryDelay(input, retries)} seconds.", null, lastFailure, retries, LastFailureDetail: lastFailureDetail);
             }
             finally { if (process is not null) await process.DisposeAsync(); }
             try { await Task.Delay(TimeSpan.FromSeconds(RetryDelay(input, retries)), token); }
