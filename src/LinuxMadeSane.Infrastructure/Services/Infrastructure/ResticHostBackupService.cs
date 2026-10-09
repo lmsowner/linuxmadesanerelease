@@ -630,7 +630,7 @@ public sealed class ResticHostBackupService(LinuxMadeSaneDbContext database, ISe
         await Gate.WaitAsync(token); var start = DateTimeOffset.UtcNow;
         try
         {
-            var validation = await runner.RunAsync(new("python3", ["-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); parts=[p,*p.parents]; assert not any(x.is_symlink() for x in parts), 'Destination contains a symbolic link'; assert not p.exists() or p.is_dir(), 'Destination must be a directory'; assert not p.exists() or not any(x.is_symlink() for x in p.rglob('*')), 'Destination contains existing symbolic links'; assert sys.argv[2]=='yes' or not p.exists() or not any(p.iterdir()), 'Destination must be empty unless overwrite is explicitly confirmed'", target, overwriteConfirmed ? "yes" : "no"], true,
+            var validation = await runner.RunAsync(new("python3", ["-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); parts=[p,*p.parents]; assert not any(x.is_symlink() for x in parts), 'Destination contains a symbolic link'; assert not p.exists() or p.is_dir(), 'Destination must be a directory'; assert not p.exists() or not any(x.is_symlink() for x in p.rglob('*')), 'Destination contains existing symbolic links'; assert sys.argv[2]=='yes' or not p.exists() or not any(p.iterdir()), 'Destination must be empty unless overwrite is explicitly confirmed'; p.mkdir(mode=0o700, parents=True, exist_ok=True)", target, overwriteConfirmed ? "yes" : "no"], true,
                 TimeSpan.FromSeconds(15), "Validate restore destination"), false, token);
             if (validation.ExitCode != 0) throw new InvalidOperationException("Unsafe restore destination: " + validation.StandardError);
             var args = new List<string> { "restore", snapshot, "--target", target };

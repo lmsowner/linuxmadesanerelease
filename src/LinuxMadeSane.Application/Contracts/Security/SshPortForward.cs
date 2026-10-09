@@ -41,6 +41,10 @@ public sealed record SshPortForward
 }
 public sealed record SshForwardStatus(string State, string Detail, DateTimeOffset? ConnectedAtUtc = null,
     DateTimeOffset? LastFailureAtUtc = null, int Restarts = 0, int? ProcessId = null, int? AllocatedListenPort = null, string? LastFailureDetail = null);
-public sealed record SshForwardView(SshPortForward Forward, SshForwardStatus Status);
+public sealed record SshForwardDiagnostic(DateTimeOffset AtUtc, string State, string Detail);
+public sealed record SshForwardView(SshPortForward Forward, SshForwardStatus Status)
+{
+    public IReadOnlyList<SshForwardDiagnostic> Diagnostics { get; init; } = [];
+}
 public sealed record SshForwardCaddyLink(string Hostname, string DomainName,
     EdgeGatewayTargetScheme Scheme = EdgeGatewayTargetScheme.Http, EdgeGatewayAuthMode AuthMode = EdgeGatewayAuthMode.RequireMfa);

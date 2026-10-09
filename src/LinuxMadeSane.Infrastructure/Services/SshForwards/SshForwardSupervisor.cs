@@ -80,7 +80,7 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
                 var credential = await credentials.ResolveAsync(rule.CredentialId, token);
                 SshPortForwardService.ValidateCredential(rule, credential);
                 process = await processes.StartAsync(rule, credential, token);
-                var deadline = DateTimeOffset.UtcNow.AddSeconds(35); DateTimeOffset? connected = null;
+                var deadline = DateTimeOffset.UtcNow.AddSeconds(35); DateTimeOffset? connected = null; string? recordedTrafficError = null;
                 while (!process.HasExited)
                 {
                     // The control socket establishes readiness, not transport health. A busy
@@ -89,20 +89,27 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
                     var alive = connected is not null || await process.IsConnectedAsync(token);
                     if (alive)
                     {
+                        if (connected is null) await RecordDiagnosticAsync(rule, "Connected", $"SSH connected to {rule.Username}@{rule.Server}:{rule.SshPort}.");
                         connected ??= DateTimeOffset.UtcNow;
+                        if (process.TrafficError is { } forwardingError && forwardingError != recordedTrafficError)
+                        {
+                            recordedTrafficError = forwardingError;
+                            await RecordDiagnosticAsync(rule, "Forwarding error", ExplainFailure(forwardingError, rule));
+                        }
                         statuses[rule.Id] = new("Connected", process.TrafficError is { } traffic ? "SSH remains connected. Last forwarding error: " + ExplainFailure(traffic, rule) : "SSH connection is active. Destination application health is separate.", connected, lastFailure, retries, process.ProcessId, process.AllocatedListenPort, lastFailureDetail);
                     }
                     else if (DateTimeOffset.UtcNow > deadline)
                         throw new InvalidOperationException("SSH did not establish a usable connection. Check credentials, the remote forwarding policy and the listen endpoint.");
                     await Task.Delay(TimeSpan.FromSeconds(2), token);
                 }
-                throw new InvalidOperationException(ExplainFailure(process.Failure, rule));
+                throw new InvalidOperationException(ExplainFailure(await process.GetDiagnosticsAsync(), rule));
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             catch (Exception exception)
             {
                 lastFailure = DateTimeOffset.UtcNow;
                 lastFailureDetail = exception.Message;
+                await RecordDiagnosticAsync(input, "Disconnected", lastFailureDetail + $" Retrying in {RetryDelay(input, retries)} seconds.");
                 logger.LogWarning("SSH forward {ForwardId} ({Name}) disconnected: {Reason}. Retrying in {Delay} seconds.", input.Id, input.Name, lastFailureDetail, RetryDelay(input, retries));
                 statuses[input.Id] = new("Retrying", lastFailureDetail + $" Retrying in {RetryDelay(input, retries)} seconds.", null, lastFailure, retries, LastFailureDetail: lastFailureDetail);
             }
@@ -111,6 +118,11 @@ public sealed class SshForwardSupervisor(SshForwardStore store, ISshForwardProce
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             retries++;
         }
+    }
+    private async Task RecordDiagnosticAsync(SshPortForward rule, string state, string detail)
+    {
+        try { await store.AppendDiagnosticAsync(rule.Id, new(DateTimeOffset.UtcNow, state, detail), CancellationToken.None); }
+        catch (Exception exception) { logger.LogError(exception, "Could not save SSH forward diagnostics for {ForwardId}. The connection is retained.", rule.Id); }
     }
     private static int RetryDelay(SshPortForward rule, int retries) => (int)Math.Min(300, Math.Clamp(rule.RetrySeconds, 1, 300) * Math.Pow(2, Math.Min(retries, 8)));
     public static string ExplainFailure(string error, SshPortForward rule)

@@ -16,8 +16,16 @@ public sealed class SshPortForwardService(SshForwardStore store, SshForwardSuper
     public async Task<IReadOnlyList<SshForwardView>> ListAsync(CancellationToken token = default)
     {
         await AuthorizeAsync(token);
-        return (await store.ReadAsync(token)).OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-            .Select(x => new SshForwardView(x, supervisor.Status(x.Id, x.Enabled))).ToArray();
+        var views = new List<SshForwardView>();
+        foreach (var rule in (await store.ReadAsync(token)).OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            IReadOnlyList<SshForwardDiagnostic> diagnostics;
+            try { diagnostics = await store.ReadDiagnosticsAsync(rule.Id, token); }
+            catch (Exception exception) when (exception is IOException or System.Text.Json.JsonException or UnauthorizedAccessException)
+            { diagnostics = [new(DateTimeOffset.UtcNow, "Diagnostics unavailable", "Stored SSH diagnostics could not be read. Check LMS service logs and storage permissions.")]; }
+            views.Add(new(rule, supervisor.Status(rule.Id, rule.Enabled)) { Diagnostics = diagnostics });
+        }
+        return views;
     }
     public async Task TestConnectionAsync(SshPortForward input, CancellationToken token = default)
     {

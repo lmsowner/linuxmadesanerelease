@@ -362,12 +362,17 @@
             <UiCommandButton Label="Clear selection" HideIcon="true" Disabled="@busy" OnClick="ClearRestoreSelection" />
         </div>
         <p class="backup-selection-summary">@(restoreEverything ? "Entire snapshot selected." : $"{selection.Count} file(s) or folder(s) selected.")</p>
-        <UiTextField Label="Restore into a private folder on LMS" Placeholder="/var/tmp/recovered-files" Helper="Original paths are recreated inside this folder." Disabled="@busy" @bind-Value="restoreTarget" />
+        <UiTextField Label="Restore into a private folder on LMS" Helper="A temporary destination is filled in for you. Original paths are recreated inside this folder; you can change it." Disabled="@busy" @bind-Value="restoreTarget" />
         <UiCheckboxField Label="Allow overwriting files in this destination" Compact="true" Disabled="@busy" @bind-Value="overwrite" />
-        <UiCommandButton Label="Restore to destination" HideIcon="true" Disabled="@(busy || string.IsNullOrWhiteSpace(restoreTarget) || (!restoreEverything && selection.Count == 0))" OnClick="Restore" />
+        <div class="infrastructure-actions">
+        <UiCommandButton Label="@(busy ? "Restoring…" : restoreEverything ? "Restore everything" : selection.Count == 1 ? "Restore selected file or folder" : "Restore selected files")" Glyph="UiIconGlyph.FolderOpen" Variant="UiButtonVariant.Primary" Disabled="@(busy || string.IsNullOrWhiteSpace(restoreTarget) || (!restoreEverything && selection.Count == 0))" OnClick="Restore" />
+        </div>
+        @if (!busy && string.IsNullOrWhiteSpace(restoreTarget)) { <p class="meta-text">Enter a destination folder to enable restore.</p> }
         @if (busy) { <p class="callout" role="status">@progress</p> }
         @if (error is not null) { <p class="callout error" role="alert">@error</p> }
         @if (output is not null) { <p class="callout" role="status">@output</p> }
+        @if (output is not null && restoredFilesPath is not null)
+        { <div class="infrastructure-actions"><UiCommandButton Label="Open recovered files" Glyph="UiIconGlyph.FolderOpen" Href="@($"/file-browser-window?hostId={LinuxMadeSane.Core.Models.Ai.AiLocalMachine.ManagedHostId}&path={Uri.EscapeDataString(restoredFilesPath)}")" Target="_blank" Rel="noopener noreferrer" OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,this.target))return false;" /></div> }
         @if (recoveryMediaSnapshot is not null)
         { <details open class="backup-media-panel"><summary>Recovery media</summary>@RecoveryMediaPanel</details> }
         @if (SelectedSnapshot?.Tags.Contains("lms-full-system") == true)
@@ -501,6 +506,7 @@
     private string recoveryPreparationPath = "", recoveryDataDirectory = "", recoveryApplicationDirectory = "", recoveryKeyDirectory = "";
     private bool protectBackupWithPassword;
     private string password = "", sources = "", restoreTarget = "", lmsRestorePath = "", progress = "";
+    private string? restoredFilesPath;
     private string backupDestination = "", backupFolder = "lms-backups", localBackupPath = "", passwordConfirmation = "";
     private bool createHostBackupFolder = true;
     private string hostBackupFolder = "";
@@ -683,10 +689,11 @@
     private Task Browse(string id)
     {
         if (busy || snapshotRepository is null || SelectedSnapshot?.Id != id) return Task.CompletedTask;
-        snapshot = null; files = []; output = null; selection.Clear();
+        snapshot = null; files = []; output = null; selection.Clear(); restoredFilesPath = null;
         return Operation("Reading files in the selected backup…", async () =>
         {
             files = await Backup.FilesAsync(snapshotRepository.Id, id); snapshot = id;
+            if (string.IsNullOrWhiteSpace(restoreTarget)) restoreTarget = "/var/tmp/lms-recovered-" + Guid.NewGuid().ToString("N")[..12];
              restoreEverything = false; overwrite = false;
         });
     }
@@ -694,6 +701,7 @@
     private void CloseSnapshots() { if (!busy) { snapshotRepository = null; snapshotPlan = null; recoveryMediaSnapshot = null; snapshot = null; selectedSnapshotId = ""; files = []; selection.Clear(); } }
     private Task Restore() => Operation("Restoring selected snapshot…", async () => { await Backup.RestoreAsync(snapshotRepository!.Id, snapshot!, restoreTarget, restoreEverything ? [] : selection.ToArray(), overwrite); var recoveryFolder = snapshots.FirstOrDefault(item => item.Id == snapshot)?.Paths.FirstOrDefault(path => path.Contains("/lms-backup-staging-", StringComparison.Ordinal));
         if (recoveryFolder is not null && (restoreEverything || selection.Contains(recoveryFolder))) lmsRestorePath = Path.Combine(restoreTarget, recoveryFolder.TrimStart('/'));
+        restoredFilesPath = restoreTarget;
         output = "Restore completed at " + restoreTarget + ". Restored files are decrypted; keep this directory private. Live LMS data was not changed."; });
     private Task PrepareRecovery() => Operation("Validating and preparing configuration recovery…", async () => output = await Backup.PrepareLmsRestoreAsync(lmsRestorePath, recoveryPreparationPath, recoveryDataDirectory, recoveryApplicationDirectory, recoveryKeyDirectory));
     private Task ValidateRestore() => Operation("Validating LMS restore…", async () => output = await Backup.ValidateLmsRestoreAsync(lmsRestorePath));

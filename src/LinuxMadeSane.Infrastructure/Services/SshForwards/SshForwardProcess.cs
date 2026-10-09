@@ -14,6 +14,7 @@ public interface ISshForwardProcess : IAsyncDisposable
     int? AllocatedListenPort { get; }
     string Failure { get; }
     string? TrafficError { get; }
+    Task<string> GetDiagnosticsAsync() => Task.FromResult(Failure);
     Task<bool> IsConnectedAsync(CancellationToken token);
 }
 public interface ISshForwardProcessFactory
@@ -97,6 +98,7 @@ internal sealed class SshForwardProcess : ISshForwardProcess
     private readonly string[] redactions;
     private readonly Task errorTask, outputTask;
     private string failure = "The SSH process ended. Check the saved credentials, server forwarding policy and destination.";
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> diagnosticLines = new();
     public SshForwardProcess(Process process, string runtime, string control, SshPortForward rule, SavedConnectionCredential credential)
     {
         this.process = process; this.runtime = runtime; this.control = control; this.rule = rule;
@@ -120,8 +122,19 @@ internal sealed class SshForwardProcess : ISshForwardProcess
             line = System.Text.RegularExpressions.Regex.Replace(line, @"/proc/\d+/fd/\d+", "[in-memory key]");
             if (line.Contains("open failed", StringComparison.OrdinalIgnoreCase) || line.Contains("connect failed", StringComparison.OrdinalIgnoreCase))
                 TrafficError = line.Length > 500 ? line[..500] : line;
-            if (line.Length > 0) failure = line.Length > 500 ? line[..500] : line;
+            if (line.Length > 0)
+            {
+                failure = line.Length > 500 ? line[..500] : line;
+                diagnosticLines.Enqueue(failure);
+                while (diagnosticLines.Count > 20) diagnosticLines.TryDequeue(out _);
+            }
         }
+    }
+    public async Task<string> GetDiagnosticsAsync()
+    {
+        if (process.HasExited) await errorTask;
+        var detail = diagnosticLines.IsEmpty ? failure : string.Join(Environment.NewLine, diagnosticLines);
+        return process.HasExited ? $"SSH exited with code {process.ExitCode}. {detail}" : detail;
     }
     public async Task<bool> IsConnectedAsync(CancellationToken token)
     {

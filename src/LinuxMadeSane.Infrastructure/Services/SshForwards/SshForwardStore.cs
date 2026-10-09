@@ -9,6 +9,28 @@ public sealed class SshForwardStore(SshForwardStorageSettings settings)
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     public string DirectoryPath => settings.DirectoryPath;
     private string PathName => Path.Combine(DirectoryPath, "ssh-forwards.json");
+    private readonly SemaphoreSlim diagnosticGate = new(1, 1);
+    private string DiagnosticPath(Guid id) => Path.Combine(DirectoryPath, "ssh-forward-" + id.ToString("N") + "-diagnostics.json");
+    public async Task<IReadOnlyList<SshForwardDiagnostic>> ReadDiagnosticsAsync(Guid id, CancellationToken token)
+    {
+        var path = DiagnosticPath(id);
+        return File.Exists(path) ? JsonSerializer.Deserialize<SshForwardDiagnostic[]>(await File.ReadAllTextAsync(path, token), Json) ?? [] : [];
+    }
+    public async Task AppendDiagnosticAsync(Guid id, SshForwardDiagnostic entry, CancellationToken token)
+    {
+        await diagnosticGate.WaitAsync(token);
+        var temporary = DiagnosticPath(id) + "." + Guid.NewGuid().ToString("N");
+        try
+        {
+            var entries = (await ReadDiagnosticsAsync(id, token)).Append(entry).TakeLast(50).ToArray();
+            Directory.CreateDirectory(DirectoryPath);
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(DirectoryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(entries, Json), token);
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.Move(temporary, DiagnosticPath(id), true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); diagnosticGate.Release(); }
+    }
     public async Task<IReadOnlyList<SshPortForward>> ReadAsync(CancellationToken token)
     {
         if (!File.Exists(PathName)) return [];
