@@ -59,6 +59,3 @@ Before publishing source or binaries:
 - do not add Linux Made Sane BSL headers to third-party vendored files
 - verify package license metadata for new NuGet dependencies
 - legal-review any non-standard or copyleft dependency before including it in a public binary or source release
-
-## Codec Notice
-
