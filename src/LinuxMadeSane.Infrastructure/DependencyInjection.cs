@@ -103,9 +103,6 @@ public static class DependencyInjection
         services.AddSingleton<IHostSystemUpdateService>(serviceProvider =>
             serviceProvider.GetRequiredService<LinuxHostSystemUpdateService>());
         services.AddHostedService<HostSystemUpdateScheduleHostedService>();
-        services.AddSingleton<MediaLibraryScanQueue>();
-        services.AddSingleton<IMediaLibraryScanQueue>(serviceProvider => serviceProvider.GetRequiredService<MediaLibraryScanQueue>());
-        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<MediaLibraryScanQueue>());
         services.AddScoped<SqliteDatabaseInitializer>();
         services.AddScoped<ManagedHostSshCredentialResolver>();
         services.AddSingleton(new RdpOptimizerStorageSettings(Path.Combine(contentRootPath, "data", "rdp-optimizer")));
@@ -175,7 +172,6 @@ public static class DependencyInjection
         services.AddSingleton<IOnDemandAppFavouriteStore, JsonOnDemandAppFavouriteStore>();
         services.AddScoped<IEdgeGatewayTemporaryIpApprovalService, EdgeGatewayTemporaryIpApprovalService>();
         services.AddScoped<IEdgeGatewayCaddyManager, LocalEdgeGatewayCaddyManager>();
-        services.AddScoped<IMediaLibraryIntegrationDataService, SqliteMediaLibraryIntegrationDataService>();
         services.AddScoped<ISftpServerStore, SqliteSftpServerStore>();
         services.AddScoped<ISftpAuditService, SqliteSftpAuditService>();
         services.AddScoped<ISftpAuthPolicyService, LocalSftpAuthPolicyService>();

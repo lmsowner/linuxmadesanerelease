@@ -14,11 +14,7 @@ The following browser assets are vendored under `src/LinuxMadeSane.Web/wwwroot/l
 | xterm-addon-fit | `wwwroot/lib/xterm-addon-fit` | `https://github.com/xtermjs/xterm.js` | MIT. Distributed as part of the xterm.js project. |
 | PDF.js | `wwwroot/lib/pdfjs` | `https://github.com/mozilla/pdf.js` | Apache License 2.0 for PDF.js files. Some annotation SVG assets carry Mozilla Public License 2.0 notices and those notices must be preserved. |
 | UTIF.js | `wwwroot/lib/utif/UTIF.js` | `https://github.com/photopea/UTIF.js` | MIT. Copyright (c) 2017 Photopea. |
-| hls.js | `wwwroot/lib/media-player/vendor/hls.min.js` | `https://github.com/video-dev/hls.js` | Apache License 2.0. |
-| mpegts.js | `wwwroot/lib/media-player/vendor/mpegts.min.js` | `https://github.com/xqq/mpegts.js` | Apache License 2.0. |
-| h265web.js | `wwwroot/lib/media-player/h265web` | `https://github.com/numberwolf/h265web.js` | CYL_Free-1.0 / upstream free usage agreement. This is a non-standard license. Review before using it in a paid redistribution, appliance, or customer-facing hosted product. |
 | GitHub Invertocat mark | `wwwroot/images/brand/github-invertocat-black.svg` | `https://brand.github.com/foundations/logo` | GitHub, the GitHub logo design, Invertocat, Octocat, and related marks are trademarks of GitHub, Inc.; the Octocat design is the exclusive property of GitHub, Inc. Used only as a social link to the public GitHub project. |
-| h265web.js bundled dependencies | `wwwroot/lib/media-player/h265web` | h265web.js distribution | Includes bundled dependencies with embedded MIT and Apache-2.0 notices, including `es6-promise`, `m3u8-parser`, `mpd-parser`, `video.js`, `vtt.js`, `@videojs/http-streaming`, `aes-decrypter`, and `pkcs7`. Preserve embedded notices. |
 
 ## NuGet Packages
 
@@ -66,4 +62,3 @@ Before publishing source or binaries:
 
 ## Codec Notice
 
-Some media playback paths can involve patented audio/video codecs, depending on browser, operating system, hardware, source media, and enabled player paths. This notice covers software copyright licenses only; it is not a patent license. Review codec patent obligations separately before shipping a commercial media playback appliance or hosted service.

@@ -155,7 +155,6 @@ public class Program
         builder.Services.AddScoped<ConnectionProfileUserResolver>();
         builder.Services.AddScoped<ISavedCredentialAccessContext, SavedCredentialAccessContext>();
         builder.Services.AddScoped<IHostAdministratorCredentials, HostAdministratorCredentials>();
-        builder.Services.AddSingleton<MediaLibrarySignedUrlService>();
         builder.Services.AddSingleton<RemoteLmsTunnelAccessService>();
         builder.Services.AddSingleton<RemoteLmsRelayCaddyService>();
         builder.Services.AddHostedService(provider => provider.GetRequiredService<RemoteLmsRelayCaddyService>());
@@ -186,7 +185,6 @@ public class Program
                 AllowAutoRedirect = false
             });
         builder.Services.AddHostedService<ApplicationUpdateHostedService>();
-        builder.Services.AddScoped<MediaLibraryTranscodePreviewService>();
         builder.Services.AddScoped<TerminalWorkspaceAccessor>();
         builder.Services.AddApplicationServices();
         builder.Services.AddInfrastructureServices(builder.Configuration, builder.Environment.ContentRootPath);
@@ -1934,7 +1932,6 @@ public class Program
             await browserFileTransferService.FailDownloadAsync(token, request?.Reason, cancellationToken);
             return Results.Ok();
         }).DisableAntiforgery();
-        app.MapMediaLibraryIntegrationApi();
         app.MapStorageApi();
         app.MapLocalAiPeerApi();
         var componentEndpoint = app.MapRazorComponents<App>()
@@ -2188,7 +2185,6 @@ public class Program
             path.StartsWithSegments("/api/passkeys/login") ||
             path.StartsWithSegments("/api/email-mfa/login") ||
             path.StartsWithSegments("/internal/lms-tunnel") ||
-            path.StartsWithSegments("/api/integrations/media-library") ||
             path.StartsWithSegments("/internal/scheduler") ||
             path.StartsWithSegments("/_framework") ||
             path.StartsWithSegments("/_content") ||
@@ -2262,9 +2258,6 @@ public class Program
 
         return IPAddress.TryParse(uri.Host, out var address) && IPAddress.IsLoopback(address);
     }
-
-    private static bool IsMediaLibraryApiPath(PathString path) =>
-        path.StartsWithSegments("/api/integrations/media-library");
 
     private static bool IsEdgeAuthCheckPath(PathString path) =>
         path.StartsWithSegments("/edge-auth/check");
@@ -2725,11 +2718,6 @@ public class Program
         if (forceHttpsRedirection)
         {
             return true;
-        }
-
-        if (IsMediaLibraryApiPath(context.Request.Path))
-        {
-            return false;
         }
 
         return isDevelopment && IsLoopbackRequestHost(context.Request.Host);

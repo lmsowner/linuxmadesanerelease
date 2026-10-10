@@ -43,7 +43,6 @@ public static class DependencyInjection
         services.AddScoped<OnDemandAppService>();
         services.AddScoped<LmsServerEmailSetupService>();
         // File previews also use the media metadata and streaming services.
-        services.AddScoped<IMediaLibraryIntegrationService, MediaLibraryIntegrationService>();
         services.AddScoped<ISftpServerManagerService, SftpServerManagerService>();
         services.AddScoped<IExposedServiceManager, ExposedServiceManager>();
         services.AddScoped<IShareManagementService, ShareManagementService>();

@@ -2,14 +2,12 @@
    Licensed under the Business Source License 1.1. See LICENSE for details. *@
 
 @using LinuxMadeSane.Application.Contracts
-@using LinuxMadeSane.Application.Contracts.MediaLibrary
 @using LinuxMadeSane.Application.Contracts.Shares
 @using LinuxMadeSane.Application.Interfaces
 @using LinuxMadeSane.Core.Abstractions
 @using LinuxMadeSane.Core.Enums
 @using LinuxMadeSane.Core.Models
 @using LinuxMadeSane.Core.Models.Ai
-@using LinuxMadeSane.Core.Models.MediaLibrary
 @using LinuxMadeSane.Core.Models.Shares
 @using LinuxMadeSane.Infrastructure.Services
 @using LinuxMadeSane.Web.Services
@@ -29,8 +27,6 @@
 @inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
 @inject FileBrowserWorkspaceRegistry FileBrowserWorkspaceRegistry
 @inject FileActionQueueService FileActionQueueService
-@inject IMediaLibraryIntegrationService MediaLibraryIntegrationService
-@inject MediaLibrarySignedUrlService MediaLibrarySignedUrlService
 @inject NavigationManager NavigationManager
 @inject IJSRuntime JSRuntime
 
@@ -390,15 +386,6 @@ else
                                     </div>
                                 }
                             }
-                            else if (HasMediaPreview && mediaPreview is not null)
-                            {
-                                <MediaFilePreviewPanel Preview="@mediaPreview"
-                                                       PlaybackUrl="@mediaPreviewPlaybackUrl"
-                                                       FallbackPlaybackUrl="@BuildMediaPreviewFallbackPlaybackUrl(mediaPreview)"
-                                                       StreamUrl="@mediaPreviewStreamUrl"
-                                                       Class="host-file-preview-main"
-                                                       Copied="HandleMediaPreviewCopiedAsync" />
-                            }
                             else if (HasVisualPreview && previewBinaryContent is not null)
                             {
                                 <FileVisualPreview FileName="@item.Name"
@@ -475,10 +462,6 @@ else
                                 else if (HasArchivePreview)
                                 {
                                     <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">@PreviewArchiveLabel</UiPill>
-                                }
-                                else if (HasMediaPreview)
-                                {
-                                    <UiPill Tone="UiPillTone.Neutral" Class="host-file-preview-pill">Media stream</UiPill>
                                 }
                                 @if (HasUnsavedPreviewChanges)
                                 {
@@ -1267,11 +1250,8 @@ else
     private bool previewIsText;
     private ArchiveFormat? previewArchiveFormat;
     private SftpBinaryFileContent? previewBinaryContent;
-    private MediaFilePreviewViewModel? mediaPreview;
     private IReadOnlyList<ArchiveEntry> previewArchiveEntries = [];
     private string previewBinaryContentType = string.Empty;
-    private string mediaPreviewStreamUrl = string.Empty;
-    private string mediaPreviewPlaybackUrl = string.Empty;
     private string previewText = string.Empty;
     private string loadedPreviewText = string.Empty;
     private string previewMessage = string.Empty;
@@ -1415,9 +1395,7 @@ else
     private bool HasUnsavedPreviewChanges => !string.Equals(previewText, loadedPreviewText, StringComparison.Ordinal);
     private bool IsPreviewReadOnly => selectedItem is null || !previewIsText || string.IsNullOrWhiteSpace(previewLoadedPath) || !string.Equals(previewLoadedPath, ResolveBrowserPath(selectedItem.FullPath), StringComparison.Ordinal) || previewMessageTone == "warning";
     private bool HasVisualPreview => previewBinaryContent is not null && !string.IsNullOrWhiteSpace(previewBinaryContentType);
-    private bool HasMediaPreview => mediaPreview is not null &&
-                                    !string.IsNullOrWhiteSpace(mediaPreviewStreamUrl) &&
-                                    !string.IsNullOrWhiteSpace(mediaPreviewPlaybackUrl);
+
     private bool HasArchivePreview => previewArchiveFormat.HasValue;
     private string PreviewLanguageLabel => $"{GuessPreviewLanguage(selectedItem?.Name)} / {PreviewTextEncodingLabel}";
     private string PreviewTextEncodingLabel => FormatTextEncodingLabel(previewTextEncodingName);
@@ -2500,10 +2478,7 @@ else
         previewArchiveFormat = null;
         previewArchiveEntries = [];
         previewBinaryContent = null;
-        mediaPreview = null;
         previewBinaryContentType = string.Empty;
-        mediaPreviewStreamUrl = string.Empty;
-        mediaPreviewPlaybackUrl = string.Empty;
         previewText = string.Empty;
         loadedPreviewText = string.Empty;
         previewLoadedPath = string.Empty;
@@ -2539,24 +2514,6 @@ else
                 }
 
                 return;
-            }
-
-            if (IsLocalBrowser)
-            {
-                var loadedMediaPreview = await MediaLibraryIntegrationService.GetPreviewForPathAsync(item.FullPath, cancellationToken);
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                if (loadedMediaPreview is not null)
-                {
-                    mediaPreview = loadedMediaPreview;
-                    mediaPreviewStreamUrl = BuildMediaPreviewStreamUrl(loadedMediaPreview.Item.Id);
-                    mediaPreviewPlaybackUrl = BuildMediaPreviewPlaybackUrl(loadedMediaPreview);
-                    previewLoadedPath = ResolveBrowserPath(item.FullPath);
-                    return;
-                }
             }
 
             var visualContentType = ResolveVisualPreviewContentType(item.Name);
@@ -2665,10 +2622,7 @@ else
         previewArchiveFormat = null;
         previewArchiveEntries = [];
         previewBinaryContent = null;
-        mediaPreview = null;
         previewBinaryContentType = string.Empty;
-        mediaPreviewStreamUrl = string.Empty;
-        mediaPreviewPlaybackUrl = string.Empty;
         previewText = string.Empty;
         loadedPreviewText = string.Empty;
         previewLoadedPath = string.Empty;
@@ -5987,71 +5941,6 @@ else
             _ when contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) => "Image preview",
             _ => "Preview"
         };
-
-    private string BuildMediaPreviewStreamUrl(Guid itemId)
-    {
-        var absolute = NavigationManager
-            .ToAbsoluteUri($"/api/integrations/media-library/items/{itemId:N}/stream")
-            .ToString();
-        return AppendMediaPreviewToken(absolute, itemId);
-    }
-
-    private string BuildMediaPreviewPlaybackUrl(MediaFilePreviewViewModel preview)
-    {
-        if (!preview.UsesTranscodedPlayback)
-        {
-            return BuildMediaPreviewStreamUrl(preview.Item.Id);
-        }
-
-        if (preview.Item.MediaKind == MediaKind.Video)
-        {
-            var hlsAbsolute = NavigationManager
-                .ToAbsoluteUri($"/api/integrations/media-library/items/{preview.Item.Id:N}/preview-hls/index.m3u8")
-                .ToString();
-            return AppendMediaPreviewToken(hlsAbsolute, preview.Item.Id);
-        }
-
-        var absolute = NavigationManager
-            .ToAbsoluteUri($"/api/integrations/media-library/items/{preview.Item.Id:N}/preview-stream")
-            .ToString();
-        return AppendMediaPreviewToken(absolute, preview.Item.Id);
-    }
-
-    private string? BuildMediaPreviewFallbackPlaybackUrl(MediaFilePreviewViewModel? preview)
-    {
-        if (preview is null ||
-            !preview.UsesTranscodedPlayback ||
-            preview.Item.MediaKind != MediaKind.Video)
-        {
-            return null;
-        }
-
-        var absolute = NavigationManager
-            .ToAbsoluteUri($"/api/integrations/media-library/items/{preview.Item.Id:N}/preview-webm")
-            .ToString();
-        return AppendMediaPreviewToken(absolute, preview.Item.Id);
-    }
-
-    private string AppendMediaPreviewToken(string absoluteUrl, Guid itemId)
-    {
-        if (mediaPreview?.UseSignedStreamUrl != true)
-        {
-            return absoluteUrl;
-        }
-
-        var token = MediaLibrarySignedUrlService.CreateStreamToken(
-            itemId,
-            TimeSpan.FromMinutes(mediaPreview.SignedUrlExpiryMinutes));
-        return $"{absoluteUrl}?token={Uri.EscapeDataString(token)}";
-    }
-
-    private Task HandleMediaPreviewCopiedAsync(string message)
-    {
-        SetOperationMessage(
-            message,
-            message.Contains("copied", StringComparison.OrdinalIgnoreCase) ? "success" : "warning");
-        return Task.CompletedTask;
-    }
 
     private FileOwnershipPermissionsEditor BuildOwnershipPermissionsEditor(SftpItem item) =>
         new()
