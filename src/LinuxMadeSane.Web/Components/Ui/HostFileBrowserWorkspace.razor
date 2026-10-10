@@ -530,6 +530,7 @@ else
                                            AddUserRequested="@(() => OpenConnectionUsersAsync(true))"
                                            ManageUsersRequested="@(() => OpenConnectionUsersAsync(false))" />
                 }
+                <UiContextMenuButton Label="Runbooks" Glyph="UiIconGlyph.Run" OnClick="OpenFileRunbooksAsync" Disabled="@(isBusy || browser is null || !canBrowse)" />
                 <UiContextMenuButton Label="Copy" Glyph="UiIconGlyph.Copy" OnClick="CopyFromContextMenuAsync" Disabled="@(!CanCopyOrCutContextTarget || isBusy)" />
                 <UiContextMenuButton Label="Cut" Glyph="UiIconGlyph.Cut" OnClick="CutFromContextMenuAsync" Disabled="@(!CanCopyOrCutContextTarget || isBusy)" />
                 <UiContextMenuButton Label="Paste" Glyph="UiIconGlyph.Paste" OnClick="PasteFromContextMenuAsync" Disabled="@(!CanPasteIntoContextTarget || isBusy)" />
@@ -1097,6 +1098,7 @@ else
 
 <ShareRemovalConfirmation @ref="shareRemovalConfirmation" />
 
+<FileRunbooksDialog @ref="fileRunbooksDialog" />
 <ConnectionUsersDialog @ref="connectionUsersDialog" Changed="LoadCredentialProfilesAsync" />
 
 @code {
@@ -5136,6 +5138,24 @@ else
             : runtimeStatus.Severity == PermissionIssueSeverity.Critical
                 ? "error"
                 : "warning";
+
+    private FileRunbooksDialog? fileRunbooksDialog;
+    private async Task OpenFileRunbooksAsync()
+    {
+        if (browser is null || contextMenuRequest is not { } request || fileRunbooksDialog is null) return;
+        var selection = GetSelectedContextItems(request);
+        if (selection.Count == 0 && request.Item is not null) selection = [request.Item];
+        if (selection.Any(x => x.ItemType == SftpItemType.Folder) && selection.Count > 1)
+        {
+            SetOperationMessage("Select files together, or select one folder for a folder runbook.", "warning");
+            DismissContextMenu(); return;
+        }
+        var folder = selection.Count == 0 || selection[0].ItemType == SftpItemType.Folder;
+        IReadOnlyList<string> paths = selection.Count == 0 ? [ResolveBrowserPath(request.TargetPath)] : selection.Select(x => ResolveBrowserPath(x.FullPath)).ToArray();
+        var host = browser.Host;
+        DismissContextMenu();
+        await fileRunbooksDialog.ShowAsync(host.Id, host.Name, paths, folder);
+    }
 
     private IReadOnlyList<SftpItem> GetSelectedContextItems(FileBrowserContextMenuRequest request)
     {

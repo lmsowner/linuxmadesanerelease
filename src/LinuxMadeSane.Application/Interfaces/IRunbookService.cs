@@ -16,6 +16,10 @@ public interface IRunbookService
         IProgress<RunbookExecutionProgressUpdate>? progress = null,
         CancellationToken cancellationToken = default);
 
+    Task<RunbookExecutionResultViewModel> RunSelectionAsync(Guid runbookId, Guid hostId,
+        IReadOnlyList<string> paths, bool isFolder, IProgress<RunbookExecutionProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
     Task<Guid> SaveRunbookAsync(RunbookEditor editor, CancellationToken cancellationToken = default);
 
     Task DeleteRunbookAsync(Guid runbookId, CancellationToken cancellationToken = default);

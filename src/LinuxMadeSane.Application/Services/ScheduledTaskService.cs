@@ -162,7 +162,7 @@ public sealed class ScheduledTaskService(
     private static IReadOnlyList<ScheduledTaskRunbookOption> BuildRunbookOptions(
         IReadOnlyList<LinuxMadeSane.Core.Models.SavedCommand> runbooks) =>
         runbooks
-            .Where(runbook => !runbook.IsTemplate)
+            .Where(runbook => !runbook.IsTemplate && runbook.TargetKind == LinuxMadeSane.Core.Enums.RunbookTargetKind.Machine)
             .OrderByDescending(runbook => runbook.IsQuickAccess)
             .ThenBy(runbook => runbook.Name, StringComparer.OrdinalIgnoreCase)
             .Select(runbook => new ScheduledTaskRunbookOption(

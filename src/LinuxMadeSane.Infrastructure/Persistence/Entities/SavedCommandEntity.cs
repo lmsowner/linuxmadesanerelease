@@ -5,6 +5,7 @@ namespace LinuxMadeSane.Infrastructure.Persistence.Entities;
 
 public sealed class SavedCommandEntity
 {
+    public LinuxMadeSane.Core.Enums.RunbookTargetKind TargetKind { get; set; }
     public Guid Id { get; set; }
     public Guid HostId { get; set; }
     public string Name { get; set; } = string.Empty;

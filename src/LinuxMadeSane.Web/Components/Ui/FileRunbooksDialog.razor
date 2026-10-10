@@ -1,0 +1,60 @@
+@* Copyright (c) Linux Made Sane.
+   Licensed under the Business Source License 1.1. See LICENSE for details. *@
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@inject IRunbookService RunbookService
+<UiModal IsOpen="open" Title="Runbook for selection" Subtitle="@hostName" CloseOnBackdrop="false" OnClose="Close">
+    <p class="meta-text">@(folder ? "Folder" : paths.Count == 1 ? "File" : "Selected files"): @string.Join(", ", paths)</p>
+    <p class="meta-text">Runs on this host using its saved runbook connection. Source files and output handling follow the saved script.</p>
+    <div class="toolbar-row">
+        @foreach (var command in commands)
+        {
+            <UiCommandButton Label="@command.Name" Glyph="UiIconGlyph.Run" Disabled="busy" Title="@command.Description" OnClick="() => Run(command)" />
+        }
+    </div>
+    @if (!string.IsNullOrEmpty(message)) { <p class="callout @(error ? "error" : "info")" role="status">@message</p> }
+    @if (!string.IsNullOrEmpty(output)) { <pre class="selection-runbook-output">@output</pre> }
+</UiModal>
+@code {
+    private bool open, busy, folder, error;
+    private Guid hostId;
+    private string hostName = "", message = "", output = "";
+    private IReadOnlyList<string> paths = [];
+    private IReadOnlyList<CommandLibraryItem> commands = [];
+    public async Task ShowAsync(Guid id, string name, IReadOnlyList<string> selection, bool isFolder)
+    {
+        hostId = id; hostName = name; paths = selection.ToArray(); folder = isFolder;
+        open = true; message = "Loading matching runbooks..."; output = ""; error = false; commands = [];
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            commands = (await RunbookService.ListCommandsAsync()).Where(x => !x.IsTemplate && x.HostIds.Contains(id) && RunbookSelectionSupport.Matches(x.TargetKind, paths.Count, folder)).ToArray();
+            message = commands.Count == 0 ? "No matching runbooks. In Runbooks, choose this host and set Run against to one file, one folder or selected files." : "Choose a runbook to run on this selection.";
+        }
+        catch (Exception ex) { message = ex.Message; error = true; }
+        await InvokeAsync(StateHasChanged);
+    }
+    private async Task Run(CommandLibraryItem command)
+    {
+        busy = true; error = false; output = ""; message = $"Running {command.Name} on {hostName}...";
+        try
+        {
+            var progress = new Progress<RunbookExecutionProgressUpdate>(update => _ = InvokeAsync(() =>
+            {
+                if (!busy) return;
+                output = update.IsCompleteSnapshot ? update.Content : output + update.Content;
+                if (output.Length > 20000) output = output[^20000..];
+                StateHasChanged();
+            }));
+            var result = await RunbookService.RunSelectionAsync(command.Id, hostId, paths, folder, progress);
+            error = !result.AllSucceeded;
+            message = error ? "Runbook failed. See the command output below." : "Runbook completed.";
+            output = string.Join("\n", result.HostResults.Select(x => x.StandardOutput + "\n" + x.StandardError));
+            if (output.Length > 20000) output = output[^20000..];
+        }
+        catch (Exception ex) { message = ex.Message; error = true; }
+        finally { busy = false; }
+    }
+    private void Close() { if (!busy) open = false; }
+}

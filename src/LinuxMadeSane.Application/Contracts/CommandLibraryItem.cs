@@ -23,6 +23,8 @@ public sealed record CommandLibraryItem(
     IReadOnlyDictionary<string, string>? ParameterValueSnapshot = null,
     bool IsGlobalFavorite = false)
 {
+    public LinuxMadeSane.Core.Enums.RunbookTargetKind TargetKind { get; init; }
+
     public bool IsScript =>
         CommandText.Contains('\n') || CommandText.Contains('\r');
 

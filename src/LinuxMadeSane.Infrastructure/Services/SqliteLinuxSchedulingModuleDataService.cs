@@ -505,7 +505,7 @@ exit \"$lms_cron_rc\"
         }
 
         var runbook = await savedCommandStore.GetAsync(task.RunbookId.Value, cancellationToken);
-        if (runbook is null || runbook.IsTemplate)
+        if (runbook is null || runbook.IsTemplate || runbook.TargetKind != LinuxMadeSane.Core.Enums.RunbookTargetKind.Machine)
         {
             throw new InvalidOperationException($"The saved runbook for '{task.Name}' no longer exists or is not runnable.");
         }

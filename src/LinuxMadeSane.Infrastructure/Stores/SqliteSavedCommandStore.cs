@@ -54,6 +54,7 @@ public sealed class SqliteSavedCommandStore(LinuxMadeSaneDbContext dbContext) : 
             dbContext.SavedCommands.Add(new SavedCommandEntity
             {
                 Id = command.Id,
+                TargetKind = command.TargetKind,
                 HostId = command.HostId,
                 Name = command.Name,
                 CommandText = command.CommandText,
@@ -70,6 +71,7 @@ public sealed class SqliteSavedCommandStore(LinuxMadeSaneDbContext dbContext) : 
         }
         else
         {
+            entity.TargetKind = command.TargetKind;
             entity.HostId = command.HostId;
             entity.Name = command.Name;
             entity.CommandText = command.CommandText;
@@ -115,7 +117,7 @@ public sealed class SqliteSavedCommandStore(LinuxMadeSaneDbContext dbContext) : 
             entity.LinkGroupId,
             DeserializeDefinitions(entity.ParameterDefinitionsJson),
             DeserializeValues(entity.ParameterValueSnapshotJson),
-            entity.IsGlobalFavorite);
+            entity.IsGlobalFavorite) { TargetKind = entity.TargetKind };
 
     private static string Serialize<T>(T value) =>
         JsonSerializer.Serialize(value, SerializerOptions);

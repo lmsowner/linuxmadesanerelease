@@ -65,6 +65,12 @@ public static class RunbookAiHelper
         var builder = new StringBuilder();
         builder.AppendLine("You are helping draft a Linux Made Sane runbook.");
         builder.AppendLine();
+        builder.AppendLine($"Run against: {editor.TargetKind}");
+        if (editor.TargetKind != RunbookTargetKind.Machine)
+        {
+            builder.AppendLine("LMS passes selected absolute paths as bash positional arguments. Use \"$1\" for one file or folder; use for file in \"$@\"; do ...; done for selected files. Never hardcode input paths, use eval, or split filenames on whitespace.");
+            builder.AppendLine("For folder runbooks, operate within \"$1\"; recurse only when requested. Check required tools, report missing packages clearly, preserve source files and avoid overwriting existing output unless explicitly requested.");
+        }
         builder.AppendLine("Linux Made Sane runbook rules:");
         builder.AppendLine("- Every runnable runbook is a bash script.");
         builder.AppendLine("- Template runbooks may contain LMS parameter tokens like {{service_name}} or {{folder_path}}.");

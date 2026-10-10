@@ -68,7 +68,7 @@ public sealed class RunbookService(
                     primary.LinkGroupId,
                     primary.ParameterDefinitions,
                     primary.ParameterValueSnapshot,
-                    primary.IsGlobalFavorite);
+                    primary.IsGlobalFavorite) { TargetKind = primary.TargetKind };
             })
             .OrderBy(item => item.HostName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
@@ -92,6 +92,8 @@ public sealed class RunbookService(
             throw new InvalidOperationException("Templates cannot be run directly. Create a runnable runbook from the template first.");
         }
 
+        if (primary.TargetKind != LinuxMadeSane.Core.Enums.RunbookTargetKind.Machine)
+            throw new InvalidOperationException("Run this runbook from the file browser after selecting its files or folder.");
         var targetCommands = ResolveLogicalRunbookGroup(commands, primary);
         var hosts = await hostStore.ListAsync(cancellationToken);
         var hostsById = hosts.ToDictionary(host => host.Id);
@@ -120,8 +122,24 @@ public sealed class RunbookService(
                 .ToArray());
     }
 
+    public async Task<RunbookExecutionResultViewModel> RunSelectionAsync(Guid runbookId, Guid hostId,
+        IReadOnlyList<string> paths, bool isFolder, IProgress<RunbookExecutionProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var commands = await savedCommandStore.ListAsync(cancellationToken);
+        var primary = commands.FirstOrDefault(x => x.Id == runbookId) ?? throw new InvalidOperationException("Runbook not found.");
+        if (primary.IsTemplate) throw new InvalidOperationException("Create a runnable runbook from this template first.");
+        var assigned = ResolveLogicalRunbookGroup(commands, primary).FirstOrDefault(x => x.HostId == hostId)
+            ?? throw new InvalidOperationException("This runbook is not assigned to the selected host.");
+        var script = RunbookSelectionSupport.Bind(assigned.CommandText, assigned.TargetKind, paths, isFolder);
+        var hosts = (await hostStore.ListAsync(cancellationToken)).ToDictionary(x => x.Id);
+        var result = await ExecuteRunbookAsync(primary.Id, assigned with { CommandText = script }, hosts, progress, cancellationToken);
+        return new(primary.Id, primary.Name, [result]);
+    }
+
     public async Task<Guid> SaveRunbookAsync(RunbookEditor editor, CancellationToken cancellationToken = default)
     {
+        if (!Enum.IsDefined(editor.TargetKind)) throw new InvalidOperationException("Choose a valid runbook target.");
         var hosts = await hostStore.ListAsync(cancellationToken);
         var hostsById = hosts.ToDictionary(host => host.Id);
         var normalizedName = editor.Name.Trim();
@@ -163,7 +181,7 @@ public sealed class RunbookService(
                     null,
                     normalizedDefinitions,
                     new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
-                    false),
+                    false) { TargetKind = editor.TargetKind },
                 cancellationToken);
 
             return templateId;
@@ -207,7 +225,7 @@ public sealed class RunbookService(
             editor.TemplateSourceId,
             parameterDefinitionsForSave,
             parameterValuesForSave,
-            cancellationToken);
+            cancellationToken, editor.TargetKind);
 
         return primaryRunbookId;
     }
@@ -279,7 +297,7 @@ public sealed class RunbookService(
             existing.TemplateSourceId,
             existing.ParameterDefinitions ?? [],
             existing.ParameterValueSnapshot ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
-            cancellationToken);
+            cancellationToken, existing.TargetKind);
     }
 
     public async Task SetHostRunbookAssignmentsAsync(Guid hostId, IReadOnlyList<Guid> runbookIds, CancellationToken cancellationToken = default)
@@ -605,7 +623,8 @@ public sealed class RunbookService(
         Guid? templateSourceId,
         IReadOnlyList<RunbookParameterDefinition> parameterDefinitions,
         IReadOnlyDictionary<string, string> parameterValueSnapshot,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        LinuxMadeSane.Core.Enums.RunbookTargetKind targetKind)
     {
         var normalizedHostIds = selectedHostIds
             .Distinct()
@@ -644,7 +663,7 @@ public sealed class RunbookService(
                     groupId,
                     parameterDefinitions,
                     parameterValueSnapshot,
-                    isGlobalFavorite),
+                    isGlobalFavorite) { TargetKind = targetKind },
                 cancellationToken);
         }
 

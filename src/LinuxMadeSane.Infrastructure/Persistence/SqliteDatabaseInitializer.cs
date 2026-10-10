@@ -448,6 +448,12 @@ public sealed class SqliteDatabaseInitializer(
                 cancellationToken);
         }
 
+        if (!columns.Contains("TargetKind"))
+        {
+            await dbContext.Database.ExecuteSqlRawAsync(
+                "ALTER TABLE saved_commands ADD COLUMN TargetKind INTEGER NOT NULL DEFAULT 0;", cancellationToken);
+        }
+
         if (!columns.Contains("IsGlobalFavorite"))
         {
             await dbContext.Database.ExecuteSqlRawAsync(

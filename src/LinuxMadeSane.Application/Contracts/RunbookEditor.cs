@@ -8,6 +8,8 @@ namespace LinuxMadeSane.Application.Contracts;
 
 public sealed class RunbookEditor
 {
+    public RunbookTargetKind TargetKind { get; set; }
+
     public Guid? Id { get; set; }
 
     [Required]
