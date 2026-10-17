@@ -1,0 +1,84 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@page "/settings/licensing"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Core.Licensing
+@using LinuxMadeSane.Web.Services.Licensing
+@using Microsoft.AspNetCore.Components.Authorization
+@inject NavigationManager Navigation
+@inject LocalLicensingService Service
+@inject LicensingAccess Access
+@inject AuthenticationStateProvider Authentication
+@inject LinuxMadeSane.Core.Abstractions.ISavedCredentialAccessContext CredentialAccess
+@inject Microsoft.Extensions.Options.IOptionsMonitor<ApplicationUpdateOptions> UpdateOptions
+<div class="licensing-embedded">
+    @if (admin)
+    {
+        <LicenceTypeSelector OnSaved="Reload" OnPreviewChanged="ChangePreview" />
+        @if (BusinessUse)
+        {
+            <div class="licensing-edition-note">
+                <span class="licensing-edition-label">Professional / Enterprise</span>
+                <h3>LMS Pro is the edition for professional use.</h3>
+                <p>Community Edition is for free Community use. For Professional or Enterprise use, CE is available for evaluation only; use LMS Pro after your 30-day evaluation.</p>
+                @if (!IsPreview && state?.Evaluation is { } evaluation)
+                { <p>Evaluation ends @evaluation.EndsAtUtc.ToLocalTime().ToString("d"). Reinstalling or switching user types does not restart it.</p> }
+                <p>Confirm your organisation and what you use LMS for on the website. Licensing, organisation details and server counts are handled there.</p>
+                @if (!string.IsNullOrEmpty(message)) { <p class="callout" role="status" aria-live="polite">@message</p> }
+                <div class="toolbar-actions">
+                    @if (IsCommunityEdition && (IsPreview || state?.Evaluation is null && state?.Licence is null && status?.Status != "community_eligible"))
+                    { <UiCommandButton Label="Start 30-day CE evaluation" HideIcon="true" Disabled="@(IsPreview || busy || !ready)" OnClick="Start" /> }
+                    <UiCommandButton Label="Confirm use / get LMS Pro ↗" HideIcon="true" Disabled="@IsPreview" Href="@(IsPreview ? null : "https://www.linuxmadesane.com/contact?topic=licence-confirmation")" Target="_blank" Rel="noopener noreferrer" />
+                    <UiCommandButton Label="Licence prices" HideIcon="true" Href="https://www.linuxmadesane.com/pricing" Target="_blank" Rel="noopener noreferrer" />
+                </div>
+            </div>
+        }
+        <p class="licensing-links"><a href="/about?tab=notices">Read the full licence</a> · <a href="https://www.linuxmadesane.com/contact?topic=support" target="_blank" rel="noopener noreferrer">Support agreements ↗</a></p>
+    }
+    else
+    { <p>An administrator can confirm the user type. <a href="/about?tab=notices">Read the licence</a>.</p> }
+</div>
+@code {
+    [Parameter] public bool Embedded { get; set; }
+    private LicensingState? state;
+    private LicensingStatus? status;
+    private bool admin, ready, busy;
+    private string category = "", message = "";
+    private string? previewCategory;
+    private bool IsPreview => previewCategory is not null;
+    private bool BusinessUse => (previewCategory ?? category) is "internal_business" or "commercial_services";
+    private bool IsCommunityEdition => new[] { "ce", "community" }.Contains(UpdateOptions.CurrentValue.Edition, StringComparer.OrdinalIgnoreCase);
+    protected override void OnAfterRender(bool firstRender) { if (firstRender) { ready = true; StateHasChanged(); } }
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Embedded) { Navigation.NavigateTo("/about?tab=licensing", replace: true); return; }
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        var id = await CredentialAccess.GetAuthenticatedUserIdAsync();
+        admin = id is not null && Access.CanAdminister(user, id == Guid.Empty);
+        await Reload();
+    }
+    private async Task Reload()
+    {
+        if (!admin) return;
+        status = await Service.StatusAsync();
+        (state, _) = await Service.ReadAsync();
+        category = state.Declarations.LastOrDefault()?.Category ?? "";
+    }
+    private void ChangePreview(string? value) { previewCategory = value; message = ""; }
+    private async Task Start()
+    {
+        if (!admin || busy || !ready || IsPreview || !IsCommunityEdition) return;
+        busy = true; message = "Starting evaluation…";
+        try
+        {
+            var user = (await Authentication.GetAuthenticationStateAsync()).User;
+            var id = await CredentialAccess.GetAuthenticatedUserIdAsync();
+            if (id is null || !Access.CanAdminister(user, id == Guid.Empty)) throw new UnauthorizedAccessException();
+            await Service.StartAsync(LicensingAccess.Actor(user, id == Guid.Empty));
+            await Reload(); message = "Evaluation started. Your original evaluation dates are retained.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        { message = "The evaluation could not be started. Confirm your user type and try again."; }
+        finally { busy = false; }
+    }
+}

@@ -1,0 +1,41 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Application.Contracts.Updates;
+
+namespace LinuxMadeSane.Application.Interfaces;
+
+public interface IHostSystemUpdateService
+{
+    HostSystemUpdateSnapshot GetSnapshot();
+
+    Task<HostSystemUpdateSnapshot> RefreshAsync(
+        bool refreshMetadata,
+        CancellationToken cancellationToken = default);
+
+    Task<HostSystemUpdateSnapshot> ApplyPackageUpdatesAsync(
+        HostPackageUpdateMode mode,
+        bool rebootIfRequired,
+        CancellationToken cancellationToken = default);
+
+    Task<HostSystemUpdateSnapshot> RepairAptAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<HostSystemUpdateSnapshot> CheckReleaseUpgradeAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<HostSystemUpdateSnapshot> SetReleaseUpgradeChannelAsync(
+        HostReleaseUpgradeChannel channel,
+        CancellationToken cancellationToken = default);
+
+    Task<HostSystemUpdateSnapshot> StartReleaseUpgradeAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<HostUpdateScheduleSettings> GetScheduleAsync(CancellationToken cancellationToken = default);
+
+    Task<HostUpdateScheduleSettings> SaveScheduleAsync(
+        HostUpdateScheduleSettings settings,
+        CancellationToken cancellationToken = default);
+
+    Task RebootAsync(CancellationToken cancellationToken = default);
+}

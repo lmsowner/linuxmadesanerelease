@@ -1,0 +1,756 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using System.Collections.Concurrent;
+using LinuxMadeSane.Application.Contracts.Ai;
+using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models;
+
+namespace LinuxMadeSane.Web.Services;
+
+public sealed class TerminalWorkspaceRegistry(ITerminalSessionService terminalSessionService)
+{
+    private readonly ConcurrentDictionary<string, TerminalWorkspaceState> workspaces = new(StringComparer.Ordinal);
+
+    public TerminalWorkspaceState GetOrCreate(string workspaceId) =>
+        workspaces.GetOrAdd(workspaceId, _ => new TerminalWorkspaceState(terminalSessionService));
+
+    public int GetOpenSessionCount(Guid hostId) =>
+        workspaces.Values.Sum(workspace =>
+            workspace.Tabs.Count(tab =>
+                tab.HostId == hostId &&
+                tab.ConnectionDesired &&
+                tab.SessionId.HasValue &&
+                tab.Snapshot?.Status is null or TerminalSessionStatus.Starting or TerminalSessionStatus.Active));
+
+    public async Task RefreshSessionsAsync(Guid? hostId = null, CancellationToken cancellationToken = default)
+    {
+        foreach (var tab in workspaces.Values.SelectMany(workspace => workspace.Tabs)
+                     .Where(tab => hostId is null || tab.HostId == hostId))
+        {
+            if (tab.SessionId is not Guid sessionId || tab.IsBusy)
+                continue;
+
+            await tab.ConnectionGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (tab.SessionId != sessionId || tab.IsBusy)
+                    continue;
+                var snapshot = await terminalSessionService.GetSnapshotAsync(sessionId, cancellationToken);
+                if (snapshot is null || snapshot.Status is TerminalSessionStatus.Closed or TerminalSessionStatus.Faulted)
+                {
+                    tab.RequestDisconnect();
+                    tab.SessionId = null;
+                    tab.Snapshot = snapshot ?? (tab.Snapshot is null ? null : tab.Snapshot with { Status = TerminalSessionStatus.Closed });
+                    await terminalSessionService.CloseSessionAsync(sessionId, cancellationToken);
+                }
+                else
+                {
+                    tab.Snapshot = snapshot;
+                }
+            }
+            finally
+            {
+                tab.ConnectionGate.Release();
+            }
+        }
+    }
+
+    public bool HasActiveSession(Guid hostId) =>
+        workspaces.Values.Any(workspace =>
+            workspace.Tabs.Any(tab =>
+                tab.HostId == hostId &&
+                tab.ConnectionDesired &&
+                (tab.IsSessionActive ||
+                 (tab.SessionId.HasValue && tab.Snapshot?.Status is null or TerminalSessionStatus.Starting))));
+
+    public TerminalConnectionSnapshot? FindConnectionSnapshot(Guid hostId) =>
+        workspaces.Values
+            .SelectMany(workspace => workspace.Tabs)
+            .Where(tab => tab.HostId == hostId)
+            .OrderByDescending(tab => tab.Snapshot?.LastActivityUtc ?? tab.CreatedAtUtc)
+            .Select(tab => new TerminalConnectionSnapshot(
+                tab.Username,
+                tab.SecretHandle,
+                tab.PreferStoredCredentials,
+                tab.ConnectionProfileKey,
+                tab.ConnectionProfileName))
+            .FirstOrDefault(snapshot =>
+                !string.IsNullOrWhiteSpace(snapshot.Username) ||
+                snapshot.SecretHandle.HasValue ||
+                snapshot.PreferStoredCredentials);
+}
+
+// Guardrail: workspace state can reference transient secrets by handle only. Raw password
+// or private-key text must stay out of shared tab snapshots.
+public sealed record TerminalConnectionSnapshot(
+    string Username,
+    Guid? SecretHandle,
+    bool PreferStoredCredentials,
+    string ConnectionProfileKey,
+    string ConnectionProfileName);
+
+public sealed class TerminalWorkspaceState(ITerminalSessionService terminalSessionService) : IAsyncDisposable
+{
+    private readonly List<TerminalTabState> tabs = [];
+    private readonly object syncRoot = new();
+    private long version;
+
+    public bool DefaultCopyOnSelect { get; private set; }
+
+    public IReadOnlyList<TerminalTabState> Tabs
+    {
+        get
+        {
+            lock (syncRoot)
+            {
+                return tabs.ToArray();
+            }
+        }
+    }
+
+    public Guid? ActiveTabId { get; private set; }
+
+    public long Version
+    {
+        get
+        {
+            lock (syncRoot)
+            {
+                return version;
+            }
+        }
+    }
+
+    public TerminalTabState? ActiveTab
+    {
+        get
+        {
+            lock (syncRoot)
+            {
+                return tabs.FirstOrDefault(tab => tab.Id == ActiveTabId)
+                    ?? tabs.FirstOrDefault();
+            }
+        }
+    }
+
+    public void SyncHosts(IEnumerable<ManagedHost> hosts)
+    {
+        var hostMap = hosts.ToDictionary(host => host.Id);
+
+        lock (syncRoot)
+        {
+            foreach (var tab in tabs)
+            {
+                if (hostMap.TryGetValue(tab.HostId, out var host))
+                {
+                    tab.ApplyHost(host);
+                }
+            }
+
+            if (ActiveTabId.HasValue && tabs.All(tab => tab.Id != ActiveTabId.Value))
+            {
+                ActiveTabId = tabs.FirstOrDefault()?.Id;
+                version++;
+            }
+        }
+    }
+
+    public TerminalTabState EnsureHostTab(ManagedHost host, bool activate = true)
+    {
+        lock (syncRoot)
+        {
+            var activeTab = tabs.FirstOrDefault(tab => tab.Id == ActiveTabId);
+            var existing = activeTab?.HostId == host.Id
+                ? activeTab
+                : tabs.FirstOrDefault(tab => tab.HostId == host.Id);
+            if (existing is null)
+            {
+                existing = TerminalTabState.Create(host);
+                existing.CopyOnSelect = DefaultCopyOnSelect;
+                tabs.Add(existing);
+            }
+            else
+            {
+                existing.ApplyHost(host);
+            }
+
+            if (activate || ActiveTabId is null)
+            {
+                ActiveTabId = existing.Id;
+                version++;
+            }
+
+            return existing;
+        }
+    }
+
+    public TerminalTabState AddTab(ManagedHost host, bool activate = true) =>
+        AddTab(host, null, activate);
+
+    public TerminalTabState AddTab(ManagedHost host, string? workingDirectory, bool activate = true)
+    {
+        lock (syncRoot)
+        {
+            var tab = TerminalTabState.Create(host);
+            tab.SetWorkingDirectoryOverride(workingDirectory);
+            tab.CopyOnSelect = DefaultCopyOnSelect;
+            tabs.Add(tab);
+
+            if (activate)
+            {
+                ActiveTabId = tab.Id;
+            }
+
+            version++;
+            return tab;
+        }
+    }
+
+    public void SetActive(Guid tabId)
+    {
+        lock (syncRoot)
+        {
+            if (tabs.Any(tab => tab.Id == tabId))
+            {
+                if (ActiveTabId != tabId)
+                {
+                    ActiveTabId = tabId;
+                    version++;
+                }
+            }
+        }
+    }
+
+    public TerminalTabState? FindTab(Guid tabId)
+    {
+        lock (syncRoot)
+        {
+            return tabs.FirstOrDefault(tab => tab.Id == tabId);
+        }
+    }
+
+    public bool SetDetached(Guid tabId, bool isDetached)
+    {
+        lock (syncRoot)
+        {
+            var tab = tabs.FirstOrDefault(item => item.Id == tabId);
+            if (tab is null || tab.IsDetached == isDetached)
+            {
+                return false;
+            }
+
+            tab.IsDetached = isDetached;
+            version++;
+            return true;
+        }
+    }
+
+    public bool SetAiPanelOpen(Guid tabId, bool isOpen)
+    {
+        lock (syncRoot)
+        {
+            var tab = tabs.FirstOrDefault(item => item.Id == tabId);
+            if (tab is null || tab.IsAiPanelOpen == isOpen)
+            {
+                return false;
+            }
+
+            tab.IsAiPanelOpen = isOpen;
+            version++;
+            return true;
+        }
+    }
+
+    public bool SetAiPanelWidth(Guid tabId, int widthPx)
+    {
+        lock (syncRoot)
+        {
+            var tab = tabs.FirstOrDefault(item => item.Id == tabId);
+            if (tab is null || tab.AiPanelWidthPx == widthPx)
+            {
+                return false;
+            }
+
+            tab.AiPanelWidthPx = widthPx;
+            version++;
+            return true;
+        }
+    }
+
+    public bool SetCopyOnSelect(Guid tabId, bool enabled)
+    {
+        lock (syncRoot)
+        {
+            if (tabs.All(item => item.Id != tabId))
+            {
+                return false;
+            }
+
+            var changed = DefaultCopyOnSelect != enabled;
+            DefaultCopyOnSelect = enabled;
+            foreach (var tab in tabs)
+            {
+                if (tab.CopyOnSelect != enabled)
+                {
+                    tab.CopyOnSelect = enabled;
+                    changed = true;
+                }
+            }
+
+            if (!changed)
+            {
+                return false;
+            }
+
+            version++;
+            return true;
+        }
+    }
+
+    public bool SetDefaultCopyOnSelect(bool enabled, bool applyToExisting)
+    {
+        lock (syncRoot)
+        {
+            var changed = DefaultCopyOnSelect != enabled;
+            DefaultCopyOnSelect = enabled;
+
+            if (applyToExisting)
+            {
+                foreach (var tab in tabs)
+                {
+                    if (tab.CopyOnSelect != enabled)
+                    {
+                        tab.CopyOnSelect = enabled;
+                        changed = true;
+                    }
+                }
+            }
+
+            if (!changed)
+            {
+                return false;
+            }
+
+            version++;
+            return true;
+        }
+    }
+
+    public async Task RemoveTabAsync(Guid tabId, CancellationToken cancellationToken = default)
+    {
+        TerminalTabState? tab;
+        lock (syncRoot)
+        {
+            var index = tabs.FindIndex(item => item.Id == tabId);
+            if (index < 0)
+            {
+                return;
+            }
+
+            tab = tabs[index];
+            tabs.RemoveAt(index);
+
+            if (ActiveTabId == tabId)
+            {
+                ActiveTabId = tabs.ElementAtOrDefault(Math.Max(0, index - 1))?.Id
+                    ?? tabs.ElementAtOrDefault(index)?.Id;
+            }
+
+            version++;
+        }
+
+        tab.RequestDisconnect();
+        tab.CancelAiOperation();
+        await tab.ConnectionGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            await CloseTabSessionsAsync(tab);
+        }
+        finally
+        {
+            tab.ConnectionGate.Release();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        TerminalTabState[] tabsToClose;
+        lock (syncRoot)
+        {
+            tabsToClose = tabs.ToArray();
+            foreach (var tab in tabsToClose)
+            {
+                tab.RequestDisconnect();
+                tab.CancelAiOperation();
+            }
+        }
+
+        foreach (var tab in tabsToClose)
+        {
+            await tab.ConnectionGate.WaitAsync(CancellationToken.None);
+            try
+            {
+                await CloseTabSessionsAsync(tab);
+            }
+            finally
+            {
+                tab.ConnectionGate.Release();
+            }
+        }
+    }
+
+    private async Task CloseTabSessionsAsync(TerminalTabState tab)
+    {
+        var sessionId = tab.SessionId;
+        tab.SessionId = null;
+        if (tab.Snapshot is not null)
+        {
+            tab.Snapshot = tab.Snapshot with
+            {
+                Status = TerminalSessionStatus.Closed,
+                LastActivityUtc = DateTimeOffset.UtcNow
+            };
+        }
+
+        if (sessionId.HasValue)
+        {
+            await terminalSessionService.CloseSessionAsync(sessionId.Value, CancellationToken.None);
+        }
+
+        await terminalSessionService.CloseOwnedSessionsAsync(tab.Id, CancellationToken.None);
+    }
+}
+
+public sealed record TerminalConnectionTraceEntry(double ElapsedMilliseconds, string Message);
+
+public sealed class TerminalTabState
+{
+    private readonly object aiOperationSync = new();
+    private readonly object connectionOperationSync = new();
+    private readonly object connectionTraceSync = new();
+    private readonly List<TerminalConnectionTraceEntry> connectionTrace = [];
+    private DateTimeOffset connectionTraceStartedUtc;
+    private Guid connectionTraceId;
+    private bool connectionTracePending;
+    private CancellationTokenSource? activeAiOperation;
+    private CancellationTokenSource? activeConnectionOperation;
+    private volatile bool connectionDesired;
+    private Guid? sessionId;
+    private TerminalSessionSnapshot? snapshot;
+    private string? previousConnectedUsername;
+
+    internal SemaphoreSlim ConnectionGate { get; } = new(1, 1);
+
+    public Guid Id { get; } = Guid.NewGuid();
+
+    public Guid HostId { get; private set; }
+
+    public string HostName { get; private set; } = string.Empty;
+
+    public string HostAddress { get; private set; } = string.Empty;
+
+    public string DefaultWorkingDirectory { get; private set; } = string.Empty;
+
+    public string Username { get; set; } = string.Empty;
+
+    public AuthenticationType PrimaryAuthenticationType { get; private set; } = AuthenticationType.Password;
+
+    public AuthenticationType? FallbackAuthenticationType { get; private set; }
+
+    public Guid? SecretHandle { get; set; }
+
+    public bool PreferStoredCredentials { get; set; }
+
+    public bool ConnectionOptionsOpen { get; set; }
+
+    public string ConnectionProfileKey { get; set; } = ConnectionProfileSelectionKeys.HostDefault;
+
+    public string ConnectionProfileName { get; set; } = string.Empty;
+
+    public bool IsDetached { get; set; }
+
+    public bool IsAiPanelOpen { get; set; }
+
+    public bool IsHomeLabTask { get; set; }
+    public string HomeLabOperationOutput { get; set; } = string.Empty;
+    public long HomeLabOutputRevision { get; set; }
+    public string HomeLabTaskTitle { get; set; } = string.Empty;
+    public string? PendingAiTaskPrompt { get; set; }
+    public bool StartPendingAiTask { get; set; }
+    public bool PendingSudoAuthentication { get; set; }
+    public bool CanStartPendingAiTask => StartPendingAiTask && (IsHomeLabTask || IsSessionActive);
+
+    public TerminalAiAccessMode AiAccessMode { get; set; } = TerminalAiAccessMode.Agent;
+
+    public Guid? AiCommandApprovalSessionId { get; set; }
+
+    public bool AllowInternetResearch { get; set; }
+
+    public int AiPanelWidthPx { get; set; } = 736;
+
+    public bool CopyOnSelect { get; set; }
+
+    private string? workingDirectoryOverride;
+
+    public TerminalAiConversationState AiConversation { get; } = new();
+
+    public Guid? SessionId
+    {
+        get => sessionId;
+        set
+        {
+            if (sessionId == value) return;
+            CancelAiOperation();
+            AiCommandApprovalSessionId = null;
+            sessionId = value;
+        }
+    }
+
+    public TerminalSessionSnapshot? Snapshot
+    {
+        get => snapshot;
+        set
+        {
+            if (value is { Status: TerminalSessionStatus.Active } && value.SessionId != SessionId) return;
+            snapshot = value;
+            if (value?.Status != TerminalSessionStatus.Active || string.IsNullOrWhiteSpace(value.Username)) return;
+            if (previousConnectedUsername is not null &&
+                !string.Equals(previousConnectedUsername, value.Username, StringComparison.Ordinal))
+            {
+                CancelAiOperation();
+                AiCommandApprovalSessionId = null;
+                AiConversation.ProviderConversationReference = string.Empty;
+                AiConversation.ProviderResponseId = string.Empty;
+                AiConversation.Entries.Clear();
+            }
+
+            previousConnectedUsername = value.Username;
+        }
+    }
+
+    public string ConnectedUsername => Snapshot is { Status: TerminalSessionStatus.Active } current && current.SessionId == SessionId
+        ? current.Username
+        : string.Empty;
+
+    public string ErrorMessage { get; set; } = string.Empty;
+
+    public IReadOnlyList<TerminalConnectionTraceEntry> ConnectionTrace
+    {
+        get
+        {
+            lock (connectionTraceSync)
+            {
+                return connectionTrace.ToArray();
+            }
+        }
+    }
+
+    public Guid ConnectionTraceId
+    {
+        get
+        {
+            lock (connectionTraceSync)
+            {
+                return connectionTraceId;
+            }
+        }
+    }
+
+    public bool ConnectionTracePending
+    {
+        get
+        {
+            lock (connectionTraceSync)
+            {
+                return connectionTracePending;
+            }
+        }
+    }
+
+    public Guid BeginConnectionTrace(string message)
+    {
+        lock (connectionTraceSync)
+        {
+            connectionTraceId = Guid.NewGuid();
+            connectionTraceStartedUtc = DateTimeOffset.UtcNow;
+            connectionTracePending = true;
+            connectionTrace.Clear();
+            connectionTrace.Add(new TerminalConnectionTraceEntry(0, message));
+            return connectionTraceId;
+        }
+    }
+
+    public bool AppendConnectionTrace(Guid traceId, string message)
+    {
+        lock (connectionTraceSync)
+        {
+            if (traceId != connectionTraceId)
+            {
+                return false;
+            }
+
+            if (connectionTrace.Count == 24)
+            {
+                connectionTrace.RemoveAt(1);
+            }
+
+            connectionTrace.Add(new TerminalConnectionTraceEntry(
+                Math.Max(0, (DateTimeOffset.UtcNow - connectionTraceStartedUtc).TotalMilliseconds),
+                message));
+            return true;
+        }
+    }
+
+    public void FinishConnectionTrace(Guid traceId)
+    {
+        lock (connectionTraceSync)
+        {
+            if (traceId == connectionTraceId)
+            {
+                connectionTracePending = false;
+            }
+        }
+    }
+
+    public bool IsBusy { get; set; }
+
+    public DateTimeOffset CreatedAtUtc { get; } = DateTimeOffset.UtcNow;
+
+    public bool IsSessionActive => Snapshot?.Status == TerminalSessionStatus.Active;
+
+    internal bool ConnectionDesired => connectionDesired;
+
+    public string WorkingDirectory => Snapshot?.WorkingDirectory ?? DefaultWorkingDirectory;
+
+    internal void RequestConnection() => connectionDesired = true;
+
+    internal void RequestDisconnect()
+    {
+        connectionDesired = false;
+        CancellationTokenSource? cancellationSource;
+        lock (connectionOperationSync)
+        {
+            cancellationSource = activeConnectionOperation;
+        }
+
+        try
+        {
+            cancellationSource?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        CancelAiOperation();
+    }
+
+    internal void RegisterConnectionOperation(CancellationTokenSource cancellationSource)
+    {
+        ArgumentNullException.ThrowIfNull(cancellationSource);
+        lock (connectionOperationSync)
+        {
+            activeConnectionOperation = cancellationSource;
+        }
+    }
+
+    internal void UnregisterConnectionOperation(CancellationTokenSource cancellationSource)
+    {
+        lock (connectionOperationSync)
+        {
+            if (ReferenceEquals(activeConnectionOperation, cancellationSource))
+            {
+                activeConnectionOperation = null;
+            }
+        }
+    }
+
+    internal void RegisterAiOperation(CancellationTokenSource cancellationSource)
+    {
+        ArgumentNullException.ThrowIfNull(cancellationSource);
+        lock (aiOperationSync)
+        {
+            activeAiOperation = cancellationSource;
+        }
+    }
+
+    internal void UnregisterAiOperation(CancellationTokenSource cancellationSource)
+    {
+        lock (aiOperationSync)
+        {
+            if (ReferenceEquals(activeAiOperation, cancellationSource))
+            {
+                activeAiOperation = null;
+            }
+        }
+    }
+
+    internal bool CancelAiOperation()
+    {
+        CancellationTokenSource? cancellationSource;
+        lock (aiOperationSync)
+        {
+            cancellationSource = activeAiOperation;
+        }
+
+        if (cancellationSource is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            cancellationSource.Cancel();
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
+    public static TerminalTabState Create(ManagedHost host)
+    {
+        var tab = new TerminalTabState();
+        tab.ApplyHost(host);
+        tab.Username = host.Username;
+        tab.PreferStoredCredentials =
+            !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+            !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+        tab.ConnectionProfileKey = ConnectionProfileSelectionKeys.HostDefault;
+        tab.ConnectionProfileName = host.Username;
+        tab.ConnectionOptionsOpen = false;
+        return tab;
+    }
+
+    public void SetWorkingDirectoryOverride(string? workingDirectory)
+    {
+        workingDirectoryOverride = string.IsNullOrWhiteSpace(workingDirectory) ? null : workingDirectory.Trim();
+        if (!string.IsNullOrWhiteSpace(workingDirectoryOverride))
+        {
+            DefaultWorkingDirectory = workingDirectoryOverride;
+        }
+    }
+
+    public void ApplyHost(ManagedHost host)
+    {
+        HostId = host.Id;
+        HostName = host.Name;
+        HostAddress = host.Hostname;
+        DefaultWorkingDirectory = workingDirectoryOverride ?? host.DefaultWorkingDirectory;
+        PrimaryAuthenticationType = host.PrimaryAuthenticationType;
+        FallbackAuthenticationType = host.FallbackAuthenticationType;
+
+        if (string.IsNullOrWhiteSpace(Username))
+        {
+            Username = host.Username;
+        }
+    }
+
+    public void ApplyAuthentication(AuthenticationType primaryAuthenticationType, AuthenticationType? fallbackAuthenticationType)
+    {
+        PrimaryAuthenticationType = primaryAuthenticationType;
+        FallbackAuthenticationType = fallbackAuthenticationType;
+    }
+}

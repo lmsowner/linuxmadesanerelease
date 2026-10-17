@@ -1,0 +1,882 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@implements IAsyncDisposable
+@inject IJSRuntime JSRuntime
+@using System.Globalization
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+
+@if (Embedded)
+{
+    <section class="file-search-dialog-embedded-shell">
+        @PanelContent
+    </section>
+}
+else if (IsOpen)
+{
+    <div class="file-search-dialog-modal">
+        <UiModal IsOpen="@IsOpen"
+                 Title="Find files"
+                 Class="file-search-dialog-modal"
+                 CloseOnBackdrop="false"
+                 OnClose="HandleCloseAsync">
+            <ChildContent>
+                @PanelContent
+            </ChildContent>
+        </UiModal>
+    </div>
+}
+
+@code {
+    private readonly string formId = $"file-search-dialog-{Guid.NewGuid():N}";
+    private readonly FileSearchDialogEditor editor = new();
+    private string? validationMessage;
+    private bool previousIsOpen;
+    private readonly HashSet<string> selectedPaths = new(StringComparer.Ordinal);
+    private string? selectionAnchor;
+    private string sortColumn = "Name";
+    private bool sortDescending, actionBusy;
+    private ElementReference selectionElement, registeredSelectionElement;
+    private bool selectionRegistered;
+    private DotNetObjectReference<FileSearchDialog>? selectionReference;
+    private FileSearchBulkAction? pendingAction;
+    private IReadOnlyList<FileSearchMatch> pendingItems = [];
+    private string destination = "";
+    private ArchiveFormat archiveFormat = ArchiveFormat.Zip;
+    private string? actionMessage;
+    private string actionTone = "info";
+    private bool actionQueued, createDestinationFolder;
+
+    private string previousRootPath = string.Empty;
+
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter] public bool Embedded { get; set; }
+    [Parameter] public bool ShowCloseAction { get; set; } = true;
+    [Parameter] public bool ShowPopOutAction { get; set; }
+    [Parameter] public string RootPath { get; set; } = "/";
+    [Parameter] public string? ScopeLabel { get; set; }
+    [Parameter] public IReadOnlyList<string> PathSuggestions { get; set; } = [];
+    [Parameter] public bool IsLoadingPathSuggestions { get; set; }
+    [Parameter] public string? FileActionsUrl { get; set; }
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter] public bool DisableOpenLocation { get; set; }
+    [Parameter] public FileSearchResponse? SearchResponse { get; set; }
+    [Parameter] public string? StatusMessage { get; set; }
+    [Parameter] public string StatusTone { get; set; } = "info";
+    [Parameter] public EventCallback<string?> RootPathChanged { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+    [Parameter] public EventCallback OnPopOut { get; set; }
+    [Parameter] public string? PopOutClientClick { get; set; }
+    [Parameter] public EventCallback<FileSearchRequest> SearchRequested { get; set; }
+    [Parameter] public EventCallback<FileSearchMatch> OpenLocationRequested { get; set; }
+    [Parameter] public EventCallback<FileSearchBulkActionRequest> BulkActionRequested { get; set; }
+    [Parameter] public EventCallback<FileSearchMatch> ResultSelected { get; set; }
+
+    private bool AllSelected => selectedPaths.Count > 0 && selectedPaths.Count == SearchResponse?.Results.Count;
+    private bool ActionsDisabled => IsBusy || actionBusy || selectedPaths.Count == 0 || !BulkActionRequested.HasDelegate;
+    private IReadOnlyList<FileSearchMatch> SortedResults
+    {
+        get
+        {
+            var items = SearchResponse?.Results ?? [];
+            IOrderedEnumerable<FileSearchMatch> sorted = sortColumn switch
+            {
+                "Size" => sortDescending ? items.OrderByDescending(item => item.SizeBytes) : items.OrderBy(item => item.SizeBytes),
+                "Modified" => sortDescending ? items.OrderByDescending(item => item.LastModifiedUtc) : items.OrderBy(item => item.LastModifiedUtc),
+                "Type" => sortDescending ? items.OrderByDescending(GetResultTypeLabel, StringComparer.OrdinalIgnoreCase) : items.OrderBy(GetResultTypeLabel, StringComparer.OrdinalIgnoreCase),
+                _ => sortDescending ? items.OrderByDescending(item => item.Name, StringComparer.OrdinalIgnoreCase) : items.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            };
+            return sorted.ThenBy(item => item.FullPath, StringComparer.Ordinal).ToArray();
+        }
+    }
+    private void SortBy(string column) { sortDescending = sortColumn == column && !sortDescending; sortColumn = column; }
+    private void SelectAll() { selectedPaths.UnionWith(SearchResponse?.Results.Select(item => item.FullPath) ?? []); }
+    private void ClearSelection() { selectedPaths.Clear(); selectionAnchor = null; }
+    private void ToggleResult(string path) { if (!selectedPaths.Add(path)) selectedPaths.Remove(path); selectionAnchor = path; }
+    private void SelectResult(FileSearchMatch item, MouseEventArgs args)
+    {
+        if (args.ShiftKey && selectionAnchor is not null)
+        {
+            var paths = SortedResults.Select(result => result.FullPath).ToList();
+            var start = paths.IndexOf(selectionAnchor); var end = paths.IndexOf(item.FullPath);
+            if (start >= 0 && end >= 0) { if (!args.CtrlKey && !args.MetaKey) selectedPaths.Clear(); selectedPaths.UnionWith(paths.Skip(Math.Min(start, end)).Take(Math.Abs(end - start) + 1)); return; }
+        }
+        if (args.CtrlKey || args.MetaKey) ToggleResult(item.FullPath);
+        else { selectedPaths.Clear(); selectedPaths.Add(item.FullPath); selectionAnchor = item.FullPath; }
+    }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (selectionRegistered && (!(Embedded || IsOpen) || SearchResponse?.Results.Count is not > 0 || !selectionElement.Equals(registeredSelectionElement)))
+        {
+            await JSRuntime.InvokeVoidAsync("lmsFileBrowser.disposeMarquee", registeredSelectionElement);
+            selectionRegistered = false;
+        }
+        if ((Embedded || IsOpen) && SearchResponse?.Results.Count > 0)
+        {
+            selectionReference ??= DotNetObjectReference.Create(this);
+            await JSRuntime.InvokeVoidAsync("lmsFileBrowser.watchMarquee", selectionElement, selectionReference);
+            registeredSelectionElement = selectionElement; selectionRegistered = true;
+        }
+    }
+    [JSInvokable] public Task OnMarqueeSelectionChangedAsync(string path, string[] paths)
+    {
+        if (IsBusy || actionBusy || path != RootPath) return Task.CompletedTask;
+        var available = (SearchResponse?.Results ?? []).Select(item => item.FullPath).ToHashSet(StringComparer.Ordinal);
+        selectedPaths.Clear(); selectedPaths.UnionWith(paths.Where(available.Contains)); selectionAnchor = paths.LastOrDefault();
+        return InvokeAsync(StateHasChanged);
+    }
+    private async Task HandleSelectionKeyAsync(KeyboardEventArgs args)
+    {
+        if (args.Key == "Escape") { ClearSelection(); pendingAction = null; }
+        else if ((args.CtrlKey || args.MetaKey) && args.Key.Equals("a", StringComparison.OrdinalIgnoreCase)) SelectAll();
+        else if ((args.CtrlKey || args.MetaKey) && args.Key.Equals("c", StringComparison.OrdinalIgnoreCase)) await StartActionAsync(FileSearchBulkAction.CopyClipboard);
+        else if ((args.CtrlKey || args.MetaKey) && args.Key.Equals("x", StringComparison.OrdinalIgnoreCase)) await StartActionAsync(FileSearchBulkAction.CutClipboard);
+        else if (args.Key == "Delete") await StartActionAsync(FileSearchBulkAction.Delete);
+    }
+    private async Task StartActionAsync(FileSearchBulkAction action)
+    {
+        if (ActionsDisabled) return;
+        pendingItems = SortedResults.Where(item => selectedPaths.Contains(item.FullPath)).ToArray();
+        actionMessage = null;
+        if (action is FileSearchBulkAction.CopyClipboard or FileSearchBulkAction.CutClipboard)
+        { await ExecuteActionAsync(new(action, pendingItems)); return; }
+        pendingAction = action;
+        destination = action == FileSearchBulkAction.Archive ? RootPath.TrimEnd('/') + "/search-results.zip" : RootPath;
+        archiveFormat = ArchiveFormat.Zip; createDestinationFolder = false;
+    }
+    private void UpdateArchiveExtension()
+    {
+        if (destination.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase)) destination = destination[..^7];
+        else if (destination.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) destination = destination[..^4];
+        destination += archiveFormat == ArchiveFormat.Zip ? ".zip" : ".tar.gz";
+    }
+    private Task ConfirmActionAsync()
+    {
+        if (!pendingAction.HasValue) return Task.CompletedTask;
+        if (pendingAction != FileSearchBulkAction.Delete && (!destination.StartsWith('/') || string.IsNullOrWhiteSpace(destination)))
+        { actionMessage = "Enter an absolute destination path."; actionTone = "error"; return Task.CompletedTask; }
+        return ExecuteActionAsync(new(pendingAction.Value, pendingItems, destination.Trim(), archiveFormat, createDestinationFolder));
+    }
+    private async Task ExecuteActionAsync(FileSearchBulkActionRequest request)
+    {
+        if (actionBusy) return;
+        actionBusy = true; actionQueued = false; actionMessage = "Preparing selected files…"; actionTone = "info"; await InvokeAsync(StateHasChanged);
+        try
+        {
+            await BulkActionRequested.InvokeAsync(request); pendingAction = null;
+            actionMessage = request.Action is FileSearchBulkAction.CopyClipboard or FileSearchBulkAction.CutClipboard
+                ? $"{request.Items.Count} items ready to paste in a file browser." : $"Queued {request.Action.ToString().ToLowerInvariant()} for {request.Items.Count} items. Track progress in File actions.";
+            actionTone = "success"; actionQueued = request.Action is not (FileSearchBulkAction.CopyClipboard or FileSearchBulkAction.CutClipboard);
+        }
+        catch (Exception ex) { actionMessage = ex.Message.Split('\n')[0]; actionTone = "error"; }
+        finally { actionBusy = false; }
+    }
+    public async ValueTask DisposeAsync()
+    {
+        if (selectionReference is null) return;
+        try { await JSRuntime.InvokeVoidAsync("lmsFileBrowser.disposeMarquee", registeredSelectionElement); } catch (JSDisconnectedException) { }
+        selectionReference.Dispose();
+    }
+
+    private static IReadOnlyList<FileSearchSizeUnit> SizeUnits { get; } =
+        Enum.GetValues<FileSearchSizeUnit>();
+
+    private string? ResolvedStatusMessage => validationMessage ?? StatusMessage;
+    private string ResolvedStatusTone => validationMessage is null ? StatusTone : "error";
+
+    private RenderFragment PanelContent => @<EditForm Model="@editor" OnSubmit="HandleSearchAsync" id="@formId" class="file-search-dialog-form">
+        <div class="file-search-dialog-shell">
+            <section class="surface-subcard file-search-dialog-panel">
+                <div class="file-search-dialog-path-row">
+                    <UiPathCombobox Value="@editor.RootPath"
+                                    ValueChanged="SetRootPathAsync"
+                                    CommitRequested="CommitRootPathAsync"
+                                    SuggestionSelected="SelectRootPathSuggestionAsync"
+                                    Suggestions="@PathSuggestions"
+                                    IsLoadingSuggestions="@IsLoadingPathSuggestions"
+                                    Placeholder="Search from folder"
+                                    AriaLabel="Search from folder"
+                                    Title="@editor.RootPath"
+                                    Glyph="UiIconGlyph.FolderOpen"
+                                    InputClass="file-search-dialog-path-input" />
+
+                    @if (!string.IsNullOrWhiteSpace(ScopeLabel))
+                    {
+                        <span class="file-search-dialog-host">
+                            <UiLabelText>Host</UiLabelText>
+                            <strong>@ScopeLabel</strong>
+                        </span>
+                    }
+                </div>
+
+                <div class="file-search-dialog-search-row">
+                    <span class="file-search-dialog-inline-label">Search (* for wildcard)</span>
+                    <input class="ui-control-input file-search-dialog-search-input"
+                           type="text"
+                           placeholder="logs, *.log, report-*"
+                           @bind="editor.NamePattern" />
+
+                    @if (IsBusy)
+                    {
+                        <UiCommandButton Label="Cancel"
+                                         Glyph="UiIconGlyph.Clear"
+                                         Variant="UiButtonVariant.Ghost"
+                                         Class="file-search-dialog-search-button file-search-dialog-search-button-cancel"
+                                         OnClick="HandleCancelAsync" />
+                    }
+                    else
+                    {
+                        <UiCommandButton Label="Search"
+                                         Glyph="UiIconGlyph.Search"
+                                         Variant="UiButtonVariant.Primary"
+                                         Class="file-search-dialog-search-button"
+                                         Type="submit"
+                                         form="@formId" />
+                    }
+
+                    <div class="file-search-dialog-inline-toggles">
+                        <div class="file-search-dialog-inline-toggle">
+                            <UiCompactCheckbox Label="Search files"
+                                               Value="@editor.IncludeFiles"
+                                               ValueChanged="SetIncludeFilesAsync" />
+                            <span>Files</span>
+                        </div>
+
+                        <div class="file-search-dialog-inline-toggle">
+                            <UiCompactCheckbox Label="Search folders"
+                                               Value="@editor.IncludeFolders"
+                                               ValueChanged="SetIncludeFoldersAsync" />
+                            <span>Folders</span>
+                        </div>
+
+                        <div class="file-search-dialog-inline-toggle">
+                            <UiCompactCheckbox Label="Use case-insensitive matching"
+                                               Value="@editor.CaseInsensitive"
+                                               ValueChanged="SetCaseInsensitiveAsync" />
+                            <span>Ignore case</span>
+                        </div>
+                    </div>
+                </div>
+
+                <details class="surface-subcard file-search-dialog-advanced">
+                    <summary>Advanced</summary>
+
+                    <div class="file-search-dialog-advanced-body">
+                        <div class="file-search-dialog-advanced-row">
+                            <span class="file-search-dialog-advanced-label">Contains text</span>
+                            <input class="ui-control-input file-search-dialog-wide-input"
+                                   type="text"
+                                   placeholder="Search inside text files"
+                                   @bind="editor.ContainsText" />
+                        </div>
+
+                        <div class="file-search-dialog-advanced-row">
+                            <span class="file-search-dialog-advanced-label">Size</span>
+
+                            <div class="file-search-dialog-field-cluster">
+                                <span class="file-search-dialog-field-tag">Min</span>
+                                <input class="ui-control-input file-search-dialog-small-input"
+                                       type="number"
+                                       min="0"
+                                       step="0.1"
+                                       @bind="editor.MinimumSize" />
+                                <select class="ui-control-input file-search-dialog-unit-input"
+                                        @bind="editor.MinimumSizeUnit">
+                                    @foreach (var option in SizeUnits)
+                                    {
+                                        <option value="@option">@GetSizeUnitLabel(option)</option>
+                                    }
+                                </select>
+                            </div>
+
+                            <div class="file-search-dialog-field-cluster">
+                                <span class="file-search-dialog-field-tag">Max</span>
+                                <input class="ui-control-input file-search-dialog-small-input"
+                                       type="number"
+                                       min="0"
+                                       step="0.1"
+                                       @bind="editor.MaximumSize" />
+                                <select class="ui-control-input file-search-dialog-unit-input"
+                                        @bind="editor.MaximumSizeUnit">
+                                    @foreach (var option in SizeUnits)
+                                    {
+                                        <option value="@option">@GetSizeUnitLabel(option)</option>
+                                    }
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="file-search-dialog-advanced-row">
+                            <span class="file-search-dialog-advanced-label">Modified</span>
+
+                            <div class="file-search-dialog-field-cluster">
+                                <span class="file-search-dialog-field-tag">From</span>
+                                <input class="ui-control-input file-search-dialog-date-input"
+                                       type="date"
+                                       value="@editor.ModifiedFrom"
+                                       @onchange="OnModifiedFromChanged" />
+                            </div>
+
+                            <div class="file-search-dialog-field-cluster">
+                                <span class="file-search-dialog-field-tag">To</span>
+                                <input class="ui-control-input file-search-dialog-date-input"
+                                       type="date"
+                                       value="@editor.ModifiedTo"
+                                       @onchange="OnModifiedToChanged" />
+                            </div>
+                        </div>
+
+                        <div class="file-search-dialog-advanced-row">
+                            <span class="file-search-dialog-advanced-label">Created</span>
+
+                            <div class="file-search-dialog-field-cluster">
+                                <span class="file-search-dialog-field-tag">From</span>
+                                <input class="ui-control-input file-search-dialog-date-input"
+                                       type="date"
+                                       value="@editor.CreatedFrom"
+                                       @onchange="OnCreatedFromChanged" />
+                            </div>
+
+                            <div class="file-search-dialog-field-cluster">
+                                <span class="file-search-dialog-field-tag">To</span>
+                                <input class="ui-control-input file-search-dialog-date-input"
+                                       type="date"
+                                       value="@editor.CreatedTo"
+                                       @onchange="OnCreatedToChanged" />
+                            </div>
+                        </div>
+
+                        <div class="file-search-dialog-advanced-row">
+                            <span class="file-search-dialog-advanced-label">Last accessed</span>
+
+                            <div class="file-search-dialog-field-cluster">
+                                <span class="file-search-dialog-field-tag">From</span>
+                                <input class="ui-control-input file-search-dialog-date-input"
+                                       type="date"
+                                       value="@editor.AccessedFrom"
+                                       @onchange="OnAccessedFromChanged" />
+                            </div>
+
+                            <div class="file-search-dialog-field-cluster">
+                                <span class="file-search-dialog-field-tag">To</span>
+                                <input class="ui-control-input file-search-dialog-date-input"
+                                       type="date"
+                                       value="@editor.AccessedTo"
+                                       @onchange="OnAccessedToChanged" />
+                            </div>
+                        </div>
+                    </div>
+                </details>
+            </section>
+
+            <section class="surface-subcard file-search-dialog-results">
+                <div class="table-header file-search-dialog-results-header">
+                    <div class="file-search-dialog-results-title">
+                        <h3>Search results</h3>
+                        <UiPill Tone="UiPillTone.Neutral" Class="file-search-dialog-results-pill">@GetResultsSummary()</UiPill>
+                        @if (!string.IsNullOrWhiteSpace(ResolvedStatusMessage))
+                        {
+                            <span class="file-search-dialog-status-pill @ResolvedStatusTone">@ResolvedStatusMessage</span>
+                        }
+                    </div>
+
+                    <div class="file-search-dialog-results-tools">
+                        @if (SearchResponse?.LimitReached == true)
+                        {
+                            <UiPill Tone="UiPillTone.Warning">Limit reached</UiPill>
+                        }
+                        @if (ShowPopOutAction)
+                        {
+                            <UiIconButton Label="Pop out"
+                                          Glyph="UiIconGlyph.PopOut"
+                                          Variant="UiButtonVariant.Ghost"
+                                          Disabled="@IsBusy"
+                                          OnClientClick="@PopOutClientClick"
+                                          OnClick="HandlePopOutAsync" />
+                        }
+                    </div>
+                </div>
+
+                @if (SearchResponse?.Results.Count > 0)
+                {
+                    <div class="file-search-selection-tools">
+                        <button type="button" @onclick="SelectAll">Select all</button>
+                        <button type="button" disabled="@(selectedPaths.Count == 0)" @onclick="ClearSelection">Clear selection</button>
+                        <strong aria-live="polite">@selectedPaths.Count selected</strong>
+                        <span class="file-search-selection-hint">Click, Ctrl/Cmd-click, Shift-click or drag to select.</span>
+                        <button type="button" disabled="@ActionsDisabled" @onclick="() => StartActionAsync(FileSearchBulkAction.CopyClipboard)">Copy</button>
+                        <button type="button" disabled="@ActionsDisabled" @onclick="() => StartActionAsync(FileSearchBulkAction.CutClipboard)">Cut</button>
+                        <button type="button" disabled="@ActionsDisabled" @onclick="() => StartActionAsync(FileSearchBulkAction.CopyTo)">Copy to…</button>
+                        <button type="button" disabled="@ActionsDisabled" @onclick="() => StartActionAsync(FileSearchBulkAction.MoveTo)">Move to…</button>
+                        <button type="button" disabled="@ActionsDisabled" @onclick="() => StartActionAsync(FileSearchBulkAction.Archive)">@(AllSelected ? "Archive all…" : "Archive selected…")</button>
+                        <button type="button" disabled="@ActionsDisabled" @onclick="() => StartActionAsync(FileSearchBulkAction.Delete)">@(AllSelected ? "Delete all…" : "Delete selected…")</button>
+                    </div>
+                }
+                @if (!string.IsNullOrEmpty(actionMessage))
+                {
+                    <div class="file-search-action-feedback @actionTone" role="status">@actionMessage
+                        @if (actionQueued && !string.IsNullOrWhiteSpace(FileActionsUrl)) { <a href="@FileActionsUrl" target="_blank">Open File actions</a> }
+                    </div>
+                }
+                @if (pendingAction.HasValue)
+                {
+                    <div class="file-search-action-editor">
+                        @if (pendingAction == FileSearchBulkAction.Delete)
+                        {
+                            <strong>Delete @pendingItems.Count selected items? Folders include their contents.</strong>
+                            <span>These files and folders will be permanently deleted from their original locations.</span>
+                        }
+                        else
+                        {
+                            <label>@(pendingAction == FileSearchBulkAction.Archive ? "Archive path" : "Destination folder")
+                                <input class="ui-control-input" aria-label="@(pendingAction == FileSearchBulkAction.Archive ? "Archive path" : "Destination folder")" @bind="destination" placeholder="/path/to/destination" />
+                            </label>
+                            @if (pendingAction == FileSearchBulkAction.Archive)
+                            {
+                                <label>Format <select class="ui-control-input" @bind="archiveFormat" @bind:after="UpdateArchiveExtension"><option value="@ArchiveFormat.Zip">ZIP</option><option value="@ArchiveFormat.TarGzip">tar.gz</option></select></label>
+                                <span>Preserves paths relative to the search folder. Existing archives are never overwritten.</span>
+                            }
+                            else
+                            {
+                                <label><input type="checkbox" @bind="createDestinationFolder" />Create this new folder</label>
+                                <span>Choose an existing folder, or create a new folder inside an existing parent. Existing files are never overwritten.</span>
+                            }
+                        }
+                        <details><summary>@pendingItems.Count items from these locations</summary><ul>@foreach (var item in pendingItems) { <li>@item.FullPath</li> }</ul></details>
+                        <div><button type="button" disabled="@actionBusy" @onclick="ConfirmActionAsync">@(pendingAction == FileSearchBulkAction.Delete ? "Delete permanently" : "Queue action")</button>
+                            <button type="button" disabled="@actionBusy" @onclick="() => pendingAction = null">Cancel</button></div>
+                    </div>
+                }
+
+                @if (SearchResponse is null)
+                {
+                    <div class="empty-state file-search-dialog-empty">
+                        @if (IsBusy)
+                        {
+                            <p>Searching this folder tree now.</p>
+                        }
+                        else
+                        {
+                            <p>Run a search and the matches will appear here.</p>
+                        }
+                    </div>
+                }
+                else if (SearchResponse.Results.Count == 0)
+                {
+                    <div class="empty-state file-search-dialog-empty">
+                        @if (IsBusy)
+                        {
+                            <p>Searching this folder tree now. Matches will appear here as they are found.</p>
+                        }
+                        else
+                        {
+                            <p>No files or folders matched this search.</p>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="file-search-dialog-results-list" role="grid" aria-label="Search results" aria-multiselectable="true" tabindex="0"
+                         @ref="selectionElement" data-selection-path="@RootPath" data-selection-busy="@((IsBusy || actionBusy).ToString().ToLowerInvariant())"
+                         data-marquee-surface data-search-selection="true" @onkeydown="HandleSelectionKeyAsync">
+                        <div class="file-search-dialog-results-head" role="row">
+                            @foreach (var column in new[] { "Name", "Type", "Size", "Modified" })
+                            {
+                                <span role="columnheader" aria-sort="@(sortColumn == column ? sortDescending ? "descending" : "ascending" : "none")"><button type="button" @onclick="() => SortBy(column)">@column @(sortColumn == column ? sortDescending ? "▼" : "▲" : "")</button></span>
+                            }
+                            <span></span>
+                        </div>
+                        @foreach (var result in SortedResults)
+                        {
+                            <div @key="result.FullPath" class="file-search-dialog-result-row @(selectedPaths.Contains(result.FullPath) ? "selected" : "")" role="row"
+                                 aria-selected="@selectedPaths.Contains(result.FullPath)" data-file-path="@result.FullPath" data-file-selected="@selectedPaths.Contains(result.FullPath).ToString().ToLowerInvariant()"
+                                 @onclick="args => SelectResult(result, args)" @ondblclick="() => OpenLocationAsync(result)">
+                                <div class="file-search-dialog-result-name-cell">
+                                    <span class="file-search-dialog-result-title-line">
+                                        <span @onclick:stopPropagation="true"><input type="checkbox" aria-label="@($"Select {result.FullPath}")" checked="@selectedPaths.Contains(result.FullPath)" @onchange="() => ToggleResult(result.FullPath)" /></span>
+                                        <span class="file-search-dialog-result-icon" aria-hidden="true">
+                                            <UiGlyphIcon Glyph="@GetResultGlyph(result.ItemType)" />
+                                        </span>
+                                        <span class="file-search-dialog-result-name" title="@result.Name">@result.Name</span>
+                                        @if (result.MatchedContents)
+                                        {
+                                            <UiPill Tone="UiPillTone.Neutral">Text match</UiPill>
+                                        }
+                                    </span>
+                                    <span class="file-search-dialog-result-location" title="@result.ParentPath">
+                                        @result.ParentPath
+                                    </span>
+                                </div>
+                                <span class="file-search-dialog-result-detail file-search-dialog-result-type" data-column="Type">@GetResultTypeLabel(result)</span>
+                                <span class="file-search-dialog-result-detail file-search-dialog-result-size" data-column="Size">@FormatBytes(result.SizeBytes, result.ItemType)</span>
+                                <span class="file-search-dialog-result-detail file-search-dialog-result-modified" data-column="Modified">@FormatModified(result.LastModifiedUtc)</span>
+
+                                <div class="file-search-dialog-result-actions" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
+                                    <UiIconButton Label="Open folder"
+                                                  Title="Open this folder in a new window"
+                                                  Glyph="UiIconGlyph.FolderOpen"
+                                                  Variant="UiButtonVariant.ActionSubtle"
+                                                  Disabled="@DisableOpenLocation"
+                                                  OnClick="@(() => OpenLocationAsync(result))" />
+                                    @if (result.ItemType != SftpItemType.Folder)
+                                    {
+                                        <UiIconButton Label="Preview file"
+                                                      Title="Preview or edit this file"
+                                                      Glyph="UiIconGlyph.Edit"
+                                                      Variant="UiButtonVariant.ActionSubtle"
+                                                      Disabled="@IsBusy"
+                                                      OnClick="@(() => OpenResultAsync(result))" />
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            </section>
+
+        </div>
+    </EditForm>;
+
+    protected override void OnParametersSet()
+    {
+        if ((Embedded || IsOpen) && (!previousIsOpen || !string.Equals(previousRootPath, RootPath, StringComparison.Ordinal)))
+        {
+            ResetEditor();
+        }
+
+        selectedPaths.IntersectWith(SearchResponse?.Results.Select(item => item.FullPath) ?? []);
+        previousIsOpen = Embedded || IsOpen;
+        previousRootPath = RootPath;
+    }
+
+    private async Task HandleSearchAsync()
+    {
+        validationMessage = null;
+        var request = BuildRequest();
+        if (request is null)
+        {
+            return;
+        }
+
+        ClearSelection(); pendingAction = null; actionMessage = null;
+        await SearchRequested.InvokeAsync(request);
+    }
+
+    private Task HandleCloseAsync()
+    {
+        if (IsBusy)
+        {
+            return Task.CompletedTask;
+        }
+
+        validationMessage = null;
+        return OnClose.InvokeAsync();
+    }
+
+    private Task HandlePopOutAsync()
+    {
+        if (IsBusy)
+        {
+            return Task.CompletedTask;
+        }
+
+        validationMessage = null;
+        return OnPopOut.InvokeAsync();
+    }
+
+    private Task HandleCancelAsync() =>
+        OnCancel.InvokeAsync();
+
+    private Task OpenResultAsync(FileSearchMatch result) =>
+        ResultSelected.InvokeAsync(result);
+
+    private Task OpenLocationAsync(FileSearchMatch result) =>
+        OpenLocationRequested.InvokeAsync(result);
+
+    private Task SetRootPathAsync(string? value)
+    {
+        editor.RootPath = value ?? string.Empty;
+        return RootPathChanged.InvokeAsync(editor.RootPath);
+    }
+
+    private Task CommitRootPathAsync(string? value)
+    {
+        editor.RootPath = value?.Trim() ?? string.Empty;
+        return RootPathChanged.InvokeAsync(editor.RootPath);
+    }
+
+    private Task SelectRootPathSuggestionAsync(string value)
+    {
+        editor.RootPath = value;
+        return RootPathChanged.InvokeAsync(editor.RootPath);
+    }
+
+    private Task SetIncludeFilesAsync(bool value)
+    {
+        editor.IncludeFiles = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetIncludeFoldersAsync(bool value)
+    {
+        editor.IncludeFolders = value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetCaseInsensitiveAsync(bool value)
+    {
+        editor.CaseInsensitive = value;
+        return Task.CompletedTask;
+    }
+
+    private Task OnModifiedFromChanged(ChangeEventArgs args)
+    {
+        editor.ModifiedFrom = args.Value?.ToString() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task OnModifiedToChanged(ChangeEventArgs args)
+    {
+        editor.ModifiedTo = args.Value?.ToString() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task OnCreatedFromChanged(ChangeEventArgs args)
+    {
+        editor.CreatedFrom = args.Value?.ToString() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task OnCreatedToChanged(ChangeEventArgs args)
+    {
+        editor.CreatedTo = args.Value?.ToString() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task OnAccessedFromChanged(ChangeEventArgs args)
+    {
+        editor.AccessedFrom = args.Value?.ToString() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task OnAccessedToChanged(ChangeEventArgs args)
+    {
+        editor.AccessedTo = args.Value?.ToString() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private void ResetEditor()
+    {
+        editor.RootPath = RootPath;
+        editor.NamePattern = string.Empty;
+        editor.ContainsText = string.Empty;
+        editor.IncludeFiles = true;
+        editor.IncludeFolders = true;
+        editor.CaseInsensitive = true;
+        editor.MinimumSize = null;
+        editor.MaximumSize = null;
+        editor.MinimumSizeUnit = FileSearchSizeUnit.Kilobytes;
+        editor.MaximumSizeUnit = FileSearchSizeUnit.Megabytes;
+        editor.ModifiedFrom = string.Empty;
+        editor.ModifiedTo = string.Empty;
+        editor.CreatedFrom = string.Empty;
+        editor.CreatedTo = string.Empty;
+        editor.AccessedFrom = string.Empty;
+        editor.AccessedTo = string.Empty;
+        validationMessage = null; ClearSelection(); pendingAction = null; actionMessage = null;
+    }
+
+    private FileSearchRequest? BuildRequest()
+    {
+        if (!editor.IncludeFiles && !editor.IncludeFolders)
+        {
+            validationMessage = "Select files, folders, or both before searching.";
+            return null;
+        }
+
+        var minimumSizeBytes = ConvertSizeToBytes(editor.MinimumSize, editor.MinimumSizeUnit);
+        var maximumSizeBytes = ConvertSizeToBytes(editor.MaximumSize, editor.MaximumSizeUnit);
+        if (minimumSizeBytes.HasValue && maximumSizeBytes.HasValue && minimumSizeBytes.Value > maximumSizeBytes.Value)
+        {
+            validationMessage = "Minimum size cannot be greater than maximum size.";
+            return null;
+        }
+
+        var modifiedFromUtc = ParseDate(editor.ModifiedFrom, endOfDay: false);
+        var modifiedToUtc = ParseDate(editor.ModifiedTo, endOfDay: true);
+        if (modifiedFromUtc.HasValue && modifiedToUtc.HasValue && modifiedFromUtc.Value > modifiedToUtc.Value)
+        {
+            validationMessage = "Modified from must be earlier than modified to.";
+            return null;
+        }
+
+        var createdFromUtc = ParseDate(editor.CreatedFrom, endOfDay: false);
+        var createdToUtc = ParseDate(editor.CreatedTo, endOfDay: true);
+        if (createdFromUtc.HasValue && createdToUtc.HasValue && createdFromUtc.Value > createdToUtc.Value)
+        {
+            validationMessage = "Created from must be earlier than created to.";
+            return null;
+        }
+
+        var accessedFromUtc = ParseDate(editor.AccessedFrom, endOfDay: false);
+        var accessedToUtc = ParseDate(editor.AccessedTo, endOfDay: true);
+        if (accessedFromUtc.HasValue && accessedToUtc.HasValue && accessedFromUtc.Value > accessedToUtc.Value)
+        {
+            validationMessage = "Last accessed from must be earlier than last accessed to.";
+            return null;
+        }
+
+        return new FileSearchRequest(
+            NullIfEmpty(editor.RootPath) ?? RootPath,
+            NullIfEmpty(editor.NamePattern),
+            editor.IncludeFiles,
+            editor.IncludeFolders,
+            minimumSizeBytes,
+            maximumSizeBytes,
+            modifiedFromUtc,
+            modifiedToUtc,
+            createdFromUtc,
+            createdToUtc,
+            accessedFromUtc,
+            accessedToUtc,
+            NullIfEmpty(editor.ContainsText),
+            editor.CaseInsensitive,
+            MaxResults: 500);
+    }
+
+    private string GetResultsSummary()
+    {
+        if (SearchResponse is null)
+        {
+            return "Results will appear here.";
+        }
+
+        return SearchResponse.Results.Count switch
+        {
+            0 => "No matches",
+            1 => "1 match",
+            _ => $"{SearchResponse.Results.Count} matches"
+        };
+    }
+
+    private static long? ConvertSizeToBytes(decimal? size, FileSearchSizeUnit unit)
+    {
+        if (!size.HasValue)
+        {
+            return null;
+        }
+
+        if (size.Value < 0)
+        {
+            return null;
+        }
+
+        var multiplier = unit switch
+        {
+            FileSearchSizeUnit.Bytes => 1m,
+            FileSearchSizeUnit.Kilobytes => 1024m,
+            FileSearchSizeUnit.Megabytes => 1024m * 1024m,
+            FileSearchSizeUnit.Gigabytes => 1024m * 1024m * 1024m,
+            _ => 1024m * 1024m * 1024m * 1024m
+        };
+
+        var value = decimal.Round(size.Value * multiplier, 0, MidpointRounding.AwayFromZero);
+        return value > long.MaxValue ? long.MaxValue : (long)value;
+    }
+
+    private static DateTimeOffset? ParseDate(string? value, bool endOfDay)
+    {
+        if (string.IsNullOrWhiteSpace(value) ||
+            !DateOnly.TryParseExact(value.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+        {
+            return null;
+        }
+
+        var localTime = date.ToDateTime(endOfDay ? TimeOnly.MaxValue : TimeOnly.MinValue, DateTimeKind.Unspecified);
+        var offset = TimeZoneInfo.Local.GetUtcOffset(localTime);
+        return new DateTimeOffset(localTime, offset).ToUniversalTime();
+    }
+
+    private static string? NullIfEmpty(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static string FormatBytes(long bytes, SftpItemType itemType)
+    {
+        if (itemType == SftpItemType.Folder)
+        {
+            return "-";
+        }
+
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        double value = bytes;
+        var unitIndex = 0;
+        while (value >= 1024 && unitIndex < units.Length - 1)
+        {
+            value /= 1024;
+            unitIndex++;
+        }
+
+        return $"{value:0.#} {units[unitIndex]}";
+    }
+
+    private static string FormatModified(DateTimeOffset? value) =>
+        value?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "n/a";
+
+    private static UiIconGlyph GetResultGlyph(SftpItemType itemType) =>
+        itemType switch
+        {
+            SftpItemType.Folder => UiIconGlyph.FolderOpen,
+            SftpItemType.Link => UiIconGlyph.Connection,
+            _ => UiIconGlyph.TextFile
+        };
+
+    private static string GetResultTypeLabel(FileSearchMatch item) =>
+        item.ItemType switch
+        {
+            SftpItemType.Folder => "Folder",
+            SftpItemType.Link => "Link",
+            SftpItemType.Other => "Other",
+            _ => string.IsNullOrEmpty(System.IO.Path.GetExtension(item.Name)) ? "File" : System.IO.Path.GetExtension(item.Name).TrimStart('.').ToUpperInvariant() + " file"
+        };
+
+    private static string GetSizeUnitLabel(FileSearchSizeUnit value) =>
+        value switch
+        {
+            FileSearchSizeUnit.Bytes => "B",
+            FileSearchSizeUnit.Kilobytes => "KB",
+            FileSearchSizeUnit.Megabytes => "MB",
+            FileSearchSizeUnit.Gigabytes => "GB",
+            _ => "TB"
+        };
+
+    private enum FileSearchSizeUnit
+    {
+        Bytes = 0,
+        Kilobytes = 1,
+        Megabytes = 2,
+        Gigabytes = 3,
+        Terabytes = 4
+    }
+
+    private sealed class FileSearchDialogEditor
+    {
+        public string RootPath { get; set; } = "/";
+        public string NamePattern { get; set; } = string.Empty;
+        public string ContainsText { get; set; } = string.Empty;
+        public bool IncludeFiles { get; set; } = true;
+        public bool IncludeFolders { get; set; } = true;
+        public bool CaseInsensitive { get; set; } = true;
+        public decimal? MinimumSize { get; set; }
+        public decimal? MaximumSize { get; set; }
+        public FileSearchSizeUnit MinimumSizeUnit { get; set; } = FileSearchSizeUnit.Kilobytes;
+        public FileSearchSizeUnit MaximumSizeUnit { get; set; } = FileSearchSizeUnit.Megabytes;
+        public string ModifiedFrom { get; set; } = string.Empty;
+        public string ModifiedTo { get; set; } = string.Empty;
+        public string CreatedFrom { get; set; } = string.Empty;
+        public string CreatedTo { get; set; } = string.Empty;
+        public string AccessedFrom { get; set; } = string.Empty;
+        public string AccessedTo { get; set; } = string.Empty;
+    }
+}

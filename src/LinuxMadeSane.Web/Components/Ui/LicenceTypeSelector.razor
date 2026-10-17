@@ -1,0 +1,195 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Web.Services.Licensing
+@using Microsoft.AspNetCore.Components.Authorization
+@inject LocalLicensingService Service
+@inject LicensingAccess Access
+@inject AuthenticationStateProvider Authentication
+@inject LinuxMadeSane.Core.Abstractions.ISavedCredentialAccessContext CredentialAccess
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+@if (loaded && (!Compact || !saved))
+{
+    <div class="licence-type-selector" @onkeydown="HandleKey">
+        <div class="licence-entry">
+            <img src="/images/lms-logo.png" alt="" class="licence-entry-logo" />
+            <div class="licence-entry-copy">
+                <span class="licence-eyebrow">@(saved ? "Your LMS user type" : "Welcome to LMS")</span>
+                <strong>@(saved ? TypeLabel : "A little sanity starts here.")</strong>
+                @if (!Compact) { <p>Choose how you use LMS, or explore the licence types in preview.</p> }
+            </div>
+            <div class="toolbar-actions">
+                <UiCommandButton Label="@(saved ? "Change user type" : "Choose user type")" HideIcon="true" Disabled="@(busy || !ready)" OnClick="Open" />
+                @if (!Compact)
+                { <UiCommandButton Label="Preview licence types" HideIcon="true" Disabled="@(busy || !ready)" OnClick="StartPreview" /> }
+            </div>
+        </div>
+        @if (!dialogOpen && !string.IsNullOrEmpty(message))
+        { <p class="callout" role="status" aria-live="polite">@message</p> }
+        <UiModal IsOpen="@dialogOpen" Title="@(previewMode ? "LMS licence preview" : "Welcome to Linux Made Sane")" Class="licence-welcome-modal" OnClose="Close">
+            <ChildContent>
+                <div class="licence-dialog-content" @ref="dialogContent" tabindex="-1">
+                    <div class="licence-welcome-hero">
+                        <div>
+                            <span class="licence-eyebrow">Your Linux. Your workspace.</span>
+                            <h3>A little sanity,<br />for everyone.</h3>
+                            <p>Tell us how you use LMS.<br />We’ll keep the licensing simple.</p>
+                        </div>
+                        <img src="/images/lms-splash.png" alt="Linux Made Sane penguin artwork" />
+                    </div>
+                    @if (previewMode)
+                    {
+                        <div class="licence-preview-banner" role="status">
+                            <span><strong>Preview only</strong> — nothing is saved.</span>
+                            <div class="toolbar-actions">
+                                <UiCommandButton Label="Reset preview" HideIcon="true" OnClick="ResetPreview" />
+                                <UiCommandButton Label="Exit preview" HideIcon="true" OnClick="ExitPreview" />
+                            </div>
+                        </div>
+                    }
+                    <div class="licence-choice-field">
+                        <label for="@selectId">How will you use LMS?</label>
+                        <UiCombobox TValue="string" Value="@category" ValueChanged="ChangeType" id="@selectId" disabled="@(busy || !ready)">
+                            <option value="">Choose your user type…</option>
+                            <option value="personal">Home / home lab / hobbyist — free</option>
+                            <option value="education">Education — free qualifying use</option>
+                            <option value="non_profit">Not-for-profit — free qualifying use</option>
+                            <option value="internal_business">Commercial organisation — internal use</option>
+                            <option value="commercial_services">Professional / Enterprise — customer services</option>
+                        </UiCombobox>
+                    </div>
+                    <div class="licence-use-note @(BusinessUse ? "licence-use-business" : "")" aria-live="polite">
+                        <span class="licence-kind">@(string.IsNullOrEmpty(category) ? "Choose your user type" : BusinessUse ? "Commercial use" : "Free Community use")</span>
+                        <h4>@UseHeading</h4>
+                        <p>@UseDescription</p>
+                    </div>
+                    @if (!string.IsNullOrEmpty(message)) { <p class="callout" role="status" aria-live="polite">@message</p> }
+                    <LmsResponsibilityNotice />
+                    <div class="licence-dialog-actions">
+                        <div class="toolbar-actions">
+                            <UiCommandButton Label="Confirm user type" Variant="UiButtonVariant.Primary" HideIcon="true" Disabled="@(previewMode || busy || !ready || string.IsNullOrEmpty(category))" OnClick="Save" />
+                            @if (BusinessUse)
+                            {
+                                <UiCommandButton Label="Commercial licence confirmation ↗" HideIcon="true" Disabled="@previewMode" Href="@(previewMode ? null : "https://www.linuxmadesane.com/contact?topic=licence-confirmation")" Target="_blank" Rel="noopener noreferrer" />
+                            }
+                            @if (!previewMode)
+                            { <UiCommandButton Label="Not now" HideIcon="true" Disabled="@busy" OnClick="Close" /> }
+                        </div>
+                        <a href="/about?tab=notices" @onclick="Close">Read licence terms</a>
+                    </div>
+                    <p class="licence-footnote">Choosing a type does not start a trial or purchase a licence.</p>
+                </div>
+            </ChildContent>
+        </UiModal>
+    </div>
+}
+@code {
+    [Parameter] public bool Compact { get; set; }
+    [Parameter] public EventCallback OnSaved { get; set; }
+    [Parameter] public EventCallback<string?> OnPreviewChanged { get; set; }
+    private readonly string selectId = "licence-user-type-" + Guid.NewGuid().ToString("N");
+    private bool loaded, ready, busy, saved, previewMode, dialogOpen, focusPending;
+    private ElementReference dialogContent;
+    private IJSObjectReference? focusModule;
+    private string category = "", savedCategory = "", message = "";
+    private bool BusinessUse => category is "internal_business" or "commercial_services";
+    private string TypeLabel => savedCategory switch
+    {
+        "personal" => "Home / home lab / hobbyist", "education" => "Education",
+        "non_profit" => "Not-for-profit", "internal_business" => "Commercial organisation — internal use",
+        "commercial_services" => "Professional / Enterprise — customer services", _ => "Not selected"
+    };
+    private string UseHeading => category switch
+    {
+        "personal" => "Make yourself at home.", "education" => "Space to learn and explore.",
+        "non_profit" => "More time for your mission.", "internal_business" => "For your organisation.",
+        "commercial_services" => "For the customers you look after.", _ => "Start with the way you use LMS."
+    };
+    private string UseDescription => category switch
+    {
+        "personal" => "Free for your home lab, personal projects and hobbies. No organisation forms, trial or purchase required.",
+        "education" => "Community is free for qualifying educational use. No commercial confirmation needed.",
+        "non_profit" => "Community is free for qualifying not-for-profit use. No commercial confirmation needed.",
+        "internal_business" => "Confirm your organisation’s use and licence eligibility on the website. Professional use requires LMS Pro; CE is for evaluation only. Free licence eligibility remains as set out in the terms.",
+        "commercial_services" => "Professional and Enterprise deployments use LMS Pro. CE is available for a 30-day evaluation only. Confirm your use on the website.",
+        _ => "Home labs, hobbyists, education and qualifying not-for-profits have free Community options. Pick your type above."
+    };
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) { ready = true; await InvokeAsync(StateHasChanged); return; }
+        if (!dialogOpen || !focusPending) return;
+        focusPending = false;
+        try
+        {
+            focusModule ??= await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Ui/SshHelpDialog.razor.js");
+            await focusModule.InvokeVoidAsync("trapFocus", dialogContent);
+        }
+        catch (JSException) { }
+    }
+    protected override async Task OnInitializedAsync()
+    {
+        if (Compact && Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0].TrimEnd('/') is "about" or "settings/licensing" or "licensing") return;
+        try
+        {
+        var principal = (await Authentication.GetAuthenticationStateAsync()).User;
+        var id = await CredentialAccess.GetAuthenticatedUserIdAsync();
+        if (id is null || !Access.CanAdminister(principal, id == Guid.Empty)) return;
+        var (state, _) = await Service.ReadAsync();
+        category = state.Declarations.LastOrDefault()?.Category ?? "";
+        savedCategory = category;
+        saved = !string.IsNullOrEmpty(category);
+        dialogOpen = Compact && !saved; focusPending = dialogOpen;
+        loaded = true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        { loaded = true; message = "Your user type is unavailable. Try again later; LMS remains available."; }
+    }
+    private async Task ChangeType(string value)
+    { category = value; message = ""; if (previewMode) await OnPreviewChanged.InvokeAsync(category); }
+    private async Task StartPreview()
+    {
+        if (busy || !ready) return;
+        previewMode = true; dialogOpen = true; focusPending = true;
+        await ResetPreview();
+    }
+    private async Task ResetPreview()
+    { category = ""; message = ""; await OnPreviewChanged.InvokeAsync(category); }
+    private async Task ExitPreview()
+    { category = savedCategory; previewMode = false; dialogOpen = false; focusPending = false; message = ""; await OnPreviewChanged.InvokeAsync((string?)null); }
+    private void Open() { category = savedCategory; message = ""; dialogOpen = true; focusPending = true; }
+    private async Task Close()
+    {
+        if (busy) return;
+        if (previewMode) { await ExitPreview(); return; }
+        category = savedCategory; dialogOpen = false; focusPending = false; message = "";
+    }
+    private Task HandleKey(KeyboardEventArgs args) => dialogOpen && args.Key == "Escape" ? Close() : Task.CompletedTask;
+    private async Task Save()
+    {
+        if (previewMode || busy || !ready || string.IsNullOrEmpty(category)) return;
+        busy = true; message = "Saving your user type…";
+        try
+        {
+            var principal = (await Authentication.GetAuthenticationStateAsync()).User;
+            var id = await CredentialAccess.GetAuthenticatedUserIdAsync();
+            if (id is null || !Access.CanAdminister(principal, id == Guid.Empty)) throw new UnauthorizedAccessException();
+            // Re-read the revision only after confirming access; never replace existing identity or trial records.
+            var (_, latestRevision) = await Service.ReadAsync();
+            await Service.SelectUsageTypeAsync(category, LicensingAccess.Actor(principal, id == Guid.Empty), latestRevision);
+            saved = true; savedCategory = category;
+            message = BusinessUse ? "User type saved. Complete the commercial confirmation on the website. This does not activate a paid licence or start a trial."
+                : "User type saved. Community use is free; no purchase or trial required.";
+            await OnSaved.InvokeAsync();
+            dialogOpen = false; focusPending = false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { message = "Your user type could not be saved. Please try again."; }
+        finally { busy = false; }
+    }
+    public async ValueTask DisposeAsync()
+    {
+        if (focusModule is null) return;
+        try { await focusModule.DisposeAsync(); } catch (JSDisconnectedException) { }
+    }
+
+}

@@ -1,0 +1,22 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Core.Enums;
+
+namespace LinuxMadeSane.Core.Models.Services;
+
+public sealed record ServiceUpdatePlan(
+    Guid ServiceId,
+    string UnitName,
+    string TargetVersion,
+    RepairRiskLevel RiskLevel,
+    bool RequiresDaemonReload,
+    bool RequiresOwnershipCorrection,
+    bool RequiresDependencyRepair,
+    bool RequiresConfigMerge,
+    IReadOnlyList<string> AcceptedSourceTypes,
+    IReadOnlyList<string> ValidationChecks,
+    IReadOnlyList<string> PlannedSteps,
+    IReadOnlyList<string> SuccessChecks,
+    IReadOnlyList<string> RollbackTriggers,
+    IReadOnlyList<string> FailureHazards);

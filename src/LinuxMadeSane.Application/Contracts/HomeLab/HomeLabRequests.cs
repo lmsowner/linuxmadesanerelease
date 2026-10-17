@@ -1,0 +1,74 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Core.Enums;
+
+namespace LinuxMadeSane.Application.Contracts.HomeLab;
+
+public sealed record HomeLabEdgeGatewayRequest(
+    string Hostname,
+    string DomainName,
+    EdgeGatewayAuthMode AuthMode = EdgeGatewayAuthMode.RequireMfa);
+
+public sealed record HomeLabInstallRequest(
+    string AppId,
+    string? DisplayName = null,
+    IReadOnlyDictionary<string, string>? StoragePaths = null,
+    IReadOnlyDictionary<string, string>? Configuration = null,
+    HomeLabEdgeGatewayRequest? EdgeGateway = null,
+    IReadOnlyDictionary<string, string>? SecretConfiguration = null);
+
+public sealed record HomeLabRecipeInstallRequest(
+    string RecipeId,
+    IReadOnlyDictionary<string, string>? StoragePaths = null,
+    IReadOnlyDictionary<string, string>? Configuration = null,
+    IReadOnlySet<string>? AppIds = null,
+    IReadOnlyDictionary<string, string>? SecretConfiguration = null);
+
+public sealed record HomeLabRecipeRunAssignment(
+    string RecipeId,
+    string RecipeName,
+    Guid RecipeRunId,
+    IReadOnlyList<Guid> InstallationIds,
+    PublishedHomeLabRecipeConnectivity? Connectivity = null);
+
+public sealed record HomeLabContainerVolumeSetting(
+    string HostPath,
+    string ContainerPath,
+    bool ReadOnly = false);
+
+public sealed record HomeLabContainerSettingsUpdate(
+    string Image,
+    IReadOnlyDictionary<string, string> Environment,
+    IReadOnlyList<HomeLabContainerVolumeSetting> Volumes);
+
+public sealed record HomeLabDockerManagementDraft(
+    string ComposeYaml,
+    bool IsExternallyManaged);
+
+public enum HomeLabLifecycleAction
+{
+    Start = 0,
+    Stop = 1,
+    Restart = 2,
+    Update = 3,
+    Remove = 4,
+    RefreshHealth = 5,
+    Repair = 6,
+    Recreate = 7
+}
+
+public sealed record HomeLabOperationResult(
+    bool Succeeded,
+    string Summary,
+    string Detail,
+    IReadOnlyList<string> Output,
+    HomeLabHealthState HealthState,
+    DateTimeOffset CompletedAtUtc);
+
+public sealed record HomeLabLogsResult(
+    bool Succeeded,
+    string Logs,
+    string Error);
+
+public sealed record HomeLabCleanupEntry(string Name,string Path,bool Removable,string Reason,bool Removed,string? ArchiveId=null);

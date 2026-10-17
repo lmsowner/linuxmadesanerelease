@@ -1,0 +1,54 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Application.Interfaces;
+using LinuxMadeSane.Application.Services;
+using LinuxMadeSane.Application.Services.EdgeGateway;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace LinuxMadeSane.Application;
+
+public static class DependencyInjection
+{
+    public static IServiceCollection AddApplicationServices(this IServiceCollection services)
+    {
+        services.AddScoped<SshfsCredentialRecoveryService>();
+        services.AddScoped<IAiChatOrchestrationService, AiChatTurnOrchestrator>();
+        services.AddScoped<IAiExecutionPlanExecutionService, AiExecutionPlanExecutionService>();
+        services.AddScoped<IAiApprovalService, AiApprovalService>();
+        services.AddScoped<IAiChatService, AiChatService>();
+        services.AddSingleton<IAiPromptSanitizer, AiPromptSanitizer>();
+        services.AddScoped<IAiProviderSettingsService, AiProviderSettingsService>();
+        services.AddScoped<IUserDisplayPreferenceService, UserDisplayPreferenceService>();
+        services.AddScoped<IFileBrowserShortcutService, FileBrowserShortcutService>();
+        services.AddScoped<IUserManagedHostCredentialProfileService, UserManagedHostCredentialProfileService>();
+        services.AddScoped<ILocalAiEngineManagerService, LocalAiEngineManagerService>();
+        services.AddScoped<LinuxMadeSane.Core.Abstractions.ILocalAiEngineService, LocalAiEngineManagerService>();
+        services.AddScoped<ITerminalAiAssistantService, TerminalAiAssistantService>();
+        services.AddScoped<IRunbookAiDraftService, RunbookAiDraftService>();
+        services.AddScoped<IAttackSurfaceAuditService, AttackSurfaceAuditService>();
+        services.AddScoped<IMailRelayService, MailRelayService>();
+        services.AddScoped<IDesktopAssistantChatService, DesktopAssistantChatService>();
+        services.AddScoped<IAiThreadService, AiThreadService>();
+        services.AddScoped<ISecuritySettingsService, SecuritySettingsService>();
+        services.AddScoped<ISecurityAuthenticationService, SecurityAuthenticationService>();
+        services.AddSingleton<TrustedNetworkAccessTrialService>();
+        services.AddScoped<IManagedHostService, ManagedHostService>();
+        services.AddScoped<IRunbookService, RunbookService>();
+        services.AddScoped<ICaddyIntegrationService, CaddyIntegrationService>();
+        services.AddScoped<EdgeGatewayCaddyfileGenerator>();
+        services.AddScoped<IEdgeGatewayService, EdgeGatewayService>();
+        services.AddScoped<IEdgeGatewayRouteRegistrationService, EdgeGatewayRouteRegistrationService>();
+        services.AddScoped<EdgeGatewayServerPublishingService>();
+        services.AddScoped<OnDemandAppService>();
+        services.AddScoped<LmsServerEmailSetupService>();
+        // File previews also use the media metadata and streaming services.
+        services.AddScoped<ISftpServerManagerService, SftpServerManagerService>();
+        services.AddScoped<IExposedServiceManager, ExposedServiceManager>();
+        services.AddScoped<IShareManagementService, ShareManagementService>();
+        services.AddScoped<IServiceOperationsService, ServiceOperationsService>();
+        services.AddScoped<IScheduledTaskService, ScheduledTaskService>();
+        services.AddScoped<IRdpOptimizationService, RdpOptimizationService>();
+        return services;
+    }
+}

@@ -1,0 +1,447 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@page "/integrations"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models
+@using Microsoft.Extensions.DependencyInjection
+@inject IManagedHostService HostService
+@inject ILmsConnectClientFeature ConnectClientFeature
+@inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
+@inject IServiceProvider Services
+@inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
+@inject NavigationManager NavigationManager
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Integrations | Linux Made Sane</PageTitle>
+
+<div class="page-shell integrations-page-shell">
+    <UiHeroPanel Title="Integrations"
+                 Compact="true" />
+
+    @if (ShouldOpenRemoteLmsIntegrations && requestedIntegrationHost is not null)
+    {
+        <section class="surface-card integrations-remote-card">
+            <div class="table-header">
+                <div>
+                    <p class="eyebrow">Remote LMS integrations</p>
+                    <h2>@requestedIntegrationHost.Name</h2>
+                    <p class="meta-text">Integration settings belong to the LMS server that runs them. Linux Made Sane opens local/LAN LMS hosts directly and uses the SSH/Caddy relay only when port 5080 is not reachable.</p>
+                </div>
+                <span>Direct or relay</span>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(remoteIntegrationStatus))
+            {
+                <p class="@($"callout {remoteIntegrationTone}")">@remoteIntegrationStatus</p>
+            }
+
+            <div class="integrations-remote-actions">
+                <UiCommandButton Label="Open remote integrations"
+                                 Glyph="UiIconGlyph.Connect"
+                                 Disabled="@(!CanOpenRequestedRemoteIntegrations || isOpeningRemoteIntegrations)"
+                                 OnClick="OpenRequestedRemoteIntegrationsAsync" />
+                <UiCommandButton Label="Host details"
+                                 Glyph="UiIconGlyph.Info"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Href="@($"/hosts/{requestedIntegrationHost.Id}")" />
+            </div>
+        </section>
+    }
+    else if (ShouldShowInvalidIntegrationTarget)
+    {
+        <section class="surface-card integrations-remote-card">
+            <div class="table-header">
+                <div>
+                    <p class="eyebrow">Integration target</p>
+                    <h2>@InvalidIntegrationTargetTitle</h2>
+                    <p class="meta-text">@InvalidIntegrationTargetMessage</p>
+                </div>
+            </div>
+
+            <div class="integrations-remote-actions">
+                <UiCommandButton Label="Return to hosts"
+                                 Glyph="UiIconGlyph.FolderOpen"
+                                 Href="/hosts" />
+                <UiCommandButton Label="Open local integrations"
+                                 Glyph="UiIconGlyph.Connection"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Href="/integrations" />
+            </div>
+        </section>
+    }
+    else
+    {
+        <TabControl ActiveValue="@activeIntegrationTab"
+                    ActiveValueChanged="HandleIntegrationTabChangedAsync"
+                    Class="page-tab-control integrations-page-tab-control"
+                    PanelClass="page-tab-panel integrations-page-tab-panel">
+            <ChildContent>
+                <TabPage Value="@CaddyTabValue" Title="Caddy">
+                    <ChildContent>
+                        <CaddyIntegrationWorkspace />
+                    </ChildContent>
+                </TabPage>
+
+                @if (PortalTabAvailable)
+                {
+	                    <TabPage Value="@PortalTabValue" Title="Portal">
+	                        <ChildContent>
+                            <DynamicComponent Type="@ConnectClientFeature.IntegrationPageComponentType"
+                                              Parameters="@portalIntegrationParameters"
+                                              @key="portalComponentVersion" />
+	                        </ChildContent>
+	                    </TabPage>
+                }
+
+            </ChildContent>
+        </TabControl>
+    }
+
+    <UiModal IsOpen="@showPortalSetupGuide"
+             Title="Portal setup guide"
+             Subtitle="Use this LMS page to register the instance, then approve it in LMS Portal."
+             OnClose="ClosePortalSetupGuide">
+        <ChildContent>
+            <div class="integrations-cloudflare-guide-body">
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>Before you start</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Make sure you know the exact public LMS Portal URL.</li>
+                        <li>Make sure you have a portal login that can approve a new LMS instance.</li>
+                        <li>Make sure this LMS server can reach the portal from the server itself.</li>
+                    </ol>
+                </section>
+
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>On this LMS page</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Enter the portal URL.</li>
+                        <li>Set the instance name you want users to see in the portal.</li>
+                        <li>Turn on <strong>Enable LMS Portal outbound connector</strong>.</li>
+                        <li>Click <strong>Save portal settings</strong>.</li>
+                    </ol>
+                </section>
+
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>In LMS Portal</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Sign in to LMS Portal.</li>
+                        <li>Open the pairing screen.</li>
+                        <li>Scan the QR code on this page or paste the pairing code.</li>
+                        <li>Approve this LMS instance.</li>
+                    </ol>
+                </section>
+
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>What success looks like</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>The status on this page changes to <strong>Connected</strong>.</li>
+                        <li>You see the portal organisation name.</li>
+                        <li>You see the portal instance ID.</li>
+                        <li>You see a recent heartbeat time.</li>
+                    </ol>
+                </section>
+
+                <section class="surface-subcard integrations-cloudflare-guide-section">
+                    <div class="integrations-cloudflare-guide-header">
+                        <h3>If it fails</h3>
+                    </div>
+
+                    <ol class="integrations-cloudflare-guide-steps">
+                        <li>Check that the portal URL is exact.</li>
+                        <li>Check that this LMS server can reach the portal over the network.</li>
+                        <li>Rotate the pairing code and try again.</li>
+                        <li>If the portal reports an instance limit, remove an old LMS instance there or change the plan.</li>
+                    </ol>
+                </section>
+            </div>
+        </ChildContent>
+        <Footer>
+            <UiCommandButton Label="Close"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             OnClick="ClosePortalSetupGuide" />
+        </Footer>
+    </UiModal>
+</div>
+
+@code {
+    private const string PortalTabValue = "portal";
+    private const string CaddyTabValue = "caddy";
+
+    [SupplyParameterFromQuery(Name = "hostId")]
+    public Guid? HostId { get; set; }
+
+    [SupplyParameterFromQuery(Name = "tab")]
+    public string? Tab { get; set; }
+
+    private IReadOnlyList<ManagedHost> hosts = [];
+    private ManagedHost? requestedIntegrationHost;
+    private string activeIntegrationTab = PortalTabValue;
+    private bool showPortalSetupGuide;
+    private bool isRotatingPortalPairingCode;
+    private bool isOpeningRemoteIntegrations;
+    private string remoteIntegrationStatus = string.Empty;
+    private string remoteIntegrationTone = "info";
+    private int portalComponentVersion;
+    private bool PortalTabAvailable =>
+        ConnectClientFeature.IsAvailable &&
+        ConnectClientFeature.IntegrationPageComponentType is not null;
+    private bool HasTargetedHostRequest => HostId.HasValue && HostId.Value != Guid.Empty;
+    private bool ShouldOpenRemoteLmsIntegrations =>
+        requestedIntegrationHost is not null &&
+        ManagedHostCapabilities.Describe(requestedIntegrationHost) is { IsLmsHost: true, IsLocalLmsHost: false };
+    private bool CanOpenRequestedRemoteIntegrations =>
+        requestedIntegrationHost is not null;
+    private bool ShouldShowInvalidIntegrationTarget =>
+        HasTargetedHostRequest &&
+        !ShouldOpenRemoteLmsIntegrations &&
+        (requestedIntegrationHost is null || !ManagedHostCapabilities.IsLmsHost(requestedIntegrationHost));
+    private string InvalidIntegrationTargetTitle =>
+        requestedIntegrationHost is null
+            ? "Host not found"
+            : $"{requestedIntegrationHost.Name} is not an LMS host";
+    private string InvalidIntegrationTargetMessage =>
+        requestedIntegrationHost is null
+            ? "The requested integration host is not registered on this LMS server."
+            : "This host is registered as an SSH host. Use terminal and files for SSH hosts, or install LMS on it before opening LMS integrations.";
+
+    private IDictionary<string, object> portalIntegrationParameters =>
+        new Dictionary<string, object>
+        {
+            ["Actions"] = PortalIntegrationActions,
+            ["PairingActions"] = PortalPairingActions
+        };
+    private RenderFragment PortalIntegrationActions => builder =>
+    {
+        builder.OpenComponent<UiCommandButton>(0);
+        builder.AddAttribute(1, nameof(UiCommandButton.Label), "Help");
+        builder.AddAttribute(2, nameof(UiCommandButton.Glyph), UiIconGlyph.Info);
+        builder.AddAttribute(3, nameof(UiCommandButton.Variant), UiButtonVariant.Ghost);
+        builder.AddAttribute(4, nameof(UiCommandButton.OnClick), EventCallback.Factory.Create(this, OpenPortalSetupGuide));
+        builder.CloseComponent();
+    };
+
+    private RenderFragment PortalPairingActions => builder =>
+    {
+        builder.OpenComponent<UiCommandButton>(0);
+        builder.AddAttribute(1, nameof(UiCommandButton.Label), isRotatingPortalPairingCode ? "Rotating..." : "Rotate pairing code");
+        builder.AddAttribute(2, nameof(UiCommandButton.Glyph), UiIconGlyph.Refresh);
+        builder.AddAttribute(3, nameof(UiCommandButton.Variant), UiButtonVariant.Ghost);
+        builder.AddAttribute(4, nameof(UiCommandButton.Disabled), isRotatingPortalPairingCode);
+        builder.AddAttribute(5, nameof(UiCommandButton.OnClick), EventCallback.Factory.Create(this, RotatePortalPairingCodeAsync));
+        builder.CloseComponent();
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        hosts = await HostService.ListHostsAsync();
+        requestedIntegrationHost = HasTargetedHostRequest
+            ? hosts.FirstOrDefault(host => host.Id == HostId!.Value)
+            : null;
+        activeIntegrationTab = ResolveSelectedIntegrationTab();
+    }
+
+    private Task HandleIntegrationTabChangedAsync(string? value)
+    {
+        activeIntegrationTab = IsSupportedTab(value)
+            ? value!
+            : CaddyTabValue;
+        return Task.CompletedTask;
+    }
+
+    private async Task OpenRequestedRemoteIntegrationsAsync()
+    {
+        if (requestedIntegrationHost is null || !CanOpenRequestedRemoteIntegrations || isOpeningRemoteIntegrations)
+        {
+            return;
+        }
+
+        isOpeningRemoteIntegrations = true;
+        remoteIntegrationStatus = $"Checking LMS web access for {requestedIntegrationHost.Name}...";
+        remoteIntegrationTone = "info";
+        var popupName = BuildRemoteLmsPopupName(requestedIntegrationHost);
+        var popupPrepared = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.preparePopup", popupName, 1280, 900);
+        if (popupPrepared)
+        {
+            _ = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.setPreparedPopupStatus",
+                popupName,
+                $"Connecting to {requestedIntegrationHost.Name}",
+                "Checking direct LMS web access before using the SSH/Caddy relay.");
+        }
+
+        try
+        {
+            var directAccess = await LmsUpdateAvailabilityService.CheckDirectWebAccessAsync(requestedIntegrationHost);
+            if (directAccess.IsDirectWebAvailable)
+            {
+                var directUrl = BuildDirectLmsUrl(requestedIntegrationHost, "/integrations");
+                if (popupPrepared)
+                {
+                    _ = await JSRuntime.InvokeAsync<bool>(
+                        "lmsTerminalWindow.setPreparedPopupStatus",
+                        popupName,
+                        $"Opening {requestedIntegrationHost.Name}",
+                        "LMS port 5080 is directly reachable. Opening the local/LAN web UI.");
+                }
+
+                var directOpened = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.openPopupAfterDelay",
+                    directUrl,
+                    popupName,
+                    1280,
+                    900,
+                    500);
+                if (!directOpened)
+                {
+                    NavigationManager.NavigateTo(directUrl, forceLoad: true);
+                }
+
+                return;
+            }
+
+            if (!HasStoredCredentials(requestedIntegrationHost))
+            {
+                throw new InvalidOperationException(
+                    "Port 5080 is not directly reachable. Save SSH credentials for this host before opening its LMS integrations through the relay.");
+            }
+
+            remoteIntegrationStatus = $"Opening an SSH tunnel to {requestedIntegrationHost.Name}...";
+            var connection = await RemoteLmsSshTunnelService.ConnectAsync(requestedIntegrationHost.Id, "/integrations");
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Opening {requestedIntegrationHost.Name}",
+                    "Caddy relay is ready. Opening the remote LMS.");
+            }
+
+            var opened = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.openPopupAfterDelay",
+                connection.Url,
+                popupName,
+                1280,
+                900,
+                1200);
+            if (!opened)
+            {
+                NavigationManager.NavigateTo(connection.Url, forceLoad: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            remoteIntegrationStatus = $"Could not open remote integrations through SSH: {ex.Message}";
+            remoteIntegrationTone = "error";
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Could not open {requestedIntegrationHost.Name}",
+                    ex.Message,
+                    "error");
+            }
+        }
+        finally
+        {
+            isOpeningRemoteIntegrations = false;
+        }
+    }
+
+    private static bool HasStoredCredentials(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private static string BuildDirectLmsUrl(ManagedHost host, string path)
+    {
+        var endpoint = host.Hostname.Trim();
+        var scheme = Uri.UriSchemeHttp;
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+        {
+            endpoint = uri.Host;
+            scheme = uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                ? Uri.UriSchemeHttps
+                : Uri.UriSchemeHttp;
+        }
+
+        return new UriBuilder(scheme, endpoint, 5080, path.TrimStart('/')).Uri.ToString();
+    }
+
+    private static string BuildRemoteLmsPopupName(ManagedHost host) =>
+        $"lms-remote-{host.Id:N}-{Guid.NewGuid():N}";
+
+    private Task OpenPortalSetupGuide()
+    {
+        showPortalSetupGuide = true;
+        return Task.CompletedTask;
+    }
+
+    private Task ClosePortalSetupGuide()
+    {
+        showPortalSetupGuide = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task RotatePortalPairingCodeAsync()
+    {
+        if (isRotatingPortalPairingCode)
+        {
+            return;
+        }
+
+        var portalConnectionService = Services.GetService<IPortalConnectionService>();
+        if (portalConnectionService is null)
+        {
+            return;
+        }
+
+        isRotatingPortalPairingCode = true;
+
+        try
+        {
+            await portalConnectionService.RotatePairingCodeAsync();
+            portalComponentVersion++;
+        }
+        finally
+        {
+            isRotatingPortalPairingCode = false;
+        }
+    }
+
+    private string ResolveSelectedIntegrationTab()
+    {
+        if (IsSupportedTab(Tab))
+        {
+            return Tab!;
+        }
+
+        if (IsSupportedTab(activeIntegrationTab))
+        {
+            return activeIntegrationTab;
+        }
+
+        return CaddyTabValue;
+    }
+
+    private bool IsSupportedTab(string? value) =>
+        string.Equals(value, CaddyTabValue, StringComparison.Ordinal) ||
+        (PortalTabAvailable && string.Equals(value, PortalTabValue, StringComparison.Ordinal));
+
+}

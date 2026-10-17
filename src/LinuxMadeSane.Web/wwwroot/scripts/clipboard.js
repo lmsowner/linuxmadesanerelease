@@ -1,0 +1,41 @@
+/* Copyright (c) 2026 LMS Developer. All rights reserved.
+ * Applicable licence and release scope: see LICENSE.md for details. */
+
+window.lmsClipboard = (() => {
+    async function writeText(text) {
+        if (typeof text !== "string" || text.length === 0) {
+            return false;
+        }
+
+        if (navigator.clipboard?.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch {
+            }
+        }
+
+        const fallbackElement = document.createElement("textarea");
+        fallbackElement.value = text;
+        fallbackElement.setAttribute("readonly", "");
+        fallbackElement.style.position = "fixed";
+        fallbackElement.style.opacity = "0";
+        fallbackElement.style.pointerEvents = "none";
+
+        document.body.appendChild(fallbackElement);
+        fallbackElement.select();
+
+        let copied = false;
+        try {
+            copied = document.execCommand("copy");
+        } finally {
+            document.body.removeChild(fallbackElement);
+        }
+
+        return copied;
+    }
+
+    return {
+        writeText
+    };
+})();

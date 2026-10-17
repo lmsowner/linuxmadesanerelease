@@ -1,0 +1,21 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using System.Net;
+using System.Security.Claims;
+
+namespace LinuxMadeSane.Application.Contracts.EdgeGateway;
+
+public sealed record EdgeGatewayAuthCheckContext(
+    string ForwardedHost,
+    string ForwardedProto,
+    string ForwardedUri,
+    string ForwardedFor,
+    string Host,
+    IPAddress? RemoteIpAddress,
+    ClaimsPrincipal User,
+    string CountryCode = "",
+    string UserAgent = "",
+    bool HasTemporaryRecoveryAccess = false,
+    bool HasPendingTemporarySetup = false,
+    bool LocalInterfaceAllowsDirectAccess = false);

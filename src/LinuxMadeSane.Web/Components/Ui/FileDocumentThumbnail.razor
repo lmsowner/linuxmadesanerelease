@@ -1,0 +1,135 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Core.Abstractions
+@implements IAsyncDisposable
+@inject IManagedHostFileAccessService FileAccessService
+@inject FileThumbnailCacheService ThumbnailCacheService
+@inject IJSRuntime JSRuntime
+<div class="file-document-media" @ref="media">
+    @if (!string.IsNullOrEmpty(imageUri)) { <img src="@imageUri" alt="@(Item.Name + (pageCount > 0 ? $", page {pageIndex + 1} of {pageCount}" : ""))" draggable="false" /> }
+    else { <span class="file-document-fallback" aria-hidden="true">@Fallback</span> }
+    @if (busy) { <span class="file-document-loading" role="status">Loading page…</span> }
+</div>
+<div class="file-document-caption">
+    <span class="file-document-name" title="@Item.Name">@Item.Name</span>
+    @if (pageCount > 0) { <span class="file-document-count">(Pages: @(pageCountComplete ? pageCount.ToString() : countError ? $"≥ {pageCount}" : "counting…"))</span> }
+    @if (SizePixels >= 240 && pageCount > 1)
+    {
+        <span class="file-document-pager" @onclick:stopPropagation="true" @onpointerdown:stopPropagation="true" @onkeydown:stopPropagation="true" @ondblclick:stopPropagation="true">
+            <button type="button" aria-label="@($"Previous page of {Item.Name}")" title="Previous page" disabled="@(busy || pageIndex == 0)" @onclick="() => LoadPage(pageIndex - 1)">‹</button>
+            <span aria-live="polite">Page: @(pageIndex + 1)</span>
+            <button type="button" aria-label="@($"Next page of {Item.Name}")" title="Next page" disabled="@(busy || pageIndex >= pageCount - 1)" @onclick="() => LoadPage(pageIndex + 1)">›</button>
+        </span>
+    }
+</div>
+@if (!string.IsNullOrEmpty(error)) { <span class="file-document-error" role="status" title="@error">@error</span> }
+@code {
+    [Parameter, EditorRequired] public ManagedHost Host { get; set; } = default!;
+    [Parameter, EditorRequired] public ManagedHostConnectionProfile ConnectionProfile { get; set; } = default!;
+    [Parameter, EditorRequired] public SftpItem Item { get; set; } = default!;
+    [Parameter] public int SizePixels { get; set; } = 156;
+    [Parameter] public RenderFragment? Fallback { get; set; }
+    private ElementReference media;
+    private DotNetObjectReference<FileDocumentThumbnail>? reference;
+    private CancellationTokenSource? cancellation;
+    private string identity = "", imageUri = "", error = "";
+    private int pageCount, pageIndex;
+    private bool busy, observePending, disposed, visible, pageCountComplete, counting, countError;
+    private CancellationTokenSource? metadataCancellation;
+    private TiffDocumentThumbnailSession? tiffSession;
+    private bool IsTiff => Item.Name.EndsWith(".tif", StringComparison.OrdinalIgnoreCase) || Item.Name.EndsWith(".tiff", StringComparison.OrdinalIgnoreCase);
+
+    protected override void OnParametersSet()
+    {
+        var key = $"{Host.Id}|{Item.FullPath}|{Item.SizeBytes}|{Item.LastModifiedUtc}|{ConnectionProfile}";
+        if (key == identity) return;
+        identity = key; cancellation?.Cancel(); metadataCancellation?.Cancel(); pageCountComplete = false; countError = false; imageUri = ""; error = ""; pageCount = 0; pageIndex = 0;
+        var host = Host; var item = Item; var profile = ConnectionProfile;
+        tiffSession = IsTiff ? new(item.SizeBytes, token => FileAccessService.OpenReadStreamAsync(host, item.FullPath, profile, token)) : null;
+        observePending = true;
+    }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (disposed) return;
+        if (observePending)
+        {
+            observePending = false; reference ??= DotNetObjectReference.Create(this);
+            await JSRuntime.InvokeVoidAsync("lmsDocumentThumbnails.observe", media, reference);
+        }
+        if (IsTiff && visible && !busy && !counting && !countError && !pageCountComplete && !string.IsNullOrEmpty(imageUri))
+            _ = CountPagesAsync();
+    }
+    private async Task CountPagesAsync()
+    {
+        counting = true; metadataCancellation?.Dispose(); metadataCancellation = new();
+        var token = metadataCancellation.Token; var requestIdentity = identity;
+        try
+        {
+            var count = await (tiffSession ?? throw new InvalidOperationException("TIFF session unavailable.")).CountPagesAsync(
+                () => ThumbnailCacheService.HasPendingDocumentGenerations, token);
+            if (!disposed && requestIdentity == identity && !token.IsCancellationRequested && count > 0)
+            {
+                pageCount = count; pageCountComplete = true; await InvokeAsync(StateHasChanged);
+                await ThumbnailCacheService.CompleteDocumentPageCountAsync(Host.Id, Item, count, ConnectionProfile.ToString(), token);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception) { if (!disposed && requestIdentity == identity && !token.IsCancellationRequested) { countError = true; metadataCancellation?.Cancel(); } }
+        finally { counting = false; if (!disposed && requestIdentity == identity) await InvokeAsync(StateHasChanged); }
+    }
+    [JSInvokable] public Task LoadVisibleAsync() { visible = true; return string.IsNullOrEmpty(imageUri) && !busy ? LoadPage(0) : InvokeAsync(StateHasChanged); }
+    [JSInvokable] public void CancelInvisible() { visible = false; cancellation?.Cancel(); metadataCancellation?.Cancel(); }
+
+    private async Task LoadPage(int requestedPage)
+    {
+        if (disposed || busy || requestedPage < 0 || (pageCount > 0 && requestedPage >= pageCount)) return;
+        metadataCancellation?.Cancel();
+        busy = true; rangeBytes = 0; error = ""; cancellation?.Dispose(); cancellation = new(); var token = cancellation.Token;
+        var requestIdentity = identity;
+        var host = Host; var item = Item; var profile = ConnectionProfile;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await ThumbnailCacheService.GetDocumentPageAsync(host.Id, item, requestedPage, async ct =>
+            {
+                if (tiffSession is not null) return await tiffSession.RenderAsync(requestedPage, ThumbnailCacheService.MaxDimension, ct);
+                var rendered = await JSRuntime.InvokeAsync<DocumentThumbnailResult>("lmsDocumentThumbnails.render", ct,
+                    media, item.Name, reference, requestIdentity, item.SizeBytes, requestedPage, ThumbnailCacheService.MaxDimension);
+                await using var jpegReference = rendered.Stream;
+                await using var jpeg = await jpegReference.OpenReadStreamAsync(2_097_152, ct);
+                using var output = new MemoryStream(); await jpeg.CopyToAsync(output, ct);
+                return new FileThumbnailCacheEntry(output.ToArray(), "image/jpeg", rendered.PageCount, requestedPage, rendered.PageCountComplete);
+            }, token, accessScope: profile.ToString());
+            if (!token.IsCancellationRequested && requestIdentity == identity && result is not null)
+            {
+                imageUri = "data:image/jpeg;base64," + Convert.ToBase64String(result.ContentBytes);
+                if (!pageCountComplete || result.PageCountComplete) { pageCount = result.PageCount; pageCountComplete = result.PageCountComplete; }
+                pageIndex = result.PageIndex;
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex) { if (!disposed && requestIdentity == identity) error = ex.Message.Split('\n')[0]; }
+        finally { busy = false; if (!disposed) { await InvokeAsync(StateHasChanged); if (visible && token.IsCancellationRequested && string.IsNullOrEmpty(imageUri)) await LoadPage(0); } }
+    }
+    private long rangeBytes;
+    [JSInvokable] public async Task<byte[]> ReadRangeAsync(string requestIdentity, long offset, int count)
+    {
+        if (disposed || cancellation is null || requestIdentity != identity) throw new OperationCanceledException();
+        if (offset < 0 || count < 1 || count > 1_048_576 || offset > Item.SizeBytes - count)
+            throw new InvalidOperationException("Invalid document byte range.");
+        rangeBytes += count;
+        if (rangeBytes > 16_777_216) throw new InvalidOperationException("This page requires too much data to thumbnail safely.");
+        var result = await FileAccessService.ReadBinaryRangeAsync(Host, Item.FullPath, ConnectionProfile, offset, count, cancellation.Token);
+        if (result.ContentBytes.Length != count) throw new InvalidOperationException("The document changed. Refresh the folder.");
+        return result.ContentBytes;
+    }
+    private sealed record DocumentThumbnailResult(int PageCount, bool PageCountComplete, IJSStreamReference Stream);
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true; cancellation?.Cancel(); cancellation?.Dispose(); metadataCancellation?.Cancel(); metadataCancellation?.Dispose();
+        if (reference is null) return;
+        try { await JSRuntime.InvokeVoidAsync("lmsDocumentThumbnails.dispose", media); }
+        catch (JSDisconnectedException) { }
+        finally { reference?.Dispose(); }
+    }
+}
