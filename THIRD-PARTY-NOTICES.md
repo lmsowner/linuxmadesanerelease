@@ -1,0 +1,83 @@
+# Third-Party Notices
+
+Linux Made Sane includes third-party components that are not owned by LMS Developer and are not relicensed under the proposed LMS-CSL 1.0. Those components remain under their own upstream licenses.
+
+This notice is intended to preserve attribution and make redistribution review practical. It does not change the license terms of any third-party component.
+
+## Vendored Browser Assets
+
+The following browser assets are vendored under `src/LinuxMadeSane.Web/wwwroot/lib`.
+
+| Component | Local path | Upstream | License / notice |
+| --- | --- | --- | --- |
+| xterm.js | `wwwroot/lib/xterm` | `https://github.com/xtermjs/xterm.js` | MIT. Copyright notices are preserved in `xterm.css`; bundled JavaScript should be treated as xterm.js MIT assets. |
+| xterm-addon-fit | `wwwroot/lib/xterm-addon-fit` | `https://github.com/xtermjs/xterm.js` | MIT. Distributed as part of the xterm.js project. |
+| PDF.js | `wwwroot/lib/pdfjs` | `https://github.com/mozilla/pdf.js` | Apache License 2.0 for PDF.js files. Some annotation SVG assets carry Mozilla Public License 2.0 notices and those notices must be preserved. |
+| UTIF.js | `wwwroot/lib/utif/UTIF.js` | `https://github.com/photopea/UTIF.js` | MIT. Copyright (c) 2017 Photopea. |
+| GitHub Invertocat mark | `wwwroot/images/brand/github-invertocat-black.svg` | `https://brand.github.com/foundations/logo` | GitHub, the GitHub logo design, Invertocat, Octocat, and related marks are trademarks of GitHub, Inc.; the Octocat design is the exclusive property of GitHub, Inc. Used only as a social link to the public GitHub project. |
+
+## NuGet Packages
+
+The LMS About page includes a searchable inventory of the resolved Community Edition server and Desktop Assistant dependencies, with versions, authors, upstream links, and package license metadata. The snapshot is stored in `src/LinuxMadeSane.Web/Resources/about-packages.json` and refreshed by `scripts/generate-about-credits.py` during CE packaging. Browser library acknowledgments are maintained alongside it in `about-browser-packages.json`, based on the vendored notices; entries marked `Bundled` do not claim a verified upstream version.
+
+After restoring the Web and DesktopHelper projects, run `python3 scripts/generate-about-credits.py` to refresh the NuGet inventory, or add `--check` to verify it. Resolved dependencies include build tooling and platform-specific packages; the actual assets shipped depend on the target platform. This inventory does not replace upstream license texts or embedded notices.
+
+Top-level and runtime package dependencies are resolved by NuGet. The package license metadata should be checked during release preparation with:
+
+```bash
+dotnet list LinuxMadeSane.sln package --include-transitive
+```
+
+Known package license metadata at the time of this review:
+
+| Package family | License |
+| --- | --- |
+| Microsoft ASP.NET Core, Entity Framework Core, Extensions, IdentityModel packages | MIT |
+| Fido2 / Fido2.Models | MIT |
+| QRCoder | MIT |
+| OpenAI .NET SDK | MIT |
+| SSH.NET | MIT |
+| BouncyCastle.Cryptography | MIT |
+| NSec.Cryptography | MIT |
+| libsodium | ISC |
+| SQLitePCLRaw packages | Apache License 2.0 package metadata; SQLite itself is public-domain software where applicable |
+| Avalonia, Avalonia.Desktop, Avalonia.Themes.Fluent | MIT package family used by the Desktop Assistant helper native Linux UI and tray integration |
+| SkiaSharp, HarfBuzzSharp, MicroCom.Runtime, Tmds.DBus.Protocol | MIT package families pulled by Avalonia for Linux rendering, text shaping, native interop, and desktop bus integration |
+| Newtonsoft.Json | MIT |
+| xUnit and .NET test packages | Test-only dependencies; retain package notices if redistributed in a test bundle |
+
+## Desktop Runtime Packages
+
+The Desktop Assistant helper uses Avalonia for the native Linux helper window and tray surface. Avalonia and its NuGet rendering dependencies are bundled through normal .NET publish output. Native tray/status-notifier support and desktop runtime libraries are expected to come from the user's Linux distribution and are not owned by Linux Made Sane. Preserve upstream package notices and review distro package license metadata when redistributing a complete appliance image.
+
+## Release Checklist
+
+Before publishing source or binaries:
+
+- preserve this file and the root `NOTICE`
+- preserve upstream notices embedded in `wwwroot/lib`
+- do not add LMS ownership or licensing headers to third-party vendored files
+- verify package license metadata for new NuGet dependencies
+- legal-review any non-standard or copyleft dependency before including it in a public binary or source release
+
+## Native TIFF thumbnail rendering
+
+TIFF thumbnails use NetVips 3.2.0 (MIT), NetVips.Native 8.18.7 (LGPL-3.0-or-later), and TiffLibrary 0.6.65 (MIT). The runtime libvips shared library is distributed separately from the LMS executable and can be replaced with a compatible user-built library. Its upstream library notices and source links are included in `Resources/ThirdParty/NetVips.Native.NOTICES.md` in the application package.
+
+Upstreams: https://github.com/kleisauke/net-vips, https://github.com/kleisauke/libvips-packaging, https://github.com/libvips/libvips, https://github.com/yigolden-oss/TiffLibrary.
+
+
+## On-demand remote desktop engine
+
+Apache Guacamole web client, guacd and protocol support are installed from the official `guacamole/guacamole:1.6.0` and `guacamole/guacd:1.6.0` Docker images only after LMS user approval. They retain the Apache License 2.0 and upstream notices in those images. The LMS bridge is compiled against the supported Guacamole 1.6.0 extension API with provided dependencies; its JAR bundles no Guacamole, servlet or Jackson implementation.
+
+The packaged `Resources/RemoteDesktop/tomcat-server.xml` is derived from the Apache Tomcat configuration in the official web image, with access logging disabled. Its Apache header is retained; `Tomcat.NOTICE.txt` and `Resources/ThirdParty/Apache-2.0.txt` preserve its notice and license. Upstreams: https://guacamole.apache.org/ and https://tomcat.apache.org/.
+
+## Draft hosted-site billing dependency
+
+Stripe.net 48.3.0 (official Stripe .NET SDK), Apache License 2.0, is used only by the private hosted-site sandbox adapter, not the CE export. Its upstream licence is preserved in `docs/licenses/upstream-stripe-net-48.3.0.txt`.
+
+
+## Private Portal direct access
+
+The private Portal add-on uses Mono.Nat 3.0.4 (MIT) for UPnP and NAT-PMP; its upstream licence is preserved in `src/LinuxMadeSane.Connect.Client/Resources/Mono.Nat.LICENSE.txt` and included in the private add-on archive. Upstream: https://github.com/mono/Mono.Nat. The private Portal uses Certes 3.0.4 (MIT) for ACME certificate issuance, with its upstream licence in `src/LinuxMadeSane.Portal.Web/Resources/Certes.LICENSE.txt` and the Portal package. Upstream: https://github.com/fszlin/certes. Direct forwarding reuses YARP 2.3.0 (MIT), already used by the Portal; https://github.com/microsoft/reverse-proxy. PCP MAP handling follows https://www.rfc-editor.org/rfc/rfc6887 (no RFC source code is copied). These components retain their own licences.

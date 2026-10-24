@@ -1,0 +1,243 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@page "/network"
+@page "/network/{Section}"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@using LinuxMadeSane.Application.Contracts.Infrastructure
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Web.Components.Infrastructure
+@inject IInfrastructureDiagnosticsService Diagnostics
+@inject NavigationManager Navigation
+<PageTitle>Network | Linux Made Sane</PageTitle>
+<div class="page-shell infrastructure-page">
+    <UiHeroPanel Title="Network" Description="Devices visible to this host, DHCP and service exposure." Compact="true" />
+    <TabControl ActiveValue="@(Section ?? "devices")" ActiveValueChanged="Navigate" Class="page-tab-control" PanelClass="page-tab-panel">
+        <ChildContent>
+            <TabPage Value="devices" Title="Devices"><ChildContent>
+                <UiCommandButton Label="@(busy ? "Discovering devices…" : "Refresh devices")" Disabled="@busy" OnClick="Load" />
+                @if (inventory is null) { @ActionFeedback }
+                @if (inventory is not null)
+                {
+                    <div class="network-discovery-controls">
+                        <UiSelectField TValue="string" Label="Existing private subnet" @bind-Value="probeNetwork" Compact="true" Disabled="@busy">
+                            <option value="">Select a host interface and subnet</option>
+                            @foreach (var network in inventory.InterfaceNetworks) { <option value="@(network.Interface + "|" + network.Network)">@network.Interface · @network.Network (host @network.Address)</option> }
+                        </UiSelectField>
+                        <UiCommandButton Label="Scan subnet & cache devices" HideIcon="true" Disabled="@(busy || probeNetwork.Length == 0)" OnClick="(() => Probe(false))" />
+                        @if (probePackage is { Installed: false })
+                        {
+                            <div class="network-discovery-package">
+                                <p>Subnet scanning requires fping. @probePackage.Explanation</p>
+                                <UiCommandButton Label="Install fping & scan" HideIcon="true" Disabled="@(busy || !probePackage.CanInstall || probeNetwork.Length == 0)" OnClick="(() => Probe(true))" />
+                            </div>
+                        }
+                    </div>
+                    @ActionFeedback
+                    <p class="network-discovery-hint">Uses the selected NIC's actual address and mask. ICMP discovery only; no port scan. Names are resolved through this host's DNS.</p>
+                    @foreach (var notice in inventory.Notices) { <p class="callout">@notice</p> }
+                    @foreach (var group in NetworkDevicePresentation.Group(inventory))
+                    {
+                        var dns = inventory.InterfaceDns.FirstOrDefault(item => item.Interface == group.Interface);
+                        <section class="device-interface-group">
+                            <h2>@group.Interface <span class="meta-text">@string.Join(" · ", group.Subnets) · @group.Devices.Count devices</span>
+                                @if (dns is { Servers.Count: > 0 })
+                                {
+                                    <span class="meta-text" title="@DnsDetails(dns)">DNS: @string.Join(", ", dns.Servers) @(dns.DhcpServers.Count > 0 && dns.Servers.ToHashSet().SetEquals(dns.DhcpServers) ? "(DHCP)" : "")</span>
+                                }
+                            </h2>
+                            <div class="infrastructure-table device-table"><table><thead><tr><th>Device</th><th>IP address</th><th>MAC address</th><th>Vendor</th><th>State</th><th>Last observed</th><th></th></tr></thead><tbody>
+                            @foreach (var device in group.Devices)
+                            {
+                                var expanded = selected?.Id == device.Id;
+                                var detailsId = "network-device-details-" + device.Id;
+                                <tr class="network-summary-row @(expanded ? "network-row-expanded" : null)" @onclick="(() => ToggleDevice(device))"><td title="@device.NameLookupStatus"><strong>@NetworkDevicePresentation.Name(device)</strong></td>
+                                    <td title="@string.Join(", ", device.Addresses)">@NetworkDevicePresentation.PrimaryAddress(device)@if (device.Addresses.Count > 1) { <span class="meta-text"> · +@(device.Addresses.Count - 1)</span> }</td>
+                                    <td>@device.Mac</td><td title="@device.Vendor">@(device.Vendor.StartsWith("Unknown") || device.Vendor.Length == 0 ? "—" : device.Vendor)</td>
+                                    <td>@device.State</td><td>@device.LastSeenUtc.ToLocalTime().ToString("g")</td>
+                                    <td class="device-toggle-cell">
+                                        <button type="button" class="network-details-toggle" disabled="@busy"
+                                                  title="@(expanded ? "Hide device details" : "Show device details")"
+                                                  aria-label="@($"{(expanded ? "Hide" : "Show")} details for {NetworkDevicePresentation.PrimaryAddress(device)}")"
+                                                  aria-expanded="@(expanded ? "true" : "false")" aria-controls="@detailsId"
+                                                  @onclick="(() => ToggleDevice(device))" @onclick:stopPropagation="true">
+                                            <span class="network-details-caret" aria-hidden="true">@(expanded ? "▾" : "▸")</span>
+                                        </button>
+                                    </td>
+                                </tr>
+                                @if (expanded && selected is not null)
+                                {
+                                    <tr class="device-details-row">
+                                        <td colspan="7" class="network-details-cell">
+                                            <section id="@detailsId" class="network-details-panel device-details-panel" aria-label="@($"Details for {NetworkDevicePresentation.PrimaryAddress(device)}")">
+                                                <UiTextField Label="Friendly name" @bind-Value="selected.FriendlyName" />
+                                                <p>@selected.Hostname · @string.Join(", ", selected.Addresses) · @selected.Mac</p>
+                                                @if (dns is not null)
+                                                {
+                                                    <p>@DnsDetails(dns)</p>
+                                                }
+                                                <p>@selected.NameLookupStatus @if (selected.LastDnsLookupUtc is { } lookup) { <span class="meta-text">Last lookup: @lookup.ToLocalTime().ToString("g")</span> }</p>
+                                                <p>First observed: @selected.FirstSeenUtc.ToLocalTime().ToString("g")<br />Sources: @string.Join(", ", selected.Sources)<br />DHCP: @selected.DhcpState</p>
+                                                <p>@string.Join(" · ", selected.Services)</p>
+                                                @foreach (var service in selected.ServiceUrls) { <UiCommandButton Label="@("Open " + service.Key)" Href="@service.Value" Target="_blank" Rel="noopener noreferrer" /> }
+                                                <UiTextField Label="Tags" @bind-Value="selected.Tags" />
+                                                <UiTextAreaField Label="Notes" @bind-Value="selected.Notes" />
+                                                <div class="infrastructure-actions">
+                                                    <UiCommandButton Label="Save details" Disabled="@busy" OnClick="SaveDevice" />
+                                                    <UiCommandButton Label="Wake-on-LAN" Disabled="@(busy || selected.Mac.Length == 0)" OnClick="Wake" />
+                                                    <UiCommandButton Label="Reserve IP" Disabled="@busy" OnClick="Reserve" />
+                                                </div>
+                                                @if (deviceFeedback is not null)
+                                                { <p class="callout @(deviceFeedbackError ? "error" : "info")" role="@(deviceFeedbackError ? "alert" : "status")" aria-live="polite">@deviceFeedback</p> }
+
+                                            </section>
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                            </tbody></table></div>
+                        </section>
+                    }
+                    @if (inventory.Devices.Count == 0) { <p>No devices have been observed yet. Discovery does not require LMS DHCP.</p> }
+                }
+            </ChildContent></TabPage>
+            <TabPage Value="dhcp" Title="DHCP"><ChildContent><DhcpPanel /></ChildContent></TabPage>
+            <TabPage Value="exposure" Title="Exposure"><ChildContent>
+                <UiCommandButton Label="@(busy ? "Reading exposure…" : "Refresh exposure")" Disabled="@busy" OnClick="Load" />
+                @ActionFeedback
+                @if (exposure is not null)
+                {
+                    <p class="network-discovery-hint">Grouped by service. A listening port does not prove Internet access. Expand a service to see its bindings, firewall evidence and Docker configuration.</p>
+                    @foreach (var notice in exposure.Notices) { <p class="callout">@notice</p> }
+                    <div class="infrastructure-table exposure-table"><table><thead><tr><th>Service</th><th>Listening addresses / ports</th><th>Edge Gateway routes</th><th>Access summary</th><th></th></tr></thead><tbody>
+                    @foreach (var group in ExposurePresentation.Group(exposure))
+                    {
+                        var expanded = expandedExposureService == group.Service;
+                        var detailsId = "network-exposure-details-" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(group.Service));
+                        <tr class="network-summary-row @(expanded ? "network-row-expanded" : null)" @onclick="(() => ToggleExposure(group.Service))"><td><strong>@group.Service</strong></td>
+                            <td title="@string.Join(", ", group.Bindings)">@string.Join(", ", group.Bindings.Take(3))@if (group.Bindings.Count > 3) { <span> · +@(group.Bindings.Count - 3) more</span> }</td>
+                            <td>@if (group.Routes.Count == 0) { <span class="meta-text">None configured</span> } else { @string.Join(", ", group.Routes.Take(2))@if (group.Routes.Count > 2) { <span> · +@(group.Routes.Count - 2) more</span> } }</td>
+                            <td>@group.AccessSummary</td>
+                            <td class="device-toggle-cell">
+                                <button type="button" class="network-details-toggle" disabled="@busy"
+                                          title="@(expanded ? "Hide service details" : "Show service details")"
+                                          aria-label="@($"{(expanded ? "Hide" : "Show")} details for {group.Service}")"
+                                          aria-expanded="@(expanded ? "true" : "false")" aria-controls="@detailsId"
+                                          @onclick="(() => ToggleExposure(group.Service))" @onclick:stopPropagation="true">
+                                    <span class="network-details-caret" aria-hidden="true">@(expanded ? "▾" : "▸")</span>
+                                </button>
+                            </td>
+                        </tr>
+                        @if (expanded)
+                        {
+                            <tr class="exposure-details-row"><td colspan="5" class="network-details-cell">
+                                <section id="@detailsId" class="network-details-panel exposure-details-panel" aria-label="@($"Details for {group.Service}")">
+                                    <p><strong>@group.AccessSummary</strong></p>
+                                    <h3>Listening addresses and ports</h3>
+                                    <p>@string.Join(" · ", group.Bindings)</p>
+                                    <h3>Edge Gateway routes</h3>
+                                    <p>@(group.Routes.Count == 0 ? "None configured in LMS." : string.Join(" · ", group.Routes))</p>
+                                    <h3>What LMS observed</h3>
+                                    <p>@string.Join(" · ", group.Entries.Select(x => x.Method).Distinct())</p>
+                                    <ul>@foreach (var reason in group.Entries.SelectMany(x => x.Reasoning).Distinct()) { <li>@reason</li> }</ul>
+                                </section>
+                            </td></tr>
+                        }
+                    }
+                    </tbody></table></div>
+                    @if (exposure.Entries.Count == 0) { <p>No listening services or configured Edge Gateway routes were found.</p> }
+                }
+            </ChildContent></TabPage>
+        </ChildContent>
+    </TabControl>
+</div>
+@code {
+    private static string DnsDetails(InterfaceDnsConfiguration dns) =>
+        $"{dns.Interface}: active DNS ({dns.Source}): {(dns.Servers.Count > 0 ? string.Join(", ", dns.Servers) : "not reported")}. " +
+        $"DHCP-provided DNS: {(dns.DhcpServers.Count > 0 ? string.Join(", ", dns.DhcpServers) : "not reported")}. " +
+        $"DHCP server: {(dns.DhcpServer.Length > 0 ? dns.DhcpServer : "not reported")}. " +
+        (dns.Source == "systemd-resolved" && dns.Servers.Count > 0 ? "Reverse lookups are restricted to this interface's DNS." : "Lookups use the system resolver; its selected server cannot be confirmed here.");
+
+    private RenderFragment ActionFeedback => @<div class="network-action-feedback">
+        @if (busy) { <p class="callout info" role="status" aria-live="polite" aria-busy="true">@progress</p> }
+        @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+    </div>;
+    [Parameter] public string? Section { get; set; }
+    private DeviceInventory? inventory;
+    private ExposureSnapshot? exposure;
+    private string? expandedExposureService;
+    private NetworkDevice? selected;
+    private string? deviceFeedback;
+    private bool deviceFeedbackError;
+    private void ToggleExposure(string service)
+    {
+        if (busy) return;
+        expandedExposureService = expandedExposureService == service ? null : service;
+    }
+    private void ToggleDevice(NetworkDevice device)
+    {
+        if (busy) return;
+        selected = selected?.Id == device.Id ? null : device;
+        deviceFeedback = null;
+        deviceFeedbackError = false;
+    }
+    private bool busy;
+    private string? error;
+    private string probeNetwork = "", progress = "Reading network information…";
+    private FeaturePackageStatus? probePackage;
+    protected override async Task OnParametersSetAsync() { await Task.Yield(); await Load(); }
+    private void Navigate(string value) => Navigation.NavigateTo("/network/" + value);
+    private async Task Load()
+    {
+        busy = true; error = null; progress = "Reading network information…"; await InvokeAsync(StateHasChanged); await Task.Yield();
+        try
+        {
+            if (Section == "exposure") exposure = await Diagnostics.GetExposureAsync();
+            else if (Section is null or "devices")
+            {
+                inventory = await Diagnostics.DiscoverDevicesAsync();
+                if (selected is not null) selected = inventory.Devices.FirstOrDefault(device => device.Id == selected.Id);
+            }
+        }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+    private async Task Probe(bool install)
+    {
+        busy = true; error = null; progress = "Scanning the selected subnet and resolving device names…"; await InvokeAsync(StateHasChanged); await Task.Yield();
+        try
+        {
+            var parts = probeNetwork.Split('|');
+            if (parts.Length != 2) throw new InvalidOperationException("Select an existing private subnet.");
+            probePackage = await Diagnostics.GetPackageStatusAsync("Discovery");
+            if (!probePackage.Installed)
+            {
+                if (!install) return;
+                progress = "Installing fping…"; await InvokeAsync(StateHasChanged);
+                await Diagnostics.InstallPackagesAsync("Discovery");
+                probePackage = await Diagnostics.GetPackageStatusAsync("Discovery");
+            }
+            progress = $"Scanning {parts[1]} on {parts[0]} and caching device names…"; await InvokeAsync(StateHasChanged);
+            inventory = await Diagnostics.ProbeSubnetAsync(parts[0], parts[1]);
+        }
+        catch (Exception e) { error = e.Message; }
+        finally { busy = false; }
+    }
+    private void Reserve() => Navigation.NavigateTo("/network/dhcp?device=" + selected!.Id);
+    private async Task SaveDevice()
+    {
+        if (selected is null || busy) return;
+        busy = true; deviceFeedbackError = false; deviceFeedback = "Saving device details…"; progress = deviceFeedback;
+        try { await Diagnostics.SaveDeviceAsync(selected); deviceFeedback = "Device details saved."; }
+        catch (Exception e) { deviceFeedbackError = true; deviceFeedback = e.Message; }
+        finally { busy = false; }
+    }
+    private async Task Wake()
+    {
+        if (selected is null || busy) return;
+        busy = true; deviceFeedbackError = false; deviceFeedback = "Sending wake packet…"; progress = deviceFeedback;
+        try { await Diagnostics.WakeAsync(selected.Id); deviceFeedback = "Wake packet sent. The device must support Wake-on-LAN."; }
+        catch (Exception e) { deviceFeedbackError = true; deviceFeedback = e.Message; }
+        finally { busy = false; }
+    }
+}

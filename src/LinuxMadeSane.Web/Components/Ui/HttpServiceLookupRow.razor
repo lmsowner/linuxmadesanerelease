@@ -1,0 +1,89 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@using LinuxMadeSane.Core.Models.Cloudflare
+
+<section class="http-service-lookup-row" role="listitem" title="@RowTitle">
+    <div class="http-service-lookup-main">
+        <span class="http-service-lookup-endpoint" title="@Service.Url">
+            <span class="http-service-lookup-host">@Service.Host</span>
+            <span class="http-service-lookup-port">:@Service.Port</span>
+        </span>
+        @if (!string.IsNullOrWhiteSpace(IpAddressLabel))
+        {
+            <span class="http-service-lookup-ip" title="@IpAddressLabel">@IpAddressLabel</span>
+        }
+        @if (!string.IsNullOrWhiteSpace(ResponseLabel))
+        {
+            <span class="http-service-lookup-response" title="@ResponseLabel">@ResponseLabel</span>
+        }
+    </div>
+    <div class="http-service-lookup-chips" aria-label="Service details">
+        <span class="http-service-lookup-chip @SchemeClass" title="@Service.Scheme">@Service.Scheme.ToUpperInvariant()</span>
+        <span class="http-service-lookup-chip status" title="HTTP status @Service.StatusCode">@Service.StatusCode</span>
+    </div>
+    <button class="http-service-lookup-use" type="button" title="Use @Service.Url" @onclick="HandleUseAsync">
+        <UiGlyphIcon Glyph="UiIconGlyph.Connect" />
+        <span>Use</span>
+    </button>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public LocalHttpServiceEndpoint Service { get; set; } = default!;
+    [Parameter] public EventCallback<LocalHttpServiceEndpoint> OnUse { get; set; }
+
+    private string SchemeClass =>
+        Service.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? "https" : "http";
+
+    private string IpAddressLabel =>
+        string.IsNullOrWhiteSpace(Service.IpAddress) ||
+        Service.Host.Equals(Service.IpAddress, StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : Service.IpAddress.Trim();
+
+    private string ResponseLabel =>
+        Service.Scope.Equals("Docker", StringComparison.OrdinalIgnoreCase)
+            ? JoinNonBlank(RealDisplayName, Service.Title)
+            : FirstNonBlank(Service.Title, RealDisplayName) ?? string.Empty;
+
+    private string? RealDisplayName =>
+        LocalHttpServiceDiscoveryRanking.IsSyntheticDiscoveryLabel(Service.DisplayName)
+            ? null
+            : Service.DisplayName;
+
+    private string RowTitle
+    {
+        get
+        {
+            var parts = new List<string> { Service.Url };
+
+            if (!string.IsNullOrWhiteSpace(IpAddressLabel))
+            {
+                parts.Add($"IP: {IpAddressLabel}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(ResponseLabel))
+            {
+                parts.Add($"Response: {ResponseLabel}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(Service.ServerHeader))
+            {
+                parts.Add($"Server: {Service.ServerHeader.Trim()}");
+            }
+
+            return string.Join(" | ", parts);
+        }
+    }
+
+    private static string? FirstNonBlank(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
+
+    private static string JoinNonBlank(params string?[] values) =>
+        string.Join(" · ", values
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase));
+
+    private Task HandleUseAsync() => OnUse.InvokeAsync(Service);
+}

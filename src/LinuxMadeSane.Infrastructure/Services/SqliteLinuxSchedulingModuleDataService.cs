@@ -1,0 +1,865 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using LinuxMadeSane.Application.Services;
+using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models.RdpOptimizer;
+using LinuxMadeSane.Core.Models.Scheduling;
+using LinuxMadeSane.Infrastructure.Persistence;
+using LinuxMadeSane.Infrastructure.Persistence.Entities;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+
+namespace LinuxMadeSane.Infrastructure.Services;
+
+public sealed class SqliteLinuxSchedulingModuleDataService(
+    LinuxMadeSaneDbContext dbContext,
+    ILinuxCommandRunner commandRunner,
+    ISavedCommandStore savedCommandStore,
+    IConfiguration configuration,
+    IEnumerable<IScheduledTaskHandler>? taskHandlers = null) : ILinuxSchedulingModuleDataService
+{
+    private const int TaskLogLineLimit = 400;
+    private readonly string schedulerCallbackBaseUrl = ResolveSchedulerCallbackBaseUrl(configuration);
+
+    public async Task<IReadOnlyList<ScheduledTaskDefinition>> ListTasksAsync(CancellationToken cancellationToken = default)
+    {
+        var tasks = (await dbContext.ScheduledTasks
+                .AsNoTracking()
+                .Select(task => Map(task))
+                .ToArrayAsync(cancellationToken))
+            .OrderByDescending(task => task.UpdatedAtUtc)
+            .ThenBy(task => task.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        foreach (var task in tasks.Where(item => item.IsEnabled))
+        {
+            await ReconcileInstalledTaskAsync(task, cancellationToken);
+        }
+
+        return tasks;
+    }
+
+    public async Task<ScheduledTaskDefinition?> GetTaskAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Map(await dbContext.ScheduledTasks
+            .AsNoTracking()
+            .SingleOrDefaultAsync(task => task.Id == id, cancellationToken));
+
+    public async Task SaveTaskAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken = default)
+    {
+        if (task.IsEnabled)
+        {
+            await EnsureLogDirectoryAsync(cancellationToken);
+            await EnsureTaskLogAccessAsync(task, cancellationToken);
+            await InstallCronFileAsync(task, cancellationToken);
+            await EnsureCronServiceAsync(cancellationToken);
+            await VerifyCronFileAsync(task, cancellationToken);
+        }
+        else
+        {
+            await RemoveCronFileAsync(task.Id, task.RunAsUser, cancellationToken);
+        }
+
+        var entity = await dbContext.ScheduledTasks.SingleOrDefaultAsync(item => item.Id == task.Id, cancellationToken);
+        if (entity is null)
+        {
+            dbContext.ScheduledTasks.Add(Map(task));
+        }
+        else
+        {
+            Apply(entity, task);
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task DeleteTaskAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var entity = await dbContext.ScheduledTasks.SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
+        await RemoveCronFileAsync(id, entity?.RunAsUser, cancellationToken);
+
+        entity = await dbContext.ScheduledTasks.SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
+        if (entity is null)
+        {
+            return;
+        }
+
+        dbContext.ScheduledTasks.Remove(entity);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task<ScheduledTaskRunResult> RunTaskNowAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var task = await GetTaskAsync(id, cancellationToken);
+        if (task is null)
+        {
+            throw new InvalidOperationException("Scheduled task not found.");
+        }
+
+        return await ExecuteTaskAsync(task, cancellationToken);
+    }
+
+    public async Task<ScheduledTaskRunResult> TriggerTaskAsync(
+        Guid id,
+        string executionToken,
+        CancellationToken cancellationToken = default)
+    {
+        var task = await GetTaskAsync(id, cancellationToken);
+        if (task is null || !IsValidExecutionToken(task.ExecutionToken, executionToken) || (task.TaskKind == ScheduledTaskKind.HostBackup && !task.IsEnabled))
+        {
+            return new ScheduledTaskRunResult(false, "Scheduled task trigger rejected.");
+        }
+
+        return await ExecuteTaskAsync(task, cancellationToken);
+    }
+
+    private async Task<ScheduledTaskRunResult> ExecuteTaskAsync(
+        ScheduledTaskDefinition task,
+        CancellationToken cancellationToken)
+    {
+        await EnsureLogDirectoryAsync(cancellationToken);
+        var handler = taskHandlers?.FirstOrDefault(item => item.CanHandle(task));
+        if (handler is not null)
+        {
+            await AppendSchedulerLogAsync($"Starting {task.Name} via LMS handler.", cancellationToken);
+            var handled = await handler.ExecuteAsync(task, cancellationToken);
+            await AppendSchedulerLogAsync(handled.Summary, cancellationToken);
+            return handled;
+        }
+        if (task.TaskKind == ScheduledTaskKind.HostBackup)
+            return new(false, "The LMS backup handler is unavailable. No shell command was executed.");
+        if (task.TaskKind == ScheduledTaskKind.ShellScript)
+        {
+            var scriptLogPath = ScheduledTaskPaths.GetLogFilePath(task.Id);
+            var report = await ScheduledScriptExecution.RunAsync(
+                new("Script", task.ScriptPath, task.ScriptArguments, task.WorkingDirectory), task.ScriptOutcomes,
+                async (stage, token) =>
+                {
+                    await AppendSchedulerLogAsync($"Starting {task.Name}: {stage.Label} ({stage.Path}).", token);
+                    var command = ScheduledScriptExecution.BuildCommand(stage, task.RunAsUser);
+                    return await commandRunner.RunAsync(new LinuxCommandRequest("bash",
+                        ["-lc", BuildRunNowCommand(task with { Name = task.Name + " — " + stage.Label }, command, scriptLogPath)],
+                        RequiresSudo: true, Timeout: TimeSpan.FromMinutes(30), Description: $"Run {stage.Label} for '{task.Name}'"), false, token);
+                }, cancellationToken);
+            await AppendSchedulerLogAsync($"{task.Name}: {report.Summary}", cancellationToken);
+            await RunRequiredCommandAsync("bash", ["-lc", $"printf '%s\\n' {Quote(report.Summary)} >> {Quote(scriptLogPath)}"],
+                "Write scheduled script outcome", true, cancellationToken);
+            return new(report.Success, report.Summary + $" Output was appended to {scriptLogPath}.");
+        }
+        var executionCommand = await ResolveExecutionCommandAsync(task, cancellationToken);
+        if (string.IsNullOrWhiteSpace(executionCommand))
+        {
+            return new ScheduledTaskRunResult(false, $"'{task.Name}' does not have a runnable command.");
+        }
+
+        var logPath = ScheduledTaskPaths.GetLogFilePath(task.Id);
+        await AppendSchedulerLogAsync($"Starting {task.Name} ({task.Id:N}) via LMS scheduler.", cancellationToken);
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "bash",
+                ["-lc", BuildRunNowCommand(task, executionCommand, logPath)],
+                RequiresSudo: true,
+                Timeout: TimeSpan.FromMinutes(30),
+                Description: $"Run scheduled task '{task.Name}' now"),
+            dryRun: false,
+            cancellationToken);
+
+        var detail = FirstNonEmptyLine(result.StandardError, result.StandardOutput)
+            ?? $"exit code {result.ExitCode}";
+        await AppendSchedulerLogAsync(
+            result.ExitCode == 0
+                ? $"Completed {task.Name} ({task.Id:N}) via LMS scheduler (rc=0)."
+                : $"Failed {task.Name} ({task.Id:N}) via LMS scheduler (rc={result.ExitCode}): {detail}",
+            cancellationToken);
+
+        if (result.ExitCode == 0)
+        {
+            return new ScheduledTaskRunResult(
+                true,
+                $"Ran '{task.Name}'. Output was appended to {logPath}.");
+        }
+
+        return new ScheduledTaskRunResult(
+            false,
+            $"Run now failed for '{task.Name}': {detail}");
+    }
+
+    public async Task<ScheduledTaskLogSnapshot> GetTaskLogAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var task = id == Guid.Empty ? null : await GetTaskAsync(id, cancellationToken);
+        if (id != Guid.Empty && task is null)
+        {
+            throw new InvalidOperationException("Scheduled task not found.");
+        }
+
+        var logPath = id == Guid.Empty ? ScheduledTaskPaths.SchedulerLogPath : ScheduledTaskPaths.GetLogFilePath(task!.Id);
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "bash",
+                ["-lc", BuildTaskLogInspectionScript(logPath, TaskLogLineLimit)],
+                RequiresSudo: true,
+                Timeout: TimeSpan.FromSeconds(12),
+                Description: $"Read scheduled task log for '{task?.Name ?? "LMS scheduler"}'"),
+            dryRun: false,
+            cancellationToken);
+
+        if (result.ExitCode != 0)
+        {
+            var detail = FirstNonEmptyLine(result.StandardError, result.StandardOutput)
+                ?? $"exit code {result.ExitCode}";
+            throw new InvalidOperationException($"Reading scheduled task log for '{task?.Name ?? "LMS scheduler"}' failed: {detail}");
+        }
+
+        var (metadata, content) = ParseTaskLogOutput(result.StandardOutput);
+        content = SelectLatestRun(content);
+        var exists = metadata.TryGetValue("exists", out var existsText) &&
+            existsText.Equals("true", StringComparison.OrdinalIgnoreCase);
+        var lineCount = metadata.TryGetValue("line_count", out var lineCountText) &&
+            int.TryParse(lineCountText, out var parsedLineCount)
+                ? parsedLineCount
+                : 0;
+        DateTimeOffset? lastUpdatedAtUtc = metadata.TryGetValue("modified_epoch", out var modifiedEpochText) &&
+            long.TryParse(modifiedEpochText, out var modifiedEpoch)
+                ? DateTimeOffset.FromUnixTimeSeconds(modifiedEpoch)
+                : null;
+
+        return new ScheduledTaskLogSnapshot(
+            id,
+            task?.Name ?? "LMS scheduler",
+
+            logPath,
+            exists,
+            content,
+            lastUpdatedAtUtc,
+            lineCount > TaskLogLineLimit);
+    }
+
+    public async Task<ScheduledTaskHealthSnapshot> GetHealthAsync(CancellationToken cancellationToken = default)
+    {
+        var cronDirectoryAvailable = Directory.Exists(ScheduledTaskPaths.CronDirectoryPath);
+        var crontabBinaryAvailable =
+            File.Exists("/usr/bin/crontab") ||
+            File.Exists("/bin/crontab") ||
+            File.Exists("/usr/sbin/crontab") ||
+            File.Exists("/sbin/crontab");
+
+        var inspection = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "bash",
+                ["-lc", BuildHealthInspectionScript()],
+                RequiresSudo: false,
+                Timeout: TimeSpan.FromSeconds(8),
+                Description: "Inspect cron scheduler state")
+            {
+                IsOptionalExternalTool = true
+            },
+            dryRun: false,
+            cancellationToken);
+
+        var values = ParseKeyValueLines(inspection.StandardOutput);
+        var serviceName = values.TryGetValue("service", out var parsedServiceName)
+            ? parsedServiceName
+            : string.Empty;
+        var serviceState = values.TryGetValue("state", out var parsedServiceState)
+            ? parsedServiceState
+            : string.Empty;
+        var summary = BuildHealthSummary(cronDirectoryAvailable, crontabBinaryAvailable, serviceName, serviceState);
+
+        return new ScheduledTaskHealthSnapshot(
+            cronDirectoryAvailable,
+            crontabBinaryAvailable,
+            serviceName,
+            serviceState,
+            summary);
+    }
+
+    private async Task AppendSchedulerLogAsync(string message, CancellationToken cancellationToken)
+    {
+        var escaped = message.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+        await RunRequiredCommandAsync(
+            "bash",
+            ["-lc", $"printf '%s [%s]\n' '{escaped}' \"$(date -Is)\" >> '{ScheduledTaskPaths.SchedulerLogPath}'"],
+            "Write LMS scheduler log",
+            true,
+            cancellationToken);
+    }
+
+    private async Task EnsureLogDirectoryAsync(CancellationToken cancellationToken)
+    {
+        await RunRequiredCommandAsync(
+            "mkdir",
+            ["-p", ScheduledTaskPaths.LogDirectoryPath],
+            $"Prepare scheduled task log directory {ScheduledTaskPaths.LogDirectoryPath}",
+            requiresSudo: true,
+            cancellationToken);
+    }
+
+    private async Task ReconcileInstalledTaskAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
+    {
+        // Always rewrite enabled entries. Marker-only verification allowed
+        // entries generated by older LMS builds to remain installed forever,
+        // so fixes to the trigger command and diagnostics never took effect.
+        // Installation is idempotent and also removes the legacy /etc/cron.d
+        // copy, leaving the selected user's crontab as the single source.
+        await EnsureLogDirectoryAsync(cancellationToken);
+        await EnsureTaskLogAccessAsync(task, cancellationToken);
+        await InstallCronFileAsync(task, cancellationToken);
+        await EnsureCronServiceAsync(cancellationToken);
+        await VerifyCronFileAsync(task, cancellationToken);
+        await AppendSchedulerLogAsync(
+            $"Installed current cron entry for {task.Name} ({task.Id:N}) as {task.RunAsUser.Trim()}.",
+            cancellationToken);
+    }
+
+    private async Task EnsureCronServiceAsync(CancellationToken cancellationToken)
+    {
+        const string script = "if command -v systemctl >/dev/null 2>&1; then if systemctl list-unit-files cron.service >/dev/null 2>&1; then systemctl enable --now cron; elif systemctl list-unit-files crond.service >/dev/null 2>&1; then systemctl enable --now crond; fi; fi";
+        await RunRequiredCommandAsync(
+            "bash",
+            ["-lc", script],
+            "Start the system cron service",
+            requiresSudo: true,
+            cancellationToken);
+    }
+
+    private async Task EnsureTaskLogAccessAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
+    {
+        if (RequiresRootExecution(task.RunAsUser))
+        {
+            return;
+        }
+
+        await RunRequiredCommandAsync(
+            "chown",
+            [task.RunAsUser.Trim(), ScheduledTaskPaths.LogDirectoryPath],
+            $"Allow scheduled task user {task.RunAsUser.Trim()} to write task logs",
+            requiresSudo: true,
+            cancellationToken);
+        await RunRequiredCommandAsync(
+            "touch",
+            [ScheduledTaskPaths.GetLogFilePath(task.Id)],
+            $"Create scheduled task log for {task.Name}",
+            requiresSudo: true,
+            cancellationToken);
+        await RunRequiredCommandAsync(
+            "chown",
+            [$"{task.RunAsUser.Trim()}:{task.RunAsUser.Trim()}", ScheduledTaskPaths.GetLogFilePath(task.Id)],
+            $"Set scheduled task log owner for {task.Name}",
+            requiresSudo: true,
+            cancellationToken);
+    }
+
+    private async Task InstallCronFileAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
+    {
+        var tempPath = Path.Combine(Path.GetTempPath(), $"linuxmadesane-schedule-{task.Id:N}.cron");
+        var wrapperTempPath = Path.Combine(Path.GetTempPath(), $"linuxmadesane-schedule-{task.Id:N}.sh");
+        var marker = $"# BEGIN LINUX MADE SANE TASK {task.Id:N}";
+        var endMarker = $"# END LINUX MADE SANE TASK {task.Id:N}";
+        try
+        {
+            await File.WriteAllTextAsync(tempPath, BuildUserCrontabBlock(task, marker, endMarker), cancellationToken);
+            await File.WriteAllTextAsync(wrapperTempPath, BuildWrapperContents(task), cancellationToken);
+            var user = Quote(task.RunAsUser.Trim());
+            var block = Quote(tempPath);
+            var wrapper = Quote(wrapperTempPath);
+            var installedWrapper = Quote(ScheduledTaskPaths.GetWrapperPath(task.Id));
+            var script = $"mkdir -p {Quote(ScheduledTaskPaths.WrapperDirectoryPath)}; install -m 0755 {wrapper} {installedWrapper}; existing=$(mktemp); filtered=$(mktemp); crontab -u {user} -l 2>/dev/null > $existing || true; awk -v start={Quote(marker)} -v end={Quote(endMarker)} '$0 == start {{skip=1; next}} $0 == end {{skip=0; next}} !skip {{print}}' $existing > $filtered; cat $filtered {block} | crontab -u {user} -; rm -f $existing $filtered; rm -f {Quote(ScheduledTaskPaths.GetCronFilePath(task.Id))}";
+            await RunRequiredCommandAsync("bash", ["-lc", script], $"Install user crontab entry for {task.Name}", true, cancellationToken);
+        }
+        finally
+        {
+            if (File.Exists(tempPath)) File.Delete(tempPath);
+            if (File.Exists(wrapperTempPath)) File.Delete(wrapperTempPath);
+        }
+    }
+
+    private string BuildUserCrontabBlock(ScheduledTaskDefinition task, string marker, string endMarker)
+    {
+        return $"{marker}\n# Task: {SanitizeComment(task.Name)}\n{task.CronExpression} {ScheduledTaskPaths.GetWrapperPath(task.Id)}\n{endMarker}\n";
+    }
+
+    private string BuildWrapperContents(ScheduledTaskDefinition task)
+    {
+        var logPath = Quote(ScheduledTaskPaths.GetLogFilePath(task.Id));
+        var schedulerLogPath = Quote(ScheduledTaskPaths.SchedulerLogPath);
+        var trigger = BuildCronTriggerCommand(task);
+        var label = SanitizeLogLabel(task.Name);
+        var intervalGuard = task.ScheduleMode == ScheduledTaskScheduleMode.Interval && task.CronExpression == "* * * * *"
+            ? $"(( ($(date +%s) / 60) % {Math.Max(1, task.Hour * 60 + task.Minute)} == 0 )) || exit 0"
+            : string.Empty;
+        return $"""
+#!/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+set -o pipefail
+{intervalGuard}
+task_log={logPath}
+scheduler_log={schedulerLogPath}
+printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> \"$task_log\"
+printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> \"$scheduler_log\"
+{trigger} 2>&1 | tee -a \"$task_log\" \"$scheduler_log\" >/dev/null
+lms_cron_rc=$?
+printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> \"$task_log\"
+printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> \"$scheduler_log\"
+exit \"$lms_cron_rc\"
+""";
+    }
+
+    private async Task VerifyCronFileAsync(ScheduledTaskDefinition task, CancellationToken cancellationToken)
+    {
+        var user = Quote(task.RunAsUser.Trim());
+        var marker = Quote($"# BEGIN LINUX MADE SANE TASK {task.Id:N}");
+        await RunRequiredCommandAsync(
+            "bash",
+            ["-lc", $"crontab -u {user} -l 2>/dev/null | grep -F -- {marker} >/dev/null"],
+            $"Verify user crontab entry for {task.Name}",
+            true,
+            cancellationToken);
+    }
+
+    private async Task RemoveCronFileAsync(Guid taskId, string? runAsUser, CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(runAsUser))
+        {
+            var user = Quote(runAsUser.Trim());
+            var start = Quote($"# BEGIN LINUX MADE SANE TASK {taskId:N}");
+            var end = Quote($"# END LINUX MADE SANE TASK {taskId:N}");
+            var script = $"existing=$(mktemp); filtered=$(mktemp); crontab -u {user} -l 2>/dev/null > $existing || true; awk -v start={start} -v end={end} '$0 == start {{skip=1; next}} $0 == end {{skip=0; next}} !skip {{print}}' $existing > $filtered; crontab -u {user} $filtered; rm -f $existing $filtered";
+            await RunRequiredCommandAsync("bash", ["-lc", script], $"Remove user crontab schedule {taskId:N}", true, cancellationToken);
+        }
+
+        await RunRequiredCommandAsync(
+            "rm",
+            ["-f", ScheduledTaskPaths.GetWrapperPath(taskId)],
+            $"Remove scheduler wrapper {taskId:N}",
+            true,
+            cancellationToken);
+
+        await RunRequiredCommandAsync(
+            "rm",
+            ["-f", ScheduledTaskPaths.GetCronFilePath(taskId)],
+            $"Remove legacy cron schedule {taskId:N}",
+            true,
+            cancellationToken);
+    }
+
+    private static string BuildRunNowCommand(
+        ScheduledTaskDefinition task,
+        string executionCommand,
+        string logPath)
+    {
+        var quotedLogPath = Quote(logPath);
+        var quotedExecutionCommand = Quote(executionCommand);
+        var runCommand = RequiresRootExecution(task.RunAsUser)
+            ? $"bash -lc {quotedExecutionCommand}"
+            : $"sudo -n -u {Quote(task.RunAsUser.Trim())} bash -lc {quotedExecutionCommand}";
+
+        return RequiresRootExecution(task.RunAsUser)
+            ? $"printf '\\n=== [LMS task start] {SanitizeLogLabel(task.Name)} %s ===\\n' \"$(date -Is)\" >> {quotedLogPath}; {runCommand} >> {quotedLogPath} 2>&1; lms_task_rc=$?; printf '=== [LMS task end] {SanitizeLogLabel(task.Name)} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_task_rc\" >> {quotedLogPath}; exit \"$lms_task_rc\""
+            : $"printf '\\n=== [LMS task start] {SanitizeLogLabel(task.Name)} %s ===\\n' \"$(date -Is)\" >> {quotedLogPath}; {runCommand} >> {quotedLogPath} 2>&1; lms_task_rc=$?; printf '=== [LMS task end] {SanitizeLogLabel(task.Name)} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_task_rc\" >> {quotedLogPath}; exit \"$lms_task_rc\"";
+    }
+
+    private string BuildCronFileContents(ScheduledTaskDefinition task)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("# Managed by Linux Made Sane");
+        builder.AppendLine($"# Task ID: {task.Id:N}");
+        builder.AppendLine($"# Task: {SanitizeComment(task.Name)}");
+        if (!string.IsNullOrWhiteSpace(task.Description))
+        {
+            builder.AppendLine($"# {SanitizeComment(task.Description)}");
+        }
+
+        builder.AppendLine("SHELL=/bin/bash");
+        builder.AppendLine("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        builder.AppendLine("MAILTO=\"\"");
+        var quotedLogPath = Quote(ScheduledTaskPaths.GetLogFilePath(task.Id));
+        var quotedSchedulerLogPath = Quote(ScheduledTaskPaths.SchedulerLogPath);
+        var trigger = EscapeCronCommand(BuildCronTriggerCommand(task));
+        var label = SanitizeLogLabel(task.Name);
+        var cronCommand = $"printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> {quotedLogPath}; printf '\\n=== [LMS cron trigger start] {label} %s ===\\n' \"$(date -Is)\" >> {quotedSchedulerLogPath}; {trigger} 2>&1 | tee -a {quotedLogPath} {quotedSchedulerLogPath} >/dev/null; lms_cron_rc=${{PIPESTATUS[0]}}; printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> {quotedLogPath}; printf '=== [LMS cron trigger end] {label} %s rc=%s ===\\n' \"$(date -Is)\" \"$lms_cron_rc\" >> {quotedSchedulerLogPath}; exit \"$lms_cron_rc\"";
+        builder.Append(task.CronExpression);
+        builder.Append(' ');
+        builder.Append(task.RunAsUser);
+        builder.Append(' ');
+        builder.Append(cronCommand);
+        builder.AppendLine();
+
+        return builder.ToString();
+    }
+
+    private async Task RunRequiredCommandAsync(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        string description,
+        bool requiresSudo,
+        CancellationToken cancellationToken)
+    {
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(fileName, arguments, requiresSudo, TimeSpan.FromSeconds(20), description),
+            dryRun: false,
+            cancellationToken);
+
+        if (result.ExitCode == 0)
+        {
+            return;
+        }
+
+        var detail = FirstNonEmptyLine(result.StandardError, result.StandardOutput)
+            ?? $"exit code {result.ExitCode}";
+        throw new InvalidOperationException($"{description} failed: {detail}");
+    }
+
+    private async Task<string> ResolveExecutionCommandAsync(
+        ScheduledTaskDefinition task,
+        CancellationToken cancellationToken)
+    {
+        if (task.TaskKind != ScheduledTaskKind.Runbook)
+        {
+            return task.CommandPreview.Trim();
+        }
+
+        if (!task.RunbookId.HasValue)
+        {
+            return task.CommandPreview.Trim();
+        }
+
+        var runbook = await savedCommandStore.GetAsync(task.RunbookId.Value, cancellationToken);
+        if (runbook is null || runbook.IsTemplate || runbook.TargetKind != LinuxMadeSane.Core.Enums.RunbookTargetKind.Machine)
+        {
+            throw new InvalidOperationException($"The saved runbook for '{task.Name}' no longer exists or is not runnable.");
+        }
+
+        var command = RunbookExecutionCommandBuilder.BuildSchedulerCommand(runbook.CommandText);
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            return string.Empty;
+        }
+
+        return string.IsNullOrWhiteSpace(task.WorkingDirectory)
+            ? command
+            : $"cd {Quote(task.WorkingDirectory.Trim())} && {command}";
+    }
+
+    private string BuildCronTriggerCommand(ScheduledTaskDefinition task)
+    {
+        var targetUrl = $"{schedulerCallbackBaseUrl.TrimEnd('/')}{ScheduledTaskTrigger.GetPath(task.Id)}";
+        var headerValue = $"{ScheduledTaskTrigger.HeaderName}: {task.ExecutionToken}";
+        if (schedulerCallbackBaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"curl -k -fsS --max-time 1800 -X POST -H {Quote(headerValue)} {Quote(targetUrl)}";
+        }
+
+        return $"curl -fsS --max-time 1800 -X POST -H {Quote(headerValue)} {Quote(targetUrl)}";
+    }
+
+    private static bool IsValidExecutionToken(string expected, string provided)
+    {
+        if (string.IsNullOrWhiteSpace(expected) || string.IsNullOrWhiteSpace(provided))
+        {
+            return false;
+        }
+
+        var expectedBytes = Encoding.UTF8.GetBytes(expected.Trim());
+        var providedBytes = Encoding.UTF8.GetBytes(provided.Trim());
+        return expectedBytes.Length == providedBytes.Length &&
+               CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
+    }
+
+    private static string BuildHealthInspectionScript() =>
+        """
+        service_name=""
+        service_state=""
+        if command -v systemctl >/dev/null 2>&1; then
+          if systemctl list-unit-files cron.service >/dev/null 2>&1; then
+            service_name="cron"
+            service_state="$(systemctl is-active cron 2>/dev/null || true)"
+          elif systemctl list-unit-files crond.service >/dev/null 2>&1; then
+            service_name="crond"
+            service_state="$(systemctl is-active crond 2>/dev/null || true)"
+          fi
+        fi
+        printf 'service\t%s\n' "$service_name"
+        printf 'state\t%s\n' "$service_state"
+        """;
+
+    private static string BuildTaskLogInspectionScript(string logPath, int maxLines) =>
+        $"""
+        log_path={Quote(logPath)}
+        if [ ! -f "$log_path" ]; then
+          printf 'exists\tfalse\n'
+          printf '__LOG__\n'
+          exit 0
+        fi
+        line_count=$(wc -l < "$log_path" 2>/dev/null || echo 0)
+        modified_epoch=$(stat -c %Y "$log_path" 2>/dev/null || echo "")
+        printf 'exists\ttrue\n'
+        printf 'line_count\t%s\n' "$line_count"
+        printf 'modified_epoch\t%s\n' "$modified_epoch"
+        printf '__LOG__\n'
+        tail -n {maxLines} "$log_path" 2>/dev/null || true
+        """;
+
+    private static Dictionary<string, string> ParseKeyValueLines(string output)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var separatorIndex = line.IndexOf('\t');
+            if (separatorIndex <= 0 || separatorIndex >= line.Length - 1)
+            {
+                continue;
+            }
+
+            values[line[..separatorIndex]] = line[(separatorIndex + 1)..].Trim();
+        }
+
+        return values;
+    }
+
+    private static string SelectLatestRun(string content)
+    {
+        const string cronMarker = "=== [LMS cron trigger start]";
+        const string taskMarker = "=== [LMS task start]";
+        var cronIndex = content.LastIndexOf(cronMarker, StringComparison.Ordinal);
+        var taskIndex = content.LastIndexOf(taskMarker, StringComparison.Ordinal);
+        var start = Math.Max(cronIndex, taskIndex);
+        return start >= 0 ? content[start..].TrimStart('\n') : content;
+    }
+
+    private static (Dictionary<string, string> Metadata, string Content) ParseTaskLogOutput(string output)
+    {
+        const string marker = "__LOG__\n";
+        var normalizedOutput = output.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var markerIndex = normalizedOutput.IndexOf(marker, StringComparison.Ordinal);
+        if (markerIndex >= 0)
+        {
+            return (
+                ParseKeyValueLines(normalizedOutput[..markerIndex]),
+                normalizedOutput[(markerIndex + marker.Length)..].TrimEnd('\n'));
+        }
+
+        if (normalizedOutput.EndsWith("__LOG__", StringComparison.Ordinal))
+        {
+            return (
+                ParseKeyValueLines(normalizedOutput[..^"__LOG__".Length]),
+                string.Empty);
+        }
+
+        return (ParseKeyValueLines(normalizedOutput), string.Empty);
+    }
+
+    private static string BuildHealthSummary(
+        bool cronDirectoryAvailable,
+        bool crontabBinaryAvailable,
+        string serviceName,
+        string serviceState)
+    {
+        if (!cronDirectoryAvailable)
+        {
+            return "Linux Made Sane could not find /etc/cron.d on this box.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(serviceName) &&
+            serviceState.Equals("active", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"{serviceName} is running. LMS can install managed scheduled tasks now.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(serviceName))
+        {
+            var readableState = string.IsNullOrWhiteSpace(serviceState) ? "unknown" : serviceState;
+            return $"{serviceName} is {readableState}. LMS can write managed cron files, but the scheduler may need starting.";
+        }
+
+        return crontabBinaryAvailable
+            ? "Cron tooling is present, but LMS could not confirm the scheduler service state."
+            : "LMS could not find cron tooling on this box.";
+    }
+
+    private static bool RequiresRootExecution(string runAsUser) =>
+        string.IsNullOrWhiteSpace(runAsUser) ||
+        runAsUser.Trim().Equals("root", StringComparison.OrdinalIgnoreCase);
+
+    private static string SanitizeComment(string value) =>
+        value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+
+    private static string SanitizeLogLabel(string value) =>
+        SanitizeComment(value)
+            .Replace("%", "%%", StringComparison.Ordinal)
+            .Replace("'", string.Empty, StringComparison.Ordinal);
+
+    private static string Quote(string value) =>
+        $"'{value.Replace("'", "'\"'\"'")}'";
+
+    private static string EscapeCronCommand(string value) =>
+        value.Replace("%", "\\%", StringComparison.Ordinal);
+
+    private static string ResolveSchedulerCallbackBaseUrl(IConfiguration configuration)
+    {
+        var configuredUrls =
+            configuration["URLS"] ??
+            configuration["ASPNETCORE_URLS"] ??
+            configuration["DOTNET_URLS"];
+
+        var candidates = string.IsNullOrWhiteSpace(configuredUrls)
+            ? configuration.GetSection("Server:Urls").Get<string[]>() ?? []
+            : configuredUrls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        var selected = candidates
+            .Select(value => Uri.TryCreate(value, UriKind.Absolute, out var uri) ? uri : null)
+            .Where(static uri => uri is not null)
+            .OrderBy(uri => uri!.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .FirstOrDefault();
+
+        if (selected is null)
+        {
+            return "http://127.0.0.1:5080";
+        }
+
+        var builder = new UriBuilder(selected)
+        {
+            Host = "127.0.0.1"
+        };
+
+        return builder.Uri.GetLeftPart(UriPartial.Authority);
+    }
+
+    private static string? FirstNonEmptyLine(params string[] values) =>
+        values
+            .SelectMany(value => value.Split('\n'))
+            .Select(line => line.Trim())
+            .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
+
+    private static ScheduledTaskDefinition Map(ScheduledTaskEntity? entity) =>
+        entity is null
+            ? null!
+            : new ScheduledTaskDefinition(
+                entity.Id,
+                entity.Name,
+                entity.Description,
+                entity.IsEnabled,
+                (ScheduledTaskKind)entity.TaskKind,
+                (ScheduledTaskScheduleMode)entity.ScheduleMode,
+                entity.Minute,
+                entity.Hour,
+                entity.DayOfMonth,
+                entity.DaysOfWeekCsv,
+                entity.CustomCronExpression,
+                entity.CronExpression,
+                entity.ScheduleSummary,
+                entity.RunAsUser,
+                entity.WorkingDirectory,
+                entity.RunbookId,
+                entity.ExecutionToken,
+                entity.CommandText,
+                entity.ScriptPath,
+                entity.ScriptArguments,
+                entity.SourcePath,
+                entity.DestinationPath,
+                entity.CopyRecursive,
+                entity.CopyPreserveAttributes,
+                entity.CopyDeleteSourceAfterCopy,
+                entity.MatchPatternsCsv,
+                entity.MatchCaseInsensitive,
+                (ScheduledTaskAgeFilterMode)entity.AgeFilterMode,
+                entity.AgeFilterValue,
+                (ScheduledTaskAgeUnit)entity.AgeFilterUnit,
+                entity.CleanupDeleteFiles,
+                entity.CleanupDeleteDirectories,
+                entity.UpdatePackageLists,
+                entity.UpgradeInstalledPackages,
+                entity.RemoveUnusedPackages,
+                entity.CommandPreview,
+                entity.CreatedAtUtc,
+                entity.UpdatedAtUtc) { ScriptOutcomes = JsonSerializer.Deserialize<ScheduledScriptOutcomes>(entity.ScriptOutcomesJson) ?? new() };
+
+    private static ScheduledTaskEntity Map(ScheduledTaskDefinition task) =>
+        new()
+        {
+            Id = task.Id,
+            Name = task.Name,
+            Description = task.Description,
+            IsEnabled = task.IsEnabled,
+            TaskKind = (int)task.TaskKind,
+            ScheduleMode = (int)task.ScheduleMode,
+            Minute = task.Minute,
+            Hour = task.Hour,
+            DayOfMonth = task.DayOfMonth,
+            DaysOfWeekCsv = task.DaysOfWeekCsv,
+            CustomCronExpression = task.CustomCronExpression,
+            CronExpression = task.CronExpression,
+            ScheduleSummary = task.ScheduleSummary,
+            RunAsUser = task.RunAsUser,
+            WorkingDirectory = task.WorkingDirectory,
+            RunbookId = task.RunbookId,
+            ExecutionToken = task.ExecutionToken,
+            CommandText = task.CommandText,
+            ScriptPath = task.ScriptPath,
+            ScriptArguments = task.ScriptArguments,
+            ScriptOutcomesJson = JsonSerializer.Serialize(task.ScriptOutcomes),
+            SourcePath = task.SourcePath,
+            DestinationPath = task.DestinationPath,
+            CopyRecursive = task.CopyRecursive,
+            CopyPreserveAttributes = task.CopyPreserveAttributes,
+            CopyDeleteSourceAfterCopy = task.CopyDeleteSourceAfterCopy,
+            MatchPatternsCsv = task.MatchPatternsCsv,
+            MatchCaseInsensitive = task.MatchCaseInsensitive,
+            AgeFilterMode = (int)task.AgeFilterMode,
+            AgeFilterValue = task.AgeFilterValue,
+            AgeFilterUnit = (int)task.AgeFilterUnit,
+            CleanupDeleteFiles = task.CleanupDeleteFiles,
+            CleanupDeleteDirectories = task.CleanupDeleteDirectories,
+            UpdatePackageLists = task.UpdatePackageLists,
+            UpgradeInstalledPackages = task.UpgradeInstalledPackages,
+            RemoveUnusedPackages = task.RemoveUnusedPackages,
+            CommandPreview = task.CommandPreview,
+            CreatedAtUtc = task.CreatedAtUtc,
+            UpdatedAtUtc = task.UpdatedAtUtc
+        };
+
+    private static void Apply(ScheduledTaskEntity entity, ScheduledTaskDefinition task)
+    {
+        entity.Name = task.Name;
+        entity.Description = task.Description;
+        entity.IsEnabled = task.IsEnabled;
+        entity.TaskKind = (int)task.TaskKind;
+        entity.ScheduleMode = (int)task.ScheduleMode;
+        entity.Minute = task.Minute;
+        entity.Hour = task.Hour;
+        entity.DayOfMonth = task.DayOfMonth;
+        entity.DaysOfWeekCsv = task.DaysOfWeekCsv;
+        entity.CustomCronExpression = task.CustomCronExpression;
+        entity.CronExpression = task.CronExpression;
+        entity.ScheduleSummary = task.ScheduleSummary;
+        entity.RunAsUser = task.RunAsUser;
+        entity.WorkingDirectory = task.WorkingDirectory;
+        entity.RunbookId = task.RunbookId;
+        entity.ExecutionToken = task.ExecutionToken;
+        entity.CommandText = task.CommandText;
+        entity.ScriptPath = task.ScriptPath;
+        entity.ScriptArguments = task.ScriptArguments;
+        entity.ScriptOutcomesJson = JsonSerializer.Serialize(task.ScriptOutcomes);
+        entity.SourcePath = task.SourcePath;
+        entity.DestinationPath = task.DestinationPath;
+        entity.CopyRecursive = task.CopyRecursive;
+        entity.CopyPreserveAttributes = task.CopyPreserveAttributes;
+        entity.CopyDeleteSourceAfterCopy = task.CopyDeleteSourceAfterCopy;
+        entity.MatchPatternsCsv = task.MatchPatternsCsv;
+        entity.MatchCaseInsensitive = task.MatchCaseInsensitive;
+        entity.AgeFilterMode = (int)task.AgeFilterMode;
+        entity.AgeFilterValue = task.AgeFilterValue;
+        entity.AgeFilterUnit = (int)task.AgeFilterUnit;
+        entity.CleanupDeleteFiles = task.CleanupDeleteFiles;
+        entity.CleanupDeleteDirectories = task.CleanupDeleteDirectories;
+        entity.UpdatePackageLists = task.UpdatePackageLists;
+        entity.UpgradeInstalledPackages = task.UpgradeInstalledPackages;
+        entity.RemoveUnusedPackages = task.RemoveUnusedPackages;
+        entity.CommandPreview = task.CommandPreview;
+        entity.CreatedAtUtc = task.CreatedAtUtc;
+        entity.UpdatedAtUtc = task.UpdatedAtUtc;
+    }
+}

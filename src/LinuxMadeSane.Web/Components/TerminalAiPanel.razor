@@ -1,0 +1,1620 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@implements IAsyncDisposable
+@using System.Text.RegularExpressions
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Contracts.HomeLab
+@using LinuxMadeSane.Core.Models.Ai
+@using LinuxMadeSane.Application.Contracts.Ai
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Web.Services
+@inject IAiThreadService ThreadService
+@inject IManagedHostService HostService
+@inject ISshKeyPairGenerator SshKeyPairGenerator
+@inject ITerminalAiAssistantService TerminalAiAssistantService
+@inject ITerminalAiCommandDaemon TerminalAiCommandDaemon
+@inject IJSRuntime JSRuntime
+@inject IServiceScopeFactory HomeLabScopeFactory
+@inject IHostAdministratorCredentials AdministratorCredentials
+
+<section class="surface-card terminal-ai-panel">
+    @if (SupportsManagedHomeLabOperations)
+    {
+        <div class="terminal-ai-section"><strong>@Tab.HomeLabTaskTitle</strong><p class="meta-text">Managed operations run through LMS. Connect the terminal for shell diagnostics.</p></div>
+    }
+    @if (!string.IsNullOrWhiteSpace(panelInfo))
+    {
+        <div class="callout warning">@panelInfo</div>
+    }
+    @if (!string.IsNullOrWhiteSpace(panelError))
+    {
+        <div class="callout error">@panelError</div>
+    }
+    @if (ShouldShowHostAuthAdvice)
+    {
+        <div class="callout warning terminal-ai-auth-advice">
+            <div class="terminal-ai-auth-advice-copy">
+                <strong>Public key SSH is recommended for AI-run terminal commands.</strong>
+                <span>This host is configured for username/password SSH. LMS runs AI commands on a separate private channel and asks here if sudo needs a password. Public key auth plus an intentional sudo policy is still the smoother automation setup.</span>
+            </div>
+            <div class="terminal-ai-auth-advice-actions">
+                <UiCommandButton Label="Set up public key"
+                                 Glyph="UiIconGlyph.Connection"
+                                 Variant="UiButtonVariant.ActionSubtle"
+                                 Disabled="@isPublicKeySetupBusy"
+                                 OnClick="OpenPublicKeySetupAsync" />
+            </div>
+        </div>
+    }
+
+    <details class="terminal-ai-settings" open="@(!hasStartedChat && Tab.AiConversation.Entries.Count == 0)">
+        <summary>
+            <span>Chat settings</span>
+            <span class="terminal-ai-settings-summary">@GetAccessModeLabel(Tab.AiAccessMode)@(string.IsNullOrWhiteSpace(selectedModelId) ? "" : " · " + selectedModelId)</span>
+        </summary>
+        <div class="terminal-ai-settings-body">
+    <section class="terminal-ai-access-bar" aria-label="Terminal AI access">
+        <div class="terminal-ai-access-copy">
+            <div class="terminal-ai-access-heading">
+                <strong>@GetAccessModeLabel(Tab.AiAccessMode)</strong>
+                @if (HasAgentSessionApproval)
+                {
+                    <UiPill Tone="UiPillTone.Success">@(FleetApproval is not null ? "Allowed for this update run" : SupportsManagedHomeLabOperations ? "Allowed for this task" : "Allowed for this session")</UiPill>
+                }
+            </div>
+            <span>@(SupportsManagedHomeLabOperations && Tab.AiAccessMode == TerminalAiAccessMode.Agent ? "Runs checks automatically and asks before the first change. You can allow changes for this task." : GetAccessModeDescription(Tab.AiAccessMode))</span>
+        </div>
+
+        <UiSelectField TValue="TerminalAiAccessMode"
+                       Label="Access"
+                       Value="@Tab.AiAccessMode"
+                       ValueChanged="HandleAccessModeChangedAsync"
+                       ValueExpression="@(() => Tab.AiAccessMode)"
+                       Disabled="@isBusy"
+                       Compact="true"
+                       Class="terminal-ai-access-select">
+            <option value="@TerminalAiAccessMode.ReadOnly">Read only</option>
+            <option value="@TerminalAiAccessMode.Agent">Agent</option>
+            <option value="@TerminalAiAccessMode.FullAccess">Full access</option>
+        </UiSelectField>
+    </section>
+
+    <section class="terminal-ai-section terminal-ai-provider-section">
+        @if (isProviderContextLoading)
+        {
+            <p class="meta-text">Loading AI providers...</p>
+        }
+        else if (AvailableAiProviders.Count == 0)
+        {
+            <p class="meta-text">No enabled runnable AI provider is configured.</p>
+        }
+        else
+        {
+            <AiProviderSwitcher Providers="@AvailableAiProviders"
+                                Models="@(aiProviderContext?.Models ?? [])"
+                                ProviderKey="@selectedProviderKey"
+                                ProviderKeyChanged="HandleProviderSelectionChangedAsync"
+                                ModelId="@selectedModelId"
+                                ModelIdChanged="HandleModelSelectionChangedAsync"
+                                Disabled="@isBusy"
+                                ProviderLabel="AI provider"
+                                ModelLabel="Model"
+                                Class="terminal-ai-provider-switcher" />
+        }
+    </section>
+
+        </div>
+    </details>
+
+    <section class="terminal-ai-section terminal-ai-activity-section">
+        @if (RecentEntries.Count == 0)
+        {
+            <div class="empty-state compact-empty-state">
+                <p>No AI activity yet.</p>
+                <p class="meta-text">Ask AI below or review the live terminal state.</p>
+            </div>
+        }
+        else
+        {
+            <div class="terminal-ai-activity-list" @ref="activityListElement">
+                @foreach (var entry in RecentEntries)
+                {
+                    <article class="@(entry.Role == AiChatMessageRole.Assistant ? "terminal-ai-tool-card" : "terminal-ai-message-card")">
+                        <div class="terminal-ai-message-header">
+                            <UiPill Tone="@GetMessageTone(entry.Role)">@GetRoleLabel(entry.Role)</UiPill>
+                            <span class="meta-text">@entry.CreatedAtUtc.ToLocalTime().ToString("HH:mm:ss")</span>
+                        </div>
+                        <p class="terminal-ai-message-content">@entry.Content</p>
+
+                        @if (!string.IsNullOrWhiteSpace(entry.SuggestedCommand))
+                        {
+                            <pre class="command-preview-block command-display-block terminal-ai-command-preview">@entry.SuggestedCommand</pre>
+                            @if (ShouldShowCommandAuthAdvice(entry.SuggestedCommand))
+                            {
+                                <div class="callout warning terminal-ai-auth-advice">
+                                    <span>This command uses sudo. If a password is required, LMS asks for it locally and sends it only through the private command channel.</span>
+                                </div>
+                            }
+                        }
+                    </article>
+                }
+            </div>
+        }
+    </section>
+
+    @if (!string.IsNullOrWhiteSpace(pendingApprovalCommand))
+    {
+        <section class="terminal-ai-approval-card terminal-ai-approval-waiting" role="alert" aria-live="assertive">
+            <div class="terminal-ai-approval-copy">
+                <strong>Allow this command?</strong>
+                <UiPill Tone="UiPillTone.Warning">Waiting for you</UiPill>
+            </div>
+            <span class="terminal-ai-approval-summary">@(FleetApproval is not null ? $"Allow for session covers all {FleetApproval.HostCount} selected servers in this update run." : "The AI needs to make a change before it can continue.")</span>
+            <pre class="command-preview-block command-display-block terminal-ai-command-preview">@pendingApprovalCommand</pre>
+            <div class="toolbar-row terminal-ai-approval-actions">
+                <UiCommandButton Label="Allow once"
+                                 Glyph="UiIconGlyph.Run"
+                                 OnClick="AllowPendingCommandOnceAsync" />
+                <UiCommandButton Label="@(SupportsManagedHomeLabOperations ? "Allow for task" : "Allow for session")"
+                                 Title="@(FleetApproval is not null ? $"Run this and later AI commands across all {FleetApproval.HostCount} selected servers in this package update run without asking again." : SupportsManagedHomeLabOperations ? "Run this and later changes in this Home Lab task without asking again." : "Run this and all later AI commands in this terminal session without asking again.")"
+                                 Glyph="UiIconGlyph.Run"
+                                 Variant="UiButtonVariant.ActionSubtle"
+                                 Disabled="@(!SupportsManagedHomeLabOperations && !Tab.SessionId.HasValue)"
+                                 OnClick="AllowPendingCommandsForSessionAsync" />
+                <UiCommandButton Label="Stop"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 OnClick="StopPendingCommandAsync" />
+            </div>
+        </section>
+    }
+
+    <TerminalAuthenticationDialog IsOpen="@(!string.IsNullOrWhiteSpace(pendingSecureCommand))"
+        HostName="@Tab.HostName" Username="@Tab.ConnectedUsername" Command="@pendingSecureCommand"
+        Password="@secureInputText" PasswordChanged="@(value => secureInputText = value)"
+        SavePassword="@saveAdministratorPassword" SavePasswordChanged="@(value => saveAdministratorPassword = value)"
+        OnSubmit="SubmitSecureInputAsync" OnCancel="CancelSecureInputAsync" />
+
+    <section class="terminal-ai-section terminal-ai-composer">
+        <label class="terminal-ai-prompt-field">
+            <span>What should the AI do?</span>
+            <textarea class="ui-control-input ui-control-textarea"
+                      @ref="promptInputElement"
+                      @bind="promptText"
+                      @bind:event="oninput"
+                      disabled="@isBusy"
+                      placeholder="@GetPromptPlaceholder()"></textarea>
+        </label>
+
+        <div class="terminal-ai-composer-actions">
+            <div class="toolbar-row">
+                <UiCommandButton Label="@(isBusy ? GetBusyLabel() : "Send")"
+                                 Title="Ask a question or describe the outcome you want."
+                                 Glyph="UiIconGlyph.Send"
+                                 OnClick="SendCustomPromptAsync"
+                                 Disabled="@(isBusy || string.IsNullOrWhiteSpace(promptText))" />
+                @if (isRunningAgent)
+                {
+                    <UiCommandButton Label="Stop"
+                                     Title="Stop the current AI request and unlock the composer."
+                                     Glyph="UiIconGlyph.Clear"
+                                     Variant="UiButtonVariant.Ghost"
+                                     OnClick="StopAgentAsync" />
+                }
+                <UiCommandButton Label="Clear context" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="ClearContext" Disabled="@(isBusy || Tab.AiConversation.Entries.Count == 0)" />
+            </div>
+
+            <div class="terminal-ai-option-row">
+                <UiCheckboxField @bind-Value="Tab.AllowInternetResearch"
+                                 Label="Web research"
+                                 Compact="true"
+                                 Class="terminal-ai-option" />
+            </div>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(agentStatus))
+        {
+            <p class="terminal-ai-run-status" role="status" aria-live="polite">@agentStatus</p>
+        }
+    </section>
+</section>
+
+<UiModal IsOpen="@isPublicKeySetupOpen"
+         Title="Set up public key SSH"
+         Subtitle="Generate an LMS key, install the public key in the current SSH account, then test and save the host so future sessions use key auth first."
+         Class="terminal-ai-public-key-modal"
+         CloseOnBackdrop="false"
+         OnClose="ClosePublicKeySetupAsync">
+    <ChildContent>
+        @if (publicKeySetupEditor is null || publicKeySetupKeyPair is null)
+        {
+            <p class="callout info terminal-ai-public-key-status">Preparing public key setup...</p>
+        }
+        else
+        {
+            <div class="terminal-ai-public-key-flow">
+                <div class="terminal-ai-public-key-steps">
+                    <article class="surface-subcard terminal-ai-public-key-step">
+                        <strong>1. Generate</strong>
+                        <span>LMS generated a key pair for @PublicKeySetupTargetLabel. The private key is only saved after the connection test passes.</span>
+                    </article>
+                    <article class="surface-subcard terminal-ai-public-key-step">
+                        <strong>2. Install</strong>
+                        <span>Send the install command to the current terminal. It only appends the public key to the current account's authorized_keys file.</span>
+                    </article>
+                    <article class="surface-subcard terminal-ai-public-key-step">
+                        <strong>3. Save</strong>
+                        <span>LMS tests key auth without using the password, then saves this host as Public key first.</span>
+                    </article>
+                </div>
+
+                <label class="terminal-inline-field">
+                    <span>Public key</span>
+                    <textarea readonly class="ui-control-input terminal-ai-public-key-textarea">@publicKeySetupKeyPair.PublicKey</textarea>
+                </label>
+
+                <span class="meta-text">Fingerprint: @publicKeySetupKeyPair.FingerprintSha256</span>
+
+                <details class="terminal-ai-public-key-command">
+                    <summary>Install command</summary>
+                    <pre class="command-preview-block command-display-block">@PublicKeyInstallCommand</pre>
+                </details>
+
+                <div class="toolbar-row terminal-ai-public-key-actions">
+                    <UiCommandButton Label="Install public key"
+                                     Glyph="UiIconGlyph.Run"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     Disabled="@(isPublicKeySetupBusy || RunCommand is null)"
+                                     OnClick="RunPublicKeyInstallCommandAsync" />
+                    <UiCommandButton Label="Copy public key"
+                                     Glyph="UiIconGlyph.Copy"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     Disabled="@isPublicKeySetupBusy"
+                                     OnClick="CopyPublicKeySetupKeyAsync" />
+                    <UiCommandButton Label="Generate new key"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@isPublicKeySetupBusy"
+                                     OnClick="GeneratePublicKeySetupKeyAsync" />
+                </div>
+
+                <UiCheckboxField @bind-Value="keepStoredPasswordFallback"
+                                 Label="Keep saved password as fallback"
+                                 Helper="Recommended until the key has been used for a few normal connections. Disable it later if you want key-only SSH."
+                                 Disabled="@(!publicKeySetupEditor.HasStoredPassword || isPublicKeySetupBusy)"
+                                 Compact="true"
+                                 Card="true" />
+            </div>
+        }
+    </ChildContent>
+
+    <Footer>
+        <div class="terminal-ai-public-key-footer">
+            @if (!string.IsNullOrWhiteSpace(publicKeySetupStatus))
+            {
+                <p class="callout @publicKeySetupTone terminal-ai-public-key-status">@publicKeySetupStatus</p>
+            }
+
+            <div class="terminal-ai-public-key-footer-actions">
+                <UiCommandButton Label="Close"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@isPublicKeySetupBusy"
+                                 OnClick="ClosePublicKeySetupAsync" />
+                <UiCommandButton Label="@(isPublicKeySetupBusy ? "Testing..." : "Save and test key auth")"
+                                 Glyph="UiIconGlyph.Save"
+                                 Disabled="@(isPublicKeySetupBusy || publicKeySetupEditor is null || publicKeySetupKeyPair is null)"
+                                 OnClick="SavePublicKeyAuthenticationAsync" />
+            </div>
+        </div>
+    </Footer>
+</UiModal>
+
+@code {
+    private bool hasStartedChat;
+    private bool saveAdministratorPassword;
+    [Parameter, EditorRequired]
+    public TerminalTabState Tab { get; set; } = default!;
+
+    [Parameter]
+    public Func<string, CancellationToken, Task>? RunCommand { get; set; }
+
+    [Parameter]
+    public int AgentCommandLimit { get; set; } = DefaultMaxAgentCommands;
+
+    [Parameter]
+    public FleetPackageApprovalScope? FleetApproval { get; set; }
+
+    [Parameter]
+    public EventCallback<bool> OnAgentStopped { get; set; }
+
+    [Parameter]
+    public Func<string, Task>? WriteManagedOperationOutput { get; set; }
+
+    private string promptText = string.Empty;
+    private string panelInfo = string.Empty;
+    private string panelError = string.Empty;
+    private string agentStatus = string.Empty;
+    private string pendingApprovalCommand = string.Empty;
+    private string pendingSecureCommand = string.Empty;
+    private string secureInputText = string.Empty;
+    private string latestStructuredCommandOutput = string.Empty;
+    private bool isSendingPrompt;
+    private bool isRunningAgent;
+    private bool isProviderContextLoading;
+    private int renderedEntryCount = -1;
+    private ElementReference activityListElement;
+    private ElementReference promptInputElement;
+    private AiChatThreadEditorContextViewModel? aiProviderContext;
+    private DotNetObjectReference<TerminalAiPanel>? promptInteropReference;
+    private CancellationTokenSource? providerContextLoadCts;
+    private CancellationTokenSource? agentRunCts;
+    private Task? providerContextLoadTask;
+    private TaskCompletionSource<bool>? pendingApprovalSource;
+    private TaskCompletionSource<string?>? pendingSecureInputSource;
+    private const int DefaultMaxAgentCommands = 8;
+    private const int MaxAgentRecoveryTurns = 4;
+    private string selectedProviderKey = string.Empty;
+    private string selectedModelId = string.Empty;
+    private Guid? observedTabId;
+    private Guid? observedSessionId;
+    private string observedUsername = string.Empty;
+    private bool isDisposed;
+    private ManagedHostEditor? publicKeySetupEditor;
+    private GeneratedSshKeyPair? publicKeySetupKeyPair;
+    private bool isPublicKeySetupOpen;
+    private bool isPublicKeySetupBusy;
+    private bool publicKeyInstallCommandSent;
+    private bool publicKeySetupSaved;
+    private bool keepStoredPasswordFallback = true;
+    private string publicKeySetupStatus = string.Empty;
+    private string publicKeySetupTone = "info";
+    private static readonly Regex sudoCommandPattern = new(
+        @"(?im)(^|[;&|]\s*)sudo(\s|$)",
+        RegexOptions.Compiled);
+
+    private bool isBusy => isSendingPrompt || isRunningAgent;
+    private bool SupportsManagedHomeLabOperations => Tab.IsHomeLabTask && AiLocalMachine.IsLocalMachine(Tab.HostId);
+    private Guid? ApprovalScopeId => Tab.SessionId ?? (SupportsManagedHomeLabOperations ? Tab.Id : null);
+    private bool HasAgentSessionApproval =>
+        Tab.AiAccessMode == TerminalAiAccessMode.Agent &&
+        ((FleetApproval?.IsApprovedFor(Tab.HostId) ?? false) ||
+         (ApprovalScopeId.HasValue && Tab.AiCommandApprovalSessionId == ApprovalScopeId));
+    private bool HostUsesPublicKeyAuthentication =>
+        ManagedHostAuthenticationPolicy.UsesPublicKeyAuthentication(Tab.PrimaryAuthenticationType) ||
+        ManagedHostAuthenticationPolicy.UsesPublicKeyAuthentication(Tab.FallbackAuthenticationType);
+    private bool ShouldShowHostAuthAdvice =>
+        !SupportsManagedHomeLabOperations &&
+        !publicKeySetupSaved &&
+        ManagedHostAuthenticationPolicy.UsesPassword(Tab.PrimaryAuthenticationType) &&
+        !HostUsesPublicKeyAuthentication;
+    private string PublicKeyInstallCommand =>
+        publicKeySetupKeyPair is null
+            ? string.Empty
+            : BuildPublicKeyInstallCommand(publicKeySetupKeyPair.PublicKey);
+    private string PublicKeySetupTargetLabel =>
+        publicKeySetupEditor is null
+            ? Tab.HostName
+            : $"{publicKeySetupEditor.Username}@{publicKeySetupEditor.Hostname}";
+
+    private IReadOnlyList<TerminalAiConversationEntry> RecentEntries =>
+        Tab.AiConversation.Entries
+            .TakeLast(10)
+            .ToArray();
+
+    public Task AnalyzeSessionAsync() =>
+        SendPromptAsync(TerminalAiPromptMode.Analyze, string.Empty, TerminalAiAccessMode.ReadOnly);
+
+    public async Task StartAgentPromptAsync(string requestText)
+    {
+        if (isBusy || string.IsNullOrWhiteSpace(requestText))
+        {
+            return;
+        }
+
+        Tab.AiAccessMode = TerminalAiAccessMode.Agent;
+        Tab.AiCommandApprovalSessionId = null;
+        promptText = requestText.Trim();
+        await SendCustomPromptAsync();
+    }
+
+    // Fleet completion uses the same approval and secure sudo path as the agent.
+    // A failed/paused agent is never sufficient evidence that updates succeeded.
+    public async Task<TerminalAiCommandResult?> VerifyPackageUpdatesAsync()
+    {
+        if (isBusy) return null;
+        isSendingPrompt = true;
+        var requestTab = Tab;
+        using var operation = new CancellationTokenSource();
+        agentRunCts = operation;
+        requestTab.RegisterAiOperation(operation);
+        try
+        {
+            var command = FleetPackageUpdateService.MetadataVerificationCommand;
+            if (!await EnsureCommandAllowedAsync(command)) return null;
+            var metadata = await ExecuteWithSecureAuthenticationAsync(command, operation.Token);
+            if (metadata is null || !metadata.IsSuccess) return metadata;
+            if ((metadata.StandardOutput+"\n"+metadata.StandardError).Split('\n').Any(line=>line.StartsWith("W:") || line.StartsWith("E:") || line.StartsWith("Err:")))
+                return metadata with { ExitCode=1 };
+            return await ExecuteSuggestedCommandAsync(FleetPackageUpdateService.VerificationCommand, operation.Token);
+        }
+        finally
+        {
+            requestTab.UnregisterAiOperation(operation);
+            if (ReferenceEquals(agentRunCts, operation)) agentRunCts = null;
+            isSendingPrompt = false;
+            if (!isDisposed) await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    public async Task AnalyzeSelectionAsync(string selectionText)
+    {
+        var selected = selectionText.Trim();
+        if (string.IsNullOrWhiteSpace(selected))
+        {
+            panelError = "Select terminal output first.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        var requestText = $"""
+Review this selected content from the current terminal session.
+Explain what it indicates, then suggest the safest next step or command if useful.
+
+Selected terminal content:
+```text
+{selected}
+```
+""";
+
+        await SendPromptAsync(TerminalAiPromptMode.Analyze, requestText, TerminalAiAccessMode.ReadOnly);
+    }
+
+    private async Task SendCustomPromptAsync()
+    {
+        var requestText = promptText.Trim();
+        if (string.IsNullOrWhiteSpace(requestText))
+        {
+            panelError = "Enter a request first.";
+            return;
+        }
+
+        if (!Tab.IsSessionActive && !SupportsManagedHomeLabOperations && Tab.AiAccessMode != TerminalAiAccessMode.ReadOnly)
+        {
+            panelError = "Connect the terminal before asking the AI to make changes.";
+            return;
+        }
+
+        var completedNormally = false;
+        hasStartedChat = true;
+        isRunningAgent = true;
+        var requestTab = Tab;
+        var runCts = new CancellationTokenSource();
+        agentRunCts = runCts;
+        requestTab.RegisterAiOperation(runCts);
+        var cancellationToken = runCts.Token;
+        panelInfo = string.Empty;
+        panelError = string.Empty;
+        agentStatus = "Thinking...";
+        var requestTabId = Tab.Id;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var commandCount = 0;
+            var recoveryTurns = 0;
+            var authenticatedInspectionAttempted = false;
+
+            if (requestTab.PendingSudoAuthentication || TerminalAiSecureInputPolicy.HasSudoAuthenticationFailure(requestText))
+            {
+                authenticatedInspectionAttempted = true;
+                requestTab.PendingSudoAuthentication = false;
+                // The host updater already established that sudo needs authentication.
+                // Prompt before asking the model: do not depend on it proposing sudo.
+                var inspection = await ExecuteWithSecureAuthenticationAsync(
+                    TerminalSudoAuthentication.UpdateInspectionCommand, cancellationToken);
+                if (inspection is null) return;
+                latestStructuredCommandOutput = TerminalAiCommandEvidenceFormatter.Format(inspection);
+                AddSystemEntry(latestStructuredCommandOutput);
+                if (TerminalAiSecureInputPolicy.RequiresSudoPassword(inspection.CommandText, inspection))
+                {
+                    requestTab.PendingSudoAuthentication = true;
+                    panelError = "Administrator authentication did not succeed. Check this Linux account's password and sudo permission, then try again. SSH key login remains unchanged.";
+                    return;
+                }
+            }
+
+            if (SupportsManagedHomeLabOperations)
+            {
+                agentStatus = "Inspecting Home Lab...";
+                await InvokeAsync(StateHasChanged);
+                var inspection = await ExecuteSuggestedCommandAsync("lms-home-lab inspect", cancellationToken);
+                latestStructuredCommandOutput = TerminalAiCommandEvidenceFormatter.Format(inspection);
+            }
+
+            var commandLimit = Math.Clamp(AgentCommandLimit, 1, 32);
+            while (commandCount < commandLimit)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (isDisposed || Tab.Id != requestTabId)
+                {
+                    return;
+                }
+
+                var result = await ExecutePromptCoreAsync(
+                    TerminalAiPromptMode.Custom,
+                    commandCount == 0 && recoveryTurns == 0 ? requestText : string.Empty,
+                    appendUserEntry: commandCount == 0 && recoveryTurns == 0,
+                    activeAgentGoal: requestText,
+                    cancellationToken: cancellationToken);
+
+                if (commandCount == 0 && recoveryTurns == 0)
+                {
+                    promptText = string.Empty;
+                }
+
+                if (string.IsNullOrWhiteSpace(result.AssistantEntry.SuggestedCommand))
+                {
+                    // A model may describe the missing administrator authentication
+                    // instead of proposing a command. LMS owns that recovery flow.
+                    if (!authenticatedInspectionAttempted &&
+                        TerminalAiSecureInputPolicy.HasSudoAuthenticationFailure(result.AssistantEntry.Content))
+                    {
+                        authenticatedInspectionAttempted = true;
+                        var inspection = await ExecuteWithSecureAuthenticationAsync(
+                            TerminalSudoAuthentication.UpdateInspectionCommand, cancellationToken);
+                        if (inspection is null) return;
+                        latestStructuredCommandOutput = TerminalAiCommandEvidenceFormatter.Format(inspection);
+                        AddSystemEntry(latestStructuredCommandOutput);
+                        if (TerminalAiSecureInputPolicy.RequiresSudoPassword(inspection.CommandText, inspection))
+                        {
+                            panelError = "Administrator authentication failed on the connected host. Check this account's Linux password and sudo permission.";
+                            return;
+                        }
+                        recoveryTurns++;
+                        continue;
+                    }
+                    agentStatus = string.Empty;
+                    completedNormally = true;
+                    return;
+                }
+
+                var normalizedCommand = result.AssistantEntry.SuggestedCommand.Trim();
+                if (!await EnsureCommandAllowedAsync(normalizedCommand))
+                {
+                    return;
+                }
+
+                agentStatus = "Running command...";
+                await InvokeAsync(StateHasChanged);
+                try
+                {
+                    var commandResult = TerminalAiSecureInputPolicy.TryPrepareSudoPasswordCommand(normalizedCommand, out _)
+                        ? await ExecuteWithSecureAuthenticationAsync(normalizedCommand, cancellationToken)
+                        : await ExecuteSuggestedCommandAsync(normalizedCommand, cancellationToken);
+                    if (commandResult is null) return;
+                    if (TerminalAiSecureInputPolicy.RequiresSudoPassword(normalizedCommand, commandResult))
+                    {
+                        var authenticatedResult = await ExecuteWithSecureAuthenticationAsync(normalizedCommand, cancellationToken);
+                        if (authenticatedResult is null) return;
+                        commandResult = authenticatedResult;
+                        if (TerminalAiSecureInputPolicy.RequiresSudoPassword(normalizedCommand, commandResult))
+                        {
+                            panelError = "Administrator authentication failed. Check this account's Linux password and sudo permission. No changes were made to its SSH key or sudo policy.";
+                            return;
+                        }
+                    }
+
+                    latestStructuredCommandOutput = TerminalAiCommandEvidenceFormatter.Format(commandResult);
+                    AddSystemEntry(latestStructuredCommandOutput);
+                }
+                catch (TerminalSessionUnavailableException exception)
+                {
+                    panelError = exception.Message;
+                    agentStatus = string.Empty;
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    recoveryTurns++;
+                    AddSystemEntry(TerminalAiAgentRecovery.BuildDispatchFailureFeedback(normalizedCommand, exception));
+                    if (recoveryTurns >= MaxAgentRecoveryTurns)
+                    {
+                        agentStatus = "The private command channel could not complete after bounded recovery attempts. The console remains available.";
+                        return;
+                    }
+
+                    agentStatus = "Private command channel interrupted. Recovering without touching the console...";
+                    await InvokeAsync(StateHasChanged);
+                    continue;
+                }
+
+                commandCount++;
+                recoveryTurns = 0;
+                if (isDisposed || Tab.Id != requestTabId)
+                {
+                    return;
+                }
+
+                agentStatus = "Checking the result...";
+                await InvokeAsync(StateHasChanged);
+            }
+
+            agentStatus = $"Stopped after {commandLimit} commands. Send a follow-up to continue.";
+        }
+        catch (OperationCanceledException)
+        {
+            agentStatus = "Stopped.";
+        }
+        catch (Exception exception)
+        {
+            panelError = exception.Message;
+            agentStatus = string.Empty;
+        }
+        finally
+        {
+            if (ReferenceEquals(agentRunCts, runCts))
+            {
+                agentRunCts = null;
+            }
+            requestTab.UnregisterAiOperation(runCts);
+            runCts.Dispose();
+            isRunningAgent = false;
+            if (!isDisposed)
+            {
+                await InvokeAsync(StateHasChanged);
+                await OnAgentStopped.InvokeAsync(completedNormally);
+            }
+        }
+    }
+
+    private async Task<bool> EnsureCommandAllowedAsync(string commandText)
+    {
+        var managed = HomeLabTerminalProtocol.IsManagedCommand(commandText);
+        if (managed && (!SupportsManagedHomeLabOperations || !HomeLabTerminalProtocol.TryParse(commandText, out _, out _)))
+        {
+            agentStatus = "Use one valid managed operation in a local Home Lab task.";
+            return false;
+        }
+        if (!managed && !Tab.IsSessionActive)
+        {
+            agentStatus = "Connect this terminal for shell diagnostics. Managed Home Lab operations can run without SSH.";
+            return false;
+        }
+
+        var disposition = TerminalAiAccessPolicy.Evaluate(
+            Tab.AiAccessMode,
+            commandText,
+            HasAgentSessionApproval);
+
+        if (disposition == TerminalAiCommandDisposition.Run)
+        {
+            return true;
+        }
+
+        if (disposition == TerminalAiCommandDisposition.Block)
+        {
+            agentStatus = "Read only — the requested change was not run.";
+            return false;
+        }
+
+        return await RequestCommandApprovalAsync(commandText);
+    }
+
+    private async Task<bool> RequestCommandApprovalAsync(string commandText)
+    {
+        var source = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pendingApprovalSource = source;
+        pendingApprovalCommand = commandText;
+        agentStatus = "Waiting for approval.";
+        await InvokeAsync(StateHasChanged);
+
+        var allowed = await source.Task.WaitAsync(agentRunCts?.Token ?? CancellationToken.None);
+
+        if (ReferenceEquals(pendingApprovalSource, source))
+        {
+            pendingApprovalSource = null;
+            pendingApprovalCommand = string.Empty;
+        }
+
+        agentStatus = allowed ? "Running command..." : "Stopped — no change was made.";
+        if (!isDisposed)
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+
+        return allowed;
+    }
+
+    private Task AllowPendingCommandOnceAsync()
+    {
+        pendingApprovalSource?.TrySetResult(true);
+        return Task.CompletedTask;
+    }
+
+    private Task AllowPendingCommandsForSessionAsync()
+    {
+        if(FleetApproval is not null)
+        {
+            if(FleetApproval.Approve(Tab.HostId)) pendingApprovalSource?.TrySetResult(true);
+        }
+        else if (ApprovalScopeId.HasValue)
+        {
+            Tab.AiCommandApprovalSessionId = ApprovalScopeId;
+            pendingApprovalSource?.TrySetResult(true);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task StopPendingCommandAsync()
+    {
+        pendingApprovalSource?.TrySetResult(false);
+        return Task.CompletedTask;
+    }
+
+    private Task StopAgentAsync()
+    {
+        agentStatus = "Stopping...";
+        Tab.CancelAiOperation();
+        pendingApprovalSource?.TrySetResult(false);
+        pendingSecureInputSource?.TrySetResult(null);
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task SendPromptAsync(
+        TerminalAiPromptMode mode,
+        string requestText,
+        TerminalAiAccessMode? accessModeOverride = null)
+    {
+        var requestTab = Tab;
+        using var operation = new CancellationTokenSource();
+        requestTab.RegisterAiOperation(operation);
+        isSendingPrompt = true;
+        panelInfo = string.Empty;
+        hasStartedChat = true;
+        panelError = string.Empty;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            await ExecutePromptCoreAsync(mode, requestText, accessModeOverride: accessModeOverride, cancellationToken: operation.Token);
+            promptText = string.Empty;
+        }
+        catch (OperationCanceledException)
+        {
+            agentStatus = "Stopped because the terminal connection changed.";
+        }
+        catch (Exception exception)
+        {
+            panelError = exception.Message;
+        }
+        finally
+        {
+            requestTab.UnregisterAiOperation(operation);
+            isSendingPrompt = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            promptInteropReference ??= DotNetObjectReference.Create(this);
+
+            try
+            {
+                await JSRuntime.InvokeVoidAsync("lmsTerminal.registerAiPromptShortcut", promptInputElement, promptInteropReference);
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+        }
+
+        if (Tab.CanStartPendingAiTask && !isBusy)
+        {
+            Tab.StartPendingAiTask = false;
+            Tab.PendingAiTaskPrompt = null;
+            await StartAgentPromptAsync(promptText);
+        }
+
+        var currentEntryCount = RecentEntries.Count;
+        if (currentEntryCount == renderedEntryCount)
+        {
+            return;
+        }
+
+        renderedEntryCount = currentEntryCount;
+
+        if (currentEntryCount == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.scrollElementToBottom", activityListElement);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    [JSInvokable]
+    public async Task SubmitPromptFromKeyboardAsync()
+    {
+        if (isBusy || string.IsNullOrWhiteSpace(promptText))
+        {
+            return;
+        }
+
+        await SendCustomPromptAsync();
+    }
+
+    protected override Task OnParametersSetAsync()
+    {
+        if (observedTabId != Tab.Id || observedSessionId != Tab.SessionId || observedUsername != Tab.ConnectedUsername)
+        {
+            pendingApprovalSource?.TrySetResult(false);
+            pendingApprovalSource = null;
+            pendingApprovalCommand = string.Empty;
+            pendingSecureInputSource?.TrySetResult(null);
+            pendingSecureInputSource = null;
+            pendingSecureCommand = string.Empty;
+            secureInputText = string.Empty;
+            latestStructuredCommandOutput = string.Empty;
+            hasStartedChat = false;
+            observedTabId = Tab.Id;
+            observedSessionId = Tab.SessionId;
+            observedUsername = Tab.ConnectedUsername;
+            ResetPublicKeySetupState();
+        }
+
+        if (Tab.PendingAiTaskPrompt is { } pendingPrompt)
+        {
+            promptText = pendingPrompt;
+        }
+        StartProviderContextLoad();
+        return Task.CompletedTask;
+    }
+
+    private async Task<TerminalAiTurnResult> ExecutePromptCoreAsync(
+        TerminalAiPromptMode mode,
+        string requestText,
+        bool appendUserEntry = true,
+        TerminalAiAccessMode? accessModeOverride = null,
+        string activeAgentGoal = "",
+        CancellationToken cancellationToken = default)
+    {
+        var requestTab = Tab;
+        var requestSessionId = Tab.SessionId;
+        var username = Tab.ConnectedUsername;
+        await EnsureProviderContextAsync(cancellationToken);
+        EnsureCurrentTerminalContext(requestTab, requestSessionId, username, cancellationToken);
+        SyncTerminalProviderSelection();
+
+        var conversation = new TerminalAiConversationState
+        {
+            ProviderKey = Tab.AiConversation.ProviderKey,
+            ProviderLabel = Tab.AiConversation.ProviderLabel,
+            ModelId = Tab.AiConversation.ModelId,
+            ProviderConversationReference = Tab.AiConversation.ProviderConversationReference,
+            ProviderResponseId = Tab.AiConversation.ProviderResponseId,
+            Entries = Tab.AiConversation.Entries.ToList()
+        };
+        var result = await TerminalAiAssistantService.ExecutePromptAsync(
+            conversation,
+            new TerminalAiPromptRequest
+            {
+                Mode = mode,
+                AccessMode = accessModeOverride ?? Tab.AiAccessMode,
+                HostId = Tab.HostId,
+                HostName = Tab.HostName,
+                HostAddress = Tab.HostAddress,
+                Username = username,
+                WorkingDirectory = Tab.WorkingDirectory,
+                TerminalOutput = Tab.Snapshot?.Output ?? string.Empty,
+                StructuredCommandOutput = latestStructuredCommandOutput,
+                Request = requestText,
+                ActiveGoal = activeAgentGoal,
+                AllowInternetResearch = Tab.AllowInternetResearch,
+                SupportsManagedHomeLabOperations = SupportsManagedHomeLabOperations
+            },
+            cancellationToken);
+        EnsureCurrentTerminalContext(requestTab, requestSessionId, username, cancellationToken);
+        latestStructuredCommandOutput = string.Empty;
+
+        panelInfo = result.Sanitization.Applied
+            ? result.Sanitization.Message
+            : string.Empty;
+
+        ApplyTerminalProviderSelection(result.ProviderKey, result.ModelId);
+        Tab.AiConversation.ProviderConversationReference = result.ProviderConversationReference;
+        Tab.AiConversation.ProviderResponseId = result.ProviderResponseId;
+        if (appendUserEntry)
+        {
+            Tab.AiConversation.Entries.Add(result.UserEntry);
+        }
+        Tab.AiConversation.Entries.Add(result.AssistantEntry);
+        await InvokeAsync(StateHasChanged);
+        return result;
+    }
+
+    private void EnsureCurrentTerminalContext(
+        TerminalTabState requestTab,
+        Guid? requestSessionId,
+        string username,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!ReferenceEquals(Tab, requestTab) || Tab.SessionId != requestSessionId || Tab.ConnectedUsername != username)
+        {
+            throw new OperationCanceledException("The terminal connection changed. Send a new request for the connected Linux user.", cancellationToken);
+        }
+    }
+
+    private async Task EnsureProviderContextAsync(CancellationToken cancellationToken = default)
+    {
+        if (aiProviderContext is not null)
+        {
+            return;
+        }
+
+        if (providerContextLoadTask is null || providerContextLoadTask.IsCompleted)
+        {
+            providerContextLoadTask = LoadProviderContextAsync(notifyOnCompletion: false);
+        }
+
+        await providerContextLoadTask.WaitAsync(cancellationToken);
+    }
+
+    private void StartProviderContextLoad()
+    {
+        if (aiProviderContext is not null)
+        {
+            SyncTerminalProviderSelection();
+            return;
+        }
+
+        if (providerContextLoadTask is { IsCompleted: false })
+        {
+            return;
+        }
+
+        providerContextLoadTask = LoadProviderContextAsync(notifyOnCompletion: true);
+    }
+
+    private async Task LoadProviderContextAsync(bool notifyOnCompletion)
+    {
+        providerContextLoadCts?.Cancel();
+        providerContextLoadCts?.Dispose();
+        providerContextLoadCts = new CancellationTokenSource();
+        var cancellationToken = providerContextLoadCts.Token;
+        isProviderContextLoading = true;
+
+        try
+        {
+            aiProviderContext = await ThreadService.GetEditorAsync(cancellationToken: cancellationToken);
+            SyncTerminalProviderSelection();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            panelError = exception.Message;
+        }
+        finally
+        {
+            isProviderContextLoading = false;
+            if (notifyOnCompletion && !isDisposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private void SyncTerminalProviderSelection()
+    {
+        if (aiProviderContext is null)
+        {
+            return;
+        }
+
+        var requestedProviderKey = string.IsNullOrWhiteSpace(selectedProviderKey)
+            ? Tab.AiConversation.ProviderKey
+            : selectedProviderKey;
+        var requestedModelId = string.IsNullOrWhiteSpace(selectedModelId)
+            ? Tab.AiConversation.ModelId
+            : selectedModelId;
+        var providers = BuildAvailableAiProviders(requestedProviderKey);
+        var selection = AiProviderSelectionResolver.Resolve(
+            requestedProviderKey,
+            requestedModelId,
+            aiProviderContext.Editor.ProviderKey,
+            aiProviderContext.Editor.ModelId,
+            providers,
+            aiProviderContext.Models);
+
+        selectedProviderKey = selection.ProviderKey;
+        selectedModelId = selection.ModelId;
+        Tab.AiConversation.ProviderKey = selection.ProviderKey;
+        Tab.AiConversation.ModelId = selection.ModelId;
+        Tab.AiConversation.ProviderLabel = selection.ProviderLabel;
+    }
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> AvailableAiProviders =>
+        BuildAvailableAiProviders(selectedProviderKey);
+
+    private Task HandleProviderSelectionChangedAsync(string providerKey)
+    {
+        var previousProviderKey = Tab.AiConversation.ProviderKey;
+        var previousModelId = Tab.AiConversation.ModelId;
+        ApplyTerminalProviderSelection(providerKey, string.Empty);
+        if (!string.Equals(previousProviderKey, Tab.AiConversation.ProviderKey, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(previousModelId, Tab.AiConversation.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            ResetTerminalProviderState();
+        }
+
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private Task HandleModelSelectionChangedAsync(string modelId)
+    {
+        var previousModelId = Tab.AiConversation.ModelId;
+        ApplyTerminalProviderSelection(selectedProviderKey, modelId);
+        if (!string.Equals(previousModelId, Tab.AiConversation.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            ResetTerminalProviderState();
+        }
+
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private Task HandleAccessModeChangedAsync(TerminalAiAccessMode accessMode)
+    {
+        Tab.AiAccessMode = accessMode;
+        Tab.AiCommandApprovalSessionId = null;
+        FleetApproval?.Revoke();
+        agentStatus = string.Empty;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private static string GetAccessModeLabel(TerminalAiAccessMode accessMode) =>
+        accessMode switch
+        {
+            TerminalAiAccessMode.ReadOnly => "Read only",
+            TerminalAiAccessMode.FullAccess => "Full access",
+            _ => "Agent"
+        };
+
+    private static string GetAccessModeDescription(TerminalAiAccessMode accessMode) =>
+        accessMode switch
+        {
+            TerminalAiAccessMode.ReadOnly => "Inspects and explains. Read-only checks can run, but the AI never changes the host.",
+            TerminalAiAccessMode.FullAccess => "Runs the commands needed to finish the request without asking for approval.",
+            _ => "Runs safe checks automatically and pauses before the first change. Allow it once or for the session."
+        };
+
+    private string GetPromptPlaceholder() =>
+        Tab.AiAccessMode switch
+        {
+            TerminalAiAccessMode.ReadOnly => "Ask a question or request an investigation. No changes will be made.",
+            TerminalAiAccessMode.FullAccess => "Describe the outcome you want. The AI will work until it is done.",
+            _ => "Ask a question or describe the outcome. The AI only pauses when a change needs approval."
+        };
+
+    private string GetBusyLabel() =>
+        string.IsNullOrWhiteSpace(pendingApprovalCommand) && string.IsNullOrWhiteSpace(pendingSecureCommand)
+            ? "Working..."
+            : "Waiting...";
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> BuildAvailableAiProviders(string selectedProviderKey)
+    {
+        if (aiProviderContext is null)
+        {
+            return [];
+        }
+
+        return aiProviderContext.ConfiguredProviders
+            .Where(provider =>
+                (provider.IsEnabled &&
+                 aiProviderContext.SupportedProviders.FirstOrDefault(definition => definition.ProviderType == provider.ProviderType)?.IsRuntimeImplemented != false) ||
+                provider.ProviderKey.Equals(selectedProviderKey, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(provider => provider.IsDefault)
+            .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private void ResetTerminalProviderState()
+    {
+        Tab.AiConversation.ProviderConversationReference = string.Empty;
+        Tab.AiConversation.ProviderResponseId = string.Empty;
+    }
+
+    private void ApplyTerminalProviderSelection(string? providerKey, string? modelId)
+    {
+        if (aiProviderContext is null)
+        {
+            selectedProviderKey = providerKey?.Trim() ?? string.Empty;
+            selectedModelId = modelId?.Trim() ?? string.Empty;
+            Tab.AiConversation.ProviderKey = selectedProviderKey;
+            Tab.AiConversation.ModelId = selectedModelId;
+            return;
+        }
+
+        var selection = AiProviderSelectionResolver.Resolve(
+            providerKey,
+            modelId,
+            aiProviderContext.Editor.ProviderKey,
+            aiProviderContext.Editor.ModelId,
+            BuildAvailableAiProviders(providerKey?.Trim() ?? string.Empty),
+            aiProviderContext.Models);
+
+        selectedProviderKey = selection.ProviderKey;
+        selectedModelId = selection.ModelId;
+        Tab.AiConversation.ProviderKey = selection.ProviderKey;
+        Tab.AiConversation.ModelId = selection.ModelId;
+        Tab.AiConversation.ProviderLabel = selection.ProviderLabel;
+    }
+
+    private void ClearContext()
+    {
+        hasStartedChat = false;
+        Tab.AiConversation.ProviderConversationReference = string.Empty;
+        Tab.AiConversation.ProviderResponseId = string.Empty;
+        Tab.AiConversation.Entries.Clear();
+        panelError = string.Empty;
+        panelInfo = string.Empty;
+        agentStatus = string.Empty;
+        latestStructuredCommandOutput = string.Empty;
+        pendingSecureInputSource?.TrySetResult(null);
+        pendingSecureInputSource = null;
+        pendingSecureCommand = string.Empty;
+        secureInputText = string.Empty;
+        renderedEntryCount = 0;
+    }
+
+    private void AddSystemEntry(string content)
+    {
+        Tab.AiConversation.Entries.Add(new TerminalAiConversationEntry(
+            AiChatMessageRole.System,
+            content,
+            DateTimeOffset.UtcNow));
+    }
+
+    private async Task<TerminalAiCommandResult> ExecuteSuggestedCommandAsync(
+        string commandText,
+        CancellationToken cancellationToken = default,
+        CommandExecutionInput? standardInput = null,
+        bool authenticateSudo = false)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (HomeLabTerminalProtocol.IsManagedCommand(commandText))
+        {
+            if (!SupportsManagedHomeLabOperations) throw new InvalidOperationException("This terminal is not a local Home Lab task.");
+            var managedTab = Tab;
+            using var scope = HomeLabScopeFactory.CreateScope();
+            var managedResult = await scope.ServiceProvider.GetRequiredService<HomeLabTerminalCommandService>().ExecuteAsync(managedTab, commandText, cancellationToken);
+            if (WriteManagedOperationOutput is not null)
+                await WriteManagedOperationOutput($"$ {commandText}\n{managedResult.StandardOutput}\n{managedResult.StandardError}\n[exit {managedResult.ExitCode}]\n");
+            return managedResult;
+        }
+        if (!Tab.SessionId.HasValue || !Tab.IsSessionActive)
+        {
+            throw new TerminalSessionUnavailableException(
+                "The terminal session is no longer active. Reconnect the terminal to continue.",
+                canRetryCommand: false,
+                connectionRecovered: false);
+        }
+
+        var requestTab = Tab;
+        var requestSessionId = Tab.SessionId;
+        var username = Tab.ConnectedUsername;
+        var result = await TerminalAiCommandDaemon.ExecuteAsync(
+            new TerminalAiCommandRequest(
+                Guid.NewGuid(),
+                Tab.SessionId.Value,
+                commandText,
+                Tab.WorkingDirectory,
+                standardInput,
+                AuthenticateSudo: authenticateSudo || standardInput is { IsSensitive: true }),
+            cancellationToken: cancellationToken);
+        EnsureCurrentTerminalContext(requestTab, requestSessionId, username, cancellationToken);
+        return result;
+    }
+
+    private async Task<TerminalAiCommandResult?> ExecuteWithSecureAuthenticationAsync(
+        string commandText, CancellationToken cancellationToken)
+    {
+        if (!TerminalAiSecureInputPolicy.TryPrepareSudoPasswordCommand(commandText, out var secureCommand))
+        {
+            agentStatus = "Simplifying the administrator command...";
+            return new TerminalAiCommandResult(Guid.NewGuid(), Tab.SessionId ?? Guid.Empty, commandText, Tab.ConnectedUsername,
+                Tab.WorkingDirectory, 126, string.Empty,
+                "LMS did not run this command or send a password. Propose one direct sudo operation without pipelines, shell scripts or substitutions. Supported operations: journalctl (quoted dates supported), systemctl, cat, head, tail, ls, df, du, stat, readlink, id, uptime, uname, and /usr/local/sbin/linux-made-sane-update. Split compound diagnostics into separate commands. Do not ask the user for a password in chat.",
+                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        }
+        var requestTab = Tab;
+        var sessionId = Tab.SessionId;
+        var username = Tab.ConnectedUsername;
+        var cachedResult = await ExecuteSuggestedCommandAsync(secureCommand, cancellationToken, authenticateSudo: true);
+        if (!TerminalAiSecureInputPolicy.RequiresSudoPassword(commandText, cachedResult)) return cachedResult;
+        var savedInput = await AdministratorCredentials.ResolveAsync(Tab.HostId, username, cancellationToken);
+        EnsureCurrentTerminalContext(requestTab, sessionId, username, cancellationToken);
+        if (savedInput is not null)
+        {
+            var savedResult = await ExecuteSuggestedCommandAsync(secureCommand, cancellationToken, savedInput);
+            if (!TerminalAiSecureInputPolicy.RequiresSudoPassword(commandText, savedResult)) return savedResult;
+        }
+        var password = await RequestSecureInputAsync(commandText, cancellationToken);
+        try
+        {
+            EnsureCurrentTerminalContext(requestTab, sessionId, username, cancellationToken);
+            if (password is null) { agentStatus = "Stopped — no password was sent."; return null; }
+            if (password.Contains('\n') || password.Contains('\r'))
+                throw new InvalidOperationException("Enter a single password without line breaks.");
+            agentStatus = "Authenticating on the connected host...";
+            await InvokeAsync(StateHasChanged);
+            var result = await ExecuteSuggestedCommandAsync(secureCommand, cancellationToken,
+                new CommandExecutionInput(password + "\n", true));
+            if (saveAdministratorPassword && result.AdministratorAuthenticated)
+            {
+                try { await AdministratorCredentials.SaveAsync(Tab.HostId, username, password, cancellationToken); }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    panelInfo = "Authentication succeeded, but the password could not be saved. " + exception.Message;
+                }
+            }
+            return result;
+        }
+        finally { password = null; }
+    }
+
+    private async Task<string?> RequestSecureInputAsync(
+        string commandText,
+        CancellationToken cancellationToken)
+    {
+        var source = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pendingSecureInputSource = source;
+        pendingSecureCommand = commandText;
+        saveAdministratorPassword = false;
+        secureInputText = string.Empty;
+        agentStatus = "Waiting for local secure input.";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            return await source.Task.WaitAsync(TimeSpan.FromMinutes(5), cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            throw new InvalidOperationException("Authentication timed out. No password was sent. Start repair again when you are ready.");
+        }
+        finally
+        {
+            if (ReferenceEquals(pendingSecureInputSource, source))
+            {
+                pendingSecureInputSource = null;
+                pendingSecureCommand = string.Empty;
+                secureInputText = string.Empty;
+            }
+
+            if (!isDisposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+    }
+
+    private Task SubmitSecureInputAsync()
+    {
+        var value = secureInputText;
+        secureInputText = string.Empty;
+        pendingSecureInputSource?.TrySetResult(string.IsNullOrEmpty(value) ? null : value);
+        value = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task CancelSecureInputAsync()
+    {
+        secureInputText = string.Empty;
+        pendingSecureInputSource?.TrySetResult(null);
+        return Task.CompletedTask;
+    }
+
+    private bool ShouldShowCommandAuthAdvice(string? commandText) =>
+        ShouldShowHostAuthAdvice && ContainsSudoCommand(commandText);
+
+    private async Task OpenPublicKeySetupAsync()
+    {
+        isPublicKeySetupOpen = true;
+        publicKeySetupStatus = string.Empty;
+        publicKeySetupTone = "info";
+        await EnsurePublicKeySetupAsync();
+    }
+
+    private Task ClosePublicKeySetupAsync()
+    {
+        if (!isPublicKeySetupBusy)
+        {
+            isPublicKeySetupOpen = false;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task EnsurePublicKeySetupAsync()
+    {
+        if (isPublicKeySetupBusy || publicKeySetupEditor is not null && publicKeySetupKeyPair is not null)
+        {
+            return;
+        }
+
+        isPublicKeySetupBusy = true;
+        publicKeySetupStatus = "Loading host details...";
+        publicKeySetupTone = "info";
+
+        try
+        {
+            publicKeySetupEditor = await HostService.GetEditorAsync(Tab.HostId);
+            if (publicKeySetupEditor is null)
+            {
+                throw new InvalidOperationException("Host not found.");
+            }
+
+            keepStoredPasswordFallback = publicKeySetupEditor.HasStoredPassword;
+            await GeneratePublicKeySetupKeyCoreAsync();
+            publicKeySetupStatus = "Key generated. Install the public key in the current terminal, then save and test key auth.";
+            publicKeySetupTone = "success";
+        }
+        catch (Exception exception)
+        {
+            publicKeySetupStatus = exception.Message;
+            publicKeySetupTone = "error";
+        }
+        finally
+        {
+            isPublicKeySetupBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task GeneratePublicKeySetupKeyAsync()
+    {
+        if (isPublicKeySetupBusy)
+        {
+            return;
+        }
+
+        isPublicKeySetupBusy = true;
+        publicKeySetupStatus = "Generating a new key pair...";
+        publicKeySetupTone = "info";
+
+        try
+        {
+            await GeneratePublicKeySetupKeyCoreAsync();
+            publicKeyInstallCommandSent = false;
+            publicKeySetupStatus = "New key generated. Install this public key before saving.";
+            publicKeySetupTone = "success";
+        }
+        catch (Exception exception)
+        {
+            publicKeySetupStatus = exception.Message;
+            publicKeySetupTone = "error";
+        }
+        finally
+        {
+            isPublicKeySetupBusy = false;
+        }
+    }
+
+    private async Task GeneratePublicKeySetupKeyCoreAsync()
+    {
+        publicKeySetupKeyPair = await SshKeyPairGenerator.GenerateAsync(
+            SshKeyGenerationProfile.Ed25519,
+            BuildPublicKeyComment());
+    }
+
+    private async Task RunPublicKeyInstallCommandAsync()
+    {
+        if (publicKeySetupKeyPair is null)
+        {
+            publicKeySetupStatus = "Generate a key before installing it.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        if (RunCommand is null)
+        {
+            publicKeySetupStatus = "Open a connected terminal for this host before running the install command.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        await RunCommand(PublicKeyInstallCommand, CancellationToken.None);
+        publicKeyInstallCommandSent = true;
+        publicKeySetupStatus = "Install command sent. Wait for the terminal to report installed or already installed, then save and test key auth.";
+        publicKeySetupTone = "success";
+    }
+
+    private async Task CopyPublicKeySetupKeyAsync()
+    {
+        if (publicKeySetupKeyPair is null)
+        {
+            publicKeySetupStatus = "Generate a key before copying it.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", publicKeySetupKeyPair.PublicKey);
+        publicKeySetupStatus = copied
+            ? "Public key copied."
+            : "Clipboard copy was blocked by the browser. Select the public key text manually.";
+        publicKeySetupTone = copied ? "success" : "warning";
+    }
+
+    private async Task SavePublicKeyAuthenticationAsync()
+    {
+        if (publicKeySetupEditor is null || publicKeySetupKeyPair is null)
+        {
+            publicKeySetupStatus = "Generate a key before saving.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        isPublicKeySetupBusy = true;
+        publicKeySetupStatus = publicKeyInstallCommandSent
+            ? "Testing public key SSH..."
+            : "Testing public key SSH. If this fails, run the install command first.";
+        publicKeySetupTone = "info";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var editor = publicKeySetupEditor;
+            editor.PrivateKey = publicKeySetupKeyPair.PrivateKey;
+            editor.PrivateKeyPassphrase = string.Empty;
+            editor.ClearStoredPrivateKey = false;
+            editor.ClearStoredPrivateKeyPassphrase = editor.HasStoredPrivateKeyPassphrase;
+            editor.PrimaryAuthenticationType = AuthenticationType.PrivateKey;
+            editor.FallbackAuthenticationType = null;
+            editor.Password = string.Empty;
+            editor.ClearStoredPassword = false;
+
+            var testResult = await HostService.TestConnectionAsync(editor);
+            if (testResult.Status != ConnectionTestStatus.Succeeded)
+            {
+                publicKeySetupStatus = BuildConnectionTestMessage(
+                    testResult,
+                    "Public key SSH did not connect. Run the install command in the terminal and try again.");
+                publicKeySetupTone = "error";
+                return;
+            }
+
+            editor.FallbackAuthenticationType =
+                keepStoredPasswordFallback && editor.HasStoredPassword
+                    ? AuthenticationType.Password
+                    : null;
+            editor.ClearStoredPassword = !keepStoredPasswordFallback && editor.HasStoredPassword;
+
+            await HostService.SaveHostAsync(editor);
+            Tab.ApplyAuthentication(AuthenticationType.PrivateKey, editor.FallbackAuthenticationType);
+            Tab.PreferStoredCredentials = true;
+            publicKeySetupSaved = true;
+            publicKeySetupStatus = "Public key auth is saved and tested. Existing terminals can stay open; reconnect when you want to use the key.";
+            publicKeySetupTone = "success";
+        }
+        catch (Exception exception)
+        {
+            publicKeySetupStatus = exception.Message;
+            publicKeySetupTone = "error";
+        }
+        finally
+        {
+            isPublicKeySetupBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ResetPublicKeySetupState()
+    {
+        isPublicKeySetupOpen = false;
+        isPublicKeySetupBusy = false;
+        publicKeySetupEditor = null;
+        publicKeySetupKeyPair = null;
+        publicKeyInstallCommandSent = false;
+        publicKeySetupSaved = false;
+        keepStoredPasswordFallback = true;
+        publicKeySetupStatus = string.Empty;
+        publicKeySetupTone = "info";
+    }
+
+    private string? BuildPublicKeyComment()
+    {
+        var username = publicKeySetupEditor?.Username.Trim() ?? Tab.Username.Trim();
+        var hostname = publicKeySetupEditor?.Hostname.Trim() ?? Tab.HostAddress.Trim();
+
+        if (!string.IsNullOrWhiteSpace(username) && !string.IsNullOrWhiteSpace(hostname))
+        {
+            return $"linux-made-sane:{username}@{hostname}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(hostname))
+        {
+            return $"linux-made-sane:{hostname}";
+        }
+
+        return string.IsNullOrWhiteSpace(username)
+            ? "linux-made-sane"
+            : $"linux-made-sane:{username}";
+    }
+
+    private static string BuildConnectionTestMessage(HostConnectionTestResult result, string fallback)
+    {
+        var summary = string.IsNullOrWhiteSpace(result.Summary) ? fallback : result.Summary.Trim();
+        var message = string.IsNullOrWhiteSpace(result.Detail)
+            ? summary
+            : $"{summary} {result.Detail.Trim()}";
+
+        return string.Equals(message, fallback, StringComparison.Ordinal)
+            ? message
+            : $"{message} {fallback}";
+    }
+
+    private static string BuildPublicKeyInstallCommand(string publicKey)
+        => SshAuthorizedKeyInstallCommandBuilder.Build(publicKey);
+
+    private static bool ContainsSudoCommand(string? commandText) =>
+        !string.IsNullOrWhiteSpace(commandText) && sudoCommandPattern.IsMatch(commandText);
+
+    private static UiPillTone GetMessageTone(AiChatMessageRole role) =>
+        role switch
+        {
+            AiChatMessageRole.Assistant => UiPillTone.Success,
+            AiChatMessageRole.System => UiPillTone.Warning,
+            _ => UiPillTone.Neutral
+        };
+
+    private static string GetRoleLabel(AiChatMessageRole role) =>
+        role switch
+        {
+            AiChatMessageRole.Assistant => "AI",
+            AiChatMessageRole.User => "Request",
+            _ => role.ToString()
+        };
+
+    public ValueTask DisposeAsync()
+    {
+        isDisposed = true;
+        if (agentRunCts is not null)
+        {
+            Tab.UnregisterAiOperation(agentRunCts);
+        }
+        agentRunCts?.Cancel();
+        pendingApprovalSource?.TrySetResult(false);
+        pendingApprovalSource = null;
+        pendingSecureInputSource?.TrySetResult(null);
+        pendingSecureInputSource = null;
+        pendingSecureCommand = string.Empty;
+        secureInputText = string.Empty;
+        latestStructuredCommandOutput = string.Empty;
+        providerContextLoadCts?.Cancel();
+        providerContextLoadCts?.Dispose();
+        providerContextLoadCts = null;
+        promptInteropReference?.Dispose();
+        promptInteropReference = null;
+        return ValueTask.CompletedTask;
+    }
+}

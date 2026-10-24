@@ -1,0 +1,61 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@implements IAsyncDisposable
+@using LinuxMadeSane.Core.Abstractions
+@inject IManagedHostFileAccessService FileAccess
+@inject FileTextThumbnailCache Cache
+@inject IJSRuntime JS
+<div class="text-thumbnail" @ref="element">
+    @if (loaded)
+    {
+        <span class="text-thumbnail-heading">Text excerpt</span>
+        <pre>@(string.IsNullOrWhiteSpace(excerpt) ? "No text to preview" : excerpt)</pre>
+    }
+</div>
+@code {
+    [Parameter, EditorRequired] public ManagedHost Host { get; set; } = default!;
+    [Parameter, EditorRequired] public ManagedHostConnectionProfile ConnectionProfile { get; set; } = default!;
+    [Parameter, EditorRequired] public SftpItem Item { get; set; } = default!;
+    private ElementReference element;
+    private DotNetObjectReference<FileTextThumbnail>? reference;
+    private CancellationTokenSource? cancellation;
+    private string identity = "", excerpt = "";
+    private bool loaded, observing, busy, disposed, visible;
+    protected override void OnParametersSet()
+    {
+        var key = $"{Host.Id}|{Item.FullPath}|{Item.SizeBytes}|{Item.LastModifiedUtc}|{ConnectionProfile}";
+        if (key == identity) return;
+        identity = key; loaded = false; excerpt = ""; cancellation?.Cancel(); observing = true;
+    }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!observing || disposed) return;
+        observing = false; reference ??= DotNetObjectReference.Create(this);
+        await JS.InvokeVoidAsync("lmsDocumentThumbnails.observe", element, reference);
+    }
+    [JSInvokable] public async Task LoadVisibleAsync()
+    {
+        visible = true;
+        if (busy || loaded || disposed) return;
+        busy = true; cancellation?.Dispose(); cancellation = new();
+        var token = cancellation.Token; var key = identity;
+        try
+        {
+            var result = await Cache.GetAsync(Host, Item, ConnectionProfile, FileAccess, token);
+            if (!disposed && key == identity && !token.IsCancellationRequested) { excerpt = result; loaded = true; }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception) { if (!disposed && key == identity && !token.IsCancellationRequested) { excerpt = "Text preview unavailable"; loaded = true; } }
+        finally { busy = false; if (!disposed) { await InvokeAsync(StateHasChanged); if (visible && !loaded && token.IsCancellationRequested) await LoadVisibleAsync(); } }
+    }
+    [JSInvokable] public void CancelInvisible() { visible = false; cancellation?.Cancel(); }
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true; cancellation?.Cancel(); cancellation?.Dispose();
+        if (reference is null) return;
+        try { await JS.InvokeVoidAsync("lmsDocumentThumbnails.dispose", element); }
+        catch (JSDisconnectedException) { }
+        finally { reference.Dispose(); }
+    }
+}

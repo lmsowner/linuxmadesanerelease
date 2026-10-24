@@ -1,0 +1,317 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@implements IDisposable
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models.RemoteDesktop
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Web.Services.RemoteDesktop
+@inject RemoteDesktopConnections Connections
+@inject RemoteDesktopRuntime Runtime
+@inject IManagedHostStore Hosts
+@inject ISavedConnectionCredentialService Credentials
+@inject RemoteDesktopDiscoveryJobs DiscoveryJobs
+@inject ISshHostDiscoveryService Discovery
+@inject IJSRuntime JS
+
+<section class="remote-desktop-panel">
+@if (userId is null)
+{
+    <p class="callout info">Sign in to LMS to configure and use remote desktops. Target credentials are separate from your LMS login. <a href="/login?returnUrl=%2Fhosts%3Ftab%3Dremote-desktop">Sign in</a></p>
+}
+else
+{
+    <div class="remote-desktop-toolbar">
+        <strong>Remote Desktop (RDP/VNC)</strong>
+        <span class="meta-text">@(engine?.Message ?? "Checking engine…")</span>
+        <CompactUIButton Label="Add Entry" Glyph="UiIconGlyph.Plus" OnClick="AddAsync" Disabled="@(busy || !EngineReady)" />
+        <CompactUIButton Label="Discover LAN" Glyph="UiIconGlyph.Search" OnClick="() => DiscoverAsync(SshHostDiscoveryScope.Lan)" Disabled="@(busy || discovery.Running)" />
+        <CompactUIButton Label="Discover Tailnet" Glyph="UiIconGlyph.Search" OnClick="() => DiscoverAsync(SshHostDiscoveryScope.Tailnet)" Disabled="@(busy || discovery.Running)" />
+        @if (discovery.Running) { <CompactUIButton Label="Cancel scan" Glyph="UiIconGlyph.Clear" OnClick="CancelScan" /> }
+    </div>
+    <div class="remote-desktop-toolbar">
+        @if (engine?.Installed != true) { <CompactUIButton Label="Install engine" Glyph="UiIconGlyph.Download" OnClick='() => OperateAsync("install")' Disabled="@busy" /> }
+        else
+        {
+            <CompactUIButton Label="Start" Glyph="UiIconGlyph.Run" OnClick='() => OperateAsync("start")' Disabled="@busy" />
+            <CompactUIButton Label="Stop" Glyph="UiIconGlyph.Clear" OnClick='() => OperateAsync("stop")' Disabled="@busy" />
+            <CompactUIButton Label="Restart" Glyph="UiIconGlyph.Refresh" OnClick='() => OperateAsync("restart")' Disabled="@busy" />
+            <CompactUIButton Label="Upgrade" Glyph="UiIconGlyph.Download" OnClick='() => OperateAsync("upgrade")' Disabled="@busy" />
+            <CompactUIButton Label="Health" Glyph="UiIconGlyph.Info" OnClick="HealthAsync" Disabled="@busy" />
+            <CompactUIButton Label="Logs" Glyph="UiIconGlyph.TextFile" OnClick="LogsAsync" Disabled="@busy" />
+            <CompactUIButton Label="Uninstall" Glyph="UiIconGlyph.Delete" OnClick='() => ConfirmOperation("uninstall")' Disabled="@busy" />
+        }
+    </div>
+    @if (engine?.Installed == false) { <p class="meta-text">Install engine to configure Guacamole before adding remote desktop entries. Installation stays on this page.</p> }
+    @if (!string.IsNullOrEmpty(message)) { <p class="callout @tone" role="status">@message</p> }
+    @if (!string.IsNullOrEmpty(discovery.Message)) { <p class="callout @(discovery.Failed ? "error" : "info")" role="status">@discovery.Message</p> }
+    <div class="remote-desktop-table-shell">
+    <table class="inventory-table remote-desktop-table" aria-label="Remote desktop connections">
+        <thead><tr><th>Host</th><th>IP/hostname</th><th>Protocol</th><th>Port</th><th>Status</th><th>Credential Reference</th><th>Actions</th></tr></thead>
+        <tbody>
+        @foreach (var connection in connections)
+        {
+            var credential = credentialNames.FirstOrDefault(c => c.Id == connection.CredentialId);
+            var missing = credential is null || !availableCredentials.Contains(connection.CredentialId);
+            <tr @key="connection.Id">
+                <td><strong>@DisplayConnectionName(connection)</strong>@if (connection.HostId is { } hostId) { <small>@(hosts.FirstOrDefault(h => h.Id == hostId)?.Name ?? "Host no longer registered")</small> }</td>
+                <td>@connection.Hostname</td><td>@connection.Protocol.ToString().ToUpperInvariant()</td><td>@connection.Port</td>
+                <td>@(missing ? "Configure credentials" : tests.GetValueOrDefault(connection.Id, "Configured"))</td>
+                <td title="@connection.CredentialId.ToString()">@(credential?.Name ?? "Missing credential")</td>
+                <td><div class="remote-desktop-actions">
+                    <CompactUIButton Label="Connect" Glyph="UiIconGlyph.Connect" Disabled="@(busy || missing || !EngineReady)"
+                        data-lms-prepare-popup="@($"lms-rd-{connection.Id:N}")" OnClick="() => ConnectAsync(connection)" />
+                    <CompactUIButton Label="Edit" Glyph="UiIconGlyph.Edit" OnClick="() => EditAsync(connection)" Disabled="@busy" />
+                    <CompactUIButton Label="Test connection" Glyph="UiIconGlyph.Info" Title="Check address, port and protocol. Credentials and certificates are checked on Connect." OnClick="() => TestAsync(connection)" Disabled="@busy" />
+                    <CompactUIButton Label="Delete" Glyph="UiIconGlyph.Delete" OnClick="() => pendingDelete = connection" Disabled="@busy" />
+                </div>@if(tests.GetValueOrDefault(connection.Id)=="Unreachable" && connectionErrors.TryGetValue(connection.Id,out var detail)) { <p class="meta-text" role="status">@detail</p> }</td>
+            </tr>
+        }
+        @if (connections.Count == 0) { <tr><td colspan="7" class="meta-text">No remote desktop connections. @(EngineReady ? "Add one or discover candidates on your LAN or tailnet." : "Install and start the engine before adding entries.")</td></tr> }
+        </tbody>
+    </table>
+    </div>
+
+    @if (discovery.Candidates.Count > 0)
+    {
+        <details class="remote-desktop-discovery"><summary>Discovered candidates (@discovery.Candidates.Count)</summary>
+            <p class="meta-text">Open ports are candidates, not trusted connections. Cached entries are checked again on each scan. Select Add Entry to choose credentials and review a connection.</p>
+            @foreach (var entry in discovery.Candidates)
+            {
+                var candidate = entry.Candidate;
+                <div class="remote-desktop-candidate" @key="(candidate.Hostname, candidate.Port)">
+                    <span>@if(candidate.DnsName is not null) { <strong>@candidate.DnsName</strong><span class="meta-text"> · </span> }<strong>@candidate.Hostname:@candidate.Port</strong> · @candidate.Protocol.ToString().ToUpperInvariant() · @(entry.Checked ? candidate.ProtocolIdentified ? "Protocol identified" : "Open port candidate" : discovery.Running ? "Checking cached result…" : "Cached result; rescan to check")</span>
+                    <div class="remote-desktop-actions"><CompactUIButton Label="Add Entry" Glyph="UiIconGlyph.Plus" OnClick="() => AddCandidateAsync(candidate)" Disabled="@(busy || !entry.Checked || !EngineReady)" />
+                    <CompactUIButton Label="Test connection" Glyph="UiIconGlyph.Info" OnClick="() => TestCandidateAsync(candidate)" Disabled="@(busy || !entry.Checked)" /></div>
+                    @if(candidateTests.TryGetValue((candidate.Hostname,candidate.Port),out var result)) { <p class="meta-text" role="status">@result</p> }
+                </div>
+            }
+        </details>
+    }
+
+}
+</section>
+<div class="remote-desktop-editor-shell">
+<UiModal Class="remote-desktop-editor-modal" IsOpen="@editing" Title="@(editor.Id.HasValue ? "Edit remote desktop" : "Add remote desktop")" OnClose="CloseEditor">
+    <EditForm Model="editor" OnValidSubmit="SaveAsync" class="stack-form">
+        <div class="remote-desktop-editor-grid remote-desktop-editor-main">
+            <UiComboboxField TValue="string" Label="Associated LMS host" Value="editor.HostId" ValueChanged="SelectHostAsync" Compact="true">
+                <option value="">Manual connection</option>@foreach (var host in hosts) { <option value="@host.Id">@host.Name · @host.Hostname</option> }
+            </UiComboboxField>
+            <UiTextField Class="remote-desktop-friendly-name" Label="Friendly name" @bind-Value="editor.Name" Compact="true" />
+            <UiTextField Label="Hostname/IP" @bind-Value="editor.Hostname" Compact="true" />
+            <UiComboboxField TValue="RemoteDesktopProtocol" Label="Protocol" Value="editor.Protocol" ValueChanged="ProtocolChanged" Compact="true"><option value="@RemoteDesktopProtocol.Rdp">RDP</option><option value="@RemoteDesktopProtocol.Vnc">VNC</option></UiComboboxField>
+            <UiNumberField Class="remote-desktop-port" Label="Port" @bind-Value="editor.Port" Compact="true" />
+        </div>
+        <SavedCredentialPicker @key="editor.Protocol" @ref="picker" InitialSelectionId="@(editor.CredentialId == Guid.Empty ? null : editor.CredentialId)" CredentialKind="@RemoteDesktopConnections.CredentialKind(editor.Protocol)" SavedOnly="true" ShowAddButton="true" InlineManageButton="true" AddRequested="CreateCredentialAsync" Selected="CredentialSelected" Cleared="ClearCredential" />
+        <details><summary>Advanced settings</summary>
+            <div class="remote-desktop-editor-grid">
+                <UiComboboxField TValue="int" Label="Colour depth" @bind-Value="editor.ColourDepth" Compact="true">@foreach (var depth in new[] { 8,16,24,32 }) { <option value="@depth">@depth bit</option> }</UiComboboxField>
+                <UiCheckboxField Label="Clipboard" @bind-Value="editor.Clipboard" Compact="true" />
+                @if (editor.Protocol == RemoteDesktopProtocol.Rdp)
+                {
+                    <UiComboboxField TValue="string" Label="Security mode" @bind-Value="editor.SecurityMode" Compact="true"><option value="nla">NLA</option><option value="tls">TLS</option><option value="rdp">Legacy RDP</option><option value="any">Negotiate</option></UiComboboxField>
+                    <UiCheckboxField Label="Accept this target’s untrusted/self-signed certificate" Helper="Saving allows untrusted certificates for this connection only. Leave unchecked to verify certificates." @bind-Value="editor.AcceptUntrustedCertificate" Compact="true" />
+                    <UiNumberField Label="Initial width" @bind-Value="editor.Width" Compact="true" /><UiNumberField Label="Initial height" @bind-Value="editor.Height" Compact="true" />
+                    <UiComboboxField TValue="string" Label="Resize" @bind-Value="editor.ResizeMethod" Compact="true"><option value="display-update">Update display</option><option value="reconnect">Reconnect</option></UiComboboxField>
+                    <UiCheckboxField Label="Audio" @bind-Value="editor.Audio" Compact="true" />
+                    <UiCheckboxField Label="Temporary drive redirection" @bind-Value="editor.Drive" Compact="true" />
+                }
+                else { <UiCheckboxField Label="Read-only" @bind-Value="editor.ReadOnly" Compact="true" /> }
+            </div>
+        </details>
+        @if (!string.IsNullOrWhiteSpace(editorMessage)) { <p class="callout @editorTone" role="status">@editorMessage</p> }
+        <div class="toolbar-row"><CompactUIButton Label="Test connection" Glyph="UiIconGlyph.Info" OnClick="TestEditorAsync" Title="@(editor.CredentialId==Guid.Empty ? "Choose a saved credential before testing this draft." : "Check address, port and protocol without saving. Credentials and certificates are checked on Connect.")" Disabled="@(busy || editor.CredentialId==Guid.Empty)" /><CompactUIButton Label="Save connection" Glyph="UiIconGlyph.Save" Type="submit" Disabled="@busy" /><CompactUIButton Label="Cancel" Glyph="UiIconGlyph.Clear" OnClick="CloseEditor" Disabled="@busy" /></div>
+    </EditForm>
+</UiModal>
+</div>
+<SavedCredentialsPanel @ref="credentialEditor" EditorOnly="true" Saved="CredentialCreatedAsync" />
+<UiModal IsOpen="@(operation is not null)" Title="Remote desktop engine" OnClose="CloseOperation">
+    <p>Remove the remote desktop containers? Connections and LMS credentials will be preserved. Active remote sessions will disconnect.</p>
+    @if (busy || !string.IsNullOrEmpty(message)) { <p class="callout @tone" role="status">@message</p> }
+    <div class="toolbar-row"><CompactUIButton Label="Uninstall engine" Glyph="UiIconGlyph.Download" OnClick="ApproveOperationAsync" Disabled="@busy" /><CompactUIButton Label="Cancel" OnClick="CloseOperation" Disabled="@busy" /></div>
+</UiModal>
+<UiModal IsOpen="@(pendingDelete is not null)" Title="Delete remote desktop connection" OnClose="() => pendingDelete = null">
+    <p>Delete @pendingDelete?.Name? Its active remote sessions will end. The associated host and saved credential stay in LMS.</p>
+    <div class="toolbar-row"><CompactUIButton Label="Delete connection" Glyph="UiIconGlyph.Delete" OnClick="DeleteAsync" Disabled="@busy" /><CompactUIButton Label="Cancel" OnClick="() => pendingDelete = null" Disabled="@busy" /></div>
+</UiModal>
+<UiModal IsOpen="@(logs is not null)" Title="Remote desktop engine logs" OnClose="() => logs = null"><pre class="remote-desktop-logs">@logs</pre></UiModal>
+
+@code {
+    private Guid? userId;
+    private IReadOnlyList<RemoteDesktopConnection> connections = [];
+    private IReadOnlyList<ManagedHost> hosts = [];
+    private IReadOnlyList<SavedConnectionCredentialSummary> credentialNames = [];
+    private RemoteDesktopDiscoverySnapshot discovery = new([], false, "", false);
+    private SshHostDiscoveryScope discoveryScope;
+    private readonly CancellationTokenSource viewLifetime = new();
+    private RemoteDesktopEngineStatus? engine;
+    private bool EngineReady => engine is {Installed:true, Healthy:true};
+    private readonly Dictionary<Guid,string> tests = new();
+    private readonly Dictionary<Guid,string> connectionErrors=new();
+    private HashSet<Guid> availableCredentials = [];
+    private bool busy, editing;
+    private string message="", tone="info", editorMessage="", editorTone="error";
+    private readonly Dictionary<(string,int),string> candidateTests=new();
+    private string? operation, logs;
+    private RemoteDesktopConnection? pendingDelete, pendingConnect;
+    private Editor editor = new();
+    private SavedCredentialPicker? picker;
+    private SavedCredentialsPanel? credentialEditor;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { userId = await Connections.UserAsync(); await RefreshAsync(); discoveryScope=DiscoveryJobs.LatestScope(userId.Value); discovery=DiscoveryJobs.Snapshot(userId.Value, discoveryScope); _=WatchDiscoveryAsync(); }
+        catch (UnauthorizedAccessException) { userId=null; }
+        catch (Exception) { message="Unable to load remote desktop configuration. Check LMS logs."; tone="error"; }
+    }
+    private async Task RefreshAsync()
+    {
+        if (userId is null) return;
+        hosts=await Hosts.ListAsync(); connections=await Connections.ListAsync(); credentialNames=await Credentials.ListAsync(userId.Value); engine=await Runtime.StatusAsync(); availableCredentials=await Connections.AvailableCredentialIdsAsync();
+        _=ResolveConnectionNamesAsync();
+    }
+    private readonly Dictionary<string,string> resolvedNames=new(StringComparer.OrdinalIgnoreCase);
+    private string DisplayConnectionName(RemoteDesktopConnection c) => c.Name!=c.Hostname ? c.Name : resolvedNames.GetValueOrDefault(c.Hostname)
+        ?? discovery.Candidates.FirstOrDefault(x=>x.Checked && x.Candidate.Hostname==c.Hostname && x.Candidate.Port==c.Port)?.Candidate.DnsName ?? c.Name;
+    private async Task ResolveConnectionNamesAsync()
+    {
+        using var gate=new SemaphoreSlim(4);
+        var token=viewLifetime.Token;
+        try
+        {
+            await Task.WhenAll(connections.Select(c=>c.Hostname).Where(h=>System.Net.IPAddress.TryParse(h,out _)).Distinct().Select(async address=>
+            {
+                await gate.WaitAsync(token);
+                try
+                {
+                    var name=await Discovery.ResolveRemoteDesktopDnsNameAsync(address,token);
+                    token.ThrowIfCancellationRequested();
+                    await InvokeAsync(()=> {if(name is not null)resolvedNames[address]=name;else resolvedNames.Remove(address);StateHasChanged();});
+                }
+                finally {gate.Release();}
+            }));
+        }
+        catch(OperationCanceledException) when(viewLifetime.IsCancellationRequested) { }
+    }
+    private async Task AddAsync() { if(!await EnsureReadyAsync())return; editor=new(); editorMessage=""; editing=true; }
+    private async Task AddCandidateAsync(RemoteDesktopCandidate c) { if(!await EnsureReadyAsync())return; editor=new() { Hostname=c.Hostname, Name=c.DnsName ?? c.Hostname, Protocol=c.Protocol, Port=c.Port }; editorMessage=""; editing=true; }
+    private Task EditAsync(RemoteDesktopConnection c) { editor=new(c); editorMessage=""; editing=true; return Task.CompletedTask; }
+    private void CloseEditor() { if(!busy) editing=false; }
+    private Task SelectHostAsync(string id) { editor.HostId=id; if(Guid.TryParse(id,out var key) && hosts.FirstOrDefault(h=>h.Id==key) is { } host) { editor.Hostname=host.Hostname; if(string.IsNullOrEmpty(editor.Name)) editor.Name=host.Name; } return Task.CompletedTask; }
+    private Task ProtocolChanged(RemoteDesktopProtocol p) { if(editor.Port is 3389 or 5900) editor.Port=p==RemoteDesktopProtocol.Rdp?3389:5900; editor.Protocol=p; editor.CredentialId=Guid.Empty; return Task.CompletedTask; }
+    private async Task CredentialSelected(SavedConnectionCredential c) { editor.CredentialId=c.Summary.Id; if(userId is { } owner) credentialNames=await Credentials.ListAsync(owner); }
+    private void ClearCredential() => editor.CredentialId=Guid.Empty;
+    private Task CreateCredentialAsync() => credentialEditor?.OpenCreateAsync(editor.Name,editor.Hostname,0,RemoteDesktopConnections.CredentialKind(editor.Protocol)) ?? Task.CompletedTask;
+    private async Task CredentialCreatedAsync(SavedConnectionCredentialSummary c) { if(userId is null) return; credentialNames=await Credentials.ListAsync(userId.Value); editor.CredentialId=c.Id; if(picker is not null) await picker.SelectCreatedAsync(c.Id); }
+    private async Task SaveAsync()
+    {
+        busy=true; editorMessage=""; editorTone="error";
+        try { if(editor.Id is null) { engine=await Runtime.StatusAsync(); if(!EngineReady) { editorMessage="Install and start the remote desktop engine before adding entries."; return; } } await Connections.SaveAsync(editor.Build(userId ?? Guid.Empty)); editing=false; message="Remote desktop connection saved."; tone="success"; await RefreshAsync(); }
+        catch(Exception e) { editorMessage=e is UnauthorizedAccessException?"Sign in again to save this connection.":e.Message; }
+        finally { busy=false; }
+    }
+    private async Task TestEditorAsync()
+    {
+        busy=true;editorMessage="Checking this draft’s address, port and protocol…";editorTone="info";await InvokeAsync(StateHasChanged);
+        try {editorMessage=await Connections.TestDraftAsync(editor.Build(userId ?? Guid.Empty));editorTone="success";}
+        catch(Exception e) {editorMessage=e.Message;editorTone="error";}
+        finally {busy=false;}
+    }
+    private async Task TestCandidateAsync(RemoteDesktopCandidate candidate)
+    {
+        busy=true;candidateTests[(candidate.Hostname,candidate.Port)]="Checking address, port and protocol…";await InvokeAsync(StateHasChanged);
+        try {candidateTests[(candidate.Hostname,candidate.Port)]=await Connections.TestCandidateAsync(candidate);}
+        catch(Exception e) {candidateTests[(candidate.Hostname,candidate.Port)]=e.Message;}
+        finally {busy=false;}
+    }
+    private async Task DeleteAsync() { if(pendingDelete is null) return; busy=true; try { await Connections.DeleteAsync(pendingDelete.Id); pendingDelete=null; message="Connection deleted; host and credential preserved."; tone="success"; await RefreshAsync(); } catch(Exception e) { message=e.Message; tone="error"; } finally { busy=false; } }
+    private Task DiscoverAsync(SshHostDiscoveryScope scope)
+    {
+        if (userId is not { } owner || busy) return Task.CompletedTask;
+        discoveryScope=scope;
+        DiscoveryJobs.Start(owner,scope);
+        discovery=DiscoveryJobs.Snapshot(owner,scope);
+        return Task.CompletedTask;
+    }
+    private void CancelScan() { if(userId is { } owner) DiscoveryJobs.Cancel(owner,discoveryScope); }
+    private async Task WatchDiscoveryAsync()
+    {
+        using var timer=new PeriodicTimer(TimeSpan.FromMilliseconds(500));
+        try
+        {
+            while(await timer.WaitForNextTickAsync(viewLifetime.Token))
+                await InvokeAsync(() =>
+                {
+                    if(userId is not { } owner) return;
+                    var updated=DiscoveryJobs.Snapshot(owner,discoveryScope);
+                    if(updated.Message==discovery.Message && updated.Running==discovery.Running && updated.Failed==discovery.Failed && updated.Candidates.SequenceEqual(discovery.Candidates)) return;
+                    discovery=updated;StateHasChanged();
+                });
+        }
+        catch(OperationCanceledException) when(viewLifetime.IsCancellationRequested) { }
+    }
+    private async Task TestAsync(RemoteDesktopConnection c)
+    {
+        busy=true; tests[c.Id]="Testing…";connectionErrors.Remove(c.Id); message=$"Testing {c.Name}…"; tone="info"; await InvokeAsync(StateHasChanged);
+        try { message=await Connections.TestAsync(c); tests[c.Id]=message.StartsWith("Protocol")?"Protocol identified":"Open port candidate"; tone="success"; }
+        catch(Exception e) { tests[c.Id]="Unreachable";connectionErrors[c.Id]=e.Message; message=e.Message; tone="error"; }
+        finally { busy=false; }
+    }
+    private async Task<bool> EnsureReadyAsync()
+    {
+        busy=true; message="Checking remote desktop engine…"; tone="info"; await InvokeAsync(StateHasChanged);
+        try
+        {
+            engine=await Runtime.StatusAsync();
+            if(!EngineReady) {message=engine.Installed ? "Start the remote desktop engine and wait for Ready before adding or connecting." : "Install engine before adding or connecting to remote desktops.";tone="error";return false;}
+            message="";return true;
+        }
+        finally {busy=false;}
+    }
+    private async Task ConnectAsync(RemoteDesktopConnection c)
+    {
+        pendingConnect=c;
+        if(!await EnsureReadyAsync()) {await ClosePendingAsync();return;}
+        await OpenPendingAsync();
+    }
+    private async Task OpenPendingAsync()
+    {
+        if(pendingConnect is not { } c) return;
+        var opened = await JS.InvokeAsync<bool>("lmsTerminalWindow.openPopup", "/remote-desktop/launch/"+c.Id, $"lms-rd-{c.Id:N}");
+        pendingConnect=null;
+        message=opened ? $"{c.Name} opened in its own remote desktop window." : "The browser blocked the remote desktop window. Allow pop-ups for LMS and click Connect again.";
+        tone=opened ? "success" : "error";
+    }
+    private async Task ClosePendingAsync()
+    {
+        if(pendingConnect is not { } c) return;
+        pendingConnect=null;
+        await JS.InvokeVoidAsync("lmsTerminalWindow.closePreparedPopup", $"lms-rd-{c.Id:N}");
+    }
+    private void ConfirmOperation(string action) => operation=action;
+    private Task CloseOperation() { if(!busy)operation=null;return Task.CompletedTask; }
+    private async Task ApproveOperationAsync() { if(operation!="uninstall")return;await OperateAsync("uninstall");if(tone!="error")operation=null; }
+    private async Task OperateAsync(string action)
+    {
+        busy=true; message=$"Remote desktop engine: {action}…"; tone="info"; await InvokeAsync(StateHasChanged);
+        try { await Connections.UserAsync(); await Runtime.OperateAsync(action,true,new InlineProgress(p=>_ =InvokeAsync(()=> {message=p; StateHasChanged();}))); engine=await Runtime.StatusAsync(); if(action is "install" or "start" or "restart" or "upgrade" && !EngineReady)throw new InvalidOperationException(engine.Message); message=action=="uninstall" ? "Remote desktop engine uninstalled; connections and credentials preserved." : action=="stop" ? "Remote desktop engine stopped." : "Remote desktop engine ready.";tone="success"; }
+        catch(Exception e) { message=e.Message; tone="error"; }
+        finally { busy=false; }
+    }
+    private async Task HealthAsync() { busy=true; message="Checking remote desktop engine…"; tone="info"; await InvokeAsync(StateHasChanged); try { engine=await Runtime.StatusAsync(); message=engine.Message; } finally { busy=false; } }
+    private async Task LogsAsync() { busy=true; try { await Connections.UserAsync(); logs=await Runtime.LogsAsync(); } catch(Exception e) { message=e.Message; tone="error"; } finally { busy=false; } }
+    public void Dispose() { viewLifetime.Cancel(); viewLifetime.Dispose(); }
+    private sealed class InlineProgress(Action<string> report):IProgress<string> { public void Report(string value)=>report(value); }
+    private sealed class Editor
+    {
+        public Guid? Id {get;set;} public string HostId {get;set;}=""; public string Name {get;set;}=""; public string Hostname {get;set;}="";
+        public RemoteDesktopProtocol Protocol {get;set;} public int Port {get;set;}=3389; public Guid CredentialId {get;set;}
+        public string SecurityMode {get;set;}="nla"; public bool AcceptUntrustedCertificate {get;set;} public int ColourDepth {get;set;}=24;
+        public int Width {get;set;}=1280; public int Height {get;set;}=720; public string ResizeMethod {get;set;}="display-update";
+        public bool Clipboard {get;set;}=true; public bool Audio {get;set;} public bool Drive {get;set;} public bool ReadOnly {get;set;}
+        public Editor() { }
+        public Editor(RemoteDesktopConnection c) { Id=c.Id; HostId=c.HostId?.ToString()??""; Name=c.Name; Hostname=c.Hostname; Protocol=c.Protocol; Port=c.Port; CredentialId=c.CredentialId; var o=c.Options; SecurityMode=o.SecurityMode; AcceptUntrustedCertificate=o.AcceptUntrustedCertificate; ColourDepth=o.ColourDepth; Width=o.Width; Height=o.Height; ResizeMethod=o.ResizeMethod; Clipboard=o.Clipboard; Audio=o.Audio; Drive=o.Drive; ReadOnly=o.ReadOnly; }
+        public RemoteDesktopConnection Build(Guid user)=>new(Id??Guid.NewGuid(),user,Guid.TryParse(HostId,out var host)?host:null,Name,Hostname,Protocol,Port,CredentialId,new() {SecurityMode=SecurityMode,AcceptUntrustedCertificate=AcceptUntrustedCertificate,ColourDepth=ColourDepth,Width=Width,Height=Height,ResizeMethod=ResizeMethod,Clipboard=Clipboard,Audio=Audio,Drive=Drive,ReadOnly=ReadOnly},0,DateTimeOffset.UtcNow);
+    }
+}
