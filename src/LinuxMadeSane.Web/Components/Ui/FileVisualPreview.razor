@@ -1,0 +1,292 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
+@inject IJSRuntime JSRuntime
+
+<div class="@CssClass">
+    @if (ShowToolbar)
+    {
+        <div class="file-visual-preview-toolbar">
+            <div class="file-visual-preview-toolbar-group file-visual-preview-downloads">
+                <CompactUIButton Label="Download document" Glyph="UiIconGlyph.Download"
+                                 Title="Download the complete original file"
+                                 Disabled="@(downloadBusy || ContentBytes.Length==0)" OnClick="DownloadDocumentAsync" />
+                @if (IsPdfPreview || IsTiffPreview)
+                {
+                    <CompactUIButton Label="Download page image" Glyph="UiIconGlyph.ThumbnailView"
+                                     Title="Download the current page as a PNG image"
+                                     Disabled="@(downloadBusy || previewRenderPending || renderedContentBytes is null || renderError is not null)"
+                                     OnClick="DownloadPageImageAsync" />
+                }
+            </div>
+            @if (HasPagedPreview)
+            {
+                <div class="file-visual-preview-toolbar-group">
+                    <CompactUIButton Label="Previous page"
+                                     Glyph="UiIconGlyph.SidebarCollapse"
+                                     Disabled="@(currentPageIndex <= 0)"
+                                     OnClick="ShowPreviousPageAsync" />
+                    <span class="file-visual-preview-page-label">Page @(currentPageIndex + 1) of @pageCount</span>
+                    <CompactUIButton Label="Next page"
+                                     Glyph="UiIconGlyph.SidebarExpand"
+                                     Disabled="@(currentPageIndex >= pageCount - 1)"
+                                     OnClick="ShowNextPageAsync" />
+                </div>
+            }
+
+            @if (SupportsZoomControls)
+            {
+                @if (HasPagedPreview)
+                {
+                    <div class="file-visual-preview-toolbar-spacer"></div>
+                }
+                <div class="file-visual-preview-toolbar-group file-visual-preview-toolbar-group-zoom">
+                    <CompactUIButton Label="Fit"
+                                     Glyph="UiIconGlyph.Focus"
+                                     OnClick="FitVisualAsync" />
+                    <CompactUIButton Label="100%"
+                                     Glyph="UiIconGlyph.ThumbnailView"
+                                     OnClick="ActualSizeVisualAsync" />
+                    <CompactUIButton Label="-"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     HideIcon="true"
+                                     OnClick="ZoomOutVisualAsync" />
+                    <span class="file-visual-preview-zoom-label">@($"{visualZoomPercent}%")</span>
+                    <CompactUIButton Label="+"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     HideIcon="true"
+                                     OnClick="ZoomInVisualAsync" />
+                </div>
+            }
+        </div>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(downloadMessage))
+    {
+        <p class="meta-text file-visual-preview-download-feedback" role="status">@downloadMessage</p>
+    }
+    @if (!string.IsNullOrWhiteSpace(renderError))
+    {
+        <div class="callout error">@renderError</div>
+    }
+
+    <div class="file-visual-preview-stage" @ref="previewHost"></div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string FileName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string ContentType { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public byte[] ContentBytes { get; set; } = [];
+    [Parameter] public string? Class { get; set; }
+
+    private ElementReference previewHost;
+    private byte[]? renderedContentBytes;
+    private string renderedFileName = string.Empty;
+    private string renderedContentType = string.Empty;
+    private DotNetObjectReference<FileVisualPreview>? dotNetReference;
+    private bool previewRenderPending;
+    private bool downloadBusy;
+    private string downloadMessage = string.Empty;
+    private string? renderError;
+    private int pageCount = 1;
+    private int currentPageIndex;
+    private int visualZoomPercent = 100;
+
+    private string CssClass => string.IsNullOrWhiteSpace(Class)
+        ? "file-visual-preview"
+        : $"file-visual-preview {Class}";
+
+    private bool IsPdfPreview => string.Equals(ContentType, "application/pdf", StringComparison.OrdinalIgnoreCase);
+    private bool IsTiffPreview => string.Equals(ContentType, "image/tiff", StringComparison.OrdinalIgnoreCase);
+    private bool SupportsZoomControls =>
+        IsPdfPreview ||
+        ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
+    private bool HasPagedPreview => pageCount > 1;
+    private bool ShowToolbar => HasPagedPreview || SupportsZoomControls;
+
+    protected override void OnParametersSet()
+    {
+        if (ContentBytes is null || ContentBytes.Length == 0)
+        {
+            return;
+        }
+
+        if (!ReferenceEquals(ContentBytes, renderedContentBytes) ||
+            !string.Equals(FileName, renderedFileName, StringComparison.Ordinal) ||
+            !string.Equals(ContentType, renderedContentType, StringComparison.Ordinal))
+        {
+            renderError = null;
+            downloadMessage = string.Empty;
+            previewRenderPending = true;
+            currentPageIndex = 0;
+            pageCount = 1;
+            visualZoomPercent = 100;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!previewRenderPending)
+        {
+            return;
+        }
+
+        previewRenderPending = false;
+        await RenderPreviewAsync();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsFilePreview.dispose", previewHost);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        finally
+        {
+            dotNetReference?.Dispose();
+            dotNetReference = null;
+        }
+    }
+
+    private async Task RenderPreviewAsync()
+    {
+        if (ContentBytes is null || ContentBytes.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            dotNetReference ??= DotNetObjectReference.Create(this);
+            using var stream = new MemoryStream(ContentBytes, writable: false);
+            using var streamReference = new DotNetStreamReference(stream);
+            var result = await JSRuntime.InvokeAsync<FileVisualPreviewLoadResult>(
+                "lmsFilePreview.load",
+                previewHost,
+                FileName,
+                ContentType,
+                streamReference,
+                currentPageIndex,
+                dotNetReference);
+
+            renderedContentBytes = ContentBytes;
+            renderedFileName = FileName;
+            renderedContentType = ContentType;
+            pageCount = Math.Max(1, result.PageCount);
+            currentPageIndex = Math.Clamp(result.CurrentPageIndex, 0, pageCount - 1);
+            visualZoomPercent = result.ZoomPercent;
+            renderError = null;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception exception)
+        {
+            renderError = exception.Message;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private Task DownloadDocumentAsync() => DownloadAsync(false);
+    private Task DownloadPageImageAsync() => DownloadAsync(true);
+    private async Task DownloadAsync(bool pageImage)
+    {
+        if (downloadBusy) return;
+        var content = ContentBytes;
+        downloadBusy = true;
+        downloadMessage = pageImage ? "Preparing current page image…" : "Preparing document download…";
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            if (pageImage) await JSRuntime.InvokeVoidAsync("lmsFilePreview.downloadPageImage", previewHost, FileName);
+            else
+            {
+                using var stream = new MemoryStream(content, writable: false);
+                using var reference = new DotNetStreamReference(stream);
+                await JSRuntime.InvokeVoidAsync("lmsFilePreview.downloadDocument", FileName, ContentType, reference);
+            }
+            if (ReferenceEquals(content, ContentBytes)) downloadMessage = "Download sent to your browser.";
+        }
+        catch (Exception error) { if (ReferenceEquals(content, ContentBytes)) downloadMessage = $"Could not download: {error.Message}"; }
+        finally { downloadBusy = false; await InvokeAsync(StateHasChanged); }
+    }
+
+    private async Task ShowPreviousPageAsync()
+    {
+        if (currentPageIndex <= 0)
+        {
+            return;
+        }
+
+        await ShowPageAsync(currentPageIndex - 1);
+    }
+
+    private async Task ShowNextPageAsync()
+    {
+        if (currentPageIndex >= pageCount - 1)
+        {
+            return;
+        }
+
+        await ShowPageAsync(currentPageIndex + 1);
+    }
+
+    private async Task ShowPageAsync(int pageIndex)
+    {
+        try
+        {
+            var result = await JSRuntime.InvokeAsync<FileVisualPreviewLoadResult>(
+                "lmsFilePreview.showPage",
+                previewHost,
+                pageIndex);
+            pageCount = Math.Max(1, result.PageCount);
+            currentPageIndex = Math.Clamp(result.CurrentPageIndex, 0, pageCount - 1);
+            visualZoomPercent = result.ZoomPercent;
+            renderError = null;
+        }
+        catch (Exception exception)
+        {
+            renderError = exception.Message;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public Task SyncViewerState(int pageIndex, int pageTotal, int zoomPercent)
+    {
+        pageCount = Math.Max(1, pageTotal);
+        currentPageIndex = Math.Clamp(pageIndex, 0, pageCount - 1);
+        visualZoomPercent = Math.Max(1, zoomPercent);
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ZoomInVisualAsync() => await UpdateZoomAsync("lmsFilePreview.zoomIn");
+
+    private async Task ZoomOutVisualAsync() => await UpdateZoomAsync("lmsFilePreview.zoomOut");
+
+    private async Task FitVisualAsync() => await UpdateZoomAsync("lmsFilePreview.fit");
+
+    private async Task ActualSizeVisualAsync() => await UpdateZoomAsync("lmsFilePreview.actualSize");
+
+    private async Task UpdateZoomAsync(string methodName)
+    {
+        try
+        {
+            var result = await JSRuntime.InvokeAsync<FileVisualPreviewLoadResult>(methodName, previewHost);
+            visualZoomPercent = result.ZoomPercent;
+            renderError = null;
+        }
+        catch (Exception exception)
+        {
+            renderError = exception.Message;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private sealed record FileVisualPreviewLoadResult(int PageCount, int CurrentPageIndex, int ZoomPercent);
+}

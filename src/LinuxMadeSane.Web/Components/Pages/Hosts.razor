@@ -1,0 +1,2229 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@page "/hosts"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Versioning
+@using LinuxMadeSane.Core.Models.LocalAi
+@inject PortalAddonBootstrapService PortalRegistration
+@inject FleetPortalRegistrationService FleetRegistration
+@inject ILocalAiEngineManagerService AiEngineManager
+@inject PageStatusCache StatusCache
+@inject IManagedHostService HostService
+@inject ICommandExecutionService CommandExecutionService
+@inject IManagedHostPublicKeyInstaller PublicKeyInstaller
+@inject ISshKeySetupRecoveryService KeySetupRecovery
+@inject ISshKeyPairGenerator SshKeyPairGenerator
+@inject IServiceScopeFactory ServiceScopeFactory
+@inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+@inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
+@inject IAiThreadService AiThreadService
+@inject ILogger<Hosts> Logger
+@inject FileThumbnailCacheService FileThumbnailCacheService
+@inject ApplicationUpdateService LocalApplicationUpdates
+@inject LmsHostUpdateAvailabilityService LmsUpdateAvailabilityService
+@inject LmsHostEdgeGatewaySummaryService EdgeGatewaySummaryService
+@inject LmsHostBenchmarkService BenchmarkService
+@inject RemoteLmsSshTunnelService RemoteLmsSshTunnelService
+@inject IHostAdministratorCredentials AdministratorCredentials
+@inject IJSRuntime JSRuntime
+@inject NavigationManager NavigationManager
+
+<PageTitle>Hosts | Linux Made Sane</PageTitle>
+
+<div class="page-shell hosts-page">
+    <UiHeroPanel Title="Hosts"
+                 Compact="true">
+        <Actions>
+            <UiCommandButton Label="@(refreshingHosts ? "Refreshing…" : "Refresh")" Glyph="UiIconGlyph.Refresh" Disabled="@(refreshingHosts || isStatusRefreshInProgress || isLmsUpdateRefreshInProgress)" OnClick="RefreshHostsAsync" Title="Refresh host status, versions, AI and routing. Results are cached for five minutes." />
+            <UiCommandButton Label="Search logs" Glyph="UiIconGlyph.Search" Href="/logs" />
+            <UiCommandButton Label="Update LMS on all hosts" Glyph="UiIconGlyph.Download" Title="Update all registered LMS hosts using each host’s selected Dev or Stable channel" Disabled="@(updatingAllHosts || LmsHostRows.Count == 0)" OnClick="UpdateAllLmsHostsAsync" />
+            @if (portalRegistered) { <UiCommandButton Label="Register with Portal" Glyph="UiIconGlyph.Connection" OnClick="@(()=>portalRegistration?.Open())" /> }
+            <UiCommandButton Label="Package updates" Glyph="UiIconGlyph.Download" OnClick="@(() => packageUpdates?.Open())" />
+            <UiCommandButton Label="Add host" Glyph="UiIconGlyph.Plus" Href="/hosts/new" />
+        </Actions>
+    </UiHeroPanel>
+
+    <FleetPortalRegistration @ref="portalRegistration" Hosts="@LmsHostRows.Select(row=>row.Host).ToArray()" />
+    <FleetPackageUpdates @ref="packageUpdates" Hosts="@hostRows.Select(row=>row.Host).ToArray()" AiAvailable="@terminalAiAvailable" />
+
+    @if (activeHostTab is not ("sftp" or "remote-desktop"))
+    {
+    <div class="summary-pill-row">
+        <UiPill Tone="UiPillTone.Neutral">@($"{ActiveHostRows.Count} configured")</UiPill>
+        <UiPill Tone="@(ActiveOnlineHostCount > 0 ? UiPillTone.Success : UiPillTone.Warning)">
+            @(ActiveOnlineHostCount > 0 ? $"{ActiveOnlineHostCount} online" : "No online hosts")
+        </UiPill>
+        <UiPill Tone="@(ActiveCheckingHostCount > 0 ? UiPillTone.Warning : UiPillTone.Neutral)">
+            @(ActiveCheckingHostCount > 0 ? $"{ActiveCheckingHostCount} checking" : "No hosts checking")
+        </UiPill>
+        <UiPill Tone="@(ActiveOfflineHostCount > 0 ? UiPillTone.Failure : UiPillTone.Neutral)">
+            @(ActiveOfflineHostCount > 0 ? $"{ActiveOfflineHostCount} offline" : "No offline hosts")
+        </UiPill>
+    </div>
+
+    }
+    @if (!string.IsNullOrWhiteSpace(lmsConnectStatus))
+    {
+        <p class="@($"callout {lmsConnectTone}")">@lmsConnectStatus
+            @if (lmsConnectUrl is not null) { <a href="@lmsConnectUrl" target="_blank" rel="noopener noreferrer">Open LMS</a> }
+        </p>
+    }
+
+    <TabControl ActiveValue="@activeHostTab"
+                ActiveValueChanged="HandleHostTabChangedAsync"
+                Class="page-tab-control hosts-tab-control"
+                PanelClass="page-tab-panel hosts-tab-panel">
+            <TabPage Value="@LmsHostsTabValue" Title="@($"LMS Hosts ({LmsHostRows.Count})")">
+                <table class="hosts-table hosts-table-lms" role="table" aria-label="LMS hosts">
+                    <colgroup>
+                        <col class="hosts-col-name" />
+                        <col class="hosts-col-status" />
+                        <col class="hosts-col-auth" />
+                        <col class="hosts-col-version" />
+                        <col class="hosts-col-channel" />
+                        <col class="hosts-col-ai" />
+                        <col class="hosts-col-performance" />
+                        <col class="hosts-col-last-seen" />
+                        <col class="hosts-col-actions" />
+                    </colgroup>
+                    <thead>
+                        <tr>
+                            <th><span class="hosts-column-heading">Name</span></th>
+                            <th><span class="hosts-column-heading">Status</span></th>
+                            <th><span class="hosts-column-heading">Auth</span></th>
+                            <th><span class="hosts-column-heading">Version</span></th>
+                            <th><span class="hosts-column-heading">Channel</span></th>
+                            <th><span class="hosts-column-heading">AI Server</span></th>
+                            <th><span class="hosts-column-heading">Performance</span></th>
+                            <th><span class="hosts-column-heading">Last seen</span></th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (LmsHostRows.Count == 0)
+                        {
+                            <tr>
+                                <td colspan="9" class="hosts-loading-cell">
+                                    <span class="meta-text">No LMS hosts registered yet.</span>
+                                </td>
+                            </tr>
+                        }
+                        else
+                        {
+                            @for (var hostIndex = 0; hostIndex < LmsHostRows.Count; hostIndex++)
+                            {
+                                var row = LmsHostRows[hostIndex];
+                                var stripeClass = hostIndex % 2 == 0 ? "hosts-group-even" : "hosts-group-odd";
+                                var hasRoutes = edgeGatewaySummaries.TryGetValue(row.Host.Id, out var edgeSummary) && edgeSummary!.Links.Count > 0;
+                                <tr @key="row.Host.Id" class="hosts-summary-row @stripeClass @(hasRoutes ? "hosts-has-routes" : "")" @onclick="(() => ToggleHostDetails(row.Host.Id))"
+                                    tabindex="0" @onkeydown="@(e => { if (e.Key == "Enter") ToggleHostDetails(row.Host.Id); })"
+                                    aria-expanded="@(expandedHostId == row.Host.Id ? "true" : "false")" aria-controls="@($"host-inline-{row.Host.Id}")">
+                                    <td class="hosts-identity-cell" data-label="Name">
+                                        <div class="hosts-identity">
+                                            <div class="hosts-quick-open">
+                                                <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiIconButton Label="Open terminal" Glyph="UiIconGlyph.Terminal"
+                                                              data-lms-prepare-popup="@HostTerminalPopupName(row.Host)"
+                                                              OnClick="@(() => OpenHostTerminalAsync(row.Host))" /></span>
+                                                <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiIconButton Label="Open file browser" Glyph="UiIconGlyph.Files"
+                                                              Href="@($"/file-browser-window?hostId={row.Host.Id}")" Target="_blank" Rel="noopener noreferrer"
+                                                              OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,this.target))return false;" /></span>
+                                            </div>
+                                            <div class="stack-tight hosts-name-stack">
+                                                <div class="inventory-host-title">
+                                                    <strong class="hosts-name-text">@GetHostDisplayName(row.Host)</strong>
+                                                    @if(FleetRegistration.Status(row.Host.Id) is {Registered:true})
+                                                    { <span class="hosts-portal-badge" title="Registered in Portal" aria-label="Registered in Portal"><UiGlyphIcon Glyph="UiIconGlyph.Connection" /></span> }
+                                                </div>
+                                                <strong class="meta-text hosts-row-meta hosts-address">@row.Host.Hostname:@row.Host.Port</strong>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="hosts-status-cell" data-label="Status">
+                                        <div class="stack-tight hosts-status-stack">
+                                            <UiPill Tone="@GetStatusTone(row)" Class="hosts-status-pill">@GetStatusLabel(row)</UiPill>
+                                            @if (ShouldShowStatusSummary(row))
+                                            {
+                                                <span class="meta-text hosts-row-meta">@GetStatusSummary(row)</span>
+                                            }
+                                        </div>
+                                    </td>
+                                    <td data-label="Authentication"><span class="hosts-row-value hosts-last-seen-value">@FormatAuthentication(row.Host.PrimaryAuthenticationType)</span></td>
+                                    <td class="hosts-version-cell" data-label="Version">
+                                        <div class="stack-tight hosts-version-stack" title="@GetLmsVersionTooltip(row)">
+                                            <UiPill Tone="@GetLmsUpdateTone(row)" Class="hosts-version-pill">@GetLmsVersionLabel(row)</UiPill>
+                                        </div>
+                                    </td>
+                                    <td data-label="Channel"><span class="hosts-row-value hosts-last-seen-value">@(row.LmsUpdate?.ReleaseChannel switch { "development" => "Development", "stable" => "Stable", _ => "Unknown" })</span></td>
+                                    <td data-label="AI Server" class="hosts-ai-cell">
+                                        @if (hostAi.TryGetValue(row.Host.Id, out var ai))
+                                        {
+                                            <span class="hosts-row-value hosts-last-seen-value" title="@ai.Detail">@(ai.LocalEngineInstalled ? "Yes" : "No")</span>
+                                            @if (ai.LocalEngineInstalled && ai.LocalEngineRunning)
+                                            {
+                                                @if (LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(row.Host.Id))
+                                                { <a class="hosts-ai-available" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true" href="/ai/engine" title="Manage this host’s local AI">Local AI available</a> }
+                                                else if (ai.SharingReady)
+                                                { <button class="hosts-ai-available hosts-ai-link" type="button" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true" title="Connect to this host’s shared AI" @onclick="@(() => OpenPeerAi(row.Host, ai))">Local AI available</button> }
+                                                else
+                                                { <span class="hosts-ai-available" title="Local AI is running; sharing is not ready">Local AI available</span> }
+                                            }
+                                        }
+                                        else { <span class="hosts-row-value hosts-last-seen-value">No</span> }
+                                    </td>
+                                    <td class="hosts-performance-cell" data-label="Performance">
+                                        @if (hostBenchmarks.TryGetValue(row.Host.Id, out var benchmark))
+                                        {
+                                            @if (benchmark.Result is { } score)
+                                            {
+                                                <span class="hosts-performance-summary" title="@($"CPU: single-core / multi-core events per second. R: disk read; W: disk write. {score.ToolVersion} · {score.TestedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm} · {score.DiskFolder} · {score.Threads} threads")">
+                                                    <span>CPU @score.SingleCpu.ToString("N0") / @score.MultiCpu.ToString("N0")</span>
+                                                    <small>R @score.ReadMBps.ToString("N0") · W @score.WriteMBps.ToString("N0") MB/s</small>
+                                                    @if (score.Internet is { } internet) { <small>↓ @internet.DownloadMbps.ToString("N1") · ↑ @internet.UploadMbps.ToString("N1") Mbps</small> }
+                                                </span>
+                                            }
+                                            else { <span class="meta-text" title="@benchmark.Error">@(benchmark.Error is null ? "Not benchmarked" : "Unavailable")</span> }
+                                        }
+                                        else { <span class="meta-text">Checking…</span> }
+                                    </td>
+                                    <td data-label="Last seen"><span class="hosts-row-value hosts-last-seen-value">@FormatLastSeen(row)</span></td>
+                                    <td class="actions-cell" data-label="Actions">
+                                        <div class="row-action-cluster">
+                                            @if (ShouldShowLmsConnectAction(row))
+                                            {
+                                                @if (CanOpenLmsDirectly(row))
+                                                {
+                                                    <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiCommandButton Label="Connect"
+                                                                     Glyph="UiIconGlyph.Connect"
+                                                                     Title="Open this host’s verified HTTPS/HTTP LMS address."
+                                                                     Variant="UiButtonVariant.Action"
+                                                                     Href="@BuildDirectLmsRootUrl(row.Host)"
+                                                                     Target="_blank"
+                                                                     Rel="noreferrer" /></span>
+                                                }
+                                                else
+                                                {
+                                                    <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiCommandButton Label="Connect"
+                                                                     Glyph="UiIconGlyph.Connect"
+                                                                     Title="@GetLmsTunnelConnectTitle(row.Host)"
+                                                                     Variant="UiButtonVariant.Action"
+                                                                     Disabled="@(!CanConnectRemoteLmsHostThroughSsh(row.Host) || IsLmsConnectBusyFor(row.Host))"
+                                                                     OnClick="@(() => ConnectToRemoteLmsAsync(row.Host))" /></span>
+                                                }
+                                            }
+                                            @if (ShouldShowLmsUpdateAction(row))
+                                            {
+                                                <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiCommandButton Label="Update"
+                                                                 Glyph="UiIconGlyph.Download"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 Disabled="@IsLmsUpdateActiveFor(row.Host)"
+                                                                 OnClick="@(() => StartLmsHostUpdateAsync(row.Host))" /></span>
+                                            }
+                                            @if (ShouldShowPublicKeySetupAction(row.Host))
+                                            {
+                                                <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiCommandButton Label="Setup key"
+                                                                 Title="Set up public key SSH"
+                                                                 Glyph="UiIconGlyph.Key"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 Disabled="@IsPublicKeySetupBusyFor(row.Host)"
+                                                                 OnClick="@(() => OpenPublicKeySetupAsync(row.Host))" /></span>
+                                            }
+                                            @if(portalRegistered && FleetRegistration.CanRegister(row.Host.Id))
+                                            { <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiCommandButton Label="Register with Portal" Glyph="UiIconGlyph.Connection" Variant="UiButtonVariant.Action" OnClick="@(()=>portalRegistration?.Open(row.Host.Id))" /></span> }
+
+
+                                        </div>
+                                    </td>
+                                </tr>
+                                @if (hasRoutes)
+                                {
+                                    <tr @key="@($"routes-{row.Host.Id}")" class="hosts-edge-routes-row @stripeClass">
+                                        <td colspan="9">
+                                            <div class="hosts-edge-routes">
+                                                <span class="meta-text">Edge Gateway routes</span>
+                                                @foreach (var link in edgeSummary!.Links)
+                                                {
+                                                    <a href="@link.Url" title="@link.Label" target="_blank" rel="noopener noreferrer">@link.Label</a>
+                                                }
+                                                @if (edgeSummary!.RouteCount > edgeSummary!.Links.Count)
+                                                {
+                                                    <span class="meta-text">+@(edgeSummary!.RouteCount - edgeSummary!.Links.Count) more</span>
+                                                }
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                                @if (detailedHostId == row.Host.Id)
+                                {
+                                    <tr @key="@($"details-{row.Host.Id}")" class="hosts-inline-details-row @stripeClass" hidden="@(expandedHostId != row.Host.Id)"><td colspan="9">
+                                        <section id="@($"host-inline-{row.Host.Id}")" aria-label="@($"Details for {GetHostDisplayName(row.Host)}")">
+                                            <HostInlineDetails @key="row.Host.Id" Host="row.Host" IsExpanded="@(expandedHostId == row.Host.Id)" InstalledVersion="@row.LmsUpdate?.InstalledVersion"
+                                                               ReleaseChannel="@row.LmsUpdate?.ReleaseChannel" LmsEndpoint="@GetInlineLmsEndpoint(row.Host)" />
+                                            <div class="toolbar-row">
+                                            <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Href="@($"/hosts/{row.Host.Id}/edit")" Variant="UiButtonVariant.Action" />
+                                            <HostRebootAction Host="row.Host" />
+                                            @if (ShouldShowLmsUninstallAction(row))
+                                            {
+                                                <UiCommandButton Label="Uninstall"
+                                                                 Glyph="UiIconGlyph.Uninstall"
+                                                                 Title="Uninstall LMS software on this machine; data removal is a separate option."
+                                                                 Href="@BuildLmsUninstallHref(row.Host)"
+                                                                 Variant="UiButtonVariant.Action" />
+                                            }
+
+                                            <div class="hosts-browser-action-main">
+                                                <UiCommandButton Label="Flush cache"
+                                                                 Title="Flush this host's image thumbnail cache"
+                                                                 Glyph="UiIconGlyph.ImageCacheClear"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 aria-label="Flush this host's image thumbnail cache"
+                                                                 Disabled="@IsThumbnailCacheFlushBusyFor(row.Host)"
+                                                                 OnClick="@(() => FlushHostThumbnailCacheAsync(row.Host))" />
+                                            </div>
+                                            @if (CanRemoveHost(row.Host))
+                                            {
+                                                <UiCommandButton Label="Remove"
+                                                                 Title="Remove this host from LMS inventory without uninstalling its software."
+                                                                 Glyph="UiIconGlyph.Delete"
+                                                                 Variant="UiButtonVariant.Danger"
+                                                                 Disabled="@isRemovingHost"
+                                                                 OnClick="@(() => OpenRemoveHostDialog(row.Host))" />
+                                            }
+                                            </div>
+                                        </section>
+                                    </td></tr>
+                                }
+                                @if (GetLmsUpdateOperation(row.Host.Id) is { State: LmsHostUpdateOperationState.Failed } failedUpdate)
+                                {
+                                    <tr class="hosts-update-failure-row @stripeClass">
+                                        <td colspan="9">
+                                            <p class="callout error" role="alert">@failedUpdate.Message</p>
+                                            <div class="hosts-update-recovery-actions">
+                                                <span>Open this host’s terminal to investigate the update failure.</span>
+                                                <UiCommandButton Label="Open terminal" Glyph="UiIconGlyph.Run" OnClientPointerDown="@PrepareHostTerminalPopup(row.Host)" OnClick="@(() => OpenHostTerminalAsync(row.Host))" />
+                                                @if (terminalAiAvailable)
+                                                {
+                                                    <UiCommandButton Label="Fix this using AI" Glyph="UiIconGlyph.Ai" OnClientPointerDown="@PrepareHostTerminalPopup(row.Host)" OnClick="@(() => OpenHostTerminalAsync(row.Host, failedUpdate.Message))" />
+                                                }
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        }
+                    </tbody>
+                </table>
+            </TabPage>
+
+            <TabPage Value="@SshHostsTabValue" Title="@($"SSH Hosts ({SshHostRows.Count})")">
+                <table class="hosts-table hosts-table-ssh" role="table" aria-label="SSH hosts">
+                    <colgroup>
+                        <col class="hosts-col-name" />
+                        <col class="hosts-col-status" />
+                        <col class="hosts-col-auth" />
+                        <col class="hosts-col-last-seen" />
+                        <col class="hosts-col-actions" />
+                    </colgroup>
+                    <thead>
+                        <tr>
+                            <th><span class="hosts-column-heading">Name</span></th>
+                            <th><span class="hosts-column-heading">Status</span></th>
+                            <th><span class="hosts-column-heading">Auth</span></th>
+                            <th><span class="hosts-column-heading">Last seen</span></th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (SshHostRows.Count == 0)
+                        {
+                            <tr>
+                                <td colspan="5" class="hosts-loading-cell">
+                                    <span class="meta-text">No SSH-only hosts registered yet.</span>
+                                </td>
+                            </tr>
+                        }
+                        else
+                        {
+                            @foreach (var row in SshHostRows)
+                            {
+                                <tr @key="row.Host.Id" class="hosts-summary-row" @onclick="(() => ToggleHostDetails(row.Host.Id))"
+                                    tabindex="0" @onkeydown="@(e => { if (e.Key == "Enter") ToggleHostDetails(row.Host.Id); })"
+                                    aria-expanded="@(expandedHostId == row.Host.Id ? "true" : "false")" aria-controls="@($"host-inline-{row.Host.Id}")">
+                                    <td class="hosts-identity-cell" data-label="Name">
+                                        <div class="hosts-identity">
+                                            <div class="hosts-quick-open">
+                                                <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiIconButton Label="Open terminal" Glyph="UiIconGlyph.Terminal"
+                                                              data-lms-prepare-popup="@HostTerminalPopupName(row.Host)"
+                                                              OnClick="@(() => OpenHostTerminalAsync(row.Host))" /></span>
+                                                <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiIconButton Label="Open file browser" Glyph="UiIconGlyph.Files"
+                                                              Href="@($"/file-browser-window?hostId={row.Host.Id}")" Target="_blank" Rel="noopener noreferrer"
+                                                              OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,this.target))return false;" /></span>
+                                            </div>
+                                            <div class="stack-tight hosts-name-stack">
+                                                <div class="inventory-host-title">
+                                                    <strong class="hosts-name-text">@GetHostDisplayName(row.Host)</strong>
+                                                    @if(FleetRegistration.Status(row.Host.Id) is {Registered:true})
+                                                    { <span class="hosts-portal-badge" title="Registered in Portal" aria-label="Registered in Portal"><UiGlyphIcon Glyph="UiIconGlyph.Connection" /></span> }
+                                                </div>
+                                                <strong class="meta-text hosts-row-meta hosts-address">@row.Host.Hostname:@row.Host.Port</strong>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="hosts-status-cell" data-label="Status">
+                                        <div class="stack-tight hosts-status-stack">
+                                            <UiPill Tone="@GetStatusTone(row)" Class="hosts-status-pill">@GetStatusLabel(row)</UiPill>
+                                            @if (ShouldShowStatusSummary(row))
+                                            {
+                                                <span class="meta-text hosts-row-meta">@GetStatusSummary(row)</span>
+                                            }
+                                        </div>
+                                    </td>
+                                    <td data-label="Authentication"><span class="hosts-row-value hosts-last-seen-value">@FormatAuthentication(row.Host.PrimaryAuthenticationType)</span></td>
+                                    <td data-label="Last seen"><span class="hosts-row-value hosts-last-seen-value">@FormatLastSeen(row)</span></td>
+                                    <td class="actions-cell" data-label="Actions">
+                                        <div class="row-action-cluster">
+                                            @if (ShouldShowPublicKeySetupAction(row.Host))
+                                            {
+                                                <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiCommandButton Label="Setup key"
+                                                                 Title="Set up public key SSH"
+                                                                 Glyph="UiIconGlyph.Key"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 Disabled="@IsPublicKeySetupBusyFor(row.Host)"
+                                                                 OnClick="@(() => OpenPublicKeySetupAsync(row.Host))" /></span>
+                                            }
+                                            @if (TryGetLmsInstallAction(row.Host) is { } installAction)
+                                            {
+                                                <span class="hosts-row-control" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true"><UiCommandButton Label="@installAction.Label"
+                                                                 Glyph="UiIconGlyph.Plus"
+                                                                 Href="@installAction.Href"
+                                                                 Title="@installAction.Title"
+                                                                 Disabled="@installAction.Disabled"
+                                                                 Variant="UiButtonVariant.Action" /></span>
+                                            }
+
+
+                                        </div>
+                                    </td>
+                                </tr>
+                                @if (detailedHostId == row.Host.Id)
+                                {
+                                    <tr @key="@($"details-{row.Host.Id}")" class="hosts-inline-details-row" hidden="@(expandedHostId != row.Host.Id)"><td colspan="5">
+                                        <section id="@($"host-inline-{row.Host.Id}")" aria-label="@($"Details for {GetHostDisplayName(row.Host)}")">
+                                            <HostInlineDetails @key="row.Host.Id" Host="row.Host" IsExpanded="@(expandedHostId == row.Host.Id)" />
+                                            <div class="toolbar-row">
+                                            <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" Href="@($"/hosts/{row.Host.Id}/edit")" Variant="UiButtonVariant.Action" />
+
+                                            <div class="hosts-browser-action-main">
+                                                <UiCommandButton Label="Flush cache"
+                                                                 Title="Flush this host's image thumbnail cache"
+                                                                 Glyph="UiIconGlyph.ImageCacheClear"
+                                                                 Variant="UiButtonVariant.Action"
+                                                                 aria-label="Flush this host's image thumbnail cache"
+                                                                 Disabled="@IsThumbnailCacheFlushBusyFor(row.Host)"
+                                                                 OnClick="@(() => FlushHostThumbnailCacheAsync(row.Host))" />
+                                            </div>
+                                            @if (CanRemoveHost(row.Host))
+                                            {
+                                                <UiCommandButton Label="Remove"
+                                                                 Title="Remove this host from LMS inventory without uninstalling its software."
+                                                                 Glyph="UiIconGlyph.Delete"
+                                                                 Variant="UiButtonVariant.Danger"
+                                                                 Disabled="@isRemovingHost"
+                                                                 OnClick="@(() => OpenRemoveHostDialog(row.Host))" />
+                                            }
+                                            </div>
+                                        </section>
+                                    </td></tr>
+                                }
+                            }
+                        }
+                    </tbody>
+                </table>
+            </TabPage>
+            <TabPage Value="sftp" Title="SFTP Hosts">
+                <SftpHostsPanel />
+            </TabPage>
+            <TabPage Value="remote-desktop" Title="Remote Desktop (RDP/VNC)">
+                <RemoteDesktopPanel />
+            </TabPage>
+    </TabControl>
+</div>
+
+<UiModal IsOpen="@(hostPendingRemoval is not null)"
+         Title="Remove host"
+         Subtitle="@RemoveHostDialogSubtitle"
+         Class="hosts-remove-modal"
+             CloseOnBackdrop="false"
+         OnClose="CloseRemoveHostDialog">
+    <ChildContent>
+        @if (hostPendingRemoval is not null)
+        {
+            <div class="stack-relaxed">
+                <p class="callout warning">
+                    Remove <strong>@hostPendingRemoval.Name</strong> from LMS? This removes the inventory entry, saved SSH credentials, host runbooks, AI host attachments, and file shortcuts.
+                </p>
+                <p class="meta-text">This does not uninstall Linux Made Sane or change anything on the remote machine.</p>
+                @if (!string.IsNullOrWhiteSpace(removeHostStatus))
+                {
+                    <p class="@($"callout {removeHostTone}")">@removeHostStatus</p>
+                }
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <div class="hosts-remove-footer">
+            <UiCommandButton Label="Cancel"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@isRemovingHost"
+                             OnClick="CloseRemoveHostDialog" />
+            <UiCommandButton Label="@(isRemovingHost ? "Removing..." : "Remove host")"
+                             Glyph="UiIconGlyph.Delete"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@(!CanConfirmRemoveHost)"
+                             OnClick="ConfirmRemoveHostAsync" />
+        </div>
+    </Footer>
+</UiModal>
+
+<UiModal IsOpen="@isPublicKeySetupOpen"
+         Title="Set up public key SSH"
+         Subtitle="@PublicKeySetupSubtitle"
+         Class="hosts-public-key-modal"
+             CloseOnBackdrop="false"
+         OnClose="ClosePublicKeySetupAsync">
+    <ChildContent>
+        @if (publicKeySetupHost is null || publicKeySetupEditor is null || publicKeySetupKeyPair is null)
+        {
+            <p class="callout info hosts-public-key-status">Preparing public key setup...</p>
+        }
+        else
+        {
+            <div class="hosts-public-key-flow">
+                <div class="hosts-public-key-steps">
+                    <article class="surface-subcard hosts-public-key-step">
+                        <strong>1. Generate</strong>
+                        <span>LMS generated a key for @PublicKeySetupTargetLabel. The private key is only saved after a successful key-auth test.</span>
+                    </article>
+                    <article class="surface-subcard hosts-public-key-step">
+                        <strong>2. Install</strong>
+                        <span>@(LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(publicKeySetupHost.Id) ? "LMS uses its existing administrator access to install the key for this local Linux account." : "LMS appends the public key using this host’s saved SSH login.")</span>
+                    </article>
+                    <article class="surface-subcard hosts-public-key-step">
+                        <strong>3. Save</strong>
+                        <span>LMS tests the new key and switches the host to Public key auth when the test passes.</span>
+                    </article>
+                </div>
+
+                <label class="terminal-inline-field">
+                    <span>Public key</span>
+                    <textarea readonly class="ui-control-input hosts-public-key-textarea">@publicKeySetupKeyPair.PublicKey</textarea>
+                </label>
+
+                <span class="meta-text">Fingerprint: @publicKeySetupKeyPair.FingerprintSha256</span>
+
+                <details class="hosts-public-key-command">
+                    <summary>Install command</summary>
+                    <pre class="command-preview-block command-display-block">@PublicKeySetupInstallCommand</pre>
+                </details>
+
+                <div class="toolbar-row hosts-public-key-actions">
+                    <UiCommandButton Label="Copy public key"
+                                     Glyph="UiIconGlyph.Copy"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     Disabled="@isPublicKeySetupBusy"
+                                     OnClick="CopyPublicKeySetupKeyAsync" />
+                    <UiCommandButton Label="Copy command"
+                                     Glyph="UiIconGlyph.Copy"
+                                     Variant="UiButtonVariant.ActionSubtle"
+                                     Disabled="@isPublicKeySetupBusy"
+                                     OnClick="CopyPublicKeySetupCommandAsync" />
+                    <UiCommandButton Label="Generate new key"
+                                     Glyph="UiIconGlyph.Refresh"
+                                     Variant="UiButtonVariant.Ghost"
+                                     Disabled="@isPublicKeySetupBusy"
+                                     OnClick="GeneratePublicKeySetupKeyAsync" />
+                </div>
+
+                <UiCheckboxField @bind-Value="keepStoredPasswordFallback"
+                                 Label="Keep saved password as fallback"
+                                 Helper="Recommended until the key has been used for a few normal connections. Disable it later if you want key-only SSH."
+                                 Disabled="@(!publicKeySetupEditor.HasStoredPassword || isPublicKeySetupBusy)"
+                                 Compact="true"
+                                 Card="true" />
+
+                @if (!string.IsNullOrWhiteSpace(publicKeySetupCommandOutput))
+                {
+                    <details class="hosts-public-key-command" open>
+                        <summary>Last setup output</summary>
+                        <pre class="command-preview-block command-display-block">@publicKeySetupCommandOutput</pre>
+                    </details>
+                }
+            </div>
+        }
+    </ChildContent>
+
+    <Footer>
+        <div class="hosts-public-key-footer">
+            @if (!string.IsNullOrWhiteSpace(publicKeySetupStatus))
+            {
+                <p class="callout @publicKeySetupTone hosts-public-key-status">@publicKeySetupStatus</p>
+            }
+
+            <div class="hosts-public-key-footer-actions">
+                <UiCommandButton Label="Close"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@isPublicKeySetupBusy"
+                                 OnClick="ClosePublicKeySetupAsync" />
+                <UiCommandButton Label="@(isPublicKeySetupBusy ? "Working..." : "Install, test, and save")"
+                                 Glyph="UiIconGlyph.Key"
+                                 Disabled="@(!CanRunPublicKeySetup)"
+                                 OnClick="InstallAndSavePublicKeyAsync" />
+            </div>
+        </div>
+    </Footer>
+</UiModal>
+
+@if (peerAiHost is not null)
+{
+    <UiModal IsOpen="true" Title="@($"Use AI on {peerAiHost.Name}")" OnClose="ClosePeerAi" Class="hosts-peer-ai-modal">
+        <div class="hosts-peer-ai-dialog">
+            <p>The connection runs from this LMS server to the AI service over direct HTTP/HTTPS, using LAN or tailnet routing. SSH access alone does not create this connection.</p>
+            <label>AI service URL<input @bind="peerAiUrl" placeholder="http://ai-host:11434" disabled="@peerAiBusy" /></label>
+            <label>Host sharing access key<input type="password" @bind="peerAiKey" autocomplete="off" disabled="@peerAiBusy" /></label>
+            <p class="meta-text">Enable sharing on that host’s Local AI page and copy its access key here. No separate cloud provider API key is needed. Prefer a private LAN, tailnet or HTTPS route.</p>
+            <label><input type="checkbox" @bind="peerAiDefault" disabled="@peerAiBusy" /> Use as the default AI provider</label>
+            <p class="callout @peerAiTone" role="status">@peerAiMessage</p>
+            <div class="toolbar-row">
+                <CompactUIButton Label="Verify and use AI" Glyph="UiIconGlyph.Connect" Disabled="@peerAiBusy" OnClick="SavePeerAiAsync" />
+                <CompactUIButton Label="Close" Glyph="UiIconGlyph.Clear" Disabled="@peerAiBusy" OnClick="ClosePeerAi" />
+            </div>
+        </div>
+    </UiModal>
+}
+
+@code {
+    private void PortalStatusesChanged()=>_ = SafeInvokeAsync(StateHasChanged);
+    private FleetPackageUpdates? packageUpdates;
+    private FleetPortalRegistration? portalRegistration;
+    private bool portalRegistered;
+    private readonly Dictionary<Guid, HostAiAvailability> hostAi = new();
+    private ManagedHost? peerAiHost;
+    private string peerAiUrl = "", peerAiKey = "", peerAiMessage = "", peerAiTone = "info";
+    private bool peerAiBusy, peerAiDefault = true;
+
+    private async Task RefreshHostAiAsync(Guid hostId, CancellationToken token)
+    {
+        try
+        {
+            using var scope = ServiceScopeFactory.CreateScope();
+            var service = scope.ServiceProvider.GetRequiredService<HostAiAvailabilityService>();
+            var directBaseUrl = GetCachedDirectBaseUrl(hostId);
+            var status = await StatusCache.GetAsync("hosts", ("ai", StatusKey(hostRows.First(row => row.Host.Id == hostId).Host)), () => Task.Run(() => LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(hostId)
+                ? service.GetLocalAsync(token)
+                : service.GetRemoteAsync(directBaseUrl, token), token));
+            if (!token.IsCancellationRequested) await InvokeAsync(() => { hostAi[hostId] = status; StateHasChanged(); });
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex) { Logger.LogDebug(ex, "Could not check AI for host {HostId}", hostId); }
+    }
+    private void OpenPeerAi(ManagedHost host, HostAiAvailability ai)
+    {
+        peerAiHost = host; peerAiKey = ""; peerAiDefault = true;
+        peerAiUrl = ai.Routes.FirstOrDefault(r => r.Reachable)?.Url ?? ai.Routes.FirstOrDefault()?.Url ?? "";
+        peerAiTone = "info"; peerAiMessage = "Enter the host sharing key. Verification checks this LMS server’s route and the remote model before saving.";
+    }
+    private void ClosePeerAi() { if (peerAiBusy) return; peerAiHost = null; peerAiKey = ""; }
+    private async Task SavePeerAiAsync()
+    {
+        if (peerAiHost is null || peerAiBusy) return;
+        peerAiBusy = true; peerAiTone = "info"; peerAiMessage = "Verifying the AI route, access key and available model…";
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var provider = await AiEngineManager.CreateOrUpdatePeerLmsProviderAsync(new PeerLmsAiProviderRequest(peerAiUrl, peerAiKey) { DisplayName = $"AI on {peerAiHost.Name}", SetDefault = peerAiDefault });
+            peerAiKey = ""; peerAiTone = "success";
+            peerAiMessage = $"Connected to {provider.DefaultModelId}. Available in AI tools, terminal and runbooks" + (provider.IsDefault ? " as the default provider." : ".");
+            await RefreshTerminalAiAvailabilityAsync();
+        }
+        catch (Exception ex) { peerAiTone = "error"; peerAiMessage = ex.Message; }
+        finally { peerAiBusy = false; }
+    }
+
+    private const string LmsHostsTabValue = "lms";
+    private const string SshHostsTabValue = "ssh";
+    private static readonly TimeSpan StatusCheckTimeout = TimeSpan.FromSeconds(8);
+    private IReadOnlyList<HostRowState> hostRows = [];
+    private readonly Dictionary<Guid, LmsHostEdgeGatewaySummary> edgeGatewaySummaries = [];
+    private CancellationTokenSource? statusRefreshCancellationTokenSource;
+    private bool isStatusRefreshInProgress;
+    private bool isLmsUpdateRefreshInProgress;
+    private bool updatingAllHosts;
+    private string? lmsConnectUrl;
+    private string activeHostTab = LmsHostsTabValue;
+    private ManagedHost? publicKeySetupHost;
+    private ManagedHostEditor? publicKeySetupEditor;
+    private GeneratedSshKeyPair? publicKeySetupKeyPair;
+    private bool isPublicKeySetupOpen;
+    private bool isPublicKeySetupBusy;
+    private bool keepStoredPasswordFallback = true;
+    private string publicKeySetupStatus = string.Empty;
+    private string publicKeySetupTone = "info";
+    private string publicKeySetupCommandOutput = string.Empty;
+    private ManagedHost? hostPendingRemoval;
+    private bool isRemovingHost;
+    private string removeHostStatus = string.Empty;
+    private string removeHostTone = "info";
+    private Guid? lmsConnectHostId;
+    private string lmsConnectStatus = string.Empty;
+    private string lmsConnectTone = "info";
+    private readonly HashSet<Guid> thumbnailCacheFlushHostIds = [];
+    private readonly Dictionary<Guid, LmsHostUpdateOperation> lmsUpdateOperations = [];
+
+    private IReadOnlyList<HostRowState> LmsHostRows =>
+        hostRows
+            .Where(row => ManagedHostCapabilities.IsLmsHost(row.Host))
+            .ToArray();
+
+    private IReadOnlyList<HostRowState> SshHostRows =>
+        hostRows
+            .Where(row => !ManagedHostCapabilities.IsLmsHost(row.Host))
+            .ToArray();
+
+    private IReadOnlyList<HostRowState> ActiveHostRows =>
+        string.Equals(activeHostTab, SshHostsTabValue, StringComparison.Ordinal)
+            ? SshHostRows
+            : LmsHostRows;
+
+    private int ActiveOnlineHostCount => ActiveHostRows.Count(row => ResolveConnectionStatus(row) == ConnectionTestStatus.Succeeded);
+
+    private int ActiveCheckingHostCount => isStatusRefreshInProgress
+        ? ActiveHostRows.Count(row => !HasActiveTerminalSession(row.Host.Id))
+        : 0;
+
+    private int ActiveOfflineHostCount => ActiveHostRows.Count(row => !row.IsStatusLoading && ResolveConnectionStatus(row) != ConnectionTestStatus.Succeeded);
+
+    private string RemoveHostDialogSubtitle =>
+        hostPendingRemoval is null
+            ? "Remove a host registration from LMS."
+            : ManagedHostCapabilities.IsLmsHost(hostPendingRemoval)
+                ? "Remove a remote LMS host registration without uninstalling the remote machine."
+                : "Remove an SSH host registration from LMS.";
+
+    private bool CanConfirmRemoveHost =>
+        hostPendingRemoval is not null &&
+        !isRemovingHost &&
+        CanRemoveHost(hostPendingRemoval);
+
+    private bool terminalAiAvailable;
+    private static string HostTerminalPopupName(ManagedHost host) => $"lms-host-terminal-{host.Id:N}";
+    private static string PrepareHostTerminalPopup(ManagedHost host) =>
+        $"window.lmsTerminalWindow?.preparePopup('{HostTerminalPopupName(host)}');";
+
+    private async Task<bool> HasTerminalAiAsync()
+    {
+        var context = await AiThreadService.GetEditorAsync();
+        return context.ConfiguredProviders.Any(provider => provider.IsEnabled &&
+            (!provider.RequiresApiKey || provider.HasApiKeyConfigured) &&
+            context.SupportedProviders.Any(definition => definition.ProviderType == provider.ProviderType && definition.IsRuntimeImplemented));
+    }
+
+    private async Task RefreshTerminalAiAvailabilityAsync()
+    {
+        try { terminalAiAvailable = await HasTerminalAiAsync(); }
+        catch (Exception exception) { Logger.LogWarning(exception, "Could not check local terminal AI availability"); terminalAiAvailable = false; }
+        await SafeInvokeAsync(StateHasChanged);
+    }
+
+    private async Task OpenHostTerminalAsync(ManagedHost host, string? updateFailure = null)
+    {
+        var popupName = HostTerminalPopupName(host);
+        try
+        {
+            if (updateFailure is not null && !await HasTerminalAiAsync())
+                throw new InvalidOperationException("AI is no longer enabled on this LMS host. Open the terminal to investigate manually.");
+            var workspace = TerminalWorkspaceRegistry.GetOrCreate(TerminalWorkspaceAccessor.GetWorkspaceId());
+            await TerminalWorkspaceRegistry.RefreshSessionsAsync(host.Id);
+            var tab = updateFailure is null ? workspace.EnsureHostTab(host) : workspace.AddTab(host);
+            if (updateFailure is null && !tab.ConnectionDesired && !tab.IsBusy && tab.Snapshot is not null)
+                tab = workspace.AddTab(host);
+            if (updateFailure is not null)
+            {
+                tab.PendingAiTaskPrompt = $"Investigate and help repair the failed LMS update on this connected host ({host.Name}). The update reported:\n{updateFailure}\nCheck the actual installer/service logs and current installed version before proposing a fix. Preserve configuration, credentials and data. Do not change release channel or use Home Lab repair tools. Explain the cause and verify LMS health after any approved repair.";
+                tab.PendingSudoAuthentication = TerminalAiSecureInputPolicy.HasSudoAuthenticationFailure(updateFailure);
+                tab.StartPendingAiTask = true;
+                workspace.SetAiPanelOpen(tab.Id, true);
+            }
+            var opened = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.openPopup", $"/terminal-window/{tab.Id}?autoconnect=true", popupName);
+            if (!opened) throw new InvalidOperationException("Your browser blocked the terminal window. Allow popups for LMS and try again.");
+            workspace.SetDetached(tab.Id, true);
+        }
+        catch (Exception exception)
+        {
+            lmsConnectStatus = $"Could not open {host.Name}'s terminal: {exception.Message}";
+            lmsConnectTone = "error";
+            await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.setPreparedPopupStatus", popupName, "Could not open terminal", exception.Message, "error");
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        FleetRegistration.Changed+=PortalStatusesChanged;
+        var portalStatus=await PortalRegistration.StatusAsync();
+        portalRegistered=portalStatus is {IsEnabled:true,PortalInstanceId:not null,PortalOrganizationId:not null};
+        var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(new Uri(NavigationManager.Uri).Query);
+        if (query.TryGetValue("tab", out var tab)) await HandleHostTabChangedAsync(tab.ToString());
+        if (query.TryGetValue("details", out var inlineHost) && Guid.TryParse(inlineHost, out var inlineHostId)) expandedHostId = detailedHostId = inlineHostId;
+        var hosts = await HostService.ListHostsAsync();
+        await TerminalWorkspaceRegistry.RefreshSessionsAsync();
+        hostRows = hosts
+            .OrderBy(ManagedHostCapabilities.GetSortRank)
+            .ThenBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(host =>
+            {
+                var hasActiveSession = TerminalWorkspaceRegistry.HasActiveSession(host.Id);
+
+                return new HostRowState
+                {
+                    Host = host,
+                    ConnectionTest = hasActiveSession
+                        ? BuildLiveSessionConnectionResult()
+                        : BuildCachedConnectionResult(host),
+                    IsStatusLoading = false
+                };
+            })
+            .ToArray();
+
+        if (expandedHostId is { } expandedId && hostRows.FirstOrDefault(row => row.Host.Id == expandedId) is { } expandedRow)
+            activeHostTab = ManagedHostCapabilities.IsLmsHost(expandedRow.Host) ? LmsHostsTabValue : "ssh";
+        isStatusRefreshInProgress = hostRows.Any(row => !HasActiveTerminalSession(row.Host.Id));
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            statusRefreshCancellationTokenSource = new CancellationTokenSource();
+            _ = RefreshStatusesAsync(statusRefreshCancellationTokenSource.Token);
+            _ = RefreshLmsUpdateStatusesAsync(statusRefreshCancellationTokenSource.Token);
+            _ = RefreshEdgeGatewaySummariesAsync(statusRefreshCancellationTokenSource.Token);
+            _ = RefreshBenchmarksAsync(statusRefreshCancellationTokenSource.Token);
+            _ = RefreshTerminalAiAvailabilityAsync();
+            _ = MonitorTerminalSessionsAsync(statusRefreshCancellationTokenSource.Token);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private string? GetCachedDirectBaseUrl(Guid hostId) =>
+        hostRows.FirstOrDefault(row => row.Host.Id == hostId)?.LmsUpdate?.VerifiedDirectBaseUrl
+        ?? LmsUpdateAvailabilityService.GetDirectBaseUrl(hostId);
+
+    private bool refreshingHosts;
+    private static ManagedHost StatusKey(ManagedHost host) => host with
+    {
+        LastSeenUtc = null, LastConnectionTestStatus = default, OperatingStatus = default
+    };
+
+    private async Task RefreshHostsAsync()
+    {
+        if (refreshingHosts) return;
+        refreshingHosts = true;
+        lmsConnectStatus = "Refreshing host status and versions…";
+        lmsConnectTone = "info";
+        await InvokeAsync(StateHasChanged);
+        await StatusCache.InvalidateAsync("hosts");
+        var token = statusRefreshCancellationTokenSource?.Token ?? CancellationToken.None;
+        try
+        {
+            await Task.WhenAll(RefreshStatusesAsync(token), RefreshLmsUpdateStatusesAsync(token),
+                RefreshEdgeGatewaySummariesAsync(token), RefreshBenchmarksAsync(token));
+            lmsConnectStatus = "Host checks completed. Results are cached for five minutes.";
+            lmsConnectTone = "success";
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex) { lmsConnectStatus = "Could not refresh hosts: " + ex.Message; lmsConnectTone = "error"; }
+        finally { refreshingHosts = false; }
+    }
+
+    private async Task MonitorTerminalSessionsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+            var previous = TerminalSessionSummary();
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await TerminalWorkspaceRegistry.RefreshSessionsAsync(cancellationToken: cancellationToken);
+                var current = TerminalSessionSummary();
+                if(current==previous) continue;
+                previous=current;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        FleetRegistration.Changed-=PortalStatusesChanged;
+        if (statusRefreshCancellationTokenSource is not null)
+        {
+            await statusRefreshCancellationTokenSource.CancelAsync();
+            statusRefreshCancellationTokenSource.Dispose();
+        }
+    }
+
+    private string TerminalSessionSummary()=>string.Join(';',hostRows.Select(row=>$"{row.Host.Id}:{TerminalWorkspaceRegistry.GetOpenSessionCount(row.Host.Id)}:{HasActiveTerminalSession(row.Host.Id)}"));
+    private Guid? expandedHostId, detailedHostId;
+    private void ToggleHostDetails(Guid hostId)
+    {
+        if(expandedHostId==hostId) expandedHostId=null;
+        else expandedHostId=detailedHostId=hostId;
+    }
+    private string? GetInlineLmsEndpoint(ManagedHost host) => IsCurrentLmsEndpoint(host)
+        ? NavigationManager.BaseUri.TrimEnd('/') : GetCachedDirectBaseUrl(host.Id);
+
+    private Task HandleHostTabChangedAsync(string? value)
+    {
+        activeHostTab = value is "ssh" or "sftp" or "remote-desktop" ? value : LmsHostsTabValue;
+        return Task.CompletedTask;
+    }
+
+    private Task OpenRemoveHostDialog(ManagedHost host)
+    {
+        if (!CanRemoveHost(host) || isRemovingHost)
+        {
+            return Task.CompletedTask;
+        }
+
+        hostPendingRemoval = host;
+        removeHostStatus = string.Empty;
+        removeHostTone = "info";
+        return Task.CompletedTask;
+    }
+
+    private Task CloseRemoveHostDialog()
+    {
+        if (!isRemovingHost)
+        {
+            hostPendingRemoval = null;
+            removeHostStatus = string.Empty;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmRemoveHostAsync()
+    {
+        var host = hostPendingRemoval;
+        if (host is null || !CanRemoveHost(host) || isRemovingHost)
+        {
+            return;
+        }
+
+        isRemovingHost = true;
+        removeHostStatus = "Removing host...";
+        removeHostTone = "info";
+
+        try
+        {
+            await HostService.DeleteHostAsync(host.Id);
+            hostRows = hostRows
+                .Where(row => row.Host.Id != host.Id)
+                .ToArray();
+            lmsUpdateOperations.Remove(host.Id);
+
+            if (publicKeySetupHost?.Id == host.Id)
+            {
+                isPublicKeySetupOpen = false;
+                publicKeySetupHost = null;
+                publicKeySetupEditor = null;
+                publicKeySetupKeyPair = null;
+            }
+
+            hostPendingRemoval = null;
+            removeHostStatus = string.Empty;
+            lmsConnectStatus = $"Removed {host.Name}.";
+            lmsConnectTone = "success";
+        }
+        catch (Exception exception)
+        {
+            removeHostStatus = exception.Message;
+            removeHostTone = "error";
+        }
+        finally
+        {
+            isRemovingHost = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private readonly Dictionary<Guid, LmsHostBenchmark> hostBenchmarks = [];
+    private async Task RefreshBenchmarksAsync(CancellationToken token)
+    {
+        using var gate = new SemaphoreSlim(3);
+        try
+        {
+            await Task.WhenAll(LmsHostRows.Select(async row =>
+            {
+                await gate.WaitAsync(token);
+                try
+                {
+                    var result = await StatusCache.GetAsync("hosts", ("benchmark", StatusKey(row.Host)), () => BenchmarkService.GetAsync(row.Host, token));
+                    await InvokeAsync(() => { if (!token.IsCancellationRequested) { hostBenchmarks[row.Host.Id] = result; StateHasChanged(); } });
+                }
+                finally { gate.Release(); }
+            }));
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
+
+    private async Task RefreshEdgeGatewaySummariesAsync(CancellationToken cancellationToken)
+    {
+        using var concurrency = new SemaphoreSlim(3);
+        var tasks = LmsHostRows.Select(async row =>
+        {
+            await concurrency.WaitAsync(cancellationToken);
+            try
+            {
+                var summary = await StatusCache.GetAsync("hosts", ("edge", StatusKey(row.Host)), () => EdgeGatewaySummaryService.GetAsync(row.Host, cancellationToken));
+                await InvokeAsync(() =>
+                {
+                    if (cancellationToken.IsCancellationRequested) return;
+                    edgeGatewaySummaries[row.Host.Id] = summary;
+                    StateHasChanged();
+                });
+            }
+            finally
+            {
+                concurrency.Release();
+            }
+        }).ToArray();
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    private async Task RefreshStatusesAsync(CancellationToken cancellationToken)
+    {
+        var hostsToRefresh = hostRows
+            .Where(row => !HasActiveTerminalSession(row.Host.Id))
+            .Select(row => row.Host)
+            .ToArray();
+
+        if (hostsToRefresh.Length == 0)
+        {
+            isStatusRefreshInProgress = false;
+            return;
+        }
+
+        try
+        {
+            var work = hostsToRefresh
+                .Select(host => ProbeHostStatusAsync(host, cancellationToken))
+                .ToList();
+
+            while (work.Count > 0)
+            {
+                var completed = await Task.WhenAny(work);
+                work.Remove(completed);
+                var result = await completed;
+                await ApplyHostStatusResultAsync(result);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            isStatusRefreshInProgress = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RefreshLmsUpdateStatusesAsync(CancellationToken cancellationToken)
+    {
+        var lmsHosts = hostRows
+            .Where(row => ManagedHostCapabilities.IsLmsHost(row.Host))
+            .Select(row => row.Host)
+            .ToArray();
+
+        if (lmsHosts.Length == 0)
+        {
+            return;
+        }
+
+        isLmsUpdateRefreshInProgress = true;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var latestVersionTask = StatusCache.GetAsync("hosts", "latest", () => LmsUpdateAvailabilityService.CheckLatestVersionAsync(cancellationToken));
+            var latest = await latestVersionTask;
+            var checks = lmsHosts.Select(host => StatusCache.GetAsync("hosts", ("update", StatusKey(host)), () => LmsUpdateAvailabilityService.CheckHostAsync(host, latest, cancellationToken))).ToList();
+            var aiChecks = new List<Task>();
+            while (checks.Count > 0)
+            {
+                var completed = await Task.WhenAny(checks); checks.Remove(completed);
+                var update = await completed;
+                await ApplyLmsUpdateResultAsync(update);
+                aiChecks.Add(RefreshHostAiAsync(update.HostId, cancellationToken));
+            }
+            await Task.WhenAll(aiChecks);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            hostRows = hostRows
+                .Select(row => new HostRowState
+                {
+                    Host = row.Host,
+                    ConnectionTest = row.ConnectionTest,
+                    IsStatusLoading = row.IsStatusLoading,
+                    LmsUpdate = ManagedHostCapabilities.IsLmsHost(row.Host)
+                        ? new LmsHostUpdateAvailability(
+                            row.Host.Id,
+                            LmsHostUpdateAvailabilityState.Unknown,
+                            "Unknown",
+                            "Unknown",
+                            ex.Message)
+                        : row.LmsUpdate
+                })
+                .ToArray();
+        }
+        finally
+        {
+            isLmsUpdateRefreshInProgress = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private static LmsLatestVersionCheck ResolveEffectiveLatestVersion(
+        LmsLatestVersionCheck publicManifestVersionCheck,
+        string localLatestVersion)
+    {
+        if (string.IsNullOrWhiteSpace(localLatestVersion))
+        {
+            return publicManifestVersionCheck;
+        }
+
+        if (!publicManifestVersionCheck.HasVersion ||
+            ApplicationUpdateVersionComparer.IsNewer(localLatestVersion, publicManifestVersionCheck.Version))
+        {
+            return new LmsLatestVersionCheck(localLatestVersion, publicManifestVersionCheck.Failure);
+        }
+
+        return publicManifestVersionCheck;
+    }
+
+    private Task ApplyHostStatusResultAsync(HostStatusProbeResult result) =>
+        InvokeAsync(() =>
+        {
+            hostRows = hostRows
+                .Select(row =>
+                {
+                    if (row.Host.Id != result.HostId)
+                    {
+                        return row;
+                    }
+
+                    if (HasActiveTerminalSession(row.Host.Id))
+                    {
+                        return new HostRowState
+                        {
+                            Host = row.Host,
+                            ConnectionTest = BuildLiveSessionConnectionResult(),
+                            IsStatusLoading = false,
+                            LmsUpdate = row.LmsUpdate
+                        };
+                    }
+
+                    return new HostRowState
+                    {
+                        Host = ApplyConnectionResult(row.Host, result.Connection),
+                        ConnectionTest = result.Connection,
+                        IsStatusLoading = false,
+                        LmsUpdate = row.LmsUpdate
+                    };
+                })
+                .ToArray();
+            StateHasChanged();
+        });
+
+    private Task ApplyLmsUpdateResultAsync(LmsHostUpdateAvailability update) =>
+        InvokeAsync(() =>
+        {
+            hostRows = hostRows
+                .Select(row => row.Host.Id == update.HostId
+                    ? new HostRowState
+                    {
+                        Host = row.Host,
+                        ConnectionTest = row.ConnectionTest,
+                        IsStatusLoading = row.IsStatusLoading,
+                        LmsUpdate = update
+                    }
+                    : row)
+                .ToArray();
+            StateHasChanged();
+        });
+
+
+    private async Task<HostStatusProbeResult> ProbeHostStatusAsync(
+        ManagedHost host,
+        CancellationToken cancellationToken)
+    {
+        return await StatusCache.GetAsync("hosts", ("connection", StatusKey(host)), () => Task.Run(
+            () => ProbeHostStatusCoreAsync(host, cancellationToken),
+            cancellationToken));
+    }
+
+    private async Task<HostStatusProbeResult> ProbeHostStatusCoreAsync(
+        ManagedHost host,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var scope = ServiceScopeFactory.CreateAsyncScope();
+            var hostService = scope.ServiceProvider.GetRequiredService<IManagedHostService>();
+            using var probeCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            probeCancellationTokenSource.CancelAfter(StatusCheckTimeout);
+
+            var connectionTask = hostService.TestConnectionAsync(host, probeCancellationTokenSource.Token);
+
+            try
+            {
+                return new HostStatusProbeResult(
+                    host.Id,
+                    await connectionTask.WaitAsync(StatusCheckTimeout, cancellationToken));
+            }
+            catch (TimeoutException)
+            {
+                probeCancellationTokenSource.Cancel();
+                _ = ObserveLateConnectionResultAsync(connectionTask);
+                return new HostStatusProbeResult(host.Id, BuildTimedOutConnectionResult());
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new HostStatusProbeResult(
+                host.Id,
+                new HostConnectionTestResult(
+                    ConnectionTestStatus.Failed,
+                    "Connection check failed.",
+                    null,
+                    DateTimeOffset.UtcNow));
+        }
+    }
+
+    private UiPillTone GetStatusTone(HostRowState row) => ResolveConnectionStatus(row) switch
+    {
+        ConnectionTestStatus.Succeeded => UiPillTone.Success,
+        ConnectionTestStatus.InvalidConfiguration => UiPillTone.Warning,
+        ConnectionTestStatus.Failed => UiPillTone.Failure,
+        ConnectionTestStatus.TimedOut => UiPillTone.Failure,
+        _ => UiPillTone.Warning
+    };
+
+    private string GetStatusLabel(HostRowState row)
+    {
+        return ResolveConnectionStatus(row) switch
+        {
+            ConnectionTestStatus.Succeeded => "Online",
+            ConnectionTestStatus.Failed => "Offline",
+            ConnectionTestStatus.TimedOut => "Timed out",
+            ConnectionTestStatus.InvalidConfiguration => "Config issue",
+            _ => "Unavailable"
+        };
+    }
+
+    private string GetStatusSummary(HostRowState row)
+    {
+        if (HasActiveTerminalSession(row.Host.Id))
+        {
+            return "Live SSH terminal session open in Linux Made Sane.";
+        }
+
+        if (isStatusRefreshInProgress)
+        {
+            return "Showing last known status while Linux Made Sane refreshes the live SSH connection in the background.";
+        }
+
+        if (row.ConnectionTest is null)
+        {
+            return "Live connection state unavailable.";
+        }
+
+        return row.ConnectionTest.Summary;
+    }
+
+    private string? GetTerminalSessionBadge(Guid hostId)
+    {
+        var count = TerminalWorkspaceRegistry.GetOpenSessionCount(hostId);
+        return count > 0 ? count.ToString() : null;
+    }
+
+    private bool IsThumbnailCacheFlushBusyFor(ManagedHost host) =>
+        thumbnailCacheFlushHostIds.Contains(host.Id);
+
+    private async Task FlushHostThumbnailCacheAsync(ManagedHost host)
+    {
+        if (!thumbnailCacheFlushHostIds.Add(host.Id))
+        {
+            return;
+        }
+
+        lmsConnectStatus = $"Clearing {host.Name}'s image thumbnail cache...";
+        lmsConnectTone = "info";
+        try
+        {
+            var result = await FileThumbnailCacheService.FlushHostAsync(host.Id);
+            lmsConnectStatus = result.RemovedFileCount == 0
+                ? $"{host.Name}'s image thumbnail cache was already empty."
+                : $"Cleared {result.RemovedFileCount} cached thumbnail{(result.RemovedFileCount == 1 ? string.Empty : "s")} for {host.Name}.";
+            lmsConnectTone = "success";
+        }
+        catch (Exception exception)
+        {
+            lmsConnectStatus = $"Could not clear {host.Name}'s image thumbnail cache: {exception.Message}";
+            lmsConnectTone = "error";
+        }
+        finally
+        {
+            thumbnailCacheFlushHostIds.Remove(host.Id);
+        }
+    }
+
+    private bool ShouldShowLmsUpdateAction(HostRowState row)
+    {
+        var operation = GetLmsUpdateOperation(row.Host.Id);
+        if (operation?.State is LmsHostUpdateOperationState.Started or LmsHostUpdateOperationState.Applying or LmsHostUpdateOperationState.Completed)
+        {
+            return false;
+        }
+
+        if (IsCurrentLmsEndpoint(row.Host))
+        {
+            return false;
+        }
+
+        return row.LmsUpdate?.IsUpdateAvailable == true;
+    }
+
+    private bool IsLmsUpdateActiveFor(ManagedHost host) =>
+        GetLmsUpdateOperation(host.Id)?.State is LmsHostUpdateOperationState.Started or LmsHostUpdateOperationState.Applying;
+
+    private static bool ShouldShowPublicKeySetupAction(ManagedHost host) =>
+        !HasPublicKeyAuthenticationEnabled(host);
+
+    private bool IsPublicKeySetupBusyFor(ManagedHost host) =>
+        isPublicKeySetupBusy && publicKeySetupHost?.Id == host.Id;
+
+    private static bool HasPublicKeyAuthenticationEnabled(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference) &&
+        (ManagedHostAuthenticationPolicy.UsesPublicKeyAuthentication(host.PrimaryAuthenticationType) ||
+         ManagedHostAuthenticationPolicy.UsesPublicKeyAuthentication(host.FallbackAuthenticationType));
+
+    private static bool ShouldShowLmsConnectAction(HostRowState row)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(row.Host);
+        return capabilities is { IsLmsHost: true, IsLocalLmsHost: false };
+    }
+
+    private static bool CanRemoveHost(ManagedHost host)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(host);
+        return !capabilities.IsLocalLmsHost &&
+               !IsCurrentLmsEndpoint(host) &&
+               host.Kind is ManagedHostKind.SshHost or ManagedHostKind.LmsHost;
+    }
+
+    private static HostActionLink? TryGetLmsInstallAction(ManagedHost host)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(host);
+        if (capabilities.IsLmsHost)
+        {
+            return null;
+        }
+
+        return new HostActionLink(
+            "Add LMS Server",
+            $"/hosts/{host.Id}?install=lms",
+            "Check this SSH host for an existing LMS install and add it to the LMS hosts list.");
+    }
+
+    private static bool CanOpenLmsDirectly(HostRowState row) =>
+        row.LmsUpdate?.IsDirectWebAvailable == true;
+
+    private static bool CanConnectRemoteLmsHostThroughSsh(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private bool IsLmsConnectBusyFor(ManagedHost host) =>
+        lmsConnectHostId == host.Id;
+
+    private static string GetLmsTunnelConnectTitle(ManagedHost host) =>
+        CanConnectRemoteLmsHostThroughSsh(host)
+            ? "Direct LMS web access is unavailable. Use saved SSH credentials to open the remote LMS through the Caddy relay."
+            : "Save SSH credentials for this host before opening its LMS UI through the relay.";
+
+    private static bool ShouldShowLmsUninstallAction(HostRowState row)
+    {
+        var capabilities = ManagedHostCapabilities.Describe(row.Host);
+        return capabilities.IsLmsHost && !capabilities.IsLocalLmsHost && !IsCurrentLmsEndpoint(row.Host);
+    }
+
+    private static string BuildLmsUninstallHref(ManagedHost host) =>
+        $"/hosts/{host.Id}?uninstall=lms";
+
+    private Task UpdateAllLmsHostsAsync()
+    {
+        if (updatingAllHosts) return Task.CompletedTask;
+        var targets = LmsHostRows.Select(row => row.Host).Where(host => !IsLmsUpdateActiveFor(host)).ToArray();
+        updatingAllHosts = true;
+        foreach (var host in targets) SetLmsUpdateOperation(host.Id, new(LmsHostUpdateOperationState.Started, "Queued for update.", DateTimeOffset.UtcNow));
+        lmsConnectStatus = $"Updating {targets.Length} LMS host(s), each on its own release channel. Per-host progress appears in the list.";
+        lmsConnectTone = "info";
+        _ = RunAllLmsHostUpdatesAsync(targets);
+        return Task.CompletedTask;
+    }
+
+    private async Task RunAllLmsHostUpdatesAsync(IReadOnlyList<ManagedHost> targets)
+    {
+        // Finish remote updates before self-update, which may restart this LMS process.
+        foreach (var host in targets.Where(host => !IsCurrentLmsEndpoint(host)))
+            await RunLmsHostUpdateInBackgroundAsync(host.Id);
+        foreach (var host in targets.Where(IsCurrentLmsEndpoint))
+        {
+            try
+            {
+                var result = await LocalApplicationUpdates.InstallLatestAsync(CancellationToken.None);
+                await SafeInvokeAsync(() => SetLmsUpdateOperation(host.Id, new(
+                    result.State == ApplicationUpdateState.Failed ? LmsHostUpdateOperationState.Failed : result.State == ApplicationUpdateState.Installing ? LmsHostUpdateOperationState.Applying : LmsHostUpdateOperationState.Completed,
+                    result.Summary, DateTimeOffset.UtcNow)));
+            }
+            catch (Exception ex) { await ApplyLmsHostUpdateFailureAsync(host.Id, ex.Message); }
+        }
+        await SafeInvokeAsync(() => { updatingAllHosts = false; lmsConnectStatus = "Update All finished or handed off to the local updater. Review each host’s result."; });
+    }
+
+    private Task StartLmsHostUpdateAsync(ManagedHost host)
+    {
+        if (IsLmsUpdateActiveFor(host) || IsCurrentLmsEndpoint(host))
+        {
+            return Task.CompletedTask;
+        }
+
+        SetLmsUpdateOperation(
+            host.Id,
+            new LmsHostUpdateOperation(
+                LmsHostUpdateOperationState.Started,
+                "Update started.",
+                DateTimeOffset.UtcNow));
+
+        _ = RunLmsHostUpdateInBackgroundAsync(host.Id);
+        return Task.CompletedTask;
+    }
+
+    private async Task RunLmsHostUpdateInBackgroundAsync(Guid hostId)
+    {
+        var progress = new Progress<ManagedHostLmsInstallProgressUpdate>(update =>
+        {
+            _ = ApplyLmsHostUpdateProgressAsync(hostId, update);
+        });
+
+        try
+        {
+            var managedUpdate = await RemoteLmsSshTunnelService.UpdateAsync(hostId);
+            if (managedUpdate is not null)
+            {
+                await SafeInvokeAsync(() => SetLmsUpdateOperation(hostId, new(
+                    LmsHostUpdateOperationState.Completed, managedUpdate.Summary,
+                    GetLmsUpdateOperation(hostId)?.StartedAtUtc ?? DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)));
+                await StatusCache.InvalidateAsync("hosts");
+                await RefreshLmsUpdateStatusesAsync(CancellationToken.None);
+                return;
+            }
+            await using var scope = ServiceScopeFactory.CreateAsyncScope();
+            var hostService = scope.ServiceProvider.GetRequiredService<IManagedHostService>();
+            var host = hostRows.FirstOrDefault(row => row.Host.Id == hostId)?.Host
+                ?? throw new InvalidOperationException("Host not found.");
+            var options = BuildLmsUpdateOptions();
+            options.AdministratorInput = await AdministratorCredentials.ResolveAsync(hostId, host.Username);
+            var result = await hostService.InstallLmsAsync(
+                hostId,
+                options,
+                progress,
+                CancellationToken.None);
+
+            await ApplyLmsHostUpdateResultAsync(hostId, result);
+        }
+        catch (Exception ex)
+        {
+            await ApplyLmsHostUpdateFailureAsync(hostId, ex.Message);
+        }
+    }
+
+    private Task ApplyLmsHostUpdateProgressAsync(Guid hostId, ManagedHostLmsInstallProgressUpdate update) =>
+        SafeInvokeAsync(() =>
+        {
+            // Progress<T> posts callbacks asynchronously. A late callback must not replace the final result.
+            if (GetLmsUpdateOperation(hostId)?.CompletedAtUtc is not null) return;
+            var state = update.State switch
+            {
+                ManagedHostLmsInstallProgressState.Starting => LmsHostUpdateOperationState.Started,
+                ManagedHostLmsInstallProgressState.Completed => LmsHostUpdateOperationState.Completed,
+                ManagedHostLmsInstallProgressState.Failed => LmsHostUpdateOperationState.Failed,
+                _ => LmsHostUpdateOperationState.Applying
+            };
+
+            var message = state switch
+            {
+                LmsHostUpdateOperationState.Started => "Update started.",
+                LmsHostUpdateOperationState.Applying => "Applying update.",
+                LmsHostUpdateOperationState.Completed => "Update finished.",
+                LmsHostUpdateOperationState.Failed => FirstNonBlank(update.Message, "Update failed.")!,
+                _ => FirstNonBlank(update.Message, "Update status changed.")!
+            };
+
+            SetLmsUpdateOperation(
+                hostId,
+                new LmsHostUpdateOperation(
+                    state,
+                    message,
+                    update.OccurredAtUtc,
+                    state is LmsHostUpdateOperationState.Completed or LmsHostUpdateOperationState.Failed
+                        ? update.OccurredAtUtc
+                        : null));
+        });
+
+    private Task ApplyLmsHostUpdateResultAsync(Guid hostId, ManagedHostLmsInstallResult result) =>
+        SafeInvokeAsync(() =>
+        {
+            SetLmsUpdateOperation(
+                hostId,
+                new LmsHostUpdateOperation(
+                    result.Success ? LmsHostUpdateOperationState.Completed : LmsHostUpdateOperationState.Failed,
+                    result.Success ? "Update finished." : FirstNonBlank(result.Detail, result.Summary, "Update failed.")!,
+                    result.StartedAtUtc,
+                    result.CompletedAtUtc));
+        });
+
+    private Task ApplyLmsHostUpdateFailureAsync(Guid hostId, string message) =>
+        SafeInvokeAsync(() =>
+        {
+            SetLmsUpdateOperation(
+                hostId,
+                new LmsHostUpdateOperation(
+                    LmsHostUpdateOperationState.Failed,
+                    FirstNonBlank(message, "Update failed.")!,
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow));
+        });
+
+    private static ManagedHostLmsInstallOptions BuildLmsUpdateOptions() =>
+        new()
+        {
+            StartService = true,
+            ConfigureLocalSshRunner = true,
+            EnableLocalSudo = true,
+            UpdateExistingInstall = true,
+            MarkAsLmsHostOnSuccess = true
+        };
+
+    private async Task SafeInvokeAsync(Action action)
+    {
+        try
+        {
+            await InvokeAsync(() =>
+            {
+                action();
+                StateHasChanged();
+            });
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private void SetLmsUpdateOperation(Guid hostId, LmsHostUpdateOperation operation)
+    {
+        lmsUpdateOperations[hostId] = operation;
+    }
+
+    private LmsHostUpdateOperation? GetLmsUpdateOperation(Guid hostId) =>
+        lmsUpdateOperations.TryGetValue(hostId, out var operation) ? operation : null;
+
+    private string BuildDirectLmsRootUrl(ManagedHost host) =>
+        BuildDirectLmsUrl(host, "/");
+
+    private string BuildDirectLmsUrl(ManagedHost host, string path)
+    {
+        if (GetCachedDirectBaseUrl(host.Id) is { } verifiedUrl)
+            return new Uri(new Uri(verifiedUrl), path).ToString();
+        var endpoint = host.Hostname.Trim();
+        var scheme = Uri.UriSchemeHttp;
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+        {
+            endpoint = uri.Host;
+            scheme = uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                ? Uri.UriSchemeHttps
+                : Uri.UriSchemeHttp;
+        }
+
+        return new UriBuilder(scheme, endpoint, 5080, path.TrimStart('/')).Uri.ToString();
+    }
+
+    private async Task ConnectToRemoteLmsAsync(ManagedHost host)
+    {
+        if (!CanConnectRemoteLmsHostThroughSsh(host) || IsLmsConnectBusyFor(host))
+        {
+            return;
+        }
+
+        lmsConnectHostId = host.Id;
+        lmsConnectStatus = $"Opening an SSH tunnel to {host.Name}...";
+        lmsConnectTone = "info";
+        var popupName = BuildRemoteLmsPopupName(host);
+        lmsConnectUrl = null;
+        var popupPrepared = await JSRuntime.InvokeAsync<bool>("lmsTerminalWindow.prepareBrowserWindow", popupName);
+        if (popupPrepared)
+        {
+            _ = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.setPreparedPopupStatus",
+                popupName,
+                $"Connecting to {host.Name}",
+                "Opening the SSH tunnel and preparing the Caddy relay.");
+        }
+
+        try
+        {
+            var connection = await RemoteLmsSshTunnelService.ConnectAsync(host.Id);
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Opening {host.Name}",
+                    "Caddy relay is ready. Opening the remote LMS.");
+            }
+
+            var opened = await JSRuntime.InvokeAsync<bool>(
+                "lmsTerminalWindow.openPreparedBrowserWindow",
+                connection.Url,
+                popupName);
+            if (!opened)
+            {
+                lmsConnectUrl = connection.Url;
+                lmsConnectStatus = "The connection is ready. Your browser blocked the new window; use Open LMS to open it.";
+                lmsConnectTone = "info";
+            }
+        }
+        catch (Exception ex)
+        {
+            lmsConnectStatus = $"Could not connect to {host.Name} through SSH: {ex.Message}";
+            lmsConnectTone = "error";
+            if (popupPrepared)
+            {
+                _ = await JSRuntime.InvokeAsync<bool>(
+                    "lmsTerminalWindow.setPreparedPopupStatus",
+                    popupName,
+                    $"Could not open {host.Name}",
+                    ex.Message,
+                    "error");
+            }
+        }
+        finally
+        {
+            lmsConnectHostId = null;
+        }
+    }
+
+    private static string BuildRemoteLmsPopupName(ManagedHost host) =>
+        $"lms-remote-{host.Id:N}-{Guid.NewGuid():N}";
+
+    private string GetLmsVersionLabel(HostRowState row)
+    {
+        var operation = GetLmsUpdateOperation(row.Host.Id);
+        if (operation is not null)
+        {
+            return operation.State switch
+            {
+                LmsHostUpdateOperationState.Started => "Update started",
+                LmsHostUpdateOperationState.Applying => "Applying update",
+                LmsHostUpdateOperationState.Completed => "Update finished",
+                LmsHostUpdateOperationState.Failed => "Update failed",
+                _ => "Updating"
+            };
+        }
+
+        if (row.LmsUpdate is null)
+        {
+            return isLmsUpdateRefreshInProgress ? "Checking" : "Unknown";
+        }
+
+        return row.LmsUpdate.State switch
+        {
+            LmsHostUpdateAvailabilityState.UpdateAvailable => "Update available",
+            LmsHostUpdateAvailabilityState.Current => "Current",
+            _ => "Unavailable"
+        };
+    }
+
+    private static string GetLmsVersionDetail(HostRowState row)
+    {
+        if (row.LmsUpdate is null)
+        {
+            return "Version check pending.";
+        }
+
+        return row.LmsUpdate.State switch
+        {
+            LmsHostUpdateAvailabilityState.UpdateAvailable => $"{row.LmsUpdate.InstalledVersion} -> {row.LmsUpdate.LatestVersion}",
+            LmsHostUpdateAvailabilityState.Current => "Up to date",
+            _ => HasKnownInstalledLmsVersion(row.LmsUpdate)
+                ? "Installed"
+                : "Port 5080 not reachable"
+        };
+    }
+
+    private string GetLmsVersionDetailWithOperation(HostRowState row)
+    {
+        var operation = GetLmsUpdateOperation(row.Host.Id);
+        if (operation is not null)
+        {
+            return operation.Message;
+        }
+
+        return GetLmsVersionDetail(row);
+    }
+
+    private string GetLmsVersionTooltip(HostRowState row) =>
+        GetLmsUpdateOperation(row.Host.Id)?.Message ?? (row.LmsUpdate is { } update
+            ? $"Installed: {update.InstalledVersion}. Latest: {update.LatestVersion}. {update.Detail}"
+            : "Version check pending.");
+
+    private UiPillTone GetLmsUpdateTone(HostRowState row)
+    {
+        var operation = GetLmsUpdateOperation(row.Host.Id);
+        if (operation is not null)
+        {
+            return operation.State switch
+            {
+                LmsHostUpdateOperationState.Completed => UiPillTone.Success,
+                LmsHostUpdateOperationState.Failed => UiPillTone.Failure,
+                _ => UiPillTone.Warning
+            };
+        }
+
+        if (row.LmsUpdate is null)
+        {
+            return isLmsUpdateRefreshInProgress ? UiPillTone.Warning : UiPillTone.Neutral;
+        }
+
+        return row.LmsUpdate.State switch
+        {
+            LmsHostUpdateAvailabilityState.UpdateAvailable => UiPillTone.Warning,
+            LmsHostUpdateAvailabilityState.Current => UiPillTone.Success,
+            _ => UiPillTone.Neutral
+        };
+    }
+
+    private static bool HasKnownInstalledLmsVersion(LmsHostUpdateAvailability update) =>
+        !string.IsNullOrWhiteSpace(update.InstalledVersion) &&
+        !update.InstalledVersion.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsCurrentLmsEndpoint(ManagedHost host) =>
+        ManagedHostCapabilities.Describe(host).IsLocalLmsHost ||
+        AiLocalMachine.IsLoopbackHostname(host.Hostname);
+
+    private static string? FirstNonBlank(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
+
+    private static string FormatAuthentication(AuthenticationType type) =>
+        ManagedHostAuthenticationPolicy.GetDisplayLabel(type);
+
+    private static string GetHostDisplayName(ManagedHost host) =>
+        string.Equals(host.Name, "Local machine", StringComparison.OrdinalIgnoreCase)
+            ? "Local Machine"
+            : host.Name;
+
+    private string PublicKeySetupSubtitle =>
+        publicKeySetupHost is null
+            ? "Generate a key, install it on the host, test it, then save the host as public-key SSH."
+            : $"Generate a key, install it on {publicKeySetupHost.Name}, test it, then save the host as public-key SSH.";
+
+    private string PublicKeySetupTargetLabel =>
+        publicKeySetupEditor is null || publicKeySetupHost is null
+            ? "this host"
+            : $"{publicKeySetupEditor.Username}@{publicKeySetupHost.Hostname}";
+
+    private string PublicKeySetupInstallCommand =>
+        publicKeySetupKeyPair is null
+            ? string.Empty
+            : SshAuthorizedKeyInstallCommandBuilder.Build(publicKeySetupKeyPair.PublicKey);
+
+    private bool CanRunPublicKeySetup =>
+        isPublicKeySetupOpen &&
+        !isPublicKeySetupBusy &&
+        publicKeySetupHost is not null &&
+        publicKeySetupEditor is not null &&
+        publicKeySetupKeyPair is not null;
+
+    private async Task OpenPublicKeySetupAsync(ManagedHost host)
+    {
+        publicKeySetupHost = host;
+        publicKeySetupEditor = null;
+        publicKeySetupKeyPair = null;
+        publicKeySetupCommandOutput = string.Empty;
+        publicKeySetupStatus = "Loading host details...";
+        publicKeySetupTone = "info";
+        keepStoredPasswordFallback = true;
+        isPublicKeySetupOpen = true;
+        isPublicKeySetupBusy = true;
+
+        try
+        {
+            publicKeySetupEditor = await HostService.GetEditorAsync(host.Id);
+            if (publicKeySetupEditor is null)
+            {
+                throw new InvalidOperationException("Host not found.");
+            }
+
+            keepStoredPasswordFallback = publicKeySetupEditor.HasStoredPassword;
+            await GeneratePublicKeySetupKeyCoreAsync();
+            publicKeySetupStatus = (LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(host.Id) || HasStoredConnectionMaterial(host))
+                ? "Ready. Click Install, test, and save to set up key authentication automatically."
+                : "Save SSH credentials for this host first. LMS needs the current login once so it can install the public key.";
+            publicKeySetupTone = (LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(host.Id) || HasStoredConnectionMaterial(host)) ? "success" : "warning";
+        }
+        catch (Exception exception)
+        {
+            publicKeySetupStatus = exception.Message;
+            publicKeySetupTone = "error";
+        }
+        finally
+        {
+            isPublicKeySetupBusy = false;
+        }
+    }
+
+    private Task ClosePublicKeySetupAsync()
+    {
+        if (!isPublicKeySetupBusy)
+        {
+            isPublicKeySetupOpen = false;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task GeneratePublicKeySetupKeyAsync()
+    {
+        if (isPublicKeySetupBusy)
+        {
+            return;
+        }
+
+        isPublicKeySetupBusy = true;
+        publicKeySetupStatus = "Generating a new key pair...";
+        publicKeySetupTone = "info";
+
+        try
+        {
+            await GeneratePublicKeySetupKeyCoreAsync();
+            publicKeySetupCommandOutput = string.Empty;
+            publicKeySetupStatus = "New key generated. Install, test, and save when ready.";
+            publicKeySetupTone = "success";
+        }
+        catch (Exception exception)
+        {
+            publicKeySetupStatus = exception.Message;
+            publicKeySetupTone = "error";
+        }
+        finally
+        {
+            isPublicKeySetupBusy = false;
+        }
+    }
+
+    private async Task GeneratePublicKeySetupKeyCoreAsync()
+    {
+        publicKeySetupKeyPair = await SshKeyPairGenerator.GenerateAsync(
+            SshKeyGenerationProfile.Ed25519,
+            BuildPublicKeyComment());
+    }
+
+    private async Task CopyPublicKeySetupKeyAsync()
+    {
+        if (publicKeySetupKeyPair is null)
+        {
+            publicKeySetupStatus = "Generate a key before copying it.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        await CopyPublicKeySetupTextAsync(publicKeySetupKeyPair.PublicKey, "Public key copied.");
+    }
+
+    private Task CopyPublicKeySetupCommandAsync() =>
+        CopyPublicKeySetupTextAsync(PublicKeySetupInstallCommand, "Install command copied.");
+
+    private async Task CopyPublicKeySetupTextAsync(string text, string successMessage)
+    {
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", text);
+        publicKeySetupStatus = copied
+            ? successMessage
+            : "Clipboard copy was blocked by the browser. Select the text manually.";
+        publicKeySetupTone = copied ? "success" : "warning";
+    }
+
+    private async Task InstallAndSavePublicKeyAsync()
+    {
+        if (publicKeySetupHost is null || publicKeySetupEditor is null || publicKeySetupKeyPair is null)
+        {
+            publicKeySetupStatus = "Generate a key before saving.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        if (!LinuxMadeSane.Core.Models.Ai.AiLocalMachine.IsLocalMachine(publicKeySetupHost.Id) && !HasStoredConnectionMaterial(publicKeySetupHost))
+        {
+            publicKeySetupStatus = "Save SSH credentials for this host first, then run public-key setup.";
+            publicKeySetupTone = "warning";
+            return;
+        }
+
+        isPublicKeySetupBusy = true;
+        publicKeySetupStatus = "Installing the public key on the remote host...";
+        publicKeySetupTone = "info";
+        publicKeySetupCommandOutput = string.Empty;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var installResult = await PublicKeyInstaller.InstallAsync(
+                publicKeySetupHost,
+                publicKeySetupKeyPair.PublicKey);
+            publicKeySetupCommandOutput = BuildCommandOutput(installResult);
+
+            publicKeySetupStatus = installResult.IsSuccess
+                ? "Public key installed. Testing key authentication..."
+                : "Checking why key installation could not finish...";
+            publicKeySetupTone = "info";
+            await InvokeAsync(StateHasChanged);
+
+            var editor = publicKeySetupEditor;
+            editor.PrivateKey = publicKeySetupKeyPair.PrivateKey;
+            editor.PrivateKeyPassphrase = string.Empty;
+            editor.ClearStoredPrivateKey = false;
+            editor.ClearStoredPrivateKeyPassphrase = editor.HasStoredPrivateKeyPassphrase;
+            editor.PrimaryAuthenticationType = AuthenticationType.PrivateKey;
+            editor.FallbackAuthenticationType = null; // Verify the key without password fallback.
+            editor.UseKeyboardInteractiveFallback = false;
+            editor.Password = string.Empty;
+            editor.ClearStoredPassword = !keepStoredPasswordFallback && editor.HasStoredPassword;
+
+            var testResult = installResult.IsSuccess
+                ? await HostService.TestConnectionAsync(editor)
+                : new HostConnectionTestResult(ConnectionTestStatus.Failed, "Key installation needs recovery.", null, DateTimeOffset.UtcNow);
+            if (testResult.Status != ConnectionTestStatus.Succeeded)
+            {
+                testResult = await KeySetupRecovery.RecoverAsync(publicKeySetupHost.Id, publicKeySetupKeyPair,
+                    token => HostService.TestConnectionAsync(editor, token), ReportKeyRecoveryAsync);
+            }
+            if (testResult.Status != ConnectionTestStatus.Succeeded)
+            {
+                publicKeySetupStatus = BuildConnectionTestMessage(testResult,
+                    "Key setup could not finish. Your saved login is unchanged.");
+                publicKeySetupTone = "error";
+                return;
+            }
+
+            editor.FallbackAuthenticationType = keepStoredPasswordFallback && editor.HasStoredPassword
+                ? AuthenticationType.Password : null;
+            await HostService.SaveHostAsync(editor);
+            await RefreshHostAfterPublicKeySetupAsync(editor.Id ?? publicKeySetupHost.Id, testResult);
+
+            publicKeySetupStatus = "Public key auth is installed, tested, and saved.";
+            publicKeySetupTone = "success";
+        }
+        catch (Exception exception)
+        {
+            publicKeySetupStatus = exception.Message;
+            publicKeySetupTone = "error";
+        }
+        finally
+        {
+            isPublicKeySetupBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ReportKeyRecoveryAsync(string message)
+    {
+        publicKeySetupStatus = message;
+        publicKeySetupTone = "info";
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task RefreshHostAfterPublicKeySetupAsync(Guid hostId, HostConnectionTestResult testResult)
+    {
+        await StatusCache.InvalidateAsync("hosts");
+        var updatedHosts = await HostService.ListHostsAsync();
+        var updatedHost = updatedHosts.SingleOrDefault(host => host.Id == hostId);
+        if (updatedHost is null)
+        {
+            return;
+        }
+
+        publicKeySetupHost = updatedHost;
+        hostRows = hostRows
+            .Select(row => row.Host.Id == hostId
+                ? new HostRowState
+                {
+                    Host = ApplyConnectionResult(updatedHost, testResult),
+                    ConnectionTest = testResult,
+                    IsStatusLoading = false,
+                    LmsUpdate = row.LmsUpdate
+                }
+                : row)
+            .ToArray();
+    }
+
+    private string? BuildPublicKeyComment()
+    {
+        var username = publicKeySetupEditor?.Username.Trim();
+        var hostname = publicKeySetupHost?.Hostname.Trim() ?? publicKeySetupEditor?.Hostname.Trim();
+
+        if (!string.IsNullOrWhiteSpace(username) && !string.IsNullOrWhiteSpace(hostname))
+        {
+            return $"linux-made-sane:{username}@{hostname}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(hostname))
+        {
+            return $"linux-made-sane:{hostname}";
+        }
+
+        return string.IsNullOrWhiteSpace(username)
+            ? "linux-made-sane"
+            : $"linux-made-sane:{username}";
+    }
+
+    private static bool HasStoredConnectionMaterial(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private static string BuildCommandOutput(CommandExecutionResult result)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(result.StandardOutput))
+        {
+            parts.Add(result.StandardOutput.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.StandardError))
+        {
+            parts.Add(result.StandardError.Trim());
+        }
+
+        return parts.Count == 0
+            ? $"Command exited with code {result.ExitCode}."
+            : string.Join(Environment.NewLine + Environment.NewLine, parts);
+    }
+
+    private static string BuildConnectionTestMessage(HostConnectionTestResult result, string fallback)
+    {
+        var summary = string.IsNullOrWhiteSpace(result.Summary) ? fallback : result.Summary.Trim();
+        var message = string.IsNullOrWhiteSpace(result.Detail)
+            ? summary
+            : $"{summary} {result.Detail.Trim()}";
+
+        return string.Equals(message, fallback, StringComparison.Ordinal)
+            ? message
+            : $"{message} {fallback}";
+    }
+
+    private ConnectionTestStatus ResolveConnectionStatus(HostRowState row)
+    {
+        if (HasActiveTerminalSession(row.Host.Id))
+        {
+            return ConnectionTestStatus.Succeeded;
+        }
+
+        return row.ConnectionTest?.Status ?? ConnectionTestStatus.NotRun;
+    }
+
+    private static string FormatLastSeen(HostRowState row)
+    {
+        var lastSeenUtc = ResolveLastSeenUtc(row);
+        if (lastSeenUtc is null)
+        {
+            return "Never";
+        }
+
+        var elapsed = DateTimeOffset.UtcNow - lastSeenUtc.Value;
+        if (elapsed < TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.Zero;
+        }
+
+        if (elapsed < TimeSpan.FromMinutes(1))
+        {
+            return "Just now";
+        }
+
+        var days = (int)elapsed.TotalDays;
+        var hours = elapsed.Hours;
+        var minutes = elapsed.Minutes;
+
+        if (days > 0)
+        {
+            return $"{days} {Pluralize(days, "day")} {hours} {Pluralize(hours, "hour")}";
+        }
+
+        if (hours > 0)
+        {
+            return $"{hours} {Pluralize(hours, "hour")} {minutes} mins";
+        }
+
+        return $"{minutes} mins";
+    }
+
+    private static string Pluralize(int value, string singular) =>
+        value == 1 ? singular : $"{singular}s";
+
+    private static DateTimeOffset? ResolveLastSeenUtc(HostRowState row)
+    {
+        if (row.ConnectionTest?.Status == ConnectionTestStatus.Succeeded)
+        {
+            return row.ConnectionTest.CheckedAtUtc;
+        }
+
+        return row.Host.LastSeenUtc;
+    }
+
+    private bool ShouldShowStatusSummary(HostRowState row) =>
+        ResolveConnectionStatus(row) != ConnectionTestStatus.Succeeded;
+
+    private static HostConnectionTestResult BuildTimedOutConnectionResult() =>
+        new(
+            ConnectionTestStatus.TimedOut,
+            "Timed out establishing the SSH session.",
+            $"Linux Made Sane did not get a live SSH result within {StatusCheckTimeout.TotalSeconds:0} seconds.",
+            DateTimeOffset.UtcNow);
+
+    private static HostConnectionTestResult BuildLiveSessionConnectionResult() =>
+        new(
+            ConnectionTestStatus.Succeeded,
+            "Live SSH terminal session open.",
+            "This host already has an active terminal session in Linux Made Sane.",
+            DateTimeOffset.UtcNow);
+
+    private static HostConnectionTestResult BuildCachedConnectionResult(ManagedHost host) =>
+        host.LastConnectionTestStatus switch
+        {
+            ConnectionTestStatus.Succeeded => new HostConnectionTestResult(
+                ConnectionTestStatus.Succeeded,
+                "Last known check succeeded.",
+                "Showing the previous successful SSH connection result until the live refresh completes.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow),
+            ConnectionTestStatus.Failed => new HostConnectionTestResult(
+                ConnectionTestStatus.Failed,
+                "Last known check failed.",
+                "Showing the previous failed SSH connection result until the live refresh completes.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow),
+            ConnectionTestStatus.TimedOut => new HostConnectionTestResult(
+                ConnectionTestStatus.TimedOut,
+                "Last known check timed out.",
+                "Showing the previous timed-out SSH connection result until the live refresh completes.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow),
+            ConnectionTestStatus.InvalidConfiguration => new HostConnectionTestResult(
+                ConnectionTestStatus.InvalidConfiguration,
+                "Last known configuration issue.",
+                "Showing the previous configuration issue until the live refresh completes.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow),
+            _ => new HostConnectionTestResult(
+                ConnectionTestStatus.NotRun,
+                "No live check recorded yet.",
+                "Linux Made Sane has not recorded a completed SSH connection result for this host yet.",
+                host.LastSeenUtc ?? DateTimeOffset.UtcNow)
+        };
+
+    private static ManagedHost ApplyConnectionResult(
+        ManagedHost host,
+        HostConnectionTestResult connection)
+    {
+        var lastSeenUtc = connection.Status == ConnectionTestStatus.Succeeded
+            ? connection.CheckedAtUtc
+            : host.LastSeenUtc;
+
+        return host with
+        {
+            LastSeenUtc = lastSeenUtc,
+            LastConnectionTestStatus = connection.Status
+        };
+    }
+
+    private bool HasActiveTerminalSession(Guid hostId) =>
+        TerminalWorkspaceRegistry.HasActiveSession(hostId);
+
+    private static async Task ObserveLateConnectionResultAsync(Task<HostConnectionTestResult> connectionTask)
+    {
+        try
+        {
+            await connectionTask;
+        }
+        catch
+        {
+        }
+    }
+
+    private sealed class HostRowState
+    {
+        public required ManagedHost Host { get; init; }
+        public HostConnectionTestResult? ConnectionTest { get; set; }
+        public bool IsStatusLoading { get; set; }
+        public LmsHostUpdateAvailability? LmsUpdate { get; init; }
+    }
+
+    private sealed record HostStatusProbeResult(
+        Guid HostId,
+        HostConnectionTestResult Connection);
+
+    private enum LmsHostUpdateOperationState
+    {
+        Started,
+        Applying,
+        Completed,
+        Failed
+    }
+
+    private sealed record LmsHostUpdateOperation(
+        LmsHostUpdateOperationState State,
+        string Message,
+        DateTimeOffset StartedAtUtc,
+        DateTimeOffset? CompletedAtUtc = null);
+
+    private sealed record HostActionLink(string Label, string? Href, string? Title = null, bool Disabled = false);
+}

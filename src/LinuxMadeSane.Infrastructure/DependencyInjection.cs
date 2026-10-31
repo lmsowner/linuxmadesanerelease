@@ -1,0 +1,326 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Application.Interfaces;
+using LinuxMadeSane.Application.Contracts.HomeLab;
+using LinuxMadeSane.Application.Contracts.EdgeGateway;
+using LinuxMadeSane.Application.Services.EdgeGateway;
+using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Abstractions.Portal;
+using LinuxMadeSane.Core.Models.Cloudflare;
+using LinuxMadeSane.Infrastructure.Persistence;
+using LinuxMadeSane.Infrastructure.Services.Cloudflare;
+using LinuxMadeSane.Infrastructure.Services;
+using LinuxMadeSane.Infrastructure.Services.SshForwards;
+using LinuxMadeSane.Infrastructure.Services.ConfigurationSummary;
+using LinuxMadeSane.Infrastructure.Services.Storage;
+using LinuxMadeSane.Infrastructure.Stores;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+
+namespace LinuxMadeSane.Infrastructure;
+
+public static class DependencyInjection
+{
+    public static IServiceCollection AddInfrastructureServices(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        string contentRootPath)
+    {
+        var dataProtectionDirectory = new DirectoryInfo(BuildRootedPath(
+            configuration["DataProtection:KeyDirectory"],
+            Path.Combine(contentRootPath, "data", "protection-keys"),
+            contentRootPath));
+        dataProtectionDirectory.Create();
+        services.AddSingleton(new LinuxMadeSane.Infrastructure.Services.Infrastructure.InfrastructureHostPaths(dataProtectionDirectory.FullName, contentRootPath));
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(dataProtectionDirectory.FullName, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            foreach (var keyFile in dataProtectionDirectory.EnumerateFiles("key-*.xml"))
+                File.SetUnixFileMode(keyFile.FullName, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+
+        var connectionString = BuildSqliteConnectionString(
+            configuration.GetConnectionString("LinuxMadeSane") ?? "Data Source=data/linuxmadesane.db",
+            contentRootPath);
+        var databaseDirectory = Path.GetDirectoryName(new SqliteConnectionStringBuilder(connectionString).DataSource) ?? contentRootPath;
+        HomeLabCatalog.Configure(
+            Path.Combine(databaseDirectory, "home-lab-catalog"),
+            Path.Combine(contentRootPath, "catalog", "home-lab"));
+        services.AddDataProtection()
+            .SetApplicationName("LinuxMadeSane")
+            .PersistKeysToFileSystem(dataProtectionDirectory);
+        services.AddOptions<CloudflareIntegrationOptions>()
+            .Bind(configuration.GetSection("Cloudflare"))
+            .ValidateDataAnnotations();
+        services.AddSingleton(serviceProvider => serviceProvider.GetRequiredService<IOptions<CloudflareIntegrationOptions>>().Value);
+        services.AddSingleton(configuration.GetSection("EdgeGateway").Get<EdgeGatewayOptions>() ?? new EdgeGatewayOptions());
+        services.AddSingleton(configuration.GetSection("OnDemandApps").Get<OnDemandAppsOptions>() ?? new OnDemandAppsOptions());
+        services.AddSingleton(TimeProvider.System);
+        services.AddHttpClient<ICloudflareClient, CloudflareClient>();
+        services.AddHttpClient<IPublicDnsPropagationService, PublicDnsPropagationService>(client =>
+            client.Timeout = TimeSpan.FromSeconds(5));
+        services.AddHttpClient(LocalHttpServiceProxyCompatibilityService.HttpClientName, client =>
+            client.Timeout = Timeout.InfiniteTimeSpan)
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                UseProxy = false,
+                ConnectTimeout = TimeSpan.FromSeconds(4),
+                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+                {
+                    RemoteCertificateValidationCallback = static (_, _, _, _) => true
+                }
+            });
+        services.AddSingleton<OnDemandAppSourceBinding>();
+        services.AddSingleton<ILocalHttpServiceProxyCompatibilityService, LocalHttpServiceProxyCompatibilityService>();
+        services.AddDbContext<LinuxMadeSaneDbContext>(options => options
+            .UseSqlite(connectionString)
+            .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.CommandExecuted)));
+        services.AddSingleton<AiChatRunQueue>();
+        services.AddSingleton<IAiChatRunQueue>(serviceProvider => serviceProvider.GetRequiredService<AiChatRunQueue>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<AiChatRunQueue>());
+        services.AddSingleton<MailRelayProvisioningQueue>();
+        services.AddSingleton<IMailRelayProvisioningQueue>(serviceProvider => serviceProvider.GetRequiredService<MailRelayProvisioningQueue>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<MailRelayProvisioningQueue>());
+        services.AddSingleton<MailRelayPublicIpMonitorService>();
+        services.AddSingleton<IMailRelayPublicIpMonitorService>(serviceProvider => serviceProvider.GetRequiredService<MailRelayPublicIpMonitorService>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<MailRelayPublicIpMonitorService>());
+        services.AddSingleton<StorageResizeQueue>();
+        services.AddSingleton<IStorageResizeExecutor>(serviceProvider => serviceProvider.GetRequiredService<StorageResizeQueue>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<StorageResizeQueue>());
+        services.AddSingleton<LinuxHostSystemUpdateService>();
+        services.AddHttpClient(nameof(LinuxHostSystemUpdateService), client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(15);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("LinuxMadeSane-ReleaseCheck/1.0");
+        });
+        services.AddSingleton<IHostSystemUpdateService>(serviceProvider =>
+            serviceProvider.GetRequiredService<LinuxHostSystemUpdateService>());
+        services.AddHostedService<HostSystemUpdateScheduleHostedService>();
+        services.AddScoped<SqliteDatabaseInitializer>();
+        services.AddScoped<ManagedHostSshCredentialResolver>();
+        services.AddSingleton(new RdpOptimizerStorageSettings(Path.Combine(contentRootPath, "data", "rdp-optimizer")));
+        services.AddSingleton(new ShareMountStorageSettings(Path.Combine(contentRootPath, "data", "share-mounts")));
+        services.AddSingleton(new SftpBackupStorageSettings(Path.Combine(contentRootPath, "data", "sftp-backups")));
+        services.AddSingleton(HttpServiceDiscoveryStorageSettings.CreatePersistent(databaseDirectory, contentRootPath));
+        services.AddSingleton(new LinuxMadeSane.Infrastructure.Services.RemoteDesktop.RemoteDesktopStorageSettings(Path.Combine(databaseDirectory, "remote-desktop")));
+        services.AddSingleton(new LocalAiPeerSharingStorageSettings(Path.Combine(databaseDirectory, "local-ai-peer-sharing")));
+        services.AddScoped<LocalAiPeerSharingStore>();
+        services.AddScoped<LocalAiPeerSharingService>();
+        services.AddHttpClient("PeerLmsAiConnection")
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+        services.AddHttpClient(LocalAiPeerSharingService.HttpClientName, client =>
+            client.Timeout = Timeout.InfiniteTimeSpan);
+        services.AddSingleton(new FirewallTrialStorageSettings(Path.Combine(databaseDirectory, "firewall-trials")));
+        services.AddSingleton(new SshAdminStorageSettings(Path.Combine(databaseDirectory, "ssh-admin-trials")));
+        services.AddSingleton(new PortForwardStorageSettings(Path.Combine(databaseDirectory, "port-forwards")));
+        services.Configure<DesktopSessionBrokerOptions>(configuration.GetSection("DesktopSession"));
+        services.AddSingleton<IDesktopSessionBroker, DesktopSessionBroker>();
+        services.AddHostedService<DesktopSessionBrokerHostedService>();
+        services.AddHostedService<TemporaryShareMountCleanupService>();
+        services.AddScoped<IAiConversationStore, SqliteAiConversationStore>();
+        services.AddScoped<IAiProviderSettingsStore, SqliteAiProviderSettingsStore>();
+        services.AddScoped<IUserDisplayPreferenceStore, SqliteUserDisplayPreferenceStore>();
+        services.AddScoped<IFileBrowserShortcutStore, SqliteFileBrowserShortcutStore>();
+        services.AddScoped<ISavedConnectionCredentialService, SavedConnectionCredentialService>();
+        services.AddScoped<IRemoteDesktopConnectionStore, SqliteRemoteDesktopConnectionStore>();
+        services.AddScoped<ISavedCredentialConnectionService, SavedCredentialConnectionService>();
+        services.AddScoped<ISavedCredentialConnectionTransport, SavedCredentialConnectionTransport>();
+        services.AddScoped<IUserManagedHostCredentialProfileStore, SqliteUserManagedHostCredentialProfileStore>();
+        services.AddScoped<ILocalAiEngineStore, SqliteLocalAiEngineStore>();
+        services.AddScoped<IAiProviderRegistry, SqliteAiProviderRegistry>();
+        services.AddScoped<IAiProviderConnectionTester, AiProviderConnectionTester>();
+        services.AddScoped<IAiProviderModelDiscoveryService, AiProviderModelDiscoveryService>();
+        services.AddScoped<IAiToolRegistry, LinuxMadeSaneAiToolRegistry>();
+        services.AddScoped<IAiSafeChangeService, AiSafeChangeService>();
+        services.AddScoped<IAiToolBridge, LinuxMadeSaneAiToolBridge>();
+        services.AddScoped<IHomeLabTerminalOperations>(provider => (IHomeLabTerminalOperations)provider.GetRequiredService<IAiToolBridge>());
+        services.AddSingleton<ILmsConnectClientFeature, DisabledLmsConnectClientFeature>();
+        services.AddSingleton<IAiApprovalPolicyService, AiApprovalPolicyService>();
+        services.AddScoped<IAiProviderCapabilityService, AiProviderCapabilityService>();
+        services.AddScoped<IAiAuditService, SqliteAiAuditService>();
+        services.AddScoped<ISecretStore, SqliteProtectedSecretStore>();
+        services.AddScoped<IPortalConnectionStore, SqlitePortalConnectionStore>();
+        services.AddScoped<IInstanceIdentityService, LinuxMadeSane.Application.Services.InstanceIdentityService>();
+        services.AddScoped<ICloudflareExposureStore, SqliteCloudflareExposureStore>();
+        services.AddScoped<IMailRelayStore, SqliteMailRelayStore>();
+        services.AddScoped<IStorageOperationRepository, SqliteStorageOperationRepository>();
+        services.AddScoped<IHostUpdateScheduleStore, SqliteHostUpdateScheduleStore>();
+        services.AddScoped<IEdgeGatewaySettingsStore, SqliteEdgeGatewaySettingsStore>();
+        services.AddScoped<IEdgeGatewayTemporaryIpApprovalStore, SqliteEdgeGatewayTemporaryIpApprovalStore>();
+        services.AddHostedService<EdgeGatewayTemporaryIpApprovalStartupResetHostedService>();
+        services.AddScoped<IMessagingEmailSettingsStore, SqliteMessagingEmailSettingsStore>();
+        services.AddScoped<IEmailDeliveryService, ConfiguredEmailDeliveryService>();
+        services.AddHttpClient(nameof(ConfiguredEmailDeliveryService));
+        services.AddScoped<ISecurityUserStore, SqliteSecurityUserStore>();
+        services.AddScoped<ISecurityPasskeyStore, SqliteSecurityPasskeyStore>();
+        services.AddScoped<ILocalInstanceIdentityStore, SqliteLocalInstanceIdentityStore>();
+        services.AddScoped<IRemoteAccessSystemService, LocalRemoteAccessSystemService>();
+        services.AddScoped<ILocalUserAccessSystemService, LocalUserAccessSystemService>();
+        services.AddScoped<ITrustedNetworkStore, SqliteTrustedNetworkStore>();
+        services.AddScoped<ITrustedNetworkAccessService, TrustedNetworkAccessService>();
+        services.AddScoped<IManagedHostStore, SqliteManagedHostStore>();
+        services.AddScoped<IManagedHostHealthProbe, ManagedHostHealthProbe>();
+        services.AddScoped<ISavedCommandStore, SqliteSavedCommandStore>();
+        services.AddScoped<ILinuxShareModuleDataService, SqliteLinuxShareModuleDataService>();
+        services.AddScoped<ISshfsMountService, SshfsRemoteMountService>();
+        services.AddScoped<ILinuxServiceModuleDataService, SqliteLinuxServiceModuleDataService>();
+        services.AddScoped<ILinuxSchedulingModuleDataService, SqliteLinuxSchedulingModuleDataService>();
+        services.AddScoped<ICaddyIntegrationDataService, SqliteCaddyIntegrationDataService>();
+        services.AddScoped<IEdgeGatewayStore, SqliteEdgeGatewayStore>();
+        services.AddSingleton<IOnDemandAppFavouriteStore, JsonOnDemandAppFavouriteStore>();
+        services.AddScoped<IEdgeGatewayTemporaryIpApprovalService, EdgeGatewayTemporaryIpApprovalService>();
+        services.AddScoped<IEdgeGatewayCaddyManager, LocalEdgeGatewayCaddyManager>();
+        services.AddScoped<ISftpServerStore, SqliteSftpServerStore>();
+        services.AddScoped<ISftpAuditService, SqliteSftpAuditService>();
+        services.AddScoped<ISftpAuthPolicyService, LocalSftpAuthPolicyService>();
+        services.AddScoped<ISftpChrootService, DefaultSftpChrootService>();
+        services.AddScoped<ISftpBackupService, FileSystemSftpBackupService>();
+        services.AddScoped<ISftpSnapshotCleanupService, SftpSnapshotCleanupService>();
+        services.AddScoped<ISftpConfigurationRestoreService, SftpConfigurationRestoreService>();
+        services.AddScoped<ISshdConfigService, SshdConfigService>();
+        services.AddScoped<ISftpServerInspectionService, LocalSftpServerInspectionService>();
+        services.AddScoped<ISftpServerConfigurationService, LocalSftpServerConfigurationService>();
+        services.AddScoped<ISftpUserManagementService, LocalSftpUserManagementService>();
+        services.AddScoped<SftpPermissionPolicyService>();
+        services.AddSingleton<ILinuxCommandRunner, LinuxCommandRunner>();
+        services.AddSingleton<LocalUfwFirewallService>();
+        services.AddSingleton<IFirewallManagementService>(serviceProvider =>
+            serviceProvider.GetRequiredService<LocalUfwFirewallService>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LocalUfwFirewallService>());
+        services.AddSingleton<IPortForwardingService, LocalSocatPortForwardingService>();
+        services.AddSingleton(new SshForwardStorageSettings(Path.Combine(databaseDirectory, "ssh-forwards")));
+        services.AddSingleton<SshForwardStore>();
+        services.AddSingleton<ISshForwardProcessFactory, SshForwardProcessFactory>();
+        services.AddSingleton<ISshForwardCredentialSource, SshForwardCredentialSource>();
+        services.AddSingleton<SshForwardSupervisor>();
+        services.AddHostedService(provider => provider.GetRequiredService<SshForwardSupervisor>());
+        services.AddScoped<ISshPortForwardService, SshPortForwardService>();
+        services.AddSingleton<UserCredentialTrialService>();
+        services.AddSingleton<IUserCredentialTrialService>(provider => provider.GetRequiredService<UserCredentialTrialService>());
+        services.AddScoped<ISshKeySetupRecoveryService, SshKeySetupRecoveryService>();
+        services.AddHostedService(provider => provider.GetRequiredService<UserCredentialTrialService>());
+        services.AddSingleton<LocalSshAdminService>();
+        services.AddSingleton<ISshAdminService>(serviceProvider => serviceProvider.GetRequiredService<LocalSshAdminService>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LocalSshAdminService>());
+        services.AddSingleton<ManagedHostSshConnectionFactory>();
+        services.AddScoped<ILocalAiHardwareInspectionService, LocalAiHardwareInspectionService>();
+        services.AddScoped<ILocalModelManagementService, LocalModelManagementService>();
+        services.AddScoped<IOllamaRuntimeService, OllamaRuntimeService>();
+        services.AddScoped<IDockerAiEngineDiscoveryService, DockerAiEngineDiscoveryService>();
+        services.AddScoped<IHomeLabService, HomeLabService>();
+        services.AddHttpClient<IHomeLabPromptRecipeProvider, GitHubHomeLabPromptRecipeProvider>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(5);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("LinuxMadeSane-HomeLabRecipes/1.0");
+        });
+        services.AddHttpClient<IWebResearchService, WebResearchService>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(15);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("LinuxMadeSane-AIResearch/1.0");
+        })
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseProxy = false,
+            ConnectTimeout = TimeSpan.FromSeconds(5)
+        });
+        services.AddScoped<IRemoteLmsAiEngineGateway, DisabledRemoteLmsAiEngineGateway>();
+        services.AddScoped<ISshHostDiscoveryService, SshHostDiscoveryService>();
+        services.AddScoped<IDesktopInspectionService, DesktopInspectionService>();
+        services.AddScoped<IPackageManagementService, AptPackageManagementService>();
+        services.AddScoped<LinuxMadeSane.Application.Interfaces.IUpsManagementService,
+            LinuxMadeSane.Infrastructure.Services.Infrastructure.NutUpsManagementService>();
+        services.AddHostedService<LinuxMadeSane.Infrastructure.Services.Infrastructure.UpsPolicyMonitor>();
+        services.AddScoped<LinuxMadeSane.Infrastructure.Services.Infrastructure.ResticHostBackupService>();
+        services.AddScoped<LinuxMadeSane.Application.Interfaces.IHostBackupService>(provider =>
+            provider.GetRequiredService<LinuxMadeSane.Infrastructure.Services.Infrastructure.ResticHostBackupService>());
+        services.AddScoped<IScheduledTaskHandler>(provider =>
+            provider.GetRequiredService<LinuxMadeSane.Infrastructure.Services.Infrastructure.ResticHostBackupService>());
+        services.AddScoped<LinuxMadeSane.Application.Interfaces.IDhcpManagementService,
+            LinuxMadeSane.Infrastructure.Services.Infrastructure.KeaDhcpManagementService>();
+        services.AddScoped<LinuxMadeSane.Application.Interfaces.IInfrastructureDiagnosticsService,
+            LinuxMadeSane.Infrastructure.Services.Infrastructure.InfrastructureDiagnosticsService>();
+        services.AddScoped<IServiceManagementService, SystemdServiceManagementService>();
+        services.AddScoped<ISessionConfigurationService, XrdpSessionConfigurationService>();
+        services.AddScoped<IRestoreSnapshotService, JsonRestoreSnapshotService>();
+        services.AddScoped<IHostSecretsService, StoredHostSecretsService>();
+        services.AddScoped<ISshKeyPairGenerator, SshKeyPairGenerator>();
+        services.AddScoped<ICloudflareZoneService, CloudflareZoneService>();
+        services.AddScoped<ICloudflareDnsService, CloudflareDnsService>();
+        services.AddScoped<IMailRelayPreflightService, MailRelayPreflightService>();
+        services.AddScoped<IMailRelayProvisioningService, MailRelayProvisioningService>();
+        services.AddScoped<IMailRelayTestService, MailRelayTestService>();
+        services.AddScoped<IMailRelayClientService, MailRelayClientService>();
+        services.AddScoped<IStorageDiscoveryService, LinuxStorageDiscoveryService>();
+        services.AddScoped<IStorageResizePlanner, LinuxStorageResizePlanner>();
+        services.AddScoped<IStorageDiskAttachmentPlanner, LinuxStorageDiskAttachmentPlanner>();
+        services.AddScoped<IConfigurationSummaryService, ConfigurationSummaryService>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, SystemConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, EdgeGatewayConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, TailscaleConfigurationSummaryProvider>();
+        services.AddScoped<DockerConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider>(provider => provider.GetRequiredService<DockerConfigurationSummaryProvider>());
+        services.AddScoped<IDockerInventoryReader>(provider => provider.GetRequiredService<DockerConfigurationSummaryProvider>());
+        services.AddScoped<ILmsConfigurationSummaryProvider, FirewallConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, SftpConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, SharesConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, ReverseProxyConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, ServiceDiscoveryConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, MailRelayConfigurationSummaryProvider>();
+        services.AddScoped<ILmsConfigurationSummaryProvider, StorageConfigurationSummaryProvider>();
+        services.AddHttpClient(nameof(MailRelayPreflightService), client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("LinuxMadeSane-MailRelay/1.0");
+        });
+        services.AddScoped<ICloudflareTunnelService, CloudflareTunnelService>();
+        services.AddScoped<ICloudflareAccessService, CloudflareAccessService>();
+        services.AddScoped<ISshConnectionService, SshConnectionService>();
+        services.AddScoped<ICommandExecutionService, ManagedHostCommandExecutionService>();
+        services.AddScoped<IManagedHostPublicKeyInstaller, ManagedHostCommandExecutionService>();
+        services.AddScoped<ILocalHttpServiceDiscoveryService, LocalHttpServiceDiscoveryService>();
+        services.AddScoped<IManagedHostFileAccessService, ManagedHostFileAccessService>();
+        services.AddScoped<PrivilegedFileBrowsingService>();
+        services.AddSingleton<ITerminalSessionService, SshTerminalSessionService>();
+        services.AddSingleton<ILocalSystemMonitorService, LocalProcSystemMonitorService>();
+        services.AddSingleton<ILocalSystemMaintenanceService, LocalSystemMaintenanceService>();
+        services.AddSingleton<ILocalDriveUsageService, LocalDriveUsageService>();
+        services.AddSingleton<TerminalAiCommandDaemon>();
+        services.AddSingleton<ITerminalAiCommandDaemon>(serviceProvider =>
+            serviceProvider.GetRequiredService<TerminalAiCommandDaemon>());
+        services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<TerminalAiCommandDaemon>());
+        services.AddScoped<ILocalFileBrowsingService, LocalFileBrowsingService>();
+        services.AddScoped<ISftpFileBrowsingService, SshSftpFileBrowsingService>();
+        return services;
+    }
+
+    private static string BuildSqliteConnectionString(string connectionString, string contentRootPath)
+    {
+        var builder = new SqliteConnectionStringBuilder(connectionString);
+
+        if (!string.IsNullOrWhiteSpace(builder.DataSource) && !Path.IsPathRooted(builder.DataSource))
+        {
+            builder.DataSource = Path.GetFullPath(builder.DataSource, contentRootPath);
+        }
+
+        return builder.ToString();
+    }
+
+    private static string BuildRootedPath(string? configuredPath, string fallbackPath, string contentRootPath)
+    {
+        var path = string.IsNullOrWhiteSpace(configuredPath)
+            ? fallbackPath
+            : configuredPath.Trim();
+
+        return Path.IsPathRooted(path)
+            ? path
+            : Path.GetFullPath(path, contentRootPath);
+    }
+}

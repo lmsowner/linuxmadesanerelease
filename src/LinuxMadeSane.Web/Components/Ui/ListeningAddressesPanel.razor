@@ -1,0 +1,70 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@inject ILocalListeningAddressService AddressService
+@inject IJSRuntime JS
+@inject ILogger<ListeningAddressesPanel> Logger
+
+<section class="surface-card listening-addresses-panel" aria-label="Listening IP addresses">
+    <h2>Listening IP addresses <span class="meta-text">Physical interfaces and Tailscale · click an address to copy</span></h2>
+    @if (readError is not null)
+    {
+        <p class="callout error" role="status">@readError</p>
+    }
+    else if (addresses.Count == 0)
+    {
+        <p class="meta-text">No listening addresses found on active physical or Tailscale interfaces.</p>
+    }
+    else
+    {
+        <p class="listening-address-list">@for (var index = 0; index < addresses.Count; index++)
+            {
+                var address = addresses[index];
+                if (index > 0) { <text>, </text> }
+                <button type="button" class="listening-address" title="@($"Copy {address}")" aria-label="@($"Copy IP address {address}")"
+                        data-copy-text="@address" data-copy-on-click="true"
+                        disabled="@copying" @onclick="@(() => CopyAsync(address))">@address</button>
+            }</p>
+    }
+    @if (copyMessage is not null) { <p class="callout @copyTone" role="status" aria-live="polite">@copyMessage</p> }
+</section>
+
+@code {
+    [Parameter] public DateTimeOffset RefreshToken { get; set; }
+    private DateTimeOffset? lastRefresh;
+    private IReadOnlyList<string> addresses = [];
+    private string? readError, copyMessage;
+    private string copyTone = "info";
+    private bool copying;
+
+    protected override void OnParametersSet()
+    {
+        if (lastRefresh == RefreshToken) return;
+        lastRefresh = RefreshToken;
+        try { addresses = AddressService.Read(); readError = null; }
+        catch (Exception exception)
+        {
+            addresses = [];
+            readError = "Unable to read this host's listening addresses. Refresh Overview to try again.";
+            Logger.LogWarning(exception, "Unable to read local listening addresses");
+        }
+    }
+
+    private async Task CopyAsync(string address)
+    {
+        if (copying) return;
+        copying = true; copyMessage = $"Copying {address}…"; copyTone = "info";
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var copied = await JS.InvokeAsync<bool>("lmsClipboard.finishCopy", address);
+            copyMessage = copied ? $"Copied {address}." : $"Could not copy {address}. Select the address text and copy it manually.";
+            copyTone = copied ? "success" : "error";
+        }
+        catch (JSException)
+        {
+            copyMessage = $"Could not copy {address}. Select the address text and copy it manually.";
+            copyTone = "error";
+        }
+        finally { copying = false; }
+    }
+}

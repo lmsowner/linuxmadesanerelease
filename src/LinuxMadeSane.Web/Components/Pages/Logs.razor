@@ -1,0 +1,215 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@page "/logs"
+@rendermode InteractiveServer
+@implements IDisposable
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Contracts.Ai
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
+@inject IManagedHostService Hosts
+@inject LogSearchService Search
+@inject IRunbookService Runbooks
+@inject IAiThreadService Threads
+@inject IAiChatService Chat
+@using LinuxMadeSane.Web.Components.Pages
+
+<PageTitle>Logs | Linux Made Sane</PageTitle>
+<div class="page-shell log-search-page">
+    <UiHeroPanel Title="Logs" Compact="true"><Actions><UiCommandButton Label="Runbooks" Glyph="UiIconGlyph.Run" Href="/commands" /></Actions></UiHeroPanel>
+    <section class="surface-card stack">
+        <fieldset disabled="@busy">
+        <TabControl ActiveValue="@source" ActiveValueChanged="SetLogSourceAsync" RenderActivePageContent="false" Class="log-source-tabs">
+            <TabPage Value="all" Title="All logs" />
+            <TabPage Value="journal" Title="Journal" />
+            <TabPage Value="file" Title="Choose files" />
+            <TabPage Value="files" Title="Files only" />
+            <TabPage Value="custom" Title="Custom path" />
+        </TabControl>
+        <div class="log-search-grid">
+            <div class="log-search-hosts"><UiMultiSelect Label="Machines" Items="@HostOptions" @bind-Value="selected" @bind-Value:after="RefreshLogFilesAsync" Placeholder="Choose machines…" /></div>
+
+            <UiTextField Label="Find text (optional)" aria-label="Find text (optional)" @bind-Value="query" Placeholder="Literal text, ignoring case" />
+            @if(source is "journal" or "all")
+            {
+                <UiTextField Label="Journal service (optional)" aria-label="Journal service (optional)" @bind-Value="unit" Placeholder="For example ssh.service" />
+                <UiComboboxField TValue="string" Label="Time window" aria-label="Time window" @bind-Value="since"><option value="1 hour ago">Last hour</option><option value="24 hours ago">Last 24 hours</option><option value="7 days ago">Last 7 days</option></UiComboboxField>
+                <UiComboboxField TValue="string" Label="Severity" aria-label="Severity" @bind-Value="priority"><option value="all">All entries</option><option value="warning">Warnings and errors</option><option value="err">Errors</option></UiComboboxField>
+            }
+            @if(source=="custom"){<UiTextField Label="Custom log file path" aria-label="Custom log file path" @bind-Value="filePath" Placeholder="/var/log/application/example.log" />}
+            @if(source!="journal" && fileMessage.Length>0){<p class="meta-text log-search-file-message" role="status">@fileMessage</p>}
+        </div>
+        @if(source=="file")
+        {
+            <section class="log-file-picker" aria-label="Choose log files">
+                <div class="log-file-picker-header">
+                    <strong>Log files <span class="meta-text">@selectedLogPaths.Count selected</span></strong>
+                    <UiFilterInput AriaLabel="Filter log files" Placeholder="Filter by name or application…" @bind-Value="logFilter" />
+                    <div class="toolbar-row">
+                        <CompactUIButton Label="@(string.IsNullOrWhiteSpace(logFilter) ? "Select all" : "Select matches")" Glyph="UiIconGlyph.Plus" Disabled="@(filesLoading || VisibleLogFiles.Count==0)" OnClick="SelectVisibleLogs" />
+                        <CompactUIButton Label="Clear" Glyph="UiIconGlyph.Clear" Disabled="@(selectedLogPaths.Count==0)" OnClick="ClearLogSelection" />
+                    </div>
+                </div>
+                <div class="log-file-picker-list">
+                    @foreach(var path in VisibleLogFiles)
+                    {
+                        <UiCheckboxField Label="@System.IO.Path.GetFileName(path)" Helper="@System.IO.Path.GetDirectoryName(path)"
+                                         Value="@selectedLogPaths.Contains(path)" ValueChanged="@((bool value)=>SetLogSelected(path,value))"
+                                         Compact="true" Card="true" Class="@(selectedLogPaths.Contains(path) ? "log-file-choice is-selected" : "log-file-choice")" title="@path" />
+                    }
+                    @if(VisibleLogFiles.Count==0){<p class="meta-text">@(filesLoading ? "Finding log files…" : "No logs match this filter.")</p>}
+                </div>
+            </section>
+        }
+        <p class="meta-text log-search-access">Logs are read with sudo using the configured LMS runner or the selected host’s saved administrator access.</p>
+        </fieldset>
+        <div class="toolbar">
+            <UiCommandButton Label="Search logs" Glyph="UiIconGlyph.Search" Disabled="@(busy || filesLoading || Targets.Count==0)" OnClick="SearchAsync" />
+            <UiCommandButton Label="Save search as runbook" Glyph="UiIconGlyph.Save" Disabled="@(busy || filesLoading || Targets.Count==0)" OnClick="CreateRunbook" />
+        </div>
+        @if(message.Length>0){<p class="callout @(failed ? "error" : "info")" role="status">@message</p>}
+        <p class="meta-text">Read-only search of the latest 10,000 lines per source, returning up to 200 matching lines per machine. All logs includes the journal and up to 200 current log files under /var/log. Result space is shared across matching sources. Service, time and severity filters apply to the journal; rotated, compressed and binary files are excluded.</p>
+    </section>
+        <section class="surface-card stack">
+            <h2>Log investigation</h2>
+            @if(aiThreadId is {} threadId)
+            {
+                @if(results.Count>0){<UiCommandButton Label="Discuss latest results" Glyph="UiIconGlyph.Ai" Disabled="@busy" OnClick="DiscussAsync" />}
+                <AiThreadEditor @key="threadId" ThreadId="threadId" Embedded="true" />
+            }
+            else
+            {
+                <UiTextAreaField Rows="2" Label="What would you like to investigate?" aria-label="What would you like to investigate?" @bind-Value="question" Placeholder="Ask which logs to search, or investigate the results across machines…" />
+                <UiCommandButton Label="@(results.Count==0 ? "Help choose logs with AI" : "Discuss results with AI")" Glyph="UiIconGlyph.Ai" Disabled="@(busy || filesLoading)" OnClick="DiscussAsync" />
+            }
+            @if(aiMessage.Length>0){<p class="callout info" role="status">@aiMessage</p>}
+            <p class="meta-text">Shares a bounded log excerpt with your configured AI provider. Review logs for sensitive information first. This discussion cannot run commands or change servers.</p>
+        </section>
+        @foreach(var result in results)
+        {
+            <section class="surface-card"><h2>@result.Host.Name</h2><p class="meta-text">Exit code @result.Result.ExitCode · @result.Result.CompletedAtUtc.ToLocalTime().ToString("g")</p>
+            <pre class="log-search-output">@(result.Result.StandardOutput.Length==0 ? "No matching lines returned within this search scope. Check the filters and read permissions." : result.Result.StandardOutput)</pre>
+            @if(result.Result.StandardError.Length>0){<pre class="log-search-output">@result.Result.StandardError</pre>}
+            </section>
+        }
+</div>
+<RunbookEditorDialog IsOpen="@editing" Editor="@editor" Hosts="@hosts" IsBusy="@busy" StatusMessage="@editorMessage" OnClose="@(()=>editing=false)" OnSave="SaveRunbookAsync" />
+
+@code {
+    private IReadOnlyList<ManagedHost> hosts=[];
+    private IReadOnlyList<UiIdentityTokenPickerItem> HostOptions=>hosts.Select(x=>new UiIdentityTokenPickerItem(x.Id.ToString(),$"{x.Name} · {x.Hostname}")).ToArray();
+    private IReadOnlyList<ManagedHost> Targets=>hosts.Where(x=>selected.Split(',',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries).Contains(x.Id.ToString(),StringComparer.OrdinalIgnoreCase)).ToArray();
+    private string selected="",source="all",query="",unit="",since="24 hours ago",priority="all",filePath="",question="",aiMessage="",message="",editorMessage="";
+    private bool busy,failed,editing,filesLoading;
+    private IReadOnlyList<string> logFiles=[];
+    private string fileMessage="",resultScope="";
+    private string? logFilter="";
+    private readonly HashSet<string> selectedLogPaths=new(StringComparer.Ordinal);
+    private IReadOnlyList<string> VisibleLogFiles=>logFiles.Where(path=>string.IsNullOrWhiteSpace(logFilter) || path.Contains(logFilter,StringComparison.OrdinalIgnoreCase)).ToArray();
+    private string[] SelectedLogPaths=>selectedLogPaths.Order(StringComparer.Ordinal).ToArray();
+    private void SetLogSelected(string path,bool value){if(value)selectedLogPaths.Add(path);else selectedLogPaths.Remove(path);}
+    private void SelectVisibleLogs(){foreach(var path in VisibleLogFiles)selectedLogPaths.Add(path);}
+    private void ClearLogSelection()=>selectedLogPaths.Clear();
+    private string CurrentScope=>$"Machines: {string.Join(", ",Targets.Select(x=>x.Name))}; source: {source}; custom path: {filePath}; search text: {query}; journal time: {since}; severity: {priority}; selected files: {string.Join(", ",SelectedLogPaths)}; available logs: {string.Join(", ",logFiles)}";
+    private readonly CancellationTokenSource lifetime=new();
+    private int fileListVersion;
+    private CancellationTokenSource? fileDiscovery;
+    private Guid? aiThreadId;
+    private List<LogSearchResult> results=[];
+    private RunbookEditor editor=new();
+    private LogSearchOptions Options {
+        get {
+            var paths=source=="file" ? SelectedLogPaths : null;
+            if(paths is { Length:0 })throw new ArgumentException("Select one or more log files, or choose All current log files.");
+            return new(source is "files" or "custom" ? "file" : source,query,unit,since,priority,200,filePath,true,source=="files",paths);
+        }
+    }
+    protected override async Task OnInitializedAsync()
+    { hosts=(await Hosts.ListHostsAsync()).Prepend(AiLocalMachine.CreateManagedHost()).DistinctBy(x=>x.Id).ToArray(); selected=AiLocalMachine.ManagedHostId.ToString(); await RefreshLogFilesAsync(); }
+    private async Task SearchAsync()
+    {
+        if(busy || filesLoading)return;
+        busy=true;failed=false;message="Searching selected machines…";results=[];aiMessage="";
+        await InvokeAsync(StateHasChanged);
+        var targets=Targets;
+        try
+        {
+            var options=Options;resultScope=CurrentScope;
+            LogSearchService.BuildScript(options);
+            foreach(var host in targets)
+            {
+                message=$"Reading logs from {host.Name}…";await InvokeAsync(StateHasChanged);
+                try { results.Add(await Search.SearchAsync(host,options,lifetime.Token)); }
+                catch(Exception error){failed=true;message=$"Could not read {host.Name}: {error.Message}";break;}
+            }
+            if(!failed)message=$"Search completed on {results.Count} machine(s). {results.Count(x=>x.Result.ExitCode!=0)} returned a non-zero exit code; review their output.";
+        }
+        catch(Exception error){failed=true;message=error.Message;}
+        finally{busy=false;}
+    }
+    private void CreateRunbook()
+    {
+        try
+        {
+            editor=new(){Name="Search logs",Description="Read-only saved log search. Searches the latest 10,000 lines per source, with a shared result limit per machine.",CommandText=LogSearchService.BuildScript(Options),RequiresSudo=true,HostId=Targets[0].Id,SelectedHostIds=Targets.Select(x=>x.Id).ToList(),DistributionMode=Targets.Count>1 ? RunbookDistributionMode.LinkAcrossMachines : RunbookDistributionMode.SingleMachine};
+            editorMessage="Review the search script and target machines. The AI helper can refine this reusable investigation.";editing=true;
+        }
+        catch(Exception error){failed=true;message=error.Message;}
+    }
+    private async Task SaveRunbookAsync()
+    {
+        busy=true;
+        try{await Runbooks.SaveRunbookAsync(editor);editing=false;failed=false;message="Log search saved in Runbooks. It can be run or assigned to other machines there.";}
+        catch(Exception error){editorMessage=error.Message;}
+        finally{busy=false;}
+    }
+    private async Task SetLogSourceAsync(string? value){source=value ?? "all";await RefreshLogFilesAsync();}
+    private async Task RefreshLogFilesAsync()
+    {
+        var version=++fileListVersion;
+        fileDiscovery?.Cancel();
+        if(source is "journal" or "custom"){filesLoading=false;return;}
+        using var request=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);fileDiscovery=request;
+        filesLoading=true;fileMessage="Finding available logs in /var/log…";
+        var targets=Targets;
+        try
+        {
+            var available=new HashSet<string>(StringComparer.Ordinal);
+            foreach(var host in targets)
+            {
+                fileMessage=$"Finding logs on {host.Name}…";await InvokeAsync(StateHasChanged);
+                var paths=await Search.ListLogFilesAsync(host,request.Token);
+                available.UnionWith(paths);
+            }
+            if(version!=fileListVersion)return;
+            logFiles=available.Order(StringComparer.Ordinal).ToArray();
+            selectedLogPaths.IntersectWith(logFiles);
+            fileMessage=logFiles.Count==0 ? "No current log files found. Choose a custom path or the system journal." : source=="all" ? $"Found {logFiles.Count} current log paths. Each machine searches its own available logs." : targets.Count>1 ? "Logs found across the selected machines. Missing files are reported without stopping other logs." : "Select several current logs in /var/log and its application folders.";
+        }
+        catch(OperationCanceledException) when(request.IsCancellationRequested){}
+        catch(Exception error){if(version==fileListVersion){logFiles=[];selectedLogPaths.Clear();fileMessage=error.Message;}}
+        finally{if(version==fileListVersion)filesLoading=false;if(ReferenceEquals(fileDiscovery,request))fileDiscovery=null;}
+    }
+    public void Dispose(){lifetime.Cancel();lifetime.Dispose();}
+    private async Task DiscussAsync()
+    {
+        busy=true;aiMessage="Preparing log investigation…";
+        try
+        {
+            var id=aiThreadId;
+            if(id is null)
+            {
+                var context=await Threads.GetEditorAsync();
+                var draft=context.Editor;draft.Title="Log investigation";draft.AllowReadOnlyTools=false;draft.AllowMutatingTools=false;draft.AttachedServerIds=results.Where(x=>!AiLocalMachine.IsLocalMachine(x.Host.Id)).Select(x=>x.Host.Id).ToList();
+                if(string.IsNullOrWhiteSpace(draft.ProviderKey))throw new InvalidOperationException("Configure an AI provider before discussing logs.");
+                id=await Threads.SaveThreadAsync(draft);
+            }
+            await Chat.SendUserMessageAsync(id.Value,new(){Content=LogSearchService.BuildAiPrompt(question,results,results.Count>0 ? resultScope : CurrentScope)});
+            aiThreadId=id;aiMessage="";
+        }
+        catch(Exception error){aiMessage=error.Message;}
+        finally{busy=false;}
+    }
+}

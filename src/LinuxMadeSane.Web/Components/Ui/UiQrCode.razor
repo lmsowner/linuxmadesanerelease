@@ -1,0 +1,66 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@using Microsoft.AspNetCore.Components
+@using QRCoder
+
+@if (Modules is { Count: > 0 })
+{
+    <div class="@CssClass" title="@Title">
+        <div class="ui-qr-code-frame" aria-label="@AriaLabel">
+            <div class="ui-qr-code-matrix" style="@MatrixStyle" role="img" aria-label="@AriaLabel">
+                @foreach (var row in Modules)
+                {
+                    @foreach (var module in row)
+                    {
+                        <span class="ui-qr-code-module @(module ? "active" : null)"></span>
+                    }
+                }
+            </div>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(Caption))
+        {
+            <p class="ui-qr-code-caption">@Caption</p>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public string Payload { get; set; } = string.Empty;
+    [Parameter] public string? Caption { get; set; }
+    [Parameter] public string? Title { get; set; }
+    [Parameter] public string AriaLabel { get; set; } = "QR code";
+    [Parameter] public string? Class { get; set; }
+
+    private IReadOnlyList<bool[]>? Modules { get; set; }
+
+    private string CssClass => string.Join(" ", new[] { "ui-qr-code", Class }
+        .Where(static value => !string.IsNullOrWhiteSpace(value)));
+
+    private string MatrixStyle => Modules is { Count: > 0 } modules
+        ? $"--ui-qr-size: {modules.Count};"
+        : string.Empty;
+
+    protected override void OnParametersSet()
+    {
+        if (string.IsNullOrWhiteSpace(Payload))
+        {
+            Modules = null;
+            return;
+        }
+
+        using var generator = new QRCodeGenerator();
+        using var data = generator.CreateQrCode(Payload.Trim(), QRCodeGenerator.ECCLevel.Q);
+        var rows = new List<bool[]>(data.ModuleMatrix.Count);
+
+        foreach (var row in data.ModuleMatrix)
+        {
+            var modules = new bool[row.Count];
+            row.CopyTo(modules, 0);
+            rows.Add(modules);
+        }
+
+        Modules = rows;
+    }
+}

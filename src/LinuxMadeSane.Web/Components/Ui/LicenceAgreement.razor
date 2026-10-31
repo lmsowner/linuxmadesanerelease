@@ -1,0 +1,92 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Web.Services.Licensing
+@using LinuxMadeSane.Core.Licensing
+@using Microsoft.AspNetCore.Components.Authorization
+@inject LocalLicensingService Service
+@inject AuthenticationStateProvider Authentication
+@inject LinuxMadeSane.Core.Abstractions.ISavedCredentialAccessContext CredentialAccess
+
+@if (Prompt)
+{
+    <LicenceTypeSelector Compact="true" />
+}
+else if (loaded)
+{
+    @AgreementContent
+}
+
+@code {
+    [Parameter] public bool Prompt { get; set; }
+    private bool ready, loaded, accepted, agreed, busy;
+    private string? error;
+    private RenderFragment AgreementContent => @<div class="licence-agreement">
+        <h2>The Linux Made Sane licence</h2>
+        <p>Licensor: <strong>LMS Developer</strong>. Please read the terms supplied with this version of LMS.</p>
+            <p><strong>Commercial organisations with consolidated annual gross revenue of US$1 million or more must purchase a Professional licence.</strong> Commercial third-party administration and MSP services require a commercial licence regardless of revenue.</p>
+            <p>You may evaluate LMS for <strong>30 consecutive days</strong>, once per organisation/group. Reinstalling or adding servers does not restart the evaluation. Qualifying personal, homelab, educational, non-profit and internal business use below the threshold remains free under the full terms.</p>
+        <p>You can read, build and modify the source under this licence. It does not automatically change to another licence.</p>
+        <div class="toolbar-actions">
+            <UiCommandButton Label="Licence prices" Href="@(AboutCredits.WebsiteUrl + "/pricing")" Target="_blank" Rel="noopener noreferrer" HideIcon="true" />
+            <UiCommandButton Label="Discuss support" Href="@AboutCredits.SupportAgreementUrl" Target="_blank" Rel="noopener noreferrer" HideIcon="true" />
+        </div>
+        <p><small>Contact Linux Made Sane to arrange a licence or support agreement. No payment is taken here. Agreeing does not start an evaluation or purchase anything.</small></p>
+        <details class="about-notice">
+            <summary>Full applicable licence — show / hide text</summary>
+            <pre>@LocalLicensingService.ApplicableTerms</pre>
+        </details>
+        @if (accepted)
+        {
+            <p class="callout" role="status">You have agreed to these terms. This licence will not prompt you again.</p>
+        }
+        else
+        {
+            @if (error is not null) { <p class="callout" role="alert">@error</p> }
+            <label><input type="checkbox" @bind="agreed" disabled="@(busy || !ready)" /> I agree to this licence.</label>
+            <p><small>Your agreement is saved for this LMS account and these exact terms. Trusted LAN access shares this installation's local acceptance record.</small></p>
+            <div class="toolbar-actions">
+                <UiCommandButton Label="Agree and continue" HideIcon="true" Disabled="@(!agreed || busy || !ready)" OnClick="Accept" />
+            </div>
+        }
+    </div>;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Prompt) return;
+        // An unapproved proposal can be reviewed, but cannot acquire accidental acceptance.
+        if (!LocalLicensingService.ApplicableRelease.Approved) return;
+        try
+        {
+            var actor = await CurrentActor();
+            if (actor is null) return;
+            var (state, _) = await Service.ReadAsync();
+            accepted = LocalLicensingService.HasAccepted(state, actor);
+            loaded = true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        { loaded = true; error = "Licensing is unavailable. Your agreement has not been recorded. Try again; management remains operational."; }
+    }
+    private async Task<string?> CurrentActor()
+    {
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        var id = await CredentialAccess.GetAuthenticatedUserIdAsync();
+        return id == Guid.Empty ? "trusted-local-administrator" : user.Identity?.IsAuthenticated == true && id.HasValue
+            ? LicensingAccess.Actor(user, false) : null;
+    }
+    private async Task Accept()
+    {
+        if (busy || !agreed || !ready) return;
+        busy = true; error = "Saving your agreement…";
+        try
+        {
+            var actor = await CurrentActor() ?? throw new UnauthorizedAccessException();
+            await Service.AcceptTermsAsync(actor, LocalLicensingService.ApplicableRelease.TermsHash, agreed);
+            accepted = true; error = null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        { error = "Your agreement could not be saved. Review your session and try again. You have not been marked as agreed."; }
+        finally { busy = false; }
+    }
+    protected override void OnAfterRender(bool firstRender)
+    { if (firstRender) { ready = true; StateHasChanged(); } }
+}

@@ -1,0 +1,749 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+namespace LinuxMadeSane.Application.Contracts.HomeLab;
+
+using LinuxMadeSane.Core.Models.HomeLab;
+
+public sealed record HomeLabPromptRecipe(
+    string Id,
+    string Name,
+    string Description,
+    string Category,
+    IReadOnlyList<string> Components,
+    IReadOnlyList<string> AppIds,
+    bool RequiresPlanning,
+    bool RequiresVpnGateway,
+    IReadOnlyList<string> VpnRoutedAppIds,
+    string StarterPrompt,
+    string TechnicalGuidance,
+    string Prompt,
+    PublishedHomeLabRecipeConnectivity? Connectivity = null,
+    HomeLabRecipeNetworkRecommendation? NetworkRecommendation = null,
+    IReadOnlyList<string>? DocumentationSources = null,
+    DateTimeOffset? DocumentationCheckedAtUtc = null)
+{
+    public bool RoutesAppThroughVpn(string appId) =>
+        VpnRoutedAppIds.Contains(appId, StringComparer.OrdinalIgnoreCase);
+}
+
+public sealed record PublishedHomeLabPromptRecipeCatalog(
+    int SchemaVersion,
+    IReadOnlyList<PublishedHomeLabPromptRecipe> Recipes);
+
+public sealed record PublishedHomeLabPromptRecipe(
+    string Id,
+    string RecipeName,
+    string Description,
+    string BaseRecipePrompt,
+    IReadOnlyList<string> AppsBeingDeployed,
+    bool RequiresVpnGateway,
+    string TechnicalGuidance,
+    IReadOnlyList<string>? VpnRoutedApps = null,
+    string? Category = null,
+    IReadOnlyList<string>? Components = null,
+    bool RequiresPlanning = false,
+    PublishedHomeLabRecipeConnectivity? Connectivity = null,
+    HomeLabRecipeNetworkRecommendation? NetworkRecommendation = null,
+    IReadOnlyList<string>? DocumentationSources = null,
+    DateTimeOffset? DocumentationCheckedAtUtc = null);
+
+public sealed record HomeLabRecipeNetworkRecommendation(
+    string ListenInterface,
+    string ListenReason,
+    string OutboundRoute,
+    string OutboundReason);
+
+public sealed record PublishedHomeLabRecipeConnectivity(
+    string PublicOriginMode,
+    IReadOnlyList<PublishedHomeLabRecipeServiceConnectivity> Services,
+    IReadOnlyList<PublishedHomeLabRecipeDependency> Dependencies);
+
+public sealed record PublishedHomeLabRecipeServiceConnectivity(
+    string ServiceId,
+    IReadOnlyList<string> Scopes,
+    bool ClientAccessEnabled = false,
+    string Routing = "auto",
+    string PreferredPath = "");
+
+public sealed record PublishedHomeLabRecipeDependency(
+    string Consumer,
+    string Provider,
+    string AccessFrom = "service",
+    string? Purpose = null,
+    string? Endpoint = null);
+
+public static class HomeLabPromptRecipeCatalog
+{
+    private const string AiProviderRequirement =
+        """
+        Home Lab AI requires a capable, enabled AI provider. Use a hosted provider or a properly resourced self-hosted model server with reliable tool calling, long-context handling, and multi-step reasoning. A configured endpoint alone is not evidence that it is suitable. Small models running on Raspberry Pi-class or similarly resource-constrained hardware are not suitable for reliable Home Lab setup, deployment, repair, or troubleshooting. If the configured provider cannot reliably follow the LMS tools, retain context, or complete multi-step work, say that the provider is inadequate and ask the user to configure a more capable provider before continuing; do not pretend the task succeeded.
+        """;
+
+    private const string OperatingContract = AiProviderRequirement + "\n\n" +
+        """
+        Treat this as a guided Linux Made Sane Home Lab task. Use inspect_home_lab before proposing changes. Use apply_home_lab_prompt_recipe for supported deployments and repairs; do not replace the LMS-managed deployment with raw docker, docker compose, or shell commands. Never request or repeat passwords, API keys, VPN profiles, or other secrets in chat.
+
+        LMS remains the source of truth for LMS-managed containers. If an installation has been handed off to a Docker manager, treat that manager as its sole lifecycle and configuration owner: inspect it, but never ask LMS to start, stop, repair, update, remove, or recreate it. Reuse healthy installed infrastructure where the selected recipe requires it. If the user reports a web or playback symptom, an HTTP health check is not proof that the app works: inspect the actual local evidence, including effective non-secret environment and endpoint data, research current primary documentation only when that evidence is insufficient, then use the minimum repair and retest the reported path or capability. For a managed runtime, network, endpoint, environment, listener, or health-check fault, repair_home_lab_installation is the generic reconciliation path for any catalog app; it reapplies the catalog and saved LMS state, including shared-network host resolution and generated routes. Use it even when the container is reported healthy if the health check does not cover the failed capability. If the user explicitly says to fix or repair it, call the supported LMS repair tool and carry the work through verification; do not send the user to another button. If the user only asks what could fix the issue, explain the evidence and proposed LMS action. If required infrastructure is missing, direct me to the appropriate LMS form so credentials remain in protected fields. Inspect the result after changes and do not claim success unless the requested app is present, the reported path is verified, and the tool output says what changed or why no fix was possible.
+        """;
+
+    private static IReadOnlyList<HomeLabPromptRecipe> BuiltInAll { get; } =
+    [
+        Deploy("Docker Management", "portainer-manager", "Install Portainer CE",
+            "Install Portainer, then hand all HomeLab containers to your Docker manager. LMS stops managing them.",
+            ["Portainer CE", "Docker socket", "Persistent manager data"],
+            ["portainer"], false,
+            "Install Portainer CE on this host. Keep it on the direct network and show its local URL. When it is healthy, hand all HomeLab containers, including Portainer, to the Docker manager. I will manage their lifecycle and configuration there and complete administrator setup in Portainer.",
+            "Confirm the Docker socket exists and verify the local endpoint. Successful deployment transfers every HomeLab container to Docker-manager ownership, including the manager itself. LMS will not install, start, stop, repair, update, remove, or recreate containers after handoff. Import saved Compose files into the manager when replacing existing containers."),
+        Deploy("Docker Management", "arcane-manager", "Install Arcane",
+            "Install Arcane, then hand all HomeLab containers to your Docker manager. LMS stops managing them.",
+            ["Arcane", "Docker socket", "Persistent manager data", "Generated encryption key"],
+            ["arcane"], false,
+            "Install Arcane on this host with a generated protected encryption key. Keep it on the direct network and show its local URL. When it is healthy, hand all HomeLab containers, including Arcane, to the Docker manager. I will manage their lifecycle and configuration there.",
+            "Confirm the Docker socket exists and verify Arcane's local endpoint. Preserve the generated encryption key when migrating Arcane. Successful deployment transfers every HomeLab container to Docker-manager ownership, including the manager itself. LMS will not install, start, stop, repair, update, remove, or recreate containers after handoff."),
+        Deploy("Docker Management", "dockhand-manager", "Install Dockhand",
+            "Install Dockhand, then hand all HomeLab containers to your Docker manager. LMS stops managing them.",
+            ["Dockhand", "Docker socket", "Persistent manager data"],
+            ["dockhand"], false,
+            "Install Dockhand on this host. Keep it on the direct network and show its local URL. When it is healthy, hand all HomeLab containers, including Dockhand, to the Docker manager. I will manage their lifecycle and configuration there.",
+            "Confirm the Docker socket exists and verify Dockhand's local endpoint. Successful deployment transfers every HomeLab container to Docker-manager ownership, including Dockhand itself. LMS will not install, start, stop, repair, update, remove, or recreate containers after handoff."),
+        Plan("Docker Management", "komodo-manager", "Plan Komodo deployment",
+            "Plan Komodo Core, its database, and Periphery together before transferring Docker ownership.",
+            ["Komodo Core", "MongoDB or FerretDB", "Periphery agent", "Persistent keys and data"],
+            "Plan a Komodo deployment using its official Core, database, and Periphery setup. Check the host architecture, database choice, persistent storage, local access, and agent connection. Do not install a partial stack or hand off existing HomeLab containers during planning.",
+            "Komodo requires a database and a Periphery agent to manage this host. LMS does not currently have a complete Komodo stack recipe. Produce a reviewable deployment plan using Komodo's official Compose files; do not claim Komodo is installed or that LMS ownership has changed."),
+        Deploy("Docker Management", "dockge-manager", "Install Dockge",
+            "Install Dockge, then hand all HomeLab containers to your Docker manager. LMS stops managing them.",
+            ["Dockge", "Docker socket", "Compose stacks directory", "Persistent manager data"],
+            ["dockge"], false,
+            "Install Dockge on this host. Keep it on the direct network and show its local URL. When it is healthy, hand all HomeLab containers, including Dockge, to the Docker manager. I will manage their lifecycle and Compose stacks there.",
+            "Confirm the Docker socket exists and verify Dockge's local endpoint. Its Compose stacks live at the host path declared in the app catalog and mounted at the same path inside Dockge. Successful deployment transfers every HomeLab container to Docker-manager ownership, including the manager itself. LMS will not install, start, stop, repair, update, remove, or recreate containers after handoff."),
+        Plan("AI / Development", "local-ai-server", "Local AI Server",
+            "Plan a private Ollama and Open WebUI server with hardware-aware acceleration.",
+            ["Ollama", "Open WebUI", "GPU detection"],
+            "Set up a private local AI server with Ollama and Open WebUI. Detect my available GPU and ask which model sizes and access policy I want before deployment.",
+            "Confirm CPU-only, NVIDIA, AMD, or other acceleration and available memory. Do not claim GPU support until LMS can validate the runtime and device mapping."),
+        Plan("AI / Development", "ai-coding-box", "AI Coding Box",
+            "Plan a local coding assistant with a web UI, code models, and controlled Git access.",
+            ["Open WebUI", "Ollama", "Code models", "Git integration"],
+            "Set up an AI coding box with Open WebUI, Ollama, suitable local code models, and Git integration. Ask which repositories, languages, GPU, model size, and Git permissions I want.",
+            "Treat repository access and Git credentials as protected configuration. Do not choose a model or grant write access without the user's requirements."),
+        Plan("AI / Development", "private-git-platform", "Private Git Platform",
+            "Plan a private Forgejo service with PostgreSQL and an explicitly registered runner.",
+            ["Forgejo", "Forgejo Runner", "PostgreSQL"],
+            "Set up a private Forgejo Git platform with PostgreSQL and a runner. Ask about the hostname, storage, runner workloads, registration token flow, and external access before deployment.",
+            "Keep PostgreSQL private. Register the runner only after Forgejo is healthy and never place its registration token in chat."),
+        Plan("AI / Development", "disposable-dev-environment", "Disposable Dev Environment",
+            "Plan a browser-based development environment with Git and chosen language SDKs.",
+            ["code-server", "Git", "Language SDKs"],
+            "Set up a disposable code-server development environment with Git. Ask which language SDKs, versions, extensions, repository access, persistence, and resource limits I need.",
+            "Do not guess the SDK image or persist Git credentials in the container definition."),
+
+        Deploy("Media", "secure-streaming", "Instant Streaming",
+            "Set up Webtor and Stremio behind one reusable VPN Gateway, with LMS-managed local access and streaming connectivity.",
+            ["Webtor", "Stremio", "Gluetun"],
+            ["webtor", "stremio-server"], true,
+            "Set up Webtor and Stremio behind an existing VPN Gateway with LMS-managed local access. Ask me which gateway to use if there is more than one.",
+            "Preserve distinct shared-namespace ports and use the generated Webtor client endpoint for browser-facing integration. Use only personal, public-domain, or otherwise lawfully accessed content; do not configure content sources or add-ons.",
+            null,
+            new PublishedHomeLabRecipeConnectivity(
+                "shared",
+                [
+                    new("stremio-server", ["internal", "lan", "client", "public"], true, "subdomain"),
+                    new("webtor", ["internal", "lan", "client", "public"], true, "subdomain")
+                ],
+                [new("stremio-server", "webtor", "client", "Browser-facing Webtor add-on endpoint", "${endpoint:webtor:client}")])),
+        Deploy("Media", "jellyfin-vpn-automation", "Media Library",
+            "Create a Jellyfin library with Seerr, Radarr, Sonarr, Prowlarr, and qBittorrent, while routing automation through Gluetun.",
+            ["Jellyfin", "Jellyseerr / Seerr", "Radarr", "Sonarr", "Prowlarr", "qBittorrent", "Gluetun"],
+            ["jellyfin", "qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"], true,
+            "Set up a complete local Jellyfin media library with Seerr, Radarr, Sonarr, Prowlarr, and qBittorrent. Keep Jellyfin local, route the automation services through one existing VPN Gateway, and reuse LMS-managed downloads, movies, and TV storage.",
+            "Never route Jellyfin through Gluetun. Give each routed service a distinct listener and report both LMS local URLs and shared-namespace loopback endpoints. Do not select or configure indexers, catalogues, download sources, or content.",
+            ["qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"],
+            MediaAutomationConnectivity()),
+        Plan("Media", "music-server", "Music Server",
+            "Plan a Navidrome music library with an optional lawful download and import pipeline.",
+            ["Navidrome", "Optional download/import pipeline"],
+            "Set up Navidrome for my local music library. Ask about storage, metadata, users, external access, and whether I want an authorised download or import pipeline.",
+            "Keep the library persistent and do not invent content sources. Treat the optional pipeline as a separate choice."),
+        Deploy("Media", "private-photo-library", "Photo Library",
+            "Set up Immich with its managed PostgreSQL, cache, and machine-learning services.",
+            ["Immich", "PostgreSQL", "Redis / Valkey", "Machine learning"],
+            ["immich"], false,
+            "Set up a private Immich photo and video library with persistent storage, database, cache, and machine-learning services. Ask about storage and access requirements not already configured.",
+            "Verify every managed dependency and the LMS local access route before reporting the library ready."),
+        Deploy("Media", "secure-qbittorrent", "qBittorrent through VPN",
+            "Set up qBittorrent behind a reusable VPN Gateway and verify its traffic cannot bypass the gateway.",
+            ["qBittorrent", "Gluetun"],
+            ["qbittorrent"], true,
+            "Set up qBittorrent behind an existing VPN Gateway and store downloads in LMS Home Lab storage.",
+            "Inbound port forwarding is optional. Preserve the LMS route and verify VPN security."),
+        Deploy("Media", "bitmagnet", "Bitmagnet",
+            "Run Bitmagnet as a private torrent indexer and DHT crawler with persistent PostgreSQL storage.",
+            ["Bitmagnet", "PostgreSQL"],
+            ["bitmagnet"], true,
+            "Set up Bitmagnet behind an existing VPN Gateway with its managed PostgreSQL database. Bitmagnet and its database must share the selected VPN namespace. Use the internal Bitmagnet Torznab endpoint from Prowlarr if you want to add it as an authorised indexer.",
+            "Bitmagnet indexes torrent metadata and does not download media itself. Keep it private, configure a personal TMDB key or disable TMDB integration, and only use sources and content you are authorised to access."),
+        Deploy("Media", "vpn-media-automation", "Media Automation through VPN",
+            "Set up qBittorrent, Prowlarr, FlareSolverr, Sonarr, Radarr, and Seerr behind one VPN Gateway.",
+            ["qBittorrent", "Prowlarr", "FlareSolverr", "Sonarr", "Radarr", "Jellyseerr / Seerr", "Gluetun"],
+            ["qbittorrent", "prowlarr", "flaresolverr", "sonarr", "radarr", "seerr"], true,
+            "Set up qBittorrent, Prowlarr, FlareSolverr, Sonarr, Radarr, and Seerr behind one existing VPN Gateway.",
+            "Use distinct shared-namespace listeners. Configure Prowlarr to use FlareSolverr at the generated internal service endpoint when an indexer requires it. Do not select or configure indexers, catalogues, download sources, or content."),
+        Deploy("Media", "jellyfin-local-library", "Jellyfin Local Library",
+            "Create a standalone Jellyfin server for locally hosted movies and television.",
+            ["Jellyfin"],
+            ["jellyfin"], false,
+            "Set up Jellyfin for local network streaming from LMS-managed movies and TV storage.",
+            "Keep Jellyfin direct, with read-only media mounts, and verify its local route."),
+        Deploy("Media", "jellyfin-arr-library", "Jellyfin with Sonarr and Radarr",
+            "Create a local Jellyfin library alongside Sonarr and Radarr.",
+            ["Jellyfin", "Sonarr", "Radarr"],
+            ["jellyfin", "sonarr", "radarr"], false,
+            "Set up Jellyfin with Sonarr and Radarr using LMS-managed movies and TV storage.",
+            "Explain that a download client and authorised indexer source are still needed; do not invent either."),
+        Deploy("Media", "jellyfin-local-automation", "Jellyfin with Local Automation",
+            "Create a direct-network Jellyfin library with qBittorrent, Prowlarr, Sonarr, Radarr, and Seerr.",
+            ["Jellyfin", "qBittorrent", "Prowlarr", "Sonarr", "Radarr", "Jellyseerr / Seerr"],
+            ["jellyfin", "qbittorrent", "prowlarr", "sonarr", "radarr", "seerr"], false,
+            "Set up a complete local Jellyfin media library and keep every app on a direct LMS route.",
+            "State clearly that qBittorrent is not VPN protected. Do not configure indexers, catalogues, download sources, or content."),
+
+        Plan("Networking", "private-vpn", "Private VPN",
+            "Plan a WireGuard server for secure access to the home network.",
+            ["WireGuard"],
+            "Set up a private WireGuard VPN server. Ask about the LAN subnet, public endpoint, DNS, client count, router forwarding, and whether the host is behind CGNAT.",
+            "Do not confuse a WireGuard server with the existing outbound Gluetun VPN Gateway."),
+        Plan("Networking", "vpn-exit-node", "VPN Exit Node",
+            "Plan a WireGuard exit node split between this server and a chosen VPS.",
+            ["WireGuard", "VPS"],
+            "Set up a WireGuard VPN exit node using a VPS. Ask which VPS, operating system, public address, routed subnets, DNS, and client platforms I use.",
+            "This spans an external machine. Separate local LMS work from VPS commands and require the user to confirm the remote target."),
+        Plan("Networking", "network-ad-blocking", "Network Ad Blocking",
+            "Plan network-wide DNS filtering with AdGuard Home or Pi-hole and Unbound.",
+            ["AdGuard Home or Pi-hole", "Unbound"],
+            "Set up network ad blocking. Ask me to choose AdGuard Home or Pi-hole, then plan Unbound, a dedicated LAN address, router DNS changes, upstream policy, and recovery DNS.",
+            "DNS must bind the correct LAN address and port 53 without colliding with the host resolver. Do not deploy both front ends."),
+        Plan("Networking", "private-remote-access", "Private Remote Access",
+            "Plan a private Headscale control plane and enrolment of Tailscale clients.",
+            ["Headscale", "Tailscale clients"],
+            "Set up private remote access with Headscale and Tailscale clients. Ask about the public hostname, certificates, users, routes, exit nodes, and each client platform.",
+            "Client enrolment and auth keys occur after the control plane is reachable; never place reusable keys in chat."),
+        Plan("Networking", "reverse-proxy", "Reverse Proxy",
+            "Plan Caddy or Traefik routing with certificates and an explicit exposure policy.",
+            ["Caddy or Traefik", "TLS certificates"],
+            "Set up a reverse proxy. Ask me to choose Caddy or Traefik and provide domains, internal targets, certificate method, authentication, and exposure requirements.",
+            "Inspect LMS Caddy and Edge Gateway first to avoid duplicate bindings on ports 80 and 443."),
+
+        Plan("Home", "home-assistant", "Home Assistant",
+            "Plan Home Assistant with MQTT and Zigbee device integration.",
+            ["Home Assistant", "Mosquitto", "Zigbee2MQTT"],
+            "Set up Home Assistant with Mosquitto and Zigbee2MQTT. Ask for my Zigbee adapter path, adapter type, MQTT credentials, discovery needs, timezone, and storage.",
+            "Hardware discovery may require host networking or explicit devices. Validate the adapter before deploying Zigbee2MQTT."),
+        Plan("Home", "cctv", "CCTV",
+            "Plan Frigate with MQTT and validated GPU or Coral acceleration.",
+            ["Frigate", "MQTT", "GPU or Coral detection"],
+            "Set up Frigate CCTV with MQTT. Ask about cameras, retention, recording storage, detector hardware, GPU or Coral devices, and Home Assistant integration.",
+            "Never guess camera credentials, stream URLs, or detector devices. Size storage before enabling recording."),
+        Plan("Home", "energy-monitor", "Energy Monitor",
+            "Plan energy collection and dashboards using Home Assistant, InfluxDB, and Grafana.",
+            ["Home Assistant", "InfluxDB", "Grafana"],
+            "Set up an energy monitoring stack with Home Assistant, InfluxDB, and Grafana. Ask which meters or integrations provide readings, retention requirements, units, and dashboards.",
+            "Keep database credentials private and define retention before collecting high-frequency metrics."),
+
+        Plan("Storage / Backup", "personal-cloud", "Personal Cloud",
+            "Plan Nextcloud with a private database and Redis cache.",
+            ["Nextcloud", "Database", "Redis"],
+            "Set up a personal Nextcloud cloud with a private database and Redis. Ask about data storage, hostname, external access, mail, backups, and expected user count.",
+            "Keep the database and Redis private and separate application data from database backups."),
+        Plan("Storage / Backup", "dropbox-replacement", "Dropbox Replacement",
+            "Plan device-to-device file synchronisation with Syncthing.",
+            ["Syncthing"],
+            "Set up Syncthing as a Dropbox replacement. Ask which folders, devices, versioning, ignore rules, storage paths, and remote access I need.",
+            "Do not expose the admin interface publicly and do not share device IDs beyond the intended peers."),
+        Plan("Storage / Backup", "backup-server", "Backup Server",
+            "Plan Restic or Borg backups with an optional MinIO object target.",
+            ["Restic or Borg", "MinIO"],
+            "Set up a backup server. Ask me to choose Restic or Borg, identify source machines, retention, encryption, schedule, storage capacity, off-site copy, and whether MinIO is required.",
+            "A backup is not complete until a restore test is defined. Keep repository keys out of chat."),
+        Plan("Storage / Backup", "s3-server", "S3 Server",
+            "Plan a private MinIO-compatible object store.",
+            ["MinIO"],
+            "Set up a private MinIO S3 server. Ask about data disks, erasure coding, hostname, TLS, users, bucket policy, backups, and external access.",
+            "Do not deploy distributed or erasure-coded storage without enough independent disks."),
+
+        Deploy("Privacy", "google-photos-replacement", "Google Photos Replacement",
+            "Use Immich as a private photo and video library.",
+            ["Immich", "PostgreSQL", "Redis / Valkey", "Machine learning"],
+            ["immich"], false,
+            "Set up Immich as my Google Photos replacement. Ask about library storage, mobile upload, import, users, backups, and external access.",
+            "Verify all managed dependencies and explain that cloud export/import remains a separate user-authorised step."),
+        Plan("Privacy", "google-drive-replacement", "Google Drive Replacement",
+            "Plan Nextcloud as a private file sync and sharing service.",
+            ["Nextcloud", "Database", "Redis"],
+            "Set up Nextcloud as my Google Drive replacement. Ask about storage, desktop and mobile clients, sharing, office integration, backups, and external access.",
+            "Keep its database and Redis private; do not claim existing cloud data has been migrated."),
+        Plan("Privacy", "password-vault", "Password Vault",
+            "Plan a private Vaultwarden service with backups and secure external access.",
+            ["Vaultwarden"],
+            "Set up Vaultwarden as a private password vault. Ask about hostname, TLS, account sign-up policy, email, backups, and whether access stays local or uses Edge Gateway.",
+            "Require HTTPS for non-local use, disable open sign-ups after onboarding, and verify backup recovery."),
+        Plan("Privacy", "private-search", "Private Search",
+            "Plan a private metasearch service using SearXNG.",
+            ["SearXNG"],
+            "Set up a private SearXNG search service. Ask about enabled engines, rate limiting, language, hostname, authentication, and external access.",
+            "Use a persistent secret key and do not expose an unrestricted public instance by default."),
+        Plan("Privacy", "private-analytics", "Private Analytics",
+            "Plan privacy-focused web analytics with Umami and PostgreSQL.",
+            ["Umami", "PostgreSQL"],
+            "Set up private Umami analytics with PostgreSQL. Ask about tracked sites, hostname, retention, backups, external access, and privacy settings.",
+            "Keep PostgreSQL private and do not add tracking code to sites without explicit instruction."),
+
+        Plan("Useful / Geeky", "internet-archive-box", "Internet Archive Box",
+            "Plan a personal web archive using ArchiveBox.",
+            ["ArchiveBox"],
+            "Set up ArchiveBox. Ask about archive storage, import sources, crawl depth, browser dependencies, schedule, users, and access.",
+            "Estimate storage and respect site permissions and applicable archiving rules."),
+        Plan("Useful / Geeky", "rss-news-server", "RSS / News Server",
+            "Plan a private FreshRSS feed reader.",
+            ["FreshRSS"],
+            "Set up FreshRSS. Ask about users, imports, refresh schedule, authentication, storage, and external access.",
+            "Keep scheduled refreshes reasonable and protect external access."),
+        Plan("Useful / Geeky", "pdf-toolkit", "PDF Toolkit",
+            "Plan a private Stirling-PDF toolbox.",
+            ["Stirling-PDF"],
+            "Set up Stirling-PDF for private document processing. Ask about OCR languages, resource limits, authentication, storage, and external access.",
+            "Treat uploaded documents as sensitive and avoid public anonymous exposure."),
+        Plan("Useful / Geeky", "document-management", "Document Management",
+            "Plan Paperless-ngx with database, cache, OCR, and document storage.",
+            ["Paperless-ngx", "PostgreSQL", "Redis", "OCR"],
+            "Set up Paperless-ngx. Ask about consume and archive folders, OCR languages, users, scanner workflow, retention, backups, and external access.",
+            "Keep database and Redis private and validate writable document paths."),
+        Plan("Useful / Geeky", "personal-wiki", "Personal Wiki",
+            "Plan a private BookStack knowledge base.",
+            ["BookStack", "Database"],
+            "Set up BookStack as a personal wiki. Ask about hostname, users, database, attachments, mail, backups, and external access.",
+            "Keep the database private and preserve both uploads and application keys."),
+        Plan("Useful / Geeky", "status-page", "Status Page",
+            "Plan service monitoring and a status dashboard with Uptime Kuma.",
+            ["Uptime Kuma"],
+            "Set up Uptime Kuma. Ask which services to monitor, check intervals, notification channels, status-page visibility, storage, and external access.",
+            "Do not place notification secrets in chat and avoid publishing internal target details."),
+        Plan("Useful / Geeky", "speed-test-history", "Speed Test History",
+            "Plan scheduled connection tests and history using Speedtest Tracker.",
+            ["Speedtest Tracker"],
+            "Set up Speedtest Tracker. Ask about schedule, server selection, retention, notifications, timezone, storage, and external access.",
+            "Avoid an excessive test schedule that distorts bandwidth use."),
+        Deploy("Useful / Geeky", "wordpress-site", "WordPress Website",
+            "Create WordPress with its managed database and persistent site files.",
+            ["WordPress", "MariaDB"],
+            ["wordpress"], false,
+            "Set up a private WordPress website. Let me specify a version, variant, database choice, administration tool, domain, or other requirement.",
+            "Keep the managed database private and explain unsupported variants before applying."),
+        Deploy("Useful / Geeky", "forward-proxy", "Forward Proxy Server",
+            "Create a private Squid forward proxy for networks the user controls.",
+            ["Squid"],
+            ["squid-proxy"], false,
+            "Set up a private forward proxy for devices on networks I control.",
+            "Choose the LAN or private interface whose clients may use Squid, then choose the outbound route. Direct uses the server's regular LAN/Internet route; VPN sends proxy traffic through the selected VPN Gateway. Configure each client with the reported proxy IP and port. Do not expose it through Edge Gateway or any public route because that would create an open proxy."),
+        Deploy("Useful / Geeky", "flare-solverr", "FlareSolverr",
+            "Run FlareSolverr as a private helper for indexers that need Cloudflare challenge solving.",
+            ["FlareSolverr"],
+            ["flaresolverr"], false,
+            "Set up FlareSolverr for use by Prowlarr or another authorised indexer manager. Keep it on a private route and configure the client with the generated internal FlareSolverr URL.",
+            "FlareSolverr is a helper, not an indexer or content source. Use it only with services and sites you are authorised to access; do not expose it publicly."),
+
+        Plan("Gaming", "retro-gaming-library", "Retro Gaming Library",
+            "Plan a RomM library with browser emulation.",
+            ["RomM", "Browser emulation"],
+            "Set up a RomM retro gaming library with browser emulation. Ask about ROM storage, metadata providers, users, save storage, controllers, and access.",
+            "The user supplies lawfully obtained game files and any metadata credentials through protected fields."),
+        Plan("Gaming", "private-game-store", "Private Game Store",
+            "Plan a private LANCommander game library.",
+            ["LANCommander"],
+            "Set up LANCommander as a private game store. Ask about library storage, users, authentication, game imports, and LAN-only or remote access.",
+            "Do not source or distribute game files; the user provides authorised installers."),
+        Plan("Gaming", "cloud-gaming-server", "Cloud Gaming Server",
+            "Plan Sunshine streaming with Moonlight clients and validated graphics hardware.",
+            ["Sunshine", "Moonlight clients"],
+            "Set up a Sunshine cloud gaming server for Moonlight clients. Ask about GPU, display session, audio, input devices, games, network, resolution, and remote access.",
+            "Validate hardware encoding, display access, and host device mappings before deployment."),
+        Plan("Gaming", "minecraft-server", "Minecraft Server",
+            "Plan a Java, Bedrock, or modded Minecraft server.",
+            ["Minecraft Java, Bedrock, or modded server"],
+            "Set up a Minecraft server. Ask me to choose Java, Bedrock, or a modpack and provide version, player count, world source, memory, backups, allowlist, and access requirements.",
+            "Do not choose an edition, accept third-party mod terms, or expose a port until the user specifies the variant."),
+        Plan("Gaming", "steam-dedicated-server", "Steam Dedicated Server",
+            "Plan one explicitly selected SteamCMD-supported dedicated game server.",
+            ["SteamCMD", "Selected dedicated game server"],
+            "Set up a Steam dedicated server. Ask which supported game and then collect its app ID, ports, anonymous or authenticated install mode, player count, storage, config, backups, and access.",
+            "Never deploy a generic idle SteamCMD container or guess a game. Protect any Steam credentials."),
+        Plan("Gaming", "valheim-server", "Valheim Server",
+            "Plan a persistent Valheim dedicated server.",
+            ["Valheim dedicated server"],
+            "Set up a Valheim server. Ask about world name or import, server name, password handling, player count, crossplay, mods, backups, updates, and access.",
+            "Keep the server password in protected configuration and verify every required UDP port."),
+        Plan("Gaming", "factorio-server", "Factorio Server",
+            "Plan a persistent Factorio dedicated server.",
+            ["Factorio dedicated server"],
+            "Set up a Factorio server. Ask about game version, save import or generation, visibility, player count, mods, credentials, backups, updates, and access.",
+            "Protect account tokens and preserve saves before updates."),
+        Plan("Gaming", "satisfactory-server", "Satisfactory Server",
+            "Plan a persistent Satisfactory dedicated server.",
+            ["Satisfactory dedicated server"],
+            "Set up a Satisfactory server. Ask about save import, player count, server claiming, storage, backups, updates, and LAN or internet access.",
+            "Validate the required TCP and UDP listeners without colliding with other containers."),
+        Plan("Gaming", "terraria-server", "Terraria Server",
+            "Plan a vanilla or modded Terraria dedicated server.",
+            ["Terraria or tModLoader server"],
+            "Set up a Terraria server. Ask about vanilla or tModLoader, version, world import or generation, difficulty, players, password handling, mods, backups, and access.",
+            "Do not choose a mod loader or overwrite a world without explicit requirements."),
+        Plan("Gaming", "lan-party", "LAN Party",
+            "Plan LANCommander, voice chat, and explicitly selected game servers.",
+            ["LANCommander", "Voice server", "Selected game servers"],
+            "Set up a LAN party environment with LANCommander, a voice server, and game servers I select. Ask about games, clients, users, storage, voice choice, network, schedule, and teardown or persistence.",
+            "Do not deploy every game template. Produce a port plan first and reject duplicate host or shared-namespace listeners.")
+    ];
+
+    public static IReadOnlyList<HomeLabPromptRecipe> All =>
+        HomeLabCatalogFileStore.LoadPromptRecipes(BuiltInAll, TryCreatePublished);
+
+    public static HomeLabPromptRecipe Get(string id) =>
+        All.FirstOrDefault(recipe => recipe.Id.Equals(id?.Trim(), StringComparison.OrdinalIgnoreCase))
+        ?? throw new InvalidOperationException($"HomeLab Recipe '{id}' is not available.");
+
+    public static HomeLabPromptRecipe CreatePublished(PublishedHomeLabPromptRecipe definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        var id = definition.Id?.Trim() ?? string.Empty;
+        var name = definition.RecipeName?.Trim() ?? string.Empty;
+        var description = definition.Description?.Trim() ?? string.Empty;
+        var category = definition.Category?.Trim() ?? "Other";
+        var basePrompt = definition.BaseRecipePrompt?.Trim() ?? string.Empty;
+        var technicalGuidance = definition.TechnicalGuidance?.Trim() ?? string.Empty;
+        var appIds = (definition.AppsBeingDeployed ?? [])
+            .Select(appId => appId?.Trim() ?? string.Empty)
+            .Where(appId => appId.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var components = (definition.Components ?? appIds.Select(appId => HomeLabCatalog.GetApp(appId).Name).ToArray())
+            .Select(component => component?.Trim() ?? string.Empty)
+            .Where(component => component.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var vpnRoutedAppIds = (definition.VpnRoutedApps ?? (definition.RequiresVpnGateway ? appIds : []))
+            .Select(appId => appId?.Trim() ?? string.Empty)
+            .Where(appId => appId.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (id.Length is < 1 or > 80 || id.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
+        {
+            throw new InvalidOperationException("Published HomeLab Recipe IDs must use 1-80 ASCII letters, numbers, hyphens, or underscores.");
+        }
+        if (name.Length is < 1 or > 160 || category.Length is < 1 or > 80 || description.Length is < 1 or > 600 || basePrompt.Length is < 1 or > 4000 || technicalGuidance.Length > 8000 || components.Length is < 1 or > 30 || components.Any(component => component.Length > 120))
+        {
+            throw new InvalidOperationException($"Published HomeLab Recipe '{id}' has an invalid text field length.");
+        }
+        if (appIds.Length > 20 || (!definition.RequiresPlanning && appIds.Length == 0) || appIds.Any(appId => !HomeLabCatalog.Apps.Any(app => app.Id.Equals(appId, StringComparison.OrdinalIgnoreCase) && app.IsInstallable)))
+        {
+            throw new InvalidOperationException($"Published HomeLab Recipe '{id}' contains unsupported LMS app IDs.");
+        }
+        if (definition.RequiresVpnGateway != (vpnRoutedAppIds.Length > 0) ||
+            vpnRoutedAppIds.Any(appId => !appIds.Contains(appId, StringComparer.OrdinalIgnoreCase)) ||
+            vpnRoutedAppIds.Any(appId => !HomeLabCatalog.GetApp(appId).SupportsVpnGateway))
+        {
+            throw new InvalidOperationException($"Published HomeLab Recipe '{id}' has an invalid VPN app list.");
+        }
+
+        ValidatePublishedConnectivity(id, appIds, definition.Connectivity);
+        ValidateNetworkRecommendation(id, definition.NetworkRecommendation, definition.RequiresVpnGateway, definition.RequiresPlanning, appIds);
+        var sources = (definition.DocumentationSources ?? []).Distinct(StringComparer.Ordinal).ToArray();
+        if (sources.Length > 20 || sources.Any(source => !Uri.TryCreate(source, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new InvalidOperationException($"Published HomeLab Recipe '{id}' has invalid upstream documentation URLs.");
+        }
+        return Create(category, id, name, description, components, appIds, definition.RequiresPlanning, definition.RequiresVpnGateway, basePrompt, technicalGuidance, vpnRoutedAppIds, definition.Connectivity, definition.NetworkRecommendation) with
+        {
+            DocumentationSources = sources,
+            DocumentationCheckedAtUtc = definition.DocumentationCheckedAtUtc
+        };
+    }
+
+    private static HomeLabPromptRecipe? TryCreatePublished(PublishedHomeLabPromptRecipe definition)
+    {
+        try
+        {
+            return CreatePublished(definition);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    public static string BuildCustomPrompt(string request)
+    {
+        var normalized = request?.Trim() ?? string.Empty;
+        if (normalized.Length == 0)
+        {
+            throw new InvalidOperationException("Describe what you want the Home Lab AI to set up.");
+        }
+
+        return $"""
+            {OperatingContract}
+
+            Custom Home Lab request:
+            {normalized}
+
+            Start by inspecting Home Lab. Explain what can be handled by the supported LMS Home Lab tools and what information is still needed. Prefer existing LMS-managed apps and infrastructure. Present every change for approval and verify the actual result.
+            """;
+    }
+
+    public static string BuildRecipePrompt(
+        HomeLabPromptRecipe recipe,
+        string request,
+        string listenInterface,
+        string listenAddress,
+        string outboundRoute,
+        Guid? vpnGatewayInstallationId = null,
+        string? vpnGatewayName = null)
+    {
+        ArgumentNullException.ThrowIfNull(recipe);
+        var normalized = request?.Trim() ?? string.Empty;
+        if (normalized.Length == 0)
+        {
+            throw new InvalidOperationException("Describe what you want from this HomeLab Recipe.");
+        }
+
+        if (string.IsNullOrWhiteSpace(listenInterface) || string.IsNullOrWhiteSpace(listenAddress))
+        {
+            throw new InvalidOperationException("Choose the network interface that should accept connections.");
+        }
+        if (outboundRoute is not ("direct" or "vpn"))
+        {
+            throw new InvalidOperationException("Choose direct Internet or a VPN Gateway for outbound traffic.");
+        }
+
+        var vpnGatewaySelection = outboundRoute == "vpn" && vpnGatewayInstallationId is { } gatewayId
+            ? $"""
+            The user selected the existing VPN Gateway{(string.IsNullOrWhiteSpace(vpnGatewayName) ? string.Empty : $" '{vpnGatewayName}'")} for this recipe.
+            Use this exact VPN Gateway installation ID when calling apply_home_lab_prompt_recipe: {gatewayId}
+            Do not ask the user to choose a gateway again unless this installation no longer exists.
+            """
+            : string.Empty;
+
+        return $"""
+            {recipe.Prompt}
+
+            {vpnGatewaySelection}
+
+            Required network choices already made by the user:
+            - Listen on {listenInterface} at {listenAddress}. Pass this exact address as listenAddress.
+            - Send outbound traffic through {(outboundRoute == "vpn" ? "the selected VPN Gateway" : "the server's normal direct/LAN route")}. Pass "{outboundRoute}" as outboundRoute.
+            {(recipe.RequiresVpnGateway
+                ? $"Only these recipe apps use the VPN Gateway: {string.Join(", ", recipe.VpnRoutedAppIds)}. Other recipe apps keep their normal direct route."
+                : "Direct follows the host routing table; it does not pin traffic to the listener interface or block Internet access.")}
+            Do not ask for these network choices again unless the selected interface or gateway is no longer available.
+
+            User-edited requirements for this recipe:
+            {normalized}
+
+            Treat the user-edited requirements as part of the requested outcome. Work out which details are supported by the LMS-managed recipe and current app catalog. Before proposing a change, clearly explain any requested version, variant, companion app, database, administration suite, or other detail that LMS cannot currently apply. Do not silently ignore, substitute, or claim to have completed an unsupported requirement.
+            """;
+    }
+
+    public static string BuildTroubleshootingPrompt(HomeLabAppInstallation installation)
+    {
+        ArgumentNullException.ThrowIfNull(installation);
+
+        return $"""
+            {AiProviderRequirement}
+
+            Treat this as a focused troubleshooting session for one existing Linux Made Sane Home Lab Docker container.
+
+            Target installation ID: {installation.Id}
+            LMS app ID: {installation.AppId}
+            Display name: {installation.DisplayName}
+            Container name: {installation.ContainerName}
+            Current LMS health: {installation.HealthState}
+            Current health detail: {installation.HealthDetail}
+
+            Call inspect_home_lab first and match the exact installation ID. Check the container health, its managed dependencies, the LMS local Caddy access route, Docker networking, and VPN namespace or kill-switch state where applicable. Ask me what symptom I see if I have not described it yet. Explain the evidence in plain language. When Docker is healthy but the application URL or behaviour is broken, call inspect_home_lab_app_config before proposing any container action. Use the returned redacted file content and hash to identify an application-level setting fault.
+
+            Keep LMS as the source of truth. Do not use raw docker, docker compose, or shell commands to replace LMS-managed configuration. Never request or expose passwords, API keys, VPN profiles, temporary application passwords, or container log secrets. Start by inspecting the actual installation, its effective non-secret environment, endpoints, networking, and application configuration when relevant. If current documentation or an unfamiliar error is needed, use search_web and fetch_web_page selectively, preferring official vendor documentation and GitHub primary sources, then compare those findings with the inspected installation. For a confirmed non-secret file setting fault, call repair_home_lab_app_config with one exact replacement from the inspected file; LMS will back it up, restart only that app, verify Docker health and local access, and roll back automatically if the check fails. Treat duplicate shared-namespace ports, stale VPN callbacks, incorrect VPN routing, shared-network host resolution, generated endpoint or environment mismatches, and mismatched forwarded ports as LMS container or network faults. For those faults, repair_home_lab_installation is the generic reconciliation path for any catalog app, even when the app is nominally healthy; LMS will recreate that installation through the catalog and saved state, then reapply the generic runtime setup and verify it. A VPN-routed app is repaired alone unless the gateway security check proves the shared namespace is faulty. If I say manual image, environment, or volume edits caused the fault, set restoreContainerSettings to true. Inspect again afterward, retest the reported path or capability, and report the exact before/after change or the verified reason no fix was possible. Do not install another application or apply a HomeLab Recipe while troubleshooting this container.
+            """;
+    }
+
+    public static string BuildGroupTroubleshootingPrompt(
+        string groupName,
+        IReadOnlyList<HomeLabAppInstallation> installations)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
+        ArgumentNullException.ThrowIfNull(installations);
+        if (installations.Count == 0)
+        {
+            throw new InvalidOperationException("The Home Lab group does not contain any installations.");
+        }
+
+        var targets = string.Join("\n", installations.Select(installation =>
+            $"- {installation.DisplayName}: installation {installation.Id}; app {installation.AppId}; container {installation.ContainerName}; health {installation.HealthState}; detail {installation.HealthDetail}"));
+
+        return $"""
+            {AiProviderRequirement}
+
+            Treat this as one troubleshooting and repair session for the Linux Made Sane Home Lab group '{groupName}'. Diagnose the group as a connected system rather than opening separate conversations for each container.
+
+            The user invoked group AI Repair and authorizes supported LMS-managed repair tools for affected installations in this conversation. Diagnose, execute those repairs, and verify them without asking the user to press another repair or approval button.
+
+            Group installations:
+            {targets}
+
+            Call inspect_home_lab first and match every exact installation ID. Identify all degraded, failed, or blocked members and check for a shared root cause across dependencies, Docker networks, LMS local Caddy routes, VPN namespaces, gateway health, generated endpoints, and effective non-secret configuration. Use inspect_home_lab_app_config when an application is running but its URL or behaviour is broken.
+
+            Keep LMS as the source of truth. Do not replace LMS-managed configuration with raw docker, docker compose, or shell commands. Repair every affected group member that the evidence supports. Use repair_home_lab_installation for managed container, network, endpoint, environment, listener, shared-network host resolution, VPN routing, or generated configuration faults. Use repair_home_lab_app_config only for a confirmed non-secret application file setting fault. If a shared VPN gateway or dependency outside this group is the proven cause, repair that exact LMS-managed installation as part of the same session. Never request or expose secrets.
+
+            Inspect the group again after repairs, retest the affected URLs or capabilities, and report the result for every installation that was unhealthy at the start. Do not claim the group is repaired while any affected member remains degraded, failed, or blocked; explain the remaining evidence and next action instead.
+            """;
+    }
+
+    private static HomeLabPromptRecipe Deploy(
+        string category,
+        string id,
+        string name,
+        string description,
+        IReadOnlyList<string> components,
+        IReadOnlyList<string> appIds,
+        bool requiresVpnGateway,
+        string starterPrompt,
+        string technicalGuidance,
+        IReadOnlyList<string>? vpnRoutedAppIds = null,
+        PublishedHomeLabRecipeConnectivity? connectivity = null) =>
+        Create(category, id, name, description, components, appIds, false, requiresVpnGateway, starterPrompt, technicalGuidance, vpnRoutedAppIds, connectivity);
+
+    private static PublishedHomeLabRecipeConnectivity MediaAutomationConnectivity() =>
+        new(
+            "shared",
+            [
+                new("jellyfin", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("qbittorrent", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("prowlarr", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("sonarr", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("radarr", ["internal", "lan", "client", "public"], true, "subdomain"),
+                new("seerr", ["internal", "lan", "client", "public"], true, "subdomain")
+            ],
+            [
+                new("sonarr", "qbittorrent", "service", "Download client", "${endpoint:qbittorrent:internal}"),
+                new("sonarr", "prowlarr", "service", "Indexer manager", "${endpoint:prowlarr:internal}"),
+                new("radarr", "qbittorrent", "service", "Download client", "${endpoint:qbittorrent:internal}"),
+                new("radarr", "prowlarr", "service", "Indexer manager", "${endpoint:prowlarr:internal}"),
+                new("seerr", "sonarr", "service", "TV manager", "${endpoint:sonarr:internal}"),
+                new("seerr", "radarr", "service", "Movie manager", "${endpoint:radarr:internal}")
+            ]);
+
+    private static HomeLabPromptRecipe Plan(
+        string category,
+        string id,
+        string name,
+        string description,
+        IReadOnlyList<string> components,
+        string starterPrompt,
+        string technicalGuidance) =>
+        Create(category, id, name, description, components, [], true, false, starterPrompt, technicalGuidance);
+
+    private static HomeLabPromptRecipe Create(
+        string category,
+        string id,
+        string name,
+        string description,
+        IReadOnlyList<string> components,
+        IReadOnlyList<string> appIds,
+        bool requiresPlanning,
+        bool requiresVpnGateway,
+        string starterPrompt,
+        string technicalGuidance,
+        IReadOnlyList<string>? vpnRoutedAppIds = null,
+        PublishedHomeLabRecipeConnectivity? connectivity = null,
+        HomeLabRecipeNetworkRecommendation? networkRecommendation = null) =>
+        new(
+            id,
+            name,
+            description,
+            category,
+            components,
+            appIds,
+            requiresPlanning,
+            requiresVpnGateway,
+            vpnRoutedAppIds ?? (requiresVpnGateway ? appIds : []),
+            starterPrompt,
+            technicalGuidance,
+            $"""
+            {OperatingContract}
+
+            Requested HomeLab Recipe: {id}
+            Goal: {description}
+            Recipe components: {string.Join(", ", components)}
+            Target LMS app IDs: {(appIds.Count == 0 ? "none yet" : string.Join(", ", appIds))}
+            Recipe-specific requirements: {technicalGuidance}
+
+            {(requiresPlanning
+                ? "Start by inspecting Home Lab. This recipe requires planning because LMS cannot yet deploy every component safely. Ask only for the missing choices, explain exactly which parts LMS supports, and do not call apply_home_lab_prompt_recipe or install a partial stack. Produce a concrete plan the user can review."
+                : "Start by inspecting Home Lab. Explain what already exists, resolve any required infrastructure choice, then ask for approval through the LMS apply tool. After the approved action completes, inspect again and report actual health, network security where applicable, and local access details.")}
+            """,
+            connectivity,
+            networkRecommendation ?? DefaultNetworkRecommendation(name, requiresVpnGateway, vpnRoutedAppIds ?? appIds));
+
+    private static HomeLabRecipeNetworkRecommendation DefaultNetworkRecommendation(
+        string name, bool requiresVpnGateway, IReadOnlyList<string> vpnApps) =>
+        new("lan", $"Use a private LAN address so local clients can reach {name}. Choose a Tailnet address instead if access should be limited to your private remote network.",
+            requiresVpnGateway ? "vpn" : "direct",
+            requiresVpnGateway
+                ? $"Use an existing VPN Gateway for {string.Join(", ", vpnApps)}. Apps outside that VPN list keep their normal host route."
+                : "Use the host's normal route for LAN access and any Internet requests. This does not restrict traffic to the LAN.");
+
+    private static void ValidateNetworkRecommendation(string id, HomeLabRecipeNetworkRecommendation? recommendation, bool requiresVpnGateway, bool requiresPlanning, IReadOnlyList<string> appIds)
+    {
+        if (recommendation is null) return; // Older published catalogs remain compatible.
+        if (recommendation.ListenInterface is not ("lan" or "tailnet") ||
+            recommendation.OutboundRoute is not ("direct" or "vpn") ||
+            requiresVpnGateway && recommendation.OutboundRoute != "vpn" ||
+            recommendation.OutboundRoute == "vpn" && !requiresVpnGateway && !requiresPlanning && appIds.Any(appId => !HomeLabCatalog.GetApp(appId).SupportsVpnGateway) ||
+            string.IsNullOrWhiteSpace(recommendation.ListenReason) || recommendation.ListenReason.Length > 1000 ||
+            string.IsNullOrWhiteSpace(recommendation.OutboundReason) || recommendation.OutboundReason.Length > 1000)
+            throw new InvalidOperationException($"Published HomeLab Recipe '{id}' has invalid network recommendations.");
+    }
+
+    private static void ValidatePublishedConnectivity(
+        string recipeId,
+        IReadOnlyList<string> appIds,
+        PublishedHomeLabRecipeConnectivity? connectivity)
+    {
+        if (connectivity is null)
+        {
+            return;
+        }
+        if (!connectivity.PublicOriginMode.Equals("shared", StringComparison.OrdinalIgnoreCase) ||
+            connectivity.Services.Count > 30 || connectivity.Dependencies.Count > 60)
+        {
+            throw new InvalidOperationException($"Published HomeLab Recipe '{recipeId}' has invalid connectivity settings.");
+        }
+        var serviceIds = connectivity.Services.Select(service => service.ServiceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (serviceIds.Count != connectivity.Services.Count ||
+            serviceIds.Any(serviceId => !appIds.Contains(serviceId, StringComparer.OrdinalIgnoreCase)) ||
+            connectivity.Services.Any(service =>
+                service.Scopes.Any(scope => scope is not ("internal" or "lan" or "client" or "public")) ||
+                service.Routing is not ("auto" or "subpath" or "subdomain") ||
+                service.ClientAccessEnabled && !service.Scopes.Contains("client", StringComparer.OrdinalIgnoreCase)) ||
+            connectivity.Dependencies.Any(dependency =>
+                !serviceIds.Contains(dependency.Consumer) ||
+                !serviceIds.Contains(dependency.Provider) ||
+                dependency.AccessFrom is not ("service" or "client") ||
+                !string.IsNullOrWhiteSpace(dependency.Endpoint) &&
+                !dependency.Endpoint.Equals(
+                    $"${{endpoint:{dependency.Provider}:{(dependency.AccessFrom == "client" ? "client" : "internal")}}}",
+                    StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException($"Published HomeLab Recipe '{recipeId}' has invalid service connectivity intent.");
+        }
+    }
+}

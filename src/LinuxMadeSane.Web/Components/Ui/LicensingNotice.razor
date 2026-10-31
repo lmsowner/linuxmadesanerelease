@@ -1,0 +1,66 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@rendermode InteractiveServer
+@using LinuxMadeSane.Core.Licensing
+@using LinuxMadeSane.Web.Services.Licensing
+@using Microsoft.AspNetCore.Components.Authorization
+@inject Microsoft.Extensions.Options.IOptionsMonitor<ApplicationUpdateOptions> UpdateOptions
+@inject LocalLicensingService Service
+@inject LicensingAccess Access
+@inject AuthenticationStateProvider Authentication
+@inject IHttpContextAccessor Context
+@inject LinuxMadeSane.Core.Abstractions.ISavedCredentialAccessContext CredentialAccess
+<LicenceAgreement Prompt="true" />
+@if (message is not null)
+{
+    <div class="callout" role="status" aria-live="polite">
+        <span>@message</span> <a href="/about?tab=licensing">Review licensing</a>
+        <a href="https://www.linuxmadesane.com/contact?topic=licence-confirmation" target="_blank" rel="noopener noreferrer">Commercial licence confirmation ↗</a>
+        <UiCommandButton Label="Dismiss" HideIcon="true" OnClick="Dismiss" />
+    </div>
+}
+@code {
+    private string? message;
+    private string actor = "", version = "";
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+        // Existing BSL releases never show new-revenue onboarding or countdown notices.
+        if (LocalLicensingService.ApplicableRelease.LegalRegime == "historical") return;
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        var trusted = await CredentialAccess.GetAuthenticatedUserIdAsync() == Guid.Empty;
+        if (!Access.CanAdminister(user, trusted)) return;
+        actor = LicensingAccess.Actor(user, trusted);
+        var status = await Service.StatusAsync(); version = LicensingNotices.Version(status);
+        var (state, _) = await Service.ReadAsync();
+        if (state.Declarations.LastOrDefault() is not { } declaration || LicensingPolicy.CommunityEligible(declaration)) return;
+        if (status.Status == "declaration_required")
+        { message = state.Dismissals.Contains(new(actor, version)) ? null : "Confirm your organisation’s use on the website. Professional and Enterprise deployments use LMS Pro; CE is for evaluation only."; return; }
+        if (!state.Dismissals.Contains(new(actor, version)))
+        {
+            var ce = new[] { "ce", "community" }.Contains(UpdateOptions.CurrentValue.Edition, StringComparer.OrdinalIgnoreCase);
+            message = ce ? status.Status switch
+            {
+                "evaluation_active" => $"CE evaluation — {status.DaysRemaining} days remaining. Use LMS Pro for ongoing Professional or Enterprise deployment.",
+                "professional_active" => "Your professional licence is for LMS Pro. Use Pro for this deployment; CE is for evaluation only.",
+                "professional_required" when status.EvaluationEndUtc is not null => "Your CE evaluation has ended. Use LMS Pro for continued Professional or Enterprise use and confirm your licence on the website.",
+                "professional_required" => "Professional and Enterprise use requires LMS Pro. CE is available for a 30-day evaluation; confirm your organisation’s use on the website.",
+                "professional_expired" => "Your professional licence has expired. Arrange renewal on the website and use LMS Pro for professional deployment.",
+                _ => LicensingNotices.Message(status)
+            } : LicensingNotices.Message(status);
+        }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Licensing diagnostics must never take out the management layout/circuit.
+            message = "Licensing status is unavailable. Management remains operational.";
+        }
+    }
+    private async Task Dismiss()
+    {
+        try { if (!string.IsNullOrEmpty(actor)) await Service.DismissAsync(actor, version); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { /* Dismiss diagnostics locally when the store is unavailable. */ }
+        message = null;
+    }
+}

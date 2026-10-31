@@ -1,0 +1,13 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+namespace LinuxMadeSane.Infrastructure.Persistence.Entities;
+
+public sealed class EdgeGatewaySettingsEntity
+{
+    public int Id { get; set; }
+    public string GatewaySubdomain { get; set; } = string.Empty;
+    public string TunnelInstanceId { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+}
