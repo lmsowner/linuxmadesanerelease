@@ -1,0 +1,2085 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@page "/hosts/{HostId:guid}/terminal"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Contracts
+@using Microsoft.AspNetCore.Components.Authorization
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@inject IManagedHostService HostService
+@inject ITerminalSessionService TerminalSessionService
+@inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject IUserManagedHostCredentialProfileService CredentialProfileService
+@inject ITransientConnectionSecretStore ConnectionSecretStore
+@inject ConnectionProfileUserResolver ConnectionProfileUserResolver
+@inject TerminalWorkspaceRegistry TerminalWorkspaceRegistry
+@inject TerminalWorkspaceAccessor TerminalWorkspaceAccessor
+@inject NavigationManager NavigationManager
+@inject IJSRuntime JSRuntime
+@inject ILogger<HostTerminal> Logger
+
+<PageTitle>@TerminalPageTitle</PageTitle>
+
+@* Guardrail: this page is a terminal workspace shell only. Keep SSH transport,
+   credential resolution, and command execution in the shared terminal/file-access
+   services and transient secret store. If detached and embedded terminal behavior
+   diverge, extract shared logic instead of forking another transport path here. *@
+<div class="page-shell terminal-page-shell">
+    @if (showMissingHostState)
+    {
+        <section class="surface-card">
+            <h1>Host not found</h1>
+        </section>
+    }
+    else
+    {
+        <section class="@GetWorkspaceShellClass()">
+            <div class="terminal-page-toolbar">
+                <div class="stack-tight">
+                    <p class="eyebrow">Terminal</p>
+                    <h1 class="section-title-compact">SSH console</h1>
+                </div>
+
+                <div class="terminal-page-actions">
+                    @if (ActiveTab is not null)
+                    {
+                        <CompactUIButton Label="Details" Glyph="UiIconGlyph.Info" Href="@($"/hosts/{ActiveTab.HostId}")" />
+                    }
+                </div>
+            </div>
+
+            @if (TerminalWorkspace?.Tabs.Count == 0)
+            {
+                <div class="empty-state compact-empty-state">
+                    <p>No terminal tabs are open.</p>
+                    <p class="meta-text">Pick a host and open a tab. Live sessions stay available while the app session stays alive.</p>
+                </div>
+            }
+            else
+            {
+                <TabControl Class="@GetTabControlClass()"
+                            PanelClass="@GetTabPanelClass()"
+                            ActiveValue="@ActiveTabValue"
+                            ActiveValueChanged="OnActiveTabChangedAsync">
+                    <LeadingHeaderActions>
+                        <UiIconButton Label="New tab"
+                                      Title="Open new terminal tab"
+                                      Glyph="UiIconGlyph.Plus"
+                                      Variant="UiButtonVariant.Toolbar"
+                                      Class="terminal-tab-add-button"
+                                      Disabled="@(hosts.Count == 0)"
+                                      OnClick="OpenNewTabAsync" />
+                    </LeadingHeaderActions>
+                    <HeaderActions>
+                        @if (ShowNewTabHostPicker)
+                        {
+                            <div class="terminal-tab-connect-actions">
+                                <UiCombobox @bind-Value="newTabHostId"
+                                          Class="terminal-tab-host-picker"
+                                          title="Choose terminal host"
+                                          aria-label="Choose terminal host">
+                                    @foreach (var host in hosts)
+                                    {
+                                        <option value="@host.Id">@host.Name</option>
+                                    }
+                                </UiCombobox>
+                                <CompactUIButton Label="Connect"
+                                                 Glyph="UiIconGlyph.Connect"
+                                                 OnClick="ConnectSelectedHostAsync"
+                                                 Disabled="@IsSelectedHostConnectDisabled" />
+                            </div>
+                        }
+                    </HeaderActions>
+                    <ChildContent>
+                        @foreach (var tab in OrderedTabs)
+                        {
+                            <TabPage Value="@GetTabValue(tab)" Title="@GetTabTitle(tab)" Tooltip="@GetTabTooltip(tab)">
+                                <Header>
+                                    <div class="terminal-tab-header">
+                                        <span class="terminal-tab-status @GetTabStatusClass(tab)" aria-hidden="true"></span>
+                                        <span class="terminal-tab-title">@GetTabTitle(tab)</span>
+                                        <span class="terminal-tab-close"
+                                              role="button"
+                                              tabindex="-1"
+                                              title="Close tab"
+                                              @onclick="@(() => CloseTabAsync(tab.Id))"
+                                              @onclick:stopPropagation="true">
+                                            ×
+                                        </span>
+                                    </div>
+                                </Header>
+                                <ChildContent>
+                                    <div class="@GetTabWorkspaceClass(tab)">
+                                        <div class="terminal-session-strip">
+                                            <div class="terminal-session-summary">
+                                                <div class="terminal-session-copy">
+                                                    <strong>@tab.HostName</strong>
+                                                    <span class="meta-text">@(string.IsNullOrWhiteSpace(tab.WorkingDirectory) ? "Home directory" : tab.WorkingDirectory)</span>
+                                                </div>
+                                                <div class="terminal-pill-row">
+                                                    <UiPill Tone="@GetSessionTone(tab)" Class="terminal-status-pill">@GetSessionLabel(tab)</UiPill>
+                                                    @if (tab.IsSessionActive && !string.IsNullOrWhiteSpace(tab.ConnectedUsername))
+                                                    {
+                                                        <UiPill Tone="UiPillTone.Neutral" Class="terminal-status-pill">@tab.ConnectedUsername</UiPill>
+                                                    }
+                                                    @if (tab.SessionId.HasValue)
+                                                    {
+                                                        <UiPill Tone="UiPillTone.Neutral" Class="terminal-status-pill">@tab.Snapshot?.LastActivityUtc.ToLocalTime().ToString("HH:mm:ss")</UiPill>
+                                                    }
+                                                </div>
+                                            </div>
+
+                                            <div class="terminal-session-actions">
+                                                @if (tab.IsDetached)
+                                                {
+                                                    <CompactUIButton Label="Open window" Glyph="UiIconGlyph.PopOut" OnClick="@(() => OpenDetachedWindowAsync(tab))" Disabled="@(tab != ActiveTab)" />
+                                                    <CompactUIButton Label="Dock" Glyph="UiIconGlyph.Dock" OnClick="@(() => ReattachTabAsync(tab))" Disabled="@(tab != ActiveTab)" />
+                                                }
+                                                else
+                                                {
+                                                    <CompactUIButton Label="Disconnect" Glyph="UiIconGlyph.Disconnect" OnClick="@(() => DisconnectTabAsync(tab))" Disabled="@(tab != ActiveTab || (!tab.ConnectionDesired && tab.SessionId is null))" />
+                                                    <CompactUIButton Label="Focus" Glyph="UiIconGlyph.Focus" OnClick="FocusTerminalAsync" Disabled="@(tab != ActiveTab || !tab.IsSessionActive)" />
+                                                    <CompactUIButton Label="Ctrl+C" Glyph="UiIconGlyph.Interrupt" OnClick="@(() => SendInterruptAsync(tab))" Disabled="@(tab != ActiveTab)" />
+                                                    <CompactUIButton Label="Clear" Glyph="UiIconGlyph.Clear" OnClick="@(() => SendClearScreenAsync(tab))" Disabled="@(tab != ActiveTab || !tab.IsSessionActive)" />
+                                                    <CompactUIButton Label="@(tab.IsAiPanelOpen ? "Hide AI" : "AI")" Glyph="UiIconGlyph.Ai" OnClick="@(() => ToggleAiPanelAsync(tab))" Disabled="@(tab != ActiveTab)" />
+                                                    <CompactUIButton Label="Connection" Glyph="UiIconGlyph.Connection" OnClick="@(() => ToggleConnectionPanel(tab))" Disabled="@(tab != ActiveTab)" />
+                                                    <CompactUIButton Label="Pop out" Glyph="UiIconGlyph.PopOut" OnClick="@(() => DetachTabAsync(tab))" Disabled="@(tab != ActiveTab)" />
+                                                }
+                                            </div>
+                                        </div>
+
+                                        <TerminalConnectionTrace Tab="tab" Expanded="@(tab.ConnectionTracePending || !string.IsNullOrWhiteSpace(tab.ErrorMessage))" />
+
+                                        @if (tab.IsDetached)
+                                        {
+                                            <div class="terminal-detached-banner">
+                                                <div class="terminal-detached-copy">
+                                                    <strong>Popped-out window open.</strong>
+                                                    <span class="meta-text">This tab is running in a separate window.</span>
+                                                </div>
+                                            </div>
+                                        }
+                                        @if (!tab.IsDetached && tab.ConnectionOptionsOpen && terminalInitialized && renderedTabId == tab.Id)
+                                        {
+                                            <UiModal IsOpen="true"
+                                                     Title="@($"Connection to {tab.HostName}")"
+                                                     Subtitle="Choose a user, then connect. Connection errors stay here so you can correct the credentials and retry."
+                                                     Class="terminal-connection-modal"
+                                                     OnClose="@(() => ToggleConnectionPanel(tab))">
+                                                <ChildContent>
+                                                <div class="connection-user-editor">
+                                                    @if (tab.IsBusy)
+                                                    {
+                                                        <p class="terminal-connection-feedback" role="status">Connecting to @tab.HostName as @tab.Username…</p>
+                                                    }
+                                                    else if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
+                                                    {
+                                                        <div class="callout error terminal-connection-error" role="alert">
+                                                            <strong>Could not complete the action.</strong> @tab.ErrorMessage
+                                                        </div>
+                                                    }
+                                                    else if (tab.IsSessionActive)
+                                                    {
+                                                        <p class="terminal-connection-feedback" role="status">Connected as @tab.ConnectedUsername.</p>
+                                                    }
+                                                    else
+                                                    {
+                                                        <p class="terminal-connection-feedback" role="status">Disconnected. Choose an identity and press Connect.</p>
+                                                    }
+                                                    <TerminalConnectionTrace Tab="tab" Expanded="true" />
+                                                    <p class="terminal-connection-help">Saved connections are login details kept by LMS. Removing one does not delete the Linux account on the host or end the current terminal session.</p>
+                                                    @if (!string.IsNullOrWhiteSpace(connectionProfileNotice))
+                                                    {
+                                                        <div class="callout @connectionProfileNoticeTone terminal-connection-notice" role="status">@connectionProfileNotice</div>
+                                                    }
+
+                                                <div class="terminal-inline-grid">
+                                                    <SavedCredentialPicker Server="@(hosts.FirstOrDefault(x => x.Id == tab.HostId)?.Hostname)" Port="@(hosts.FirstOrDefault(x => x.Id == tab.HostId)?.Port)" Selected="@((SavedConnectionCredential value) => ApplyCentralCredentialAsync(tab, value))" Disabled="@tab.IsBusy" />
+                        <UiSelectField TValue="string"
+                                                                   Label="Identity"
+                                                                   Value="@tab.ConnectionProfileKey"
+                                                                   ValueChanged="@((string value) => SelectConnectionProfileAsync(tab, value))"
+                                                                   ValueExpression="@(() => tab.ConnectionProfileKey)"
+                                                                   Compact="true"
+                                                                   Class="terminal-inline-field">
+                                                        <option value="@ConnectionProfileSelectionKeys.HostDefault">@BuildHostDefaultProfileLabel(tab)</option>
+                                                        @if (ShouldShowLinkedLinuxUserOption(tab))
+                                                        {
+                                                            <option value="@ConnectionProfileSelectionKeys.LinkedLinuxUser">@BuildLinkedLinuxUserProfileLabel()</option>
+                                                        }
+                                                        @foreach (var profile in GetCredentialProfiles(tab.HostId))
+                                                        {
+                                                            <option value="@ConnectionProfileSelectionKeys.Saved(profile.Id)">@FormatCredentialProfileOption(profile)</option>
+                                                        }
+                                                        <option value="@ConnectionProfileSelectionKeys.Custom">Another user...</option>
+                                                    </UiSelectField>
+
+                                                    <label class="terminal-inline-field">
+                                                        <span>Saved user name</span>
+                                                        <InputText @bind-Value="tab.ConnectionProfileName" />
+                                                    </label>
+
+                                                    <label class="terminal-inline-field">
+                                                        <span>Username</span>
+                                                        <InputText @bind-Value="tab.Username" />
+                                                    </label>
+
+                                                    <label class="terminal-inline-field">
+                                                        <span>Password</span>
+                                                        <input type="password"
+                                                               value="@GetPassword(tab)"
+                                                               @oninput="@((ChangeEventArgs args) => SetPassword(tab, args.Value?.ToString()))" />
+                                                    </label>
+
+                                                    <UiCheckboxField @bind-Value="tab.PreferStoredCredentials"
+                                                                     Label="Use host credentials"
+                                                                     Compact="true"
+                                                                     Class="terminal-inline-checkbox" />
+                                                </div>
+
+                                                <div class="connection-user-editor-footer">
+                                                    <details class="terminal-advanced-auth terminal-advanced-auth-compact">
+                                                        <summary>Private key (optional)</summary>
+                                                        <div class="advanced-auth-body compact-stack-form">
+                                                            <label class="terminal-inline-field">
+                                                                <span>Client private key PEM</span>
+                                                                <textarea @oninput="@((ChangeEventArgs args) => SetPrivateKey(tab, args.Value?.ToString()))">@GetPrivateKey(tab)</textarea>
+                                                            </label>
+                                                            <label class="terminal-inline-field">
+                                                                <span>Key passphrase</span>
+                                                                <input type="password"
+                                                                       value="@GetPrivateKeyPassphrase(tab)"
+                                                                       @oninput="@((ChangeEventArgs args) => SetPrivateKeyPassphrase(tab, args.Value?.ToString()))" />
+                                                            </label>
+                                                        </div>
+                                                    </details>
+
+                                                    <div class="connection-user-editor-actions">
+                                                        <UiCommandButton Label="@GetRemoveConnectionLabel(tab)"
+                                                                         Glyph="UiIconGlyph.Delete"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         HideIcon="true"
+                                                                         Class="@GetRemoveConnectionClass(tab)"
+                                                                         Disabled="@(!CanDeleteSelectedConnectionProfile(tab))"
+                                                                         OnClick="@(() => RequestRemoveConnectionProfileAsync(tab))" />
+                                                        <UiCommandButton Label="@(tab.IsSessionActive ? "Reconnect" : "Connect")"
+                                                                         Glyph="UiIconGlyph.Connect"
+                                                                         Variant="UiButtonVariant.Ghost"
+                                                                         HideIcon="true"
+                                                                         Class="connection-user-editor-action"
+                                                                         Disabled="@(tab != ActiveTab || tab.IsBusy)"
+                                                                         OnClick="@(() => ConnectFromConnectionPanelAsync(tab))" />
+                                                        <UiCommandButton Label="Save user"
+                                                                         Glyph="UiIconGlyph.Save"
+                                                                         Variant="UiButtonVariant.PrimaryMuted"
+                                                                         HideIcon="true"
+                                                                         Class="connection-user-editor-action"
+                                                                         Disabled="@(userId is null)"
+                                                                         OnClick="@(() => SaveConnectionProfileAsync(tab))" />
+                                                    </div>
+                                                </div>
+                                                <p class="terminal-connection-help">Only saved connections can be removed here. Host default and My Linux user are not saved entries.</p>
+                                                </div>
+                                                </ChildContent>
+                                            </UiModal>
+                                        }
+
+                                        @if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
+                                        {
+                                            <div class="callout error terminal-callout terminal-connection-banner" role="alert">
+                                                <span>@tab.ErrorMessage</span>
+                                                <UiCommandButton Label="Connection settings"
+                                                                 Glyph="UiIconGlyph.Connection"
+                                                                 Variant="UiButtonVariant.Ghost"
+                                                                 OnClick="@(() => OpenConnectionPanelAsync(tab))" />
+                                            </div>
+                                        }
+
+                                        @if (!tab.IsDetached)
+                                        {
+                                            <div class="terminal-console-layout @(tab.IsAiPanelOpen ? "with-ai" : string.Empty)"
+                                                 style="@GetConsoleLayoutStyle(tab)"
+                                                 @ref="terminalConsoleLayoutElement">
+                                                <div class="terminal-console-main">
+                                                    <div class="terminal-shell terminal-shell-large terminal-shell-interactive"
+                                                         @ref="terminalShellElement"
+                                                         @oncontextmenu="ShowContextMenu"
+                                                         @oncontextmenu:preventDefault="true"
+                                                         @onclick="FocusTerminalAsync">
+                                                        <div class="terminal-prompt-bar terminal-prompt-bar-compact">
+                                                            <span class="terminal-dot"></span>
+                                                            <span class="terminal-dot"></span>
+                                                            <span class="terminal-dot"></span>
+                                                            <span class="meta-text">@tab.HostName</span>
+                                                        </div>
+
+                                                        <div id="@terminalElementId" class="terminal-emulator-host"></div>
+
+                                                        @if (contextMenuOpen && tab == ActiveTab)
+                                                        {
+                                                            <div class="terminal-context-menu"
+                                                                 style="@($"left:{contextMenuX}px;top:{contextMenuY}px;")"
+                                                                 @onclick="IgnoreClick"
+                                                                 @onclick:stopPropagation="true">
+                                                                <TerminalConnectAsMenu HostDefaultLabel="@BuildHostDefaultProfileLabel(tab)"
+                                                                                       ShowLinkedLinuxUser="@ShouldShowLinkedLinuxUserOption(tab)"
+                                                                                       LinkedLinuxUserLabel="@BuildLinkedLinuxUserProfileLabel()"
+                                                                                       SavedUsers="@GetCredentialProfiles(tab.HostId)"
+                                                                                       Disabled="@tab.IsBusy"
+                                                                                       ConnectionRequested="@((string value) => ConnectAsProfileAsync(tab, value))"
+                                                                                       AddUserRequested="@(() => AddConnectionUserAsync(tab))"
+                                                                                       ManageUsersRequested="@(() => OpenConnectionPanelAsync(tab))" />
+                                                                <UiContextMenuButton Label="Copy selection" Glyph="UiIconGlyph.Copy" OnClick="CopySelectionAsync" />
+                                                                <UiContextMenuButton Label="Paste clipboard" Glyph="UiIconGlyph.Paste" OnClientPointerDown="window.lmsTerminal.stageClipboardRead()" OnClick="PasteClipboardAsync" />
+                                                                <UiContextMenuButton Label="Paste command" Glyph="UiIconGlyph.Terminal" OnClick="PasteCommandAsync" />
+                                                                <UiContextMenuButton Label="Ask AI" Glyph="UiIconGlyph.Ai" OnClick="@(() => AskAiAsync(tab))" />
+                                                                @if (hasContextMenuSelection)
+                                                                {
+                                                                    <UiContextMenuButton Label="Ask AI - selection" Glyph="UiIconGlyph.Ai" OnClick="@(() => AskAiAboutSelectionAsync(tab))" />
+                                                                }
+                                                                <TerminalRunbooksMenu HostId="@tab.HostId"
+                                                                                      PasteCommand="@((string commandText) => RunCommandAsync(tab, commandText))" />
+                                                                <UiContextMenuButton Label="Send Ctrl+C" Glyph="UiIconGlyph.Interrupt" OnClick="@(() => SendInterruptAsync(tab))" />
+                                                                <UiContextMenuButton Label="Clear local view" Glyph="UiIconGlyph.Clear" OnClick="ClearTerminalAsync" />
+                                                                <UiContextMenuButton Label="Disconnect" Glyph="UiIconGlyph.Disconnect" OnClick="@(() => DisconnectTabAsync(tab))" />
+                                                                <UiContextMenuButton Label="Pop out" Glyph="UiIconGlyph.PopOut" OnClick="@(() => DetachTabAsync(tab))" />
+                                                            </div>
+                                                        }
+                                                    </div>
+
+                                                    <div class="terminal-console-note">
+                                                        <label class="terminal-copy-on-select">
+                                                            <input type="checkbox"
+                                                                   checked="@tab.CopyOnSelect"
+                                                                   @onchange="@((ChangeEventArgs args) => SetCopyOnSelectAsync(tab, args))" />
+                                                            <span>Copy on select</span>
+                                                        </label>
+                                                    </div>
+                                                </div>
+
+                                                @if (tab.IsAiPanelOpen)
+                                                {
+                                                    <div class="terminal-ai-splitter"
+                                                         role="separator"
+                                                         aria-label="Resize AI panel"
+                                                         aria-orientation="vertical"
+                                                         title="Drag to resize the AI panel"
+                                                         @onpointerdown="@(args => OnAiSplitterPointerDownAsync(tab, args))"
+                                                         @onpointerdown:preventDefault="true"></div>
+                                                    <TerminalAiPanel Tab="tab"
+                                                                     WriteManagedOperationOutput="@(text => WriteHomeLabOutputAsync(tab, text))"
+                                                                     @ref="terminalAiPanel"
+                                                                     RunCommand="@((string commandText, CancellationToken cancellationToken) => RunCommandAsync(tab, commandText, cancellationToken))" />
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                </ChildContent>
+                            </TabPage>
+                        }
+                    </ChildContent>
+                </TabControl>
+            }
+        </section>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public Guid HostId { get; set; }
+
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private readonly string terminalElementId = $"terminal-{Guid.NewGuid():N}";
+    private readonly string terminalClientId = Guid.NewGuid().ToString("N");
+    private readonly Dictionary<Guid, long> renderedOutputRevisions = [];
+    private DotNetObjectReference<HostTerminal>? dotNetReference;
+    private TerminalAiPanel? terminalAiPanel;
+    private ElementReference terminalShellElement;
+    private ElementReference terminalConsoleLayoutElement;
+    private TerminalWorkspaceState? terminalWorkspace;
+    private IReadOnlyList<ManagedHost> hosts = [];
+    private Dictionary<Guid, IReadOnlyList<UserManagedHostCredentialProfileSummary>> credentialProfilesByHost = [];
+    private CancellationTokenSource? pollingCts;
+    private Guid? renderedTabId;
+    private Guid newTabHostId;
+    private bool terminalInitialized;
+    private Guid? autoConnectIssuedTabId;
+    private bool showMissingHostState;
+    private bool contextMenuOpen;
+    private bool hasContextMenuSelection;
+    private double contextMenuX;
+    private double contextMenuY;
+    private int terminalColumns = 160;
+    private int terminalRows = 40;
+    private long observedWorkspaceVersion;
+    private bool pendingAiAnalyzeSession;
+    private Guid? pendingAiSelectionTabId;
+    private string? pendingAiSelectionText;
+    private Guid? userId;
+    private string currentLinuxUsername = string.Empty;
+    private Guid? pendingRemovalProfileId;
+    private string connectionProfileNotice = string.Empty;
+    private string connectionProfileNoticeTone = "success";
+
+    private TerminalWorkspaceState? TerminalWorkspace => terminalWorkspace;
+
+    private TerminalTabState? ActiveTab => TerminalWorkspace?.ActiveTab;
+
+    private TerminalTabState? RenderedTab =>
+        renderedTabId.HasValue && TerminalWorkspace is not null
+            ? TerminalWorkspace.Tabs.FirstOrDefault(tab => tab.Id == renderedTabId.Value)
+            : ActiveTab;
+
+    private string TerminalPageTitle => ActiveTab is null
+        ? "Terminal | Linux Made Sane"
+        : $"Terminal - {BuildTerminalTitleHostLabel(ActiveTab)} | Linux Made Sane";
+
+    private IReadOnlyList<TerminalTabState> OrderedTabs =>
+        TerminalWorkspace?.Tabs
+            .OrderBy(tab => tab.CreatedAtUtc)
+            .ToArray()
+        ?? [];
+
+    private bool ShowNewTabHostPicker => ActiveTab is null || !ActiveTab.IsSessionActive;
+    private ManagedHost? SelectedHeaderHost => hosts.FirstOrDefault(host => host.Id == newTabHostId);
+    private bool IsSelectedHostConnectDisabled =>
+        SelectedHeaderHost is null ||
+        FindHeaderConnectTargetTab(SelectedHeaderHost) is { IsBusy: true };
+
+    private string? ActiveTabValue => ActiveTab is null ? null : GetTabValue(ActiveTab);
+
+    protected override async Task OnInitializedAsync()
+    {
+        terminalWorkspace = TerminalWorkspaceRegistry.GetOrCreate(TerminalWorkspaceAccessor.GetWorkspaceId());
+        var currentUser = await ResolveCurrentUserAsync();
+        userId = currentUser?.Id;
+        if (currentUser is not null)
+        {
+            currentLinuxUsername = currentUser.LinuxUsername.Trim();
+            var preference = await UserDisplayPreferenceService.GetAsync(currentUser.Id);
+            if (preference is not null)
+            {
+                terminalWorkspace.SetDefaultCopyOnSelect(preference.TerminalCopyOnSelect, applyToExisting: true);
+            }
+        }
+
+        observedWorkspaceVersion = terminalWorkspace.Version;
+        dotNetReference = DotNetObjectReference.Create(this);
+        TerminalSessionService.OutputAppended += HandleTerminalOutputAppended;
+        pollingCts = new CancellationTokenSource();
+        _ = PollSnapshotsAsync(pollingCts.Token);
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        await LoadWorkspaceAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (ActiveTab is null)
+        {
+            if (terminalInitialized)
+            {
+                await JSRuntime.InvokeVoidAsync("lmsTerminal.disposeTerminal", terminalClientId);
+                terminalInitialized = false;
+                renderedTabId = null;
+            }
+
+            return;
+        }
+
+        if (ActiveTab.IsDetached)
+        {
+            if (terminalInitialized)
+            {
+                await JSRuntime.InvokeVoidAsync("lmsTerminal.disposeTerminal", terminalClientId);
+                terminalInitialized = false;
+                renderedTabId = null;
+            }
+
+            return;
+        }
+
+        if (dotNetReference is null)
+        {
+            return;
+        }
+
+        if (!terminalInitialized || renderedTabId != ActiveTab.Id)
+        {
+            if (terminalInitialized)
+            {
+                await JSRuntime.InvokeVoidAsync("lmsTerminal.disposeTerminal", terminalClientId);
+            }
+
+            terminalInitialized = await JSRuntime.InvokeAsync<bool>("lmsTerminal.createTerminal", terminalClientId, terminalElementId, dotNetReference);
+            renderedTabId = ActiveTab.Id;
+            renderedOutputRevisions[ActiveTab.Id] = -1;
+        }
+
+        if (terminalInitialized)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.setCopyOnSelect", terminalClientId, ActiveTab.CopyOnSelect);
+        }
+
+        await WriteRenderedSnapshotAsync();
+
+        if (terminalInitialized &&
+            hosts.Any(host => host.Id == HostId) &&
+            ActiveTab is { IsDetached: false, IsSessionActive: false, IsBusy: false } pendingTab &&
+            pendingTab.HostId == HostId &&
+            !pendingTab.IsHomeLabTask &&
+            autoConnectIssuedTabId != pendingTab.Id)
+        {
+            autoConnectIssuedTabId = pendingTab.Id;
+            await ConnectTabAsync(pendingTab);
+        }
+
+        if (pendingAiSelectionText is not null &&
+            pendingAiSelectionTabId == ActiveTab?.Id &&
+            terminalAiPanel is not null)
+        {
+            var selectionText = pendingAiSelectionText;
+            pendingAiSelectionText = null;
+            pendingAiSelectionTabId = null;
+            await terminalAiPanel.AnalyzeSelectionAsync(selectionText);
+        }
+        else if (pendingAiAnalyzeSession &&
+                 pendingAiSelectionTabId == ActiveTab?.Id &&
+                 terminalAiPanel is not null)
+        {
+            pendingAiAnalyzeSession = false;
+            pendingAiSelectionTabId = null;
+            await terminalAiPanel.AnalyzeSessionAsync();
+        }
+    }
+
+    private async Task LoadWorkspaceAsync()
+    {
+        hosts = (await HostService.ListHostsAsync())
+            .OrderBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        TerminalWorkspace?.SyncHosts(hosts);
+        await LoadCredentialProfilesAsync();
+
+        var requestedHost = hosts.FirstOrDefault(host => host.Id == HostId);
+        if (requestedHost is not null)
+        {
+            TerminalWorkspace?.EnsureHostTab(requestedHost, activate: true);
+            showMissingHostState = false;
+        }
+        else
+        {
+            showMissingHostState = TerminalWorkspace?.Tabs.Count == 0;
+        }
+
+        if (newTabHostId == Guid.Empty || hosts.All(host => host.Id != newTabHostId))
+        {
+            newTabHostId = requestedHost?.Id ?? hosts.FirstOrDefault()?.Id ?? Guid.Empty;
+        }
+        else if (ActiveTab is not null && !ActiveTab.IsSessionActive)
+        {
+            newTabHostId = ActiveTab.HostId;
+        }
+
+        await RefreshSnapshotsAsync();
+
+    }
+
+    private async Task OpenNewTabAsync()
+    {
+        var host = hosts.FirstOrDefault(item => item.Id == newTabHostId);
+        if (host is null)
+        {
+            return;
+        }
+
+        TerminalWorkspace?.AddTab(host, activate: true);
+        contextMenuOpen = false;
+        await NavigateToActiveHostAsync();
+    }
+
+    private async Task ConnectSelectedHostAsync()
+    {
+        var host = SelectedHeaderHost;
+        if (host is null)
+        {
+            return;
+        }
+
+        var targetTab = ResolveHeaderConnectTargetTab(host);
+        if (targetTab is null || targetTab.IsBusy)
+        {
+            return;
+        }
+
+        contextMenuOpen = false;
+        newTabHostId = host.Id;
+
+        TerminalWorkspace?.SetActive(targetTab.Id);
+        observedWorkspaceVersion = TerminalWorkspace?.Version ?? observedWorkspaceVersion;
+
+        if (targetTab.IsSessionActive)
+        {
+            await NavigateToActiveHostAsync();
+            return;
+        }
+
+        await ConnectTabAsync(targetTab);
+        await NavigateToActiveHostAsync();
+    }
+
+    private async Task DetachTabAsync(TerminalTabState tab)
+    {
+        contextMenuOpen = false;
+
+        var opened = await JSRuntime.InvokeAsync<bool>(
+            "lmsTerminalWindow.openPopup",
+            BuildDetachedTerminalUrl(tab.Id),
+            $"lms-terminal-{tab.Id:N}");
+
+        if (!opened)
+        {
+            tab.ErrorMessage = "Popup blocked. Allow popups for this app and try again.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        TerminalWorkspace?.SetDetached(tab.Id, true);
+        observedWorkspaceVersion = TerminalWorkspace?.Version ?? observedWorkspaceVersion;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OpenDetachedWindowAsync(TerminalTabState tab)
+    {
+        contextMenuOpen = false;
+        await JSRuntime.InvokeVoidAsync(
+            "lmsTerminalWindow.openPopup",
+            BuildDetachedTerminalUrl(tab.Id),
+            $"lms-terminal-{tab.Id:N}");
+    }
+
+    private async Task ReattachTabAsync(TerminalTabState tab)
+    {
+        contextMenuOpen = false;
+        TerminalWorkspace?.SetDetached(tab.Id, false);
+        observedWorkspaceVersion = TerminalWorkspace?.Version ?? observedWorkspaceVersion;
+        await NavigateToActiveHostAsync();
+    }
+
+    private async Task OnActiveTabChangedAsync(string? value)
+    {
+        if (!Guid.TryParse(value, out var tabId))
+        {
+            return;
+        }
+
+        TerminalWorkspace?.SetActive(tabId);
+        if (ActiveTab is not null && !ActiveTab.IsSessionActive)
+        {
+            newTabHostId = ActiveTab.HostId;
+        }
+        contextMenuOpen = false;
+        await NavigateToActiveHostAsync();
+    }
+
+    private async Task ToggleConnectionPanel(TerminalTabState tab)
+    {
+        tab.ConnectionOptionsOpen = !tab.ConnectionOptionsOpen;
+        contextMenuOpen = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OpenConnectionPanelAsync(TerminalTabState tab)
+    {
+        tab.ConnectionOptionsOpen = true;
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ConnectFromConnectionPanelAsync(TerminalTabState tab)
+    {
+        if (tab != ActiveTab || tab.IsBusy)
+        {
+            return;
+        }
+
+        tab.ErrorMessage = string.Empty;
+        await InvokeAsync(StateHasChanged);
+        if (tab.IsSessionActive)
+        {
+            await DisconnectTabAsync(tab);
+        }
+
+        await ConnectTabAsync(tab);
+        if (!tab.IsSessionActive)
+        {
+            tab.ConnectionOptionsOpen = true;
+            if (string.IsNullOrWhiteSpace(tab.ErrorMessage))
+            {
+                tab.ErrorMessage = "The connection did not start. Check the selected user and host, then try again.";
+            }
+
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ConnectAsProfileAsync(TerminalTabState tab, string connectionProfileKey)
+    {
+        if (tab.IsBusy)
+        {
+            return;
+        }
+
+        var switchStarted = System.Diagnostics.Stopwatch.StartNew();
+        var traceId = tab.BeginConnectionTrace("Loading selected connection profile");
+        await InvokeAsync(StateHasChanged);
+        Logger.LogInformation("Terminal profile switch started for host {HostId} profile {ProfileKey}", tab.HostId, connectionProfileKey);
+        await SelectConnectionProfileAsync(tab, connectionProfileKey);
+        if (!string.IsNullOrWhiteSpace(tab.ErrorMessage))
+        {
+            tab.AppendConnectionTrace(traceId, $"Profile lookup failed: {tab.ErrorMessage}");
+            tab.FinishConnectionTrace(traceId);
+            Logger.LogWarning("Terminal profile switch failed while loading profile for host {HostId} after {ElapsedMs} ms: {Error}",
+                tab.HostId, switchStarted.Elapsed.TotalMilliseconds, tab.ErrorMessage);
+            await OpenConnectionPanelAsync(tab);
+            return;
+        }
+
+        Logger.LogInformation("Terminal profile resolved for host {HostId} as {Username} after {ElapsedMs} ms",
+            tab.HostId, tab.Username, switchStarted.Elapsed.TotalMilliseconds);
+        tab.AppendConnectionTrace(traceId, $"Selected profile for {tab.Username}");
+        await InvokeAsync(StateHasChanged);
+
+        // The connection core replaces the old session under the gate.
+        tab.RequestConnection();
+        Logger.LogInformation("Terminal replacing previous session for host {HostId} as {Username}", tab.HostId, tab.Username);
+        await ReconnectTabAsync(tab);
+        if (tab is { IsSessionActive: true, SessionId: Guid })
+        {
+            Logger.LogInformation("Terminal profile switch completed for host {HostId} as {Username} in {ElapsedMs} ms",
+                tab.HostId, tab.ConnectedUsername, switchStarted.Elapsed.TotalMilliseconds);
+        }
+        else
+        {
+            Logger.LogWarning("Terminal profile switch failed for host {HostId} as {Username} after {ElapsedMs} ms: {Error}",
+                tab.HostId, tab.Username, switchStarted.Elapsed.TotalMilliseconds, tab.ErrorMessage);
+            await OpenConnectionPanelAsync(tab);
+        }
+    }
+
+    private async Task AddConnectionUserAsync(TerminalTabState tab)
+    {
+        ConnectionSecretStore.Delete(tab.SecretHandle);
+        tab.SecretHandle = null;
+        tab.ConnectionProfileKey = ConnectionProfileSelectionKeys.Custom;
+        tab.ConnectionProfileName = string.Empty;
+        tab.Username = string.Empty;
+        tab.PreferStoredCredentials = false;
+        tab.ErrorMessage = string.Empty;
+        await OpenConnectionPanelAsync(tab);
+    }
+
+    private async Task ToggleAiPanelAsync(TerminalTabState tab)
+    {
+        TerminalWorkspace?.SetAiPanelOpen(tab.Id, !tab.IsAiPanelOpen);
+        contextMenuOpen = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OnAiSplitterPointerDownAsync(TerminalTabState tab, PointerEventArgs args)
+    {
+        if (!tab.IsAiPanelOpen || dotNetReference is null)
+        {
+            return;
+        }
+
+        contextMenuOpen = false;
+
+        await JSRuntime.InvokeVoidAsync(
+            "lmsTerminal.beginAiPanelResize",
+            terminalConsoleLayoutElement,
+            args.ClientX,
+            360,
+            1200,
+            420,
+            dotNetReference,
+            tab.Id.ToString("N"));
+    }
+
+    private async Task ConnectTabAsync(TerminalTabState tab, CancellationToken cancellationToken = default)
+    {
+        if (tab.IsBusy || tab.IsSessionActive)
+        {
+            return;
+        }
+
+        tab.RequestConnection();
+        await tab.ConnectionGate.WaitAsync(cancellationToken);
+        using var operationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        tab.RegisterConnectionOperation(operationCts);
+        try
+        {
+            if (tab.IsSessionActive)
+            {
+                return;
+            }
+
+            await ConnectTabCoreAsync(tab, operationCts.Token);
+        }
+        finally
+        {
+            tab.UnregisterConnectionOperation(operationCts);
+            tab.ConnectionGate.Release();
+        }
+    }
+
+    private async Task<bool> ReconnectTabAsync(TerminalTabState tab, CancellationToken cancellationToken = default)
+    {
+        if (!tab.ConnectionDesired)
+        {
+            return false;
+        }
+
+        await tab.ConnectionGate.WaitAsync(cancellationToken);
+        using var operationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        tab.RegisterConnectionOperation(operationCts);
+        try
+        {
+            if (!tab.ConnectionDesired)
+            {
+                return false;
+            }
+
+            await ConnectTabCoreAsync(tab, operationCts.Token);
+            return tab.ConnectionDesired && tab.IsSessionActive;
+        }
+        finally
+        {
+            tab.UnregisterConnectionOperation(operationCts);
+            tab.ConnectionGate.Release();
+        }
+    }
+
+    private async Task ConnectTabCoreAsync(TerminalTabState tab, CancellationToken cancellationToken)
+    {
+        if (tab != ActiveTab || !tab.ConnectionDesired)
+        {
+            return;
+        }
+
+        var host = hosts.FirstOrDefault(item => item.Id == tab.HostId);
+        if (host is null)
+        {
+            tab.ErrorMessage = "Host not found.";
+            if (tab.ConnectionTracePending)
+            {
+                var missingHostTraceId = tab.ConnectionTraceId;
+                tab.AppendConnectionTrace(missingHostTraceId, tab.ErrorMessage);
+                tab.FinishConnectionTrace(missingHostTraceId);
+            }
+            return;
+        }
+
+        var traceId = tab.ConnectionTracePending
+            ? tab.ConnectionTraceId
+            : tab.BeginConnectionTrace($"Connecting as {tab.Username}");
+        tab.AppendConnectionTrace(traceId,
+            $"Configured SSH target: {host.Hostname.Trim()}:{host.Port}. The LMS server opens the socket; its OS chooses the route.");
+        tab.AppendConnectionTrace(traceId, "Closing previous SSH session");
+        tab.IsBusy = true;
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
+        var closeStarted = System.Diagnostics.Stopwatch.StartNew();
+        Logger.LogInformation("Terminal closing previous session for host {HostId}", tab.HostId);
+        await DisconnectTabCoreAsync(tab, cancellationToken);
+        Logger.LogInformation("Terminal previous session closed for host {HostId} after {ElapsedMs} ms",
+            tab.HostId, closeStarted.Elapsed.TotalMilliseconds);
+        tab.AppendConnectionTrace(traceId, $"Previous session closed in {closeStarted.Elapsed.TotalMilliseconds:0} ms");
+        if (terminalInitialized && renderedTabId == tab.Id)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.resetForNewSession", terminalClientId, tab.Username, $"{host.Hostname.Trim()}:{host.Port}");
+        }
+        if (!tab.ConnectionDesired)
+        {
+            tab.AppendConnectionTrace(traceId, "Connection was canceled");
+            tab.FinishConnectionTrace(traceId);
+            return;
+        }
+
+        tab.IsBusy = true;
+        tab.ErrorMessage = string.Empty;
+        contextMenuOpen = false;
+
+        try
+        {
+            tab.AppendConnectionTrace(traceId, "Preparing connection credentials");
+            var request = (await BuildTerminalConnectionRequestAsync(tab)) with
+            {
+                Progress = message =>
+                {
+                    if (tab.AppendConnectionTrace(traceId, message))
+                    {
+                        _ = InvokeAsync(StateHasChanged);
+                    }
+                }
+            };
+            var session = await TerminalSessionService.StartSessionAsync(host, request, cancellationToken);
+            if (!tab.ConnectionDesired)
+            {
+                await TerminalSessionService.CloseSessionAsync(session.Id, CancellationToken.None);
+                await TerminalSessionService.CloseOwnedSessionsAsync(tab.Id, CancellationToken.None);
+                return;
+            }
+
+            tab.SessionId = session.Id;
+            if (!tab.ConnectionDesired)
+            {
+                await DisconnectTabCoreAsync(tab, CancellationToken.None);
+                return;
+            }
+
+            tab.Snapshot = await TerminalSessionService.GetSnapshotAsync(session.Id, cancellationToken)
+                ?? new TerminalSessionSnapshot(
+                    session.Id,
+                    session.Status,
+                    session.WorkingDirectory,
+                    string.Empty,
+                    0,
+                    session.StartedAtUtc,
+                    session.LastActivityUtc)
+                {
+                    Username = session.Username
+                };
+            ConnectionSecretStore.Delete(tab.SecretHandle);
+            tab.SecretHandle = null;
+            tab.ConnectionOptionsOpen = false;
+            renderedOutputRevisions[tab.Id] = -1;
+            await InvokeAsync(StateHasChanged);
+            await WriteRenderedSnapshotAsync();
+            await FocusTerminalAsync();
+            tab.AppendConnectionTrace(traceId, tab.Snapshot?.OutputRevision > 0
+                ? $"Connected as {tab.ConnectedUsername}; shell output received"
+                : $"Connected as {tab.ConnectedUsername}; waiting for shell output if no prompt is visible");
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = exception.Message;
+            tab.AppendConnectionTrace(traceId, $"Connection failed: {exception.Message}");
+        }
+        finally
+        {
+            tab.FinishConnectionTrace(traceId);
+            tab.IsBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task DisconnectTabAsync(TerminalTabState tab)
+    {
+        tab.RequestDisconnect();
+        await tab.ConnectionGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            await DisconnectTabCoreAsync(tab, CancellationToken.None);
+        }
+        finally
+        {
+            tab.ConnectionGate.Release();
+        }
+    }
+
+    private async Task DisconnectTabCoreAsync(TerminalTabState tab, CancellationToken cancellationToken)
+    {
+        tab.IsBusy = true;
+        tab.ErrorMessage = string.Empty;
+        contextMenuOpen = false;
+        var sessionId = tab.SessionId;
+        tab.SessionId = null;
+        if (tab.Snapshot is not null)
+        {
+            tab.Snapshot = tab.Snapshot with
+            {
+                Status = TerminalSessionStatus.Closed,
+                LastActivityUtc = DateTimeOffset.UtcNow
+            };
+        }
+
+        try
+        {
+            if (sessionId.HasValue)
+            {
+                await TerminalSessionService.CloseSessionAsync(sessionId.Value, cancellationToken);
+            }
+
+            await TerminalSessionService.CloseOwnedSessionsAsync(tab.Id, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = exception.Message;
+        }
+        finally
+        {
+            tab.IsBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task CloseTabAsync(Guid tabId)
+    {
+        contextMenuOpen = false;
+
+        if (renderedTabId == tabId && terminalInitialized)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.disposeTerminal", terminalClientId);
+            terminalInitialized = false;
+            renderedTabId = null;
+        }
+
+        if (TerminalWorkspace is null)
+        {
+            return;
+        }
+
+        await TerminalWorkspace.RemoveTabAsync(tabId);
+
+        if (ActiveTab is not null)
+        {
+            await NavigateToActiveHostAsync();
+        }
+        else
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task PollSnapshotsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(150));
+
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                var refresh = await RefreshSnapshotsAsync(cancellationToken);
+                if (refresh.RequiresUiRefresh)
+                {
+                    await InvokeAsync(async () =>
+                    {
+                        StateHasChanged();
+                        await WriteRenderedSnapshotAsync();
+                    });
+                }
+                else if (refresh.HasOutputChanges)
+                {
+                    await InvokeAsync(WriteRenderedSnapshotAsync);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task<TerminalRefreshResult> RefreshSnapshotsAsync(CancellationToken cancellationToken = default)
+    {
+        var uiChanged = false;
+        var outputChanged = false;
+
+        if (TerminalWorkspace is null)
+        {
+            return TerminalRefreshResult.None;
+        }
+
+        var currentVersion = TerminalWorkspace.Version;
+        if (currentVersion != observedWorkspaceVersion)
+        {
+            observedWorkspaceVersion = currentVersion;
+            uiChanged = true;
+        }
+
+        foreach (var tab in TerminalWorkspace.Tabs.ToArray())
+        {
+            if (!tab.SessionId.HasValue)
+            {
+                continue;
+            }
+
+            var snapshot = await TerminalSessionService.GetSnapshotAsync(tab.SessionId.Value, cancellationToken);
+            if (snapshot is null)
+            {
+                tab.SessionId = null;
+                if (tab.Snapshot is not null)
+                {
+                    tab.Snapshot = tab.Snapshot with
+                    {
+                        Status = TerminalSessionStatus.Closed,
+                        LastActivityUtc = DateTimeOffset.UtcNow
+                    };
+                }
+
+                uiChanged = true;
+                continue;
+            }
+
+            var previousSnapshot = tab.Snapshot;
+            if (previousSnapshot != snapshot)
+            {
+                tab.Snapshot = snapshot;
+                if (!string.Equals(previousSnapshot?.Output, snapshot.Output, StringComparison.Ordinal))
+                {
+                    outputChanged = true;
+                }
+
+                if (RequiresUiRefresh(previousSnapshot, snapshot))
+                {
+                    uiChanged = true;
+                }
+            }
+        }
+
+        return new TerminalRefreshResult(uiChanged, outputChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnTerminalData(string data)
+    {
+        var targetTab = RenderedTab;
+        if (targetTab is not { ConnectionDesired: true, SessionId: not null, IsSessionActive: true, IsBusy: false } ||
+            string.IsNullOrEmpty(data))
+        {
+            return;
+        }
+
+        var isReturn = data.Contains('\r') || data.Contains('\n');
+        var inputStarted = isReturn ? System.Diagnostics.Stopwatch.StartNew() : null;
+        if (isReturn)
+        {
+            Logger.LogInformation("Terminal Return input started for host {HostId} session {SessionId}", targetTab.HostId, targetTab.SessionId);
+        }
+
+        try
+        {
+            await SendInputToTerminalAsync(targetTab, data, CancellationToken.None);
+            targetTab.ErrorMessage = string.Empty;
+            if (isReturn)
+            {
+                Logger.LogInformation("Terminal Return input completed for host {HostId} session {SessionId} after {ElapsedMs} ms",
+                    targetTab.HostId, targetTab.SessionId, inputStarted!.Elapsed.TotalMilliseconds);
+            }
+        }
+        catch (Exception exception)
+        {
+            Logger.LogWarning(exception, "Terminal input failed for host {HostId} session {SessionId} after {ElapsedMs} ms",
+                targetTab.HostId, targetTab.SessionId, inputStarted?.Elapsed.TotalMilliseconds);
+            targetTab.ErrorMessage = exception.Message;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    [JSInvokable]
+    public async Task OnTerminalResize(int columns, int rows)
+    {
+        terminalColumns = Math.Max(columns, 20);
+        terminalRows = Math.Max(rows, 8);
+
+        var targetTab = RenderedTab;
+        if (targetTab is not { IsSessionActive: true, SessionId: Guid sessionId })
+        {
+            return;
+        }
+
+        try
+        {
+            await TerminalSessionService.ResizeAsync(sessionId, terminalColumns, terminalRows);
+        }
+        catch (Exception exception) when (targetTab.SessionId == sessionId)
+        {
+            targetTab.ErrorMessage = exception.Message;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    [JSInvokable]
+    public Task OnAiPanelWidthChanged(string tabIdValue, int width)
+    {
+        if (!Guid.TryParseExact(tabIdValue, "N", out var tabId) || TerminalWorkspace is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        var clampedWidth = Math.Clamp(width, 360, 1200);
+        if (!TerminalWorkspace.SetAiPanelWidth(tabId, clampedWidth))
+        {
+            return Task.CompletedTask;
+        }
+
+        observedWorkspaceVersion = TerminalWorkspace.Version;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task WriteHomeLabOutputAsync(TerminalTabState target, string text)
+    {
+        target.HomeLabOperationOutput = (target.HomeLabOperationOutput + text.Replace("\r\n", "\n").Replace("\n", "\r\n"));
+        if (target.HomeLabOperationOutput.Length > 100000) target.HomeLabOperationOutput = target.HomeLabOperationOutput[^100000..];
+        target.HomeLabOutputRevision++;
+        await WriteRenderedSnapshotAsync();
+    }
+
+    private async Task WriteRenderedSnapshotAsync()
+    {
+        if (!terminalInitialized || RenderedTab is null)
+        {
+            return;
+        }
+
+        var snapshot = RenderedTab.Snapshot;
+        var output = (snapshot?.Output ?? string.Empty) + RenderedTab.HomeLabOperationOutput;
+        var outputRevision = (snapshot?.OutputRevision ?? 0) + RenderedTab.HomeLabOutputRevision;
+        var renderedRevision = renderedOutputRevisions.GetValueOrDefault(RenderedTab.Id, -1);
+        if (outputRevision == renderedRevision)
+        {
+            return;
+        }
+
+        await JSRuntime.InvokeVoidAsync("lmsTerminal.writeDelta", terminalClientId, output, outputRevision);
+        renderedOutputRevisions[RenderedTab.Id] = outputRevision;
+    }
+
+    private async Task ShowContextMenu(MouseEventArgs args)
+    {
+        var position = await JSRuntime.InvokeAsync<TerminalContextMenuPosition>(
+            "lmsTerminal.getContextMenuPosition",
+            terminalShellElement,
+            args.ClientX,
+            args.ClientY);
+        var selection = await JSRuntime.InvokeAsync<string>("lmsTerminal.getSelection", terminalClientId);
+        contextMenuOpen = true;
+        hasContextMenuSelection = !string.IsNullOrWhiteSpace(selection);
+        contextMenuX = position.Left;
+        contextMenuY = position.Top;
+    }
+
+    private async Task FocusTerminalAsync()
+    {
+        contextMenuOpen = false;
+
+        if (terminalInitialized)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.focus", terminalClientId);
+        }
+    }
+
+    private async Task CopySelectionAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        await JSRuntime.InvokeVoidAsync("lmsTerminal.copySelection", terminalClientId);
+    }
+
+    private async Task SetCopyOnSelectAsync(TerminalTabState tab, ChangeEventArgs args)
+    {
+        var enabled = ReadCheckboxValue(args);
+
+        if (TerminalWorkspace is not null)
+        {
+            if (TerminalWorkspace.SetCopyOnSelect(tab.Id, enabled))
+            {
+                observedWorkspaceVersion = TerminalWorkspace.Version;
+            }
+        }
+        else
+        {
+            tab.CopyOnSelect = enabled;
+        }
+
+        if (terminalInitialized && renderedTabId == tab.Id)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.setCopyOnSelect", terminalClientId, enabled);
+        }
+
+        if (userId.HasValue)
+        {
+            await UserDisplayPreferenceService.SaveTerminalCopyOnSelectAsync(userId.Value, enabled);
+        }
+    }
+
+    private static bool ReadCheckboxValue(ChangeEventArgs args) =>
+        args.Value switch
+        {
+            bool value => value,
+            string text when bool.TryParse(text, out var parsed) => parsed,
+            _ => false
+        };
+
+    private async Task<SecurityUser?> ResolveCurrentUserAsync()
+    {
+        var authenticationState = AuthenticationStateTask is null
+            ? null
+            : await AuthenticationStateTask;
+        return await ConnectionProfileUserResolver.ResolveAsync(authenticationState?.User);
+    }
+
+    private async Task AskAiAsync(TerminalTabState tab)
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+
+        tab.ErrorMessage = string.Empty;
+
+        if (!tab.IsAiPanelOpen)
+        {
+            TerminalWorkspace?.SetAiPanelOpen(tab.Id, true);
+            observedWorkspaceVersion = TerminalWorkspace?.Version ?? observedWorkspaceVersion;
+        }
+
+        pendingAiAnalyzeSession = true;
+        pendingAiSelectionText = null;
+        pendingAiSelectionTabId = tab.Id;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task AskAiAboutSelectionAsync(TerminalTabState tab)
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+
+        var selection = (await JSRuntime.InvokeAsync<string>("lmsTerminal.getSelection", terminalClientId)).Trim();
+        if (string.IsNullOrWhiteSpace(selection))
+        {
+            tab.ErrorMessage = "Select terminal output first.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        tab.ErrorMessage = string.Empty;
+        pendingAiAnalyzeSession = false;
+
+        if (!tab.IsAiPanelOpen)
+        {
+            TerminalWorkspace?.SetAiPanelOpen(tab.Id, true);
+            observedWorkspaceVersion = TerminalWorkspace?.Version ?? observedWorkspaceVersion;
+        }
+
+        pendingAiSelectionText = selection;
+        pendingAiSelectionTabId = tab.Id;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task PasteClipboardAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+
+        var targetTab = RenderedTab;
+        if (targetTab is not { ConnectionDesired: true, SessionId: not null })
+        {
+            return;
+        }
+
+        var clipboard = await JSRuntime.InvokeAsync<string?>("lmsTerminal.readClipboard");
+        if (clipboard is null)
+        {
+            var secureContext = await JSRuntime.InvokeAsync<bool>("lmsTerminal.isSecureContext");
+            targetTab.ErrorMessage = secureContext
+                ? "Browser clipboard access is unavailable. Use Paste command and Ctrl+V, or paste directly in the terminal."
+                : "Paste clipboard is unavailable over non-SSL HTTP access. Open LMS over HTTPS, or use Paste command and Ctrl+V.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        targetTab.ErrorMessage = string.Empty;
+        if (!string.IsNullOrEmpty(clipboard))
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.paste", terminalClientId, clipboard);
+        }
+    }
+
+    private async Task PasteCommandAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+
+        var targetTab = RenderedTab;
+        if (targetTab is not { ConnectionDesired: true, SessionId: not null })
+        {
+            return;
+        }
+
+        var command = await JSRuntime.InvokeAsync<string>("lmsTerminal.promptPasteCommand");
+        if (!string.IsNullOrEmpty(command))
+        {
+            targetTab.ErrorMessage = string.Empty;
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.paste", terminalClientId, command);
+        }
+    }
+
+    private async Task SendInterruptAsync(TerminalTabState tab)
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        if (!tab.ConnectionDesired || tab.SessionId is not Guid sessionId)
+        {
+            return;
+        }
+
+        try
+        {
+            await TerminalSessionService.SendInterruptAsync(sessionId);
+            tab.ErrorMessage = string.Empty;
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = exception.Message;
+        }
+        finally
+        {
+            await InvokeAsync(StateHasChanged);
+            await FocusTerminalAsync();
+        }
+    }
+
+    private async Task SendClearScreenAsync(TerminalTabState tab)
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+
+        if (tab.ConnectionDesired && tab.SessionId is Guid sessionId)
+        {
+            await TerminalSessionService.SendInputAsync(sessionId, "clear" + Environment.NewLine);
+        }
+    }
+
+    private async Task SendCommandToTerminalAsync(
+        TerminalTabState targetTab,
+        string commandText,
+        CancellationToken cancellationToken)
+    {
+        if (!targetTab.ConnectionDesired || targetTab.SessionId is not Guid sessionId)
+        {
+            throw new TerminalSessionUnavailableException(
+                "Connect the terminal before sending commands.",
+                canRetryCommand: true,
+                connectionRecovered: false);
+        }
+
+        contextMenuOpen = false;
+        await TerminalSessionService.SendInputAsync(sessionId, commandText, cancellationToken);
+    }
+
+    private async Task SendInputToTerminalAsync(
+        TerminalTabState targetTab,
+        string input,
+        CancellationToken cancellationToken)
+    {
+        if (!targetTab.ConnectionDesired || targetTab.SessionId is not Guid sessionId)
+        {
+            throw new TerminalSessionUnavailableException(
+                "Connect the terminal before sending input.",
+                canRetryCommand: true,
+                connectionRecovered: false);
+        }
+
+        await TerminalSessionService.SendInputAsync(sessionId, input, cancellationToken);
+    }
+
+    private async Task RunCommandAsync(
+        TerminalTabState targetTab,
+        string commandText,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedCommand = commandText.TrimEnd();
+        if (string.IsNullOrWhiteSpace(normalizedCommand))
+        {
+            return;
+        }
+
+        var terminalInput = normalizedCommand + Environment.NewLine;
+        await TerminalCommandTransportRecovery.SendWithReconnectAsync(
+            () => SendCommandToTerminalAsync(targetTab, terminalInput, cancellationToken),
+            async () =>
+            {
+                return await ReconnectTabAsync(targetTab, cancellationToken);
+            },
+            cancellationToken);
+        await FocusTerminalAsync();
+    }
+
+    private async Task ClearTerminalAsync()
+    {
+        contextMenuOpen = false;
+        hasContextMenuSelection = false;
+        await JSRuntime.InvokeVoidAsync("lmsTerminal.clear", terminalClientId);
+
+        if (RenderedTab is not null)
+        {
+            renderedOutputRevisions[RenderedTab.Id] = RenderedTab.Snapshot?.OutputRevision ?? 0;
+        }
+    }
+
+    private async Task NavigateToActiveHostAsync()
+    {
+        var activeTab = ActiveTab;
+        if (activeTab is null)
+        {
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        var target = $"/hosts/{activeTab.HostId}/terminal";
+        if (!string.Equals(NavigationManager.Uri, NavigationManager.ToAbsoluteUri(target).ToString(), StringComparison.OrdinalIgnoreCase))
+        {
+            NavigationManager.NavigateTo(target);
+            return;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private TerminalTabState? FindHeaderConnectTargetTab(ManagedHost host)
+    {
+        if (TerminalWorkspace is null)
+        {
+            return null;
+        }
+
+        var activeTab = ActiveTab;
+        if (activeTab is not null &&
+            !activeTab.IsDetached &&
+            activeTab.HostId == host.Id)
+        {
+            activeTab.ApplyHost(host);
+            return activeTab;
+        }
+
+        var existingTab = OrderedTabs.FirstOrDefault(tab => tab.HostId == host.Id && !tab.IsDetached);
+        if (existingTab is not null)
+        {
+            existingTab.ApplyHost(host);
+            return existingTab;
+        }
+
+        return null;
+    }
+
+    private TerminalTabState? ResolveHeaderConnectTargetTab(ManagedHost host)
+    {
+        if (TerminalWorkspace is null)
+        {
+            return null;
+        }
+
+        var existingTab = FindHeaderConnectTargetTab(host);
+        if (existingTab is not null)
+        {
+            return existingTab;
+        }
+
+        observedWorkspaceVersion = TerminalWorkspace.Version;
+        return TerminalWorkspace.AddTab(host, activate: false);
+    }
+
+    private string GetTabValue(TerminalTabState tab) => tab.Id.ToString("N");
+
+    private string GetWorkspaceShellClass() =>
+        ActiveTab?.IsDetached == true
+            ? "surface-card terminal-workspace-shell terminal-workspace-shell-detached"
+            : "surface-card terminal-workspace-shell";
+
+    private string GetTabControlClass() =>
+        ActiveTab?.IsDetached == true
+            ? "terminal-tab-control terminal-tab-control-detached"
+            : "terminal-tab-control";
+
+    private string GetTabPanelClass() =>
+        ActiveTab?.IsDetached == true
+            ? "terminal-tab-panel terminal-tab-panel-detached"
+            : "terminal-tab-panel";
+
+    private static string GetTabWorkspaceClass(TerminalTabState tab) =>
+        tab.IsDetached
+            ? "terminal-tab-workspace terminal-tab-workspace-detached"
+            : "terminal-tab-workspace";
+
+    private static string GetConsoleLayoutStyle(TerminalTabState tab) =>
+        tab.IsAiPanelOpen
+            ? $"--terminal-ai-panel-width:{Math.Clamp(tab.AiPanelWidthPx, 360, 1200)}px;"
+            : string.Empty;
+
+    private static bool RequiresUiRefresh(TerminalSessionSnapshot? previous, TerminalSessionSnapshot current)
+    {
+        if (previous is null)
+        {
+            return true;
+        }
+
+        return previous.Status != current.Status
+               || !string.Equals(previous.WorkingDirectory, current.WorkingDirectory, StringComparison.Ordinal);
+    }
+
+    private void HandleTerminalOutputAppended(TerminalSessionOutputAppended update)
+    {
+        if (TerminalWorkspace is null || TerminalWorkspace.Tabs.All(tab => tab.SessionId != update.SessionId))
+        {
+            return;
+        }
+
+        _ = InvokeAsync(() => ApplyTerminalOutputUpdateAsync(update));
+    }
+
+    private async Task ApplyTerminalOutputUpdateAsync(TerminalSessionOutputAppended update)
+    {
+        if (TerminalWorkspace is null)
+        {
+            return;
+        }
+
+        TerminalTabState? renderedMatch = null;
+
+        foreach (var tab in TerminalWorkspace.Tabs.Where(tab => tab.SessionId == update.SessionId))
+        {
+            if (!tab.IsDetached && update.OutputRevision == 1 && update.Status == TerminalSessionStatus.Active && tab.ConnectionTraceId != Guid.Empty)
+            {
+                tab.AppendConnectionTrace(tab.ConnectionTraceId, "First shell output received");
+                await InvokeAsync(StateHasChanged);
+            }
+            tab.Snapshot = MergeTerminalSnapshot(tab, tab.Snapshot, update);
+            if (RenderedTab?.Id == tab.Id)
+            {
+                renderedMatch = tab;
+            }
+        }
+
+        if (renderedMatch is not null && terminalInitialized)
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.appendChunk", terminalClientId, update.Chunk, update.OutputRevision);
+            renderedOutputRevisions[renderedMatch.Id] = update.OutputRevision;
+        }
+    }
+
+    private static TerminalSessionSnapshot MergeTerminalSnapshot(
+        TerminalTabState tab,
+        TerminalSessionSnapshot? previous,
+        TerminalSessionOutputAppended update)
+    {
+        var nextOutput = (previous?.Output ?? string.Empty) + update.Chunk;
+        if (nextOutput.Length > 120_000)
+        {
+            nextOutput = nextOutput[^120_000..];
+        }
+
+        return previous is null
+            ? new TerminalSessionSnapshot(
+                update.SessionId,
+                update.Status,
+                tab.WorkingDirectory,
+                nextOutput,
+                update.OutputRevision,
+                update.LastActivityUtc,
+                update.LastActivityUtc)
+            : previous with
+            {
+                Status = update.Status,
+                Output = nextOutput,
+                OutputRevision = update.OutputRevision,
+                LastActivityUtc = update.LastActivityUtc
+            };
+    }
+
+    private string GetTabTitle(TerminalTabState tab)
+    {
+        if (tab.IsHomeLabTask) return tab.HomeLabTaskTitle;
+        var siblings = OrderedTabs.Where(item => item.HostId == tab.HostId).ToArray();
+        if (siblings.Length <= 1)
+        {
+            return tab.HostName;
+        }
+
+        var index = Array.FindIndex(siblings, item => item.Id == tab.Id) + 1;
+        return $"{tab.HostName} {index}";
+    }
+
+    private string GetTabTooltip(TerminalTabState tab) =>
+        $"{tab.HostName} · {GetSessionLabel(tab)}{(tab.IsDetached ? " · Popped out" : string.Empty)}";
+
+    private static string BuildTerminalTitleHostLabel(TerminalTabState tab)
+    {
+        var name = string.IsNullOrWhiteSpace(tab.HostName) ? tab.HostAddress : tab.HostName.Trim();
+        var address = tab.HostAddress.Trim();
+        return string.IsNullOrWhiteSpace(address) || string.Equals(name, address, StringComparison.OrdinalIgnoreCase)
+            ? name
+            : $"{name} ({address})";
+    }
+
+    private string GetTabStatusClass(TerminalTabState tab) =>
+        tab.IsDetached
+            ? "detached"
+            : tab.Snapshot?.Status switch
+        {
+            TerminalSessionStatus.Active => "active",
+            TerminalSessionStatus.Faulted => "faulted",
+            _ => "idle"
+        };
+
+    private static UiPillTone GetSessionTone(TerminalTabState tab) =>
+        tab.Snapshot?.Status switch
+        {
+            TerminalSessionStatus.Active => UiPillTone.Success,
+            TerminalSessionStatus.Faulted => UiPillTone.Failure,
+            _ => UiPillTone.Neutral
+        };
+
+    private static string GetSessionLabel(TerminalTabState tab) =>
+        tab.Snapshot?.Status switch
+        {
+            TerminalSessionStatus.Active => "Connected",
+            TerminalSessionStatus.Faulted => "Faulted",
+            TerminalSessionStatus.Closed => "Closed",
+            _ => tab.SessionId.HasValue ? "Opening" : "Ready"
+        };
+
+    private sealed class TerminalContextMenuPosition
+    {
+        public double Left { get; set; }
+
+        public double Top { get; set; }
+    }
+
+    private readonly record struct TerminalRefreshResult(bool RequiresUiRefresh, bool HasOutputChanges)
+    {
+        public static TerminalRefreshResult None => new(false, false);
+    }
+
+    private string GetPassword(TerminalTabState tab) =>
+        ConnectionSecretStore.Get(tab.SecretHandle).Password;
+
+    private string GetPrivateKey(TerminalTabState tab) =>
+        ConnectionSecretStore.Get(tab.SecretHandle).PrivateKey;
+
+    private string GetPrivateKeyPassphrase(TerminalTabState tab) =>
+        ConnectionSecretStore.Get(tab.SecretHandle).PrivateKeyPassphrase;
+
+    private void SetPassword(TerminalTabState tab, string? value)
+    {
+        var existing = ConnectionSecretStore.Get(tab.SecretHandle);
+        tab.SecretHandle = ConnectionSecretStore.Save(tab.SecretHandle, value, existing.PrivateKey, existing.PrivateKeyPassphrase);
+    }
+
+    private void SetPrivateKey(TerminalTabState tab, string? value)
+    {
+        var existing = ConnectionSecretStore.Get(tab.SecretHandle);
+        tab.SecretHandle = ConnectionSecretStore.Save(tab.SecretHandle, existing.Password, value, existing.PrivateKeyPassphrase);
+    }
+
+    private void SetPrivateKeyPassphrase(TerminalTabState tab, string? value)
+    {
+        var existing = ConnectionSecretStore.Get(tab.SecretHandle);
+        tab.SecretHandle = ConnectionSecretStore.Save(tab.SecretHandle, existing.Password, existing.PrivateKey, value);
+    }
+
+    private async Task LoadCredentialProfilesAsync()
+    {
+        if (!userId.HasValue || hosts.Count == 0)
+        {
+            credentialProfilesByHost = [];
+            return;
+        }
+
+        var profiles = new Dictionary<Guid, IReadOnlyList<UserManagedHostCredentialProfileSummary>>();
+        foreach (var host in hosts)
+        {
+            profiles[host.Id] = await CredentialProfileService.ListAsync(userId.Value, host.Id);
+        }
+
+        credentialProfilesByHost = profiles;
+    }
+
+    private IReadOnlyList<UserManagedHostCredentialProfileSummary> GetCredentialProfiles(Guid hostId) =>
+        credentialProfilesByHost.TryGetValue(hostId, out var profiles)
+            ? profiles
+            : Array.Empty<UserManagedHostCredentialProfileSummary>();
+
+    private Task ApplyCentralCredentialAsync(TerminalTabState tab, SavedConnectionCredential credential)
+    {
+        if (!string.IsNullOrWhiteSpace(credential.Summary.Username)) tab.Username = credential.Summary.Username;
+        tab.ConnectionProfileName = credential.Summary.Name;
+        tab.ConnectionProfileKey = ConnectionProfileSelectionKeys.Custom;
+        tab.PreferStoredCredentials = false;
+        tab.SecretHandle = ConnectionSecretStore.Save(tab.SecretHandle, credential.Password, credential.PrivateKey, credential.Passphrase);
+        tab.ErrorMessage = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private async Task SelectConnectionProfileAsync(TerminalTabState tab, string value)
+    {
+        pendingRemovalProfileId = null;
+        connectionProfileNotice = string.Empty;
+        tab.ConnectionProfileKey = value;
+        tab.ErrorMessage = string.Empty;
+
+        if (value == ConnectionProfileSelectionKeys.HostDefault)
+        {
+            var host = hosts.FirstOrDefault(item => item.Id == tab.HostId);
+            if (host is not null)
+            {
+                tab.Username = host.Username.Trim();
+                tab.ConnectionProfileName = host.Username.Trim();
+                tab.PreferStoredCredentials = HasConfiguredStoredCredentials(host);
+                ConnectionSecretStore.Delete(tab.SecretHandle);
+                tab.SecretHandle = null;
+            }
+
+            return;
+        }
+
+        if (value == ConnectionProfileSelectionKeys.LinkedLinuxUser)
+        {
+            tab.Username = currentLinuxUsername;
+            tab.ConnectionProfileName = currentLinuxUsername;
+            tab.PreferStoredCredentials = false;
+            ConnectionSecretStore.Delete(tab.SecretHandle);
+            tab.SecretHandle = null;
+            return;
+        }
+
+        if (!ConnectionProfileSelectionKeys.TryParseSaved(value, out var profileId) || !userId.HasValue)
+        {
+            return;
+        }
+
+        UserManagedHostCredentialProfileCredentials? credentials;
+        try
+        {
+            credentials = await CredentialProfileService.ResolveAsync(userId.Value, tab.HostId, profileId);
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = $"Could not load saved connection: {exception.Message}";
+            return;
+        }
+        if (credentials is null)
+        {
+            tab.ErrorMessage = "Credential profile not found.";
+            return;
+        }
+
+        tab.Username = credentials.Username;
+        tab.ConnectionProfileName = credentials.Name;
+        tab.PreferStoredCredentials = false;
+        tab.SecretHandle = ConnectionSecretStore.Save(
+            tab.SecretHandle,
+            credentials.Password,
+            credentials.PrivateKey,
+            credentials.PrivateKeyPassphrase);
+    }
+
+    private async Task<TerminalConnectionRequest> BuildTerminalConnectionRequestAsync(TerminalTabState tab)
+    {
+        var username = tab.Username.Trim();
+        var password = string.IsNullOrWhiteSpace(GetPassword(tab)) ? null : GetPassword(tab);
+        var privateKey = string.IsNullOrWhiteSpace(GetPrivateKey(tab)) ? null : GetPrivateKey(tab);
+        var privateKeyPassphrase = string.IsNullOrWhiteSpace(GetPrivateKeyPassphrase(tab)) ? null : GetPrivateKeyPassphrase(tab);
+        var preferStoredCredentials = tab.PreferStoredCredentials;
+
+        if (!tab.SecretHandle.HasValue &&
+            ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId) && userId.HasValue)
+        {
+            var credentials = await CredentialProfileService.ResolveAsync(userId.Value, tab.HostId, profileId);
+            if (credentials is not null)
+            {
+                username = credentials.Username;
+                password = string.IsNullOrWhiteSpace(credentials.Password) ? null : credentials.Password;
+                privateKey = string.IsNullOrWhiteSpace(credentials.PrivateKey) ? null : credentials.PrivateKey;
+                privateKeyPassphrase = string.IsNullOrWhiteSpace(credentials.PrivateKeyPassphrase)
+                    ? null
+                    : credentials.PrivateKeyPassphrase;
+                preferStoredCredentials = false;
+            }
+        }
+
+        return new TerminalConnectionRequest(
+            username,
+            password,
+            privateKey,
+            privateKeyPassphrase,
+            preferStoredCredentials,
+            terminalColumns,
+            terminalRows,
+            tab.DefaultWorkingDirectory,
+            tab.Id);
+    }
+
+    private async Task SaveConnectionProfileAsync(TerminalTabState tab)
+    {
+        if (!userId.HasValue)
+        {
+            tab.ErrorMessage = "Sign in before saving connection profiles.";
+            return;
+        }
+
+        try
+        {
+            var secrets = ConnectionSecretStore.Get(tab.SecretHandle);
+            var editor = new UserManagedHostCredentialProfileEditor
+            {
+                Id = ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId)
+                    ? profileId
+                    : null,
+                UserId = userId.Value,
+                ManagedHostId = tab.HostId,
+                Name = tab.ConnectionProfileName,
+                Username = tab.Username,
+                Password = secrets.Password,
+                PrivateKey = secrets.PrivateKey,
+                PrivateKeyPassphrase = secrets.PrivateKeyPassphrase
+            };
+
+            var saved = await CredentialProfileService.SaveAsync(editor);
+            await LoadCredentialProfilesAsync();
+            tab.ConnectionProfileKey = ConnectionProfileSelectionKeys.Saved(saved.Id);
+            tab.ConnectionProfileName = saved.Name;
+            tab.PreferStoredCredentials = false;
+            tab.ErrorMessage = string.Empty;
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = exception.Message;
+        }
+    }
+
+    private async Task DeleteConnectionProfileAsync(TerminalTabState tab)
+    {
+        if (!userId.HasValue ||
+            !ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId))
+        {
+            return;
+        }
+
+        try
+        {
+            await CredentialProfileService.DeleteAsync(userId.Value, tab.HostId, profileId);
+            await LoadCredentialProfilesAsync();
+            await SelectConnectionProfileAsync(tab, ConnectionProfileSelectionKeys.HostDefault);
+            connectionProfileNotice = "Saved connection and its stored credentials removed from LMS. The Linux account and current terminal session were not changed.";
+            connectionProfileNoticeTone = "success";
+        }
+        catch (Exception exception)
+        {
+            tab.ErrorMessage = $"Could not remove saved connection: {exception.Message}";
+        }
+    }
+
+    private async Task RequestRemoveConnectionProfileAsync(TerminalTabState tab)
+    {
+        if (!CanDeleteSelectedConnectionProfile(tab) ||
+            !ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId))
+        {
+            return;
+        }
+
+        if (pendingRemovalProfileId != profileId)
+        {
+            pendingRemovalProfileId = profileId;
+            connectionProfileNotice = "Click again to remove this saved connection and its stored credentials from LMS. The Linux account will remain.";
+            connectionProfileNoticeTone = "warning";
+            return;
+        }
+
+        pendingRemovalProfileId = null;
+        connectionProfileNotice = string.Empty;
+        await DeleteConnectionProfileAsync(tab);
+    }
+
+    private string GetRemoveConnectionLabel(TerminalTabState tab) =>
+        ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId) &&
+        pendingRemovalProfileId == profileId
+            ? "Click to confirm removal"
+            : "Remove saved connection";
+
+    private string GetRemoveConnectionClass(TerminalTabState tab) =>
+        ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out var profileId) &&
+        pendingRemovalProfileId == profileId
+            ? "connection-user-editor-action terminal-remove-profile-action is-armed"
+            : "connection-user-editor-action terminal-remove-profile-action";
+
+    private bool CanDeleteSelectedConnectionProfile(TerminalTabState tab) =>
+        userId.HasValue && ConnectionProfileSelectionKeys.TryParseSaved(tab.ConnectionProfileKey, out _);
+
+    private bool ShouldShowLinkedLinuxUserOption(TerminalTabState tab)
+    {
+        var host = hosts.FirstOrDefault(item => item.Id == tab.HostId);
+        return !string.IsNullOrWhiteSpace(currentLinuxUsername) &&
+               host is not null &&
+               !string.Equals(currentLinuxUsername, host.Username, StringComparison.Ordinal);
+    }
+
+    private string BuildHostDefaultProfileLabel(TerminalTabState tab)
+    {
+        var host = hosts.FirstOrDefault(item => item.Id == tab.HostId);
+        var username = host?.Username.Trim() ?? tab.Username.Trim();
+        return string.IsNullOrWhiteSpace(username)
+            ? "Host default"
+            : $"Host default ({username})";
+    }
+
+    private string BuildLinkedLinuxUserProfileLabel() =>
+        string.IsNullOrWhiteSpace(currentLinuxUsername)
+            ? "My Linux user"
+            : $"My Linux user ({currentLinuxUsername})";
+
+    private static string FormatCredentialProfileOption(UserManagedHostCredentialProfileSummary profile) =>
+        string.Equals(profile.Name, profile.Username, StringComparison.Ordinal)
+            ? profile.Name
+            : $"{profile.Name} ({profile.Username})";
+
+    private static bool HasConfiguredStoredCredentials(ManagedHost host) =>
+        !string.IsNullOrWhiteSpace(host.PasswordSecretReference) ||
+        !string.IsNullOrWhiteSpace(host.PrivateKeySecretReference);
+
+    private string BuildDetachedTerminalUrl(Guid tabId) =>
+        NavigationManager.ToAbsoluteUri($"/terminal-window/{tabId}").ToString();
+
+    private static void IgnoreClick()
+    {
+    }
+
+    private async Task DisposeTerminalClientAsync()
+    {
+        if (!terminalInitialized)
+        {
+            return;
+        }
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsTerminal.disposeTerminal", terminalClientId);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+        finally
+        {
+            terminalInitialized = false;
+            renderedTabId = null;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        pollingCts?.Cancel();
+        pollingCts?.Dispose();
+        TerminalSessionService.OutputAppended -= HandleTerminalOutputAppended;
+
+        await DisposeTerminalClientAsync();
+
+        dotNetReference?.Dispose();
+    }
+}

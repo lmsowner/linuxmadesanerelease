@@ -1,0 +1,21 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Core.Models.MailRelay;
+
+namespace LinuxMadeSane.Core.Abstractions;
+
+public interface IMailRelayStore
+{
+    Task<MailRelayConfiguration?> GetConfigurationAsync(CancellationToken cancellationToken = default);
+    Task SaveConfigurationAsync(MailRelayConfiguration configuration, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<MailRelayDomain>> ListDomainsAsync(CancellationToken cancellationToken = default);
+    Task SaveDomainAsync(MailRelayDomain domain, CancellationToken cancellationToken = default);
+    Task DeleteDomainAsync(Guid domainId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<MailRelayClient>> ListClientsAsync(CancellationToken cancellationToken = default);
+    Task SaveClientAsync(MailRelayClient client, CancellationToken cancellationToken = default);
+    Task DeleteClientAsync(Guid clientId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<MailRelayDnsRecord>> ListDnsRecordsAsync(Guid domainId, CancellationToken cancellationToken = default);
+    Task SaveDnsRecordAsync(MailRelayDnsRecord record, CancellationToken cancellationToken = default);
+    Task DeleteDnsRecordAsync(Guid recordId, CancellationToken cancellationToken = default);
+}

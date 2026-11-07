@@ -1,0 +1,1340 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using System.Globalization;
+using System.Text.RegularExpressions;
+using LinuxMadeSane.Application.Contracts.Updates;
+using LinuxMadeSane.Application.Interfaces;
+using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Models.RdpOptimizer;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+
+namespace LinuxMadeSane.Infrastructure.Services;
+
+public sealed partial class LinuxHostSystemUpdateService(
+    ILinuxCommandRunner commandRunner,
+    ILocalSystemMaintenanceService maintenanceService,
+    IServiceScopeFactory scopeFactory,
+    TimeProvider timeProvider,
+    ILogger<LinuxHostSystemUpdateService> logger,
+    IHttpClientFactory? httpClientFactory = null) : IHostSystemUpdateService
+{
+    private const int MaxLogLines = 200;
+    private const string FailureStatusDetail = "See the Host update log below for details.";
+    private static readonly TimeSpan MetadataTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ApplyTimeout = TimeSpan.FromHours(2);
+    private static readonly TimeSpan ReleaseCheckTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan ReleaseUpgradeTimeout = TimeSpan.FromHours(4);
+    private const string UbuntuStableReleaseFeed = "https://changelogs.ubuntu.com/meta-release";
+    private const string UbuntuLtsReleaseFeed = "https://changelogs.ubuntu.com/meta-release-lts";
+    private static readonly string[] AptNetworkOptions =
+    [
+        "-o", "Acquire::http::Timeout=30",
+        "-o", "Acquire::https::Timeout=30",
+        "-o", "Acquire::Retries=0",
+        "-o", "DPkg::Lock::Timeout=120"
+    ];
+
+    private readonly SemaphoreSlim operationLock = new(1, 1);
+    private readonly object syncRoot = new();
+    private HostSystemUpdateSnapshot snapshot = CreateEmptySnapshot();
+
+    public HostSystemUpdateSnapshot GetSnapshot()
+    {
+        lock (syncRoot)
+        {
+            return Clone(snapshot);
+        }
+    }
+
+    public async Task<HostSystemUpdateSnapshot> RefreshAsync(
+        bool refreshMetadata,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await operationLock.WaitAsync(0, cancellationToken))
+        {
+            return GetSnapshot();
+        }
+
+        try
+        {
+            EnsureLinux();
+            SetJob(
+                HostSystemUpdateJobState.Refreshing,
+                "Checking for updates…",
+                "Reading package and release information.",
+                10,
+                clearPackages: true,
+                clearLog: true);
+            AppendLog(refreshMetadata
+                ? "Refreshing APT metadata and upgrade list."
+                : "Refreshing upgrade list without a full metadata pull.");
+
+            var aptNeedsAttention = false;
+            if (refreshMetadata)
+            {
+                var update = await RunAptAsync(
+                    [.. AptNetworkOptions, "update"],
+                    MetadataTimeout,
+                    "Refresh package metadata",
+                    cancellationToken);
+                if (update.ExitCode != 0)
+                {
+                    FailJob("Could not refresh package metadata.", BuildFailureDetail(update));
+                    return GetSnapshot();
+                }
+
+                aptNeedsAttention = HasActionableAptDiagnostics(update);
+                AppendLog(aptNeedsAttention
+                    ? "Package metadata refreshed with warnings that need attention."
+                    : "Package metadata refreshed.");
+                SetProgress(35);
+            }
+
+            var packages = await ListUpgradeablePackagesAsync(cancellationToken);
+            var release = await ReadReleaseUpgradeAsync(cancellationToken);
+            var reboot = ReadRebootRequired();
+            var schedule = await LoadScheduleAsync(cancellationToken);
+            var os = ReadOsRelease();
+            var now = timeProvider.GetUtcNow();
+
+            CompleteRefresh(
+                os,
+                packages,
+                reboot,
+                release,
+                schedule,
+                now,
+                summary: aptNeedsAttention ? "APT reported package source problems." : null,
+                detail: aptNeedsAttention ? FailureStatusDetail : null,
+                needsAttention: aptNeedsAttention);
+            return GetSnapshot();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Host system update refresh failed.");
+            FailJob("Update check failed.", ex.Message);
+            return GetSnapshot();
+        }
+        finally
+        {
+            operationLock.Release();
+        }
+    }
+
+    public async Task<HostSystemUpdateSnapshot> ApplyPackageUpdatesAsync(
+        HostPackageUpdateMode mode,
+        bool rebootIfRequired,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await operationLock.WaitAsync(0, cancellationToken))
+        {
+            return GetSnapshot();
+        }
+
+        try
+        {
+            EnsureLinux();
+            var started = timeProvider.GetUtcNow();
+            var modeLabel = mode switch
+            {
+                HostPackageUpdateMode.SecurityOnly => "security updates",
+                HostPackageUpdateMode.DistUpgrade => "dependency-aware upgrades",
+                _ => "package updates"
+            };
+            SetJob(
+                HostSystemUpdateJobState.Applying,
+                $"Applying {modeLabel}…",
+                "LMS is running a non-interactive APT upgrade.",
+                5,
+                started);
+            AppendLog($"Starting {modeLabel}.");
+
+            var update = await RunAptAsync(
+                [.. AptNetworkOptions, "update"],
+                MetadataTimeout,
+                "Refresh package metadata",
+                cancellationToken);
+            if (update.ExitCode != 0)
+            {
+                FailJob("Could not refresh package metadata before applying updates.", BuildFailureDetail(update));
+                return GetSnapshot();
+            }
+            var aptNeedsAttention = HasActionableAptDiagnostics(update);
+
+            SetProgress(25);
+            AppendLog("Metadata refreshed. Applying updates.");
+
+            LinuxCommandResult apply;
+            if (mode == HostPackageUpdateMode.SecurityOnly)
+            {
+                apply = await ApplySecurityUpdatesAsync(cancellationToken);
+            }
+            else
+            {
+                var verb = mode == HostPackageUpdateMode.DistUpgrade ? "dist-upgrade" : "upgrade";
+                apply = await RunAptAsync(
+                    [
+                        .. AptNetworkOptions,
+                        "-o", "Dpkg::Options::=--force-confold",
+                        verb, "-y"
+                    ],
+                    ApplyTimeout,
+                    $"Apply {verb}",
+                    cancellationToken);
+            }
+
+            if (apply.ExitCode != 0)
+            {
+                FailJob("Package updates failed.", BuildFailureDetail(apply));
+                return GetSnapshot();
+            }
+            aptNeedsAttention |= HasActionableAptDiagnostics(apply);
+
+            AppendLog("Package updates completed. Rechecking status.");
+            SetProgress(75);
+
+            var packages = await ListUpgradeablePackagesAsync(cancellationToken);
+            var release = await ReadReleaseUpgradeAsync(cancellationToken);
+            var reboot = ReadRebootRequired();
+            var schedule = await LoadScheduleAsync(cancellationToken);
+            var os = ReadOsRelease();
+            CompleteRefresh(
+                os,
+                packages,
+                reboot,
+                release,
+                schedule,
+                timeProvider.GetUtcNow(),
+                HostSystemUpdateJobState.Completed,
+                aptNeedsAttention
+                    ? "Package updates completed with APT warnings."
+                    : packages.Count == 0 ? "Packages are up to date." : $"{packages.Count} package(s) still pending.",
+                aptNeedsAttention
+                    ? FailureStatusDetail
+                    : reboot.Required
+                    ? "A reboot is required to finish applying kernel or core updates."
+                    : "No reboot is currently required.",
+                100,
+                aptNeedsAttention);
+
+            if (rebootIfRequired && reboot.Required)
+            {
+                AppendLog("Reboot requested after successful updates.");
+                await maintenanceService.RebootAsync(cancellationToken);
+            }
+
+            return GetSnapshot();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Host package update apply failed.");
+            FailJob("Package updates failed.", ex.Message);
+            return GetSnapshot();
+        }
+        finally
+        {
+            operationLock.Release();
+        }
+    }
+
+    public async Task<HostSystemUpdateSnapshot> RepairAptAsync(CancellationToken cancellationToken = default)
+    {
+        if (!await operationLock.WaitAsync(0, cancellationToken))
+        {
+            return GetSnapshot();
+        }
+
+        try
+        {
+            EnsureLinux();
+            SetJob(
+                HostSystemUpdateJobState.Applying,
+                "Repairing APT…",
+                "Waiting for package locks, completing interrupted packages, and refreshing metadata.",
+                5);
+            AppendLog("Starting APT repair.");
+
+            var configure = await RunPrivilegedAsync(
+                "dpkg",
+                ["--configure", "-a"],
+                TimeSpan.FromMinutes(3),
+                "Complete interrupted package configuration",
+                cancellationToken);
+            if (configure.ExitCode != 0)
+            {
+                FailJob("APT repair failed while completing package configuration.", BuildFailureDetail(configure));
+                return GetSnapshot();
+            }
+            var aptNeedsAttention = HasActionableAptDiagnostics(configure);
+
+            SetProgress(30);
+            var fixBroken = await RunAptAsync(
+                [.. AptNetworkOptions, "--fix-broken", "install", "-y"],
+                ApplyTimeout,
+                "Repair broken package dependencies",
+                cancellationToken);
+            if (fixBroken.ExitCode != 0)
+            {
+                FailJob("APT repair failed while fixing package dependencies.", BuildFailureDetail(fixBroken));
+                return GetSnapshot();
+            }
+            aptNeedsAttention |= HasActionableAptDiagnostics(fixBroken);
+
+            SetProgress(65);
+            var metadata = await RunAptAsync(
+                [.. AptNetworkOptions, "update"],
+                MetadataTimeout,
+                "Refresh package metadata after APT repair",
+                cancellationToken);
+            if (metadata.ExitCode != 0)
+            {
+                FailJob("APT repair completed partially but metadata refresh failed.", BuildFailureDetail(metadata));
+                return GetSnapshot();
+            }
+            aptNeedsAttention |= HasActionableAptDiagnostics(metadata);
+
+            var packages = await ListUpgradeablePackagesAsync(cancellationToken);
+            var release = await ReadReleaseUpgradeAsync(cancellationToken);
+            var reboot = ReadRebootRequired();
+            var schedule = await LoadScheduleAsync(cancellationToken);
+            CompleteRefresh(
+                ReadOsRelease(),
+                packages,
+                reboot,
+                release,
+                schedule,
+                timeProvider.GetUtcNow(),
+                HostSystemUpdateJobState.Completed,
+                aptNeedsAttention ? "APT repair completed with warnings." : "APT repair completed.",
+                aptNeedsAttention
+                    ? FailureStatusDetail
+                    : packages.Count == 0 ? "Package metadata is current and no updates are pending." : $"{packages.Count} package(s) pending.",
+                100,
+                aptNeedsAttention);
+            return GetSnapshot();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "APT repair failed.");
+            FailJob("APT repair failed.", ex.Message);
+            return GetSnapshot();
+        }
+        finally
+        {
+            operationLock.Release();
+        }
+    }
+
+    public async Task<HostSystemUpdateSnapshot> CheckReleaseUpgradeAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (!await operationLock.WaitAsync(0, cancellationToken))
+        {
+            return GetSnapshot();
+        }
+
+        try
+        {
+            EnsureLinux();
+            BeginReleaseOperation(
+                "Checking for a new OS release…",
+                "Asking the Ubuntu release upgrader directly. Package repositories are checked separately.");
+
+            var release = await ReadReleaseUpgradeAsync(cancellationToken);
+            CompleteReleaseCheck(ReadOsRelease(), release, timeProvider.GetUtcNow());
+            return GetSnapshot();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            CompleteReleaseCheck(
+                ReadOsRelease(),
+                BuildReleaseCheckFailure("The OS release check was cancelled."),
+                timeProvider.GetUtcNow());
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "OS release upgrade check failed.");
+            var failed = BuildReleaseCheckFailure(ex.Message);
+            CompleteReleaseCheck(ReadOsRelease(), failed, timeProvider.GetUtcNow());
+            return GetSnapshot();
+        }
+        finally
+        {
+            operationLock.Release();
+        }
+    }
+
+    public async Task<HostSystemUpdateSnapshot> SetReleaseUpgradeChannelAsync(
+        HostReleaseUpgradeChannel channel,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await operationLock.WaitAsync(0, cancellationToken))
+        {
+            return GetSnapshot();
+        }
+
+        try
+        {
+            EnsureLinux();
+            var os = ReadOsRelease();
+            if (!os.Id.Equals("ubuntu", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Release upgrade tracks can only be configured automatically on Ubuntu.");
+            }
+
+            var prompt = channel == HostReleaseUpgradeChannel.LtsOnly ? "lts" : "normal";
+            var label = channel == HostReleaseUpgradeChannel.LtsOnly ? "LTS releases" : "every stable Ubuntu release";
+            BeginReleaseOperation(
+                $"Selecting {label}…",
+                "Updating Ubuntu's release-upgrade track, then checking it immediately.");
+
+            var result = await commandRunner.RunAsync(
+                new LinuxCommandRequest(
+                    "sed",
+                    [
+                        "-i",
+                        "-E",
+                        $"s/^[[:space:]]*Prompt[[:space:]]*=.*/Prompt={prompt}/",
+                        "/etc/update-manager/release-upgrades"
+                    ],
+                    RequiresSudo: true,
+                    Timeout: TimeSpan.FromSeconds(30),
+                    Description: "Configure Ubuntu release upgrade track"),
+                dryRun: false,
+                cancellationToken);
+            if (result.ExitCode != 0)
+            {
+                CompleteReleaseCheck(os, BuildReleaseCheckFailure(BuildFailureDetail(result)), timeProvider.GetUtcNow());
+                return GetSnapshot();
+            }
+
+            var configuredChannel = ReadReleaseUpgradeChannel();
+            if (!configuredChannel.Equals(prompt, StringComparison.OrdinalIgnoreCase))
+            {
+                CompleteReleaseCheck(
+                    os,
+                    BuildReleaseCheckFailure("Ubuntu's release-upgrades file did not contain a usable Prompt setting."),
+                    timeProvider.GetUtcNow());
+                return GetSnapshot();
+            }
+
+            var release = await ReadReleaseUpgradeAsync(cancellationToken);
+            CompleteReleaseCheck(os, release, timeProvider.GetUtcNow());
+            return GetSnapshot();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            CompleteReleaseCheck(
+                ReadOsRelease(),
+                BuildReleaseCheckFailure("The Ubuntu release track change was cancelled."),
+                timeProvider.GetUtcNow());
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Ubuntu release upgrade track configuration failed.");
+            CompleteReleaseCheck(
+                ReadOsRelease(),
+                BuildReleaseCheckFailure(ex.Message),
+                timeProvider.GetUtcNow());
+            return GetSnapshot();
+        }
+        finally
+        {
+            operationLock.Release();
+        }
+    }
+
+    public async Task<HostSystemUpdateSnapshot> StartReleaseUpgradeAsync(CancellationToken cancellationToken = default)
+    {
+        if (!await operationLock.WaitAsync(0, cancellationToken))
+        {
+            return GetSnapshot();
+        }
+
+        try
+        {
+            EnsureLinux();
+            var started = timeProvider.GetUtcNow();
+            SetJob(
+                HostSystemUpdateJobState.Applying,
+                "Starting OS release upgrade…",
+                "This can take a long time and may disconnect remote sessions.",
+                5,
+                started);
+            AppendLog("Starting do-release-upgrade in non-interactive mode.");
+
+            var result = await commandRunner.RunAsync(
+                new LinuxCommandRequest(
+                    "env",
+                    [
+                        "DEBIAN_FRONTEND=noninteractive",
+                        "NEEDRESTART_MODE=a",
+                        "do-release-upgrade",
+                        "-f",
+                        "DistUpgradeViewNonInteractive"
+                    ],
+                    RequiresSudo: true,
+                    Timeout: ReleaseUpgradeTimeout,
+                    Description: "Start OS release upgrade")
+                {
+                    IsOptionalExternalTool = true
+                },
+                dryRun: false,
+                cancellationToken);
+
+            if (result.ExitCode != 0)
+            {
+                FailJob("OS release upgrade did not complete.", BuildFailureDetail(result));
+                return GetSnapshot();
+            }
+
+            AppendLog("Release upgrade command finished. Refreshing status.");
+            var packages = await ListUpgradeablePackagesAsync(cancellationToken);
+            var release = await ReadReleaseUpgradeAsync(cancellationToken);
+            var reboot = ReadRebootRequired();
+            var schedule = await LoadScheduleAsync(cancellationToken);
+            CompleteRefresh(
+                ReadOsRelease(),
+                packages,
+                reboot,
+                release,
+                schedule,
+                timeProvider.GetUtcNow(),
+                HostSystemUpdateJobState.Completed,
+                "OS release upgrade finished.",
+                reboot.Required
+                    ? "Reboot to finish the release upgrade."
+                    : "Verify services after the upgrade.",
+                100);
+            return GetSnapshot();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "OS release upgrade failed.");
+            FailJob("OS release upgrade failed.", ex.Message);
+            return GetSnapshot();
+        }
+        finally
+        {
+            operationLock.Release();
+        }
+    }
+
+    public Task<HostUpdateScheduleSettings> GetScheduleAsync(CancellationToken cancellationToken = default) =>
+        LoadScheduleAsync(cancellationToken);
+
+    public async Task<HostUpdateScheduleSettings> SaveScheduleAsync(
+        HostUpdateScheduleSettings settings,
+        CancellationToken cancellationToken = default)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var store = scope.ServiceProvider.GetRequiredService<IHostUpdateScheduleStore>();
+        var saved = await store.SaveAsync(
+            settings with { UpdatedAtUtc = timeProvider.GetUtcNow() },
+            cancellationToken);
+        lock (syncRoot)
+        {
+            snapshot = snapshot with { Schedule = saved };
+        }
+
+        return saved;
+    }
+
+    public Task RebootAsync(CancellationToken cancellationToken = default) =>
+        maintenanceService.RebootAsync(cancellationToken);
+
+    internal static IReadOnlyList<HostUpgradeablePackage> ParseUpgradeablePackages(string output)
+    {
+        var packages = new List<HostUpgradeablePackage>();
+        foreach (var rawLine in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (rawLine.StartsWith("Listing", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var match = UpgradeablePackageRegex().Match(rawLine);
+            if (!match.Success)
+            {
+                continue;
+            }
+
+            var suite = match.Groups["suite"].Value;
+            packages.Add(new HostUpgradeablePackage(
+                match.Groups["name"].Value,
+                match.Groups["current"].Value,
+                match.Groups["candidate"].Value,
+                suite,
+                suite.Contains("security", StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return packages
+            .OrderByDescending(item => item.IsSecurity)
+            .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    internal static HostOsReleaseUpgradeInfo ParseReleaseUpgradeCheck(
+        string output,
+        string error,
+        bool toolAvailable,
+        string upgradeChannel = "unknown")
+    {
+        var diagnostic = TrimForLog($"{output}\n{error}");
+        if (!toolAvailable)
+        {
+            return new HostOsReleaseUpgradeInfo(
+                false,
+                false,
+                "Release upgrade tool not installed",
+                "Install ubuntu-release-upgrader-core, then run the check again.",
+                null,
+                false,
+                HostReleaseUpgradeCheckState.ToolMissing,
+                upgradeChannel,
+                diagnostic);
+        }
+
+        var text = $"{output}\n{error}";
+        var match = NewReleaseRegex().Match(text);
+        if (match.Success)
+        {
+            var target = match.Groups["release"].Value.Trim();
+            return new HostOsReleaseUpgradeInfo(
+                true,
+                true,
+                $"New OS release {target} is available",
+                "Complete the readiness steps below, then run Ubuntu's interactive upgrader in LMS Terminal.",
+                target,
+                true,
+                HostReleaseUpgradeCheckState.Available,
+                upgradeChannel,
+                diagnostic);
+        }
+
+        if (text.Contains("Prompt", StringComparison.OrdinalIgnoreCase) &&
+            text.Contains("set to never", StringComparison.OrdinalIgnoreCase))
+        {
+            return new HostOsReleaseUpgradeInfo(
+                true,
+                false,
+                "Ubuntu release upgrades are disabled",
+                "This server is configured with Prompt=never. Select the recommended LTS track below and LMS will check again.",
+                null,
+                true,
+                HostReleaseUpgradeCheckState.Disabled,
+                "never",
+                diagnostic);
+        }
+
+        if (text.Contains("Release upgrade not possible right now", StringComparison.OrdinalIgnoreCase))
+        {
+            return new HostOsReleaseUpgradeInfo(
+                true,
+                false,
+                "Ubuntu has temporarily paused this upgrade",
+                "Canonical's release service is not offering this upgrade path right now. No local setting can bypass that hold safely; retry later.",
+                null,
+                false,
+                HostReleaseUpgradeCheckState.TemporarilyUnavailable,
+                upgradeChannel,
+                diagnostic);
+        }
+
+        if (text.Contains("No new release found", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("There is no development version of an LTS available", StringComparison.OrdinalIgnoreCase))
+        {
+            return new HostOsReleaseUpgradeInfo(
+                true,
+                false,
+                upgradeChannel.Equals("lts", StringComparison.OrdinalIgnoreCase)
+                    ? "No newer LTS release is being offered"
+                    : "No newer Ubuntu release is being offered",
+                "Ubuntu's release service did not offer a supported next release on the selected track. This can happen during a staged rollout; retry later or choose a different track.",
+                null,
+                true,
+                HostReleaseUpgradeCheckState.NoRelease,
+                upgradeChannel,
+                diagnostic);
+        }
+
+        return new HostOsReleaseUpgradeInfo(
+            true,
+            false,
+            "Could not determine release upgrade status",
+            "The Ubuntu release upgrader returned an unexpected result. The exact diagnostic and recovery commands are shown below.",
+            null,
+            false,
+            HostReleaseUpgradeCheckState.Failed,
+            upgradeChannel,
+            diagnostic);
+    }
+
+    private async Task<LinuxCommandResult> ApplySecurityUpdatesAsync(CancellationToken cancellationToken)
+    {
+        var packages = await ListUpgradeablePackagesAsync(cancellationToken);
+        var securityNames = packages
+            .Where(item => item.IsSecurity)
+            .Select(item => item.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (securityNames.Length == 0)
+        {
+            AppendLog("No security packages are pending.");
+            return new LinuxCommandResult(
+                "security-filter",
+                0,
+                "No security packages pending.",
+                string.Empty,
+                timeProvider.GetUtcNow(),
+                timeProvider.GetUtcNow(),
+                false);
+        }
+
+        AppendLog($"Installing {securityNames.Length} security package(s).");
+        return await RunAptAsync(
+            [
+                .. AptNetworkOptions,
+                "-o", "Dpkg::Options::=--force-confold",
+                "install", "-y",
+                .. securityNames
+            ],
+            ApplyTimeout,
+            "Apply security updates",
+            cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<HostUpgradeablePackage>> ListUpgradeablePackagesAsync(
+        CancellationToken cancellationToken)
+    {
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "apt",
+                ["list", "--upgradable", "-qq"],
+                RequiresSudo: false,
+                Timeout: TimeSpan.FromMinutes(2),
+                Description: "List upgradable packages"),
+            dryRun: false,
+            cancellationToken);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Could not list upgradable packages: {BuildFailureDetail(result)}");
+        }
+
+        return ParseUpgradeablePackages(result.StandardOutput);
+    }
+
+    private async Task<HostOsReleaseUpgradeInfo> ReadReleaseUpgradeAsync(CancellationToken cancellationToken)
+    {
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "do-release-upgrade",
+                ["-c"],
+                RequiresSudo: false,
+                Timeout: ReleaseCheckTimeout,
+                Description: "Check for OS release upgrade")
+            {
+                IsOptionalExternalTool = true
+            },
+            dryRun: false,
+            cancellationToken);
+
+        var toolMissing = result.ExitCode == 127 ||
+                          result.StandardError.Contains("No such file", StringComparison.OrdinalIgnoreCase) ||
+                          result.StandardError.Contains("not found", StringComparison.OrdinalIgnoreCase);
+        var release = ParseReleaseUpgradeCheck(
+                result.StandardOutput,
+                result.StandardError,
+                !toolMissing || result.ExitCode == 0,
+                ReadReleaseUpgradeChannel())
+            with { LastCheckedAtUtc = timeProvider.GetUtcNow() };
+
+        if (release.CheckState != HostReleaseUpgradeCheckState.NoRelease || httpClientFactory is null)
+        {
+            return release;
+        }
+
+        var os = ReadOsRelease();
+        if (!os.Id.Equals("ubuntu", StringComparison.OrdinalIgnoreCase))
+        {
+            return release;
+        }
+
+        var feedUrl = release.UpgradeChannel.Equals("lts", StringComparison.OrdinalIgnoreCase)
+            ? UbuntuLtsReleaseFeed
+            : UbuntuStableReleaseFeed;
+        try
+        {
+            var client = httpClientFactory.CreateClient(nameof(LinuxHostSystemUpdateService));
+            var metadata = await client.GetStringAsync(feedUrl, cancellationToken);
+            return ExplainNoReleaseWithUbuntuMetadata(os, release, metadata, feedUrl);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogInformation(ex, "Could not correlate Ubuntu release check with {FeedUrl}.", feedUrl);
+            return release with
+            {
+                Detail = $"{release.Detail} LMS could not independently read Ubuntu's live release feed during this check.",
+                Diagnostic = AppendDiagnostic(release.Diagnostic, $"Ubuntu release feed could not be read: {ex.Message}")
+            };
+        }
+    }
+
+    internal static HostOsReleaseUpgradeInfo ExplainNoReleaseWithUbuntuMetadata(
+        HostOsReleaseInfo os,
+        HostOsReleaseUpgradeInfo release,
+        string metadata,
+        string feedUrl)
+    {
+        if (!TryParseUbuntuVersion(os.VersionId, out var currentVersion))
+        {
+            return release;
+        }
+
+        var newer = ParseUbuntuReleaseMetadata(metadata)
+            .Where(item => TryParseUbuntuVersion(item.Version, out var version) && version.CompareTo(currentVersion) > 0)
+            .OrderBy(item => ParseUbuntuVersionForSort(item.Version))
+            .ToArray();
+        var next = release.UpgradeChannel.Equals("normal", StringComparison.OrdinalIgnoreCase)
+            ? newer.FirstOrDefault(item => item.Supported) ?? newer.FirstOrDefault()
+            : newer.FirstOrDefault();
+        if (next is null)
+        {
+            return release with
+            {
+                Detail = "Ubuntu's live release feed does not list a newer release on the selected track.",
+                Diagnostic = AppendDiagnostic(release.Diagnostic, $"Ubuntu release feed checked: {feedUrl}\nNo newer release entry was listed.")
+            };
+        }
+
+        var feedDiagnostic = $"Ubuntu release feed: {feedUrl}\nNext release: {next.Version}\nSupported: {(next.Supported ? 1 : 0)}";
+        if (!next.Supported)
+        {
+            return release with
+            {
+                Summary = $"Ubuntu {next.Version} is published, but upgrades from {os.VersionId} are not open",
+                Detail = $"Canonical's live upgrade feed currently marks {next.Version} as Supported=0. Installation media can be available before Canonical enables the supported in-place upgrade path. Keep the current release fully updated and retry later.",
+                TargetRelease = next.Version,
+                CheckSucceeded = true,
+                CheckState = HostReleaseUpgradeCheckState.PublishedButUpgradeClosed,
+                Diagnostic = AppendDiagnostic(release.Diagnostic, feedDiagnostic)
+            };
+        }
+
+        return release with
+        {
+            Summary = $"Ubuntu {next.Version} upgrades are open, but this server was not offered one",
+            Detail = $"Canonical's live feed marks {next.Version} as supported. Fully update Ubuntu {os.VersionId}, reboot if required, and retry. The exact release-upgrader output is shown below if it still refuses the upgrade.",
+            TargetRelease = next.Version,
+            CheckSucceeded = false,
+            CheckState = HostReleaseUpgradeCheckState.Failed,
+            Diagnostic = AppendDiagnostic(release.Diagnostic, feedDiagnostic)
+        };
+    }
+
+    internal static IReadOnlyList<UbuntuReleaseMetadataEntry> ParseUbuntuReleaseMetadata(string metadata)
+    {
+        var entries = new List<UbuntuReleaseMetadataEntry>();
+        string? version = null;
+        bool? supported = null;
+
+        void AddEntry()
+        {
+            if (!string.IsNullOrWhiteSpace(version) && supported is not null)
+            {
+                entries.Add(new UbuntuReleaseMetadataEntry(version, supported.Value));
+            }
+
+            version = null;
+            supported = null;
+        }
+
+        foreach (var rawLine in metadata.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0)
+            {
+                AddEntry();
+                continue;
+            }
+
+            if (line.StartsWith("Version:", StringComparison.OrdinalIgnoreCase))
+            {
+                version = line["Version:".Length..].Trim();
+            }
+            else if (line.StartsWith("Supported:", StringComparison.OrdinalIgnoreCase))
+            {
+                supported = line["Supported:".Length..].Trim() == "1";
+            }
+        }
+
+        AddEntry();
+        return entries;
+    }
+
+    private static bool TryParseUbuntuVersion(string value, out Version version)
+    {
+        var match = UbuntuVersionRegex().Match(value ?? string.Empty);
+        if (match.Success &&
+            int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var year) &&
+            int.TryParse(match.Groups[2].Value, CultureInfo.InvariantCulture, out var month))
+        {
+            version = new Version(year, month);
+            return true;
+        }
+
+        version = new Version(0, 0);
+        return false;
+    }
+
+    private static Version ParseUbuntuVersionForSort(string value) =>
+        TryParseUbuntuVersion(value, out var version) ? version : new Version(int.MaxValue, int.MaxValue);
+
+    private static string AppendDiagnostic(string existing, string addition) =>
+        string.IsNullOrWhiteSpace(existing) ? addition : $"{existing.Trim()}\n\n{addition}";
+
+    internal sealed record UbuntuReleaseMetadataEntry(string Version, bool Supported);
+
+    internal static string ParseReleaseUpgradeChannel(string content)
+    {
+        foreach (var rawLine in content.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var line = rawLine.Trim();
+            if (line.StartsWith('#') || !line.StartsWith("Prompt", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=');
+            if (separator < 0)
+            {
+                continue;
+            }
+
+            var value = line[(separator + 1)..].Trim().ToLowerInvariant();
+            if (value is "lts" or "normal" or "never")
+            {
+                return value;
+            }
+        }
+
+        return "unknown";
+    }
+
+    private static string ReadReleaseUpgradeChannel()
+    {
+        try
+        {
+            const string path = "/etc/update-manager/release-upgrades";
+            return File.Exists(path) ? ParseReleaseUpgradeChannel(File.ReadAllText(path)) : "unknown";
+        }
+        catch
+        {
+            return "unknown";
+        }
+    }
+
+    private void CompleteReleaseCheck(
+        HostOsReleaseInfo os,
+        HostOsReleaseUpgradeInfo release,
+        DateTimeOffset checkedAtUtc)
+    {
+        lock (syncRoot)
+        {
+            snapshot = snapshot with
+            {
+                OperatingSystem = os,
+                ReleaseUpgrade = release with { LastCheckedAtUtc = checkedAtUtc, IsChecking = false }
+            };
+        }
+    }
+
+    private void BeginReleaseOperation(string summary, string detail)
+    {
+        lock (syncRoot)
+        {
+            snapshot = snapshot with
+            {
+                ReleaseUpgrade = snapshot.ReleaseUpgrade with
+                {
+                    Summary = summary,
+                    Detail = detail,
+                    IsChecking = true
+                }
+            };
+        }
+    }
+
+    private HostOsReleaseUpgradeInfo BuildReleaseCheckFailure(string diagnostic) =>
+        new(
+            true,
+            false,
+            "Could not check for a new OS release",
+            "The release upgrader did not complete. Retry the check or use the guided terminal command below.",
+            null,
+            false,
+            HostReleaseUpgradeCheckState.Failed,
+            ReadReleaseUpgradeChannel(),
+            diagnostic,
+            timeProvider.GetUtcNow());
+
+    private async Task<LinuxCommandResult> RunAptAsync(
+        IReadOnlyList<string> aptArguments,
+        TimeSpan timeout,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        var request = new LinuxCommandRequest(
+            "env",
+            ["DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a", "apt-get", .. aptArguments],
+            RequiresSudo: true,
+            Timeout: timeout,
+            Description: description);
+        var result = commandRunner is IStreamingLinuxCommandRunner streamingRunner
+            ? await streamingRunner.RunStreamingAsync(request, false, output => AppendLog(output.Text), cancellationToken)
+            : await commandRunner.RunAsync(request, false, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(result.StandardOutput))
+        {
+            if (commandRunner is not IStreamingLinuxCommandRunner)
+            {
+                AppendLog(TrimForLog(result.StandardOutput));
+            }
+        }
+
+        if (result.ExitCode != 0 && !string.IsNullOrWhiteSpace(result.StandardError))
+        {
+            if (commandRunner is not IStreamingLinuxCommandRunner)
+            {
+                AppendLog(TrimForLog(result.StandardError));
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<LinuxCommandResult> RunPrivilegedAsync(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        TimeSpan timeout,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        var request = new LinuxCommandRequest(
+            "env",
+            ["DEBIAN_FRONTEND=noninteractive", "NEEDRESTART_MODE=a", fileName, .. arguments],
+            RequiresSudo: true,
+            Timeout: timeout,
+            Description: description);
+        var result = commandRunner is IStreamingLinuxCommandRunner streamingRunner
+            ? await streamingRunner.RunStreamingAsync(request, false, output => AppendLog(output.Text), cancellationToken)
+            : await commandRunner.RunAsync(request, false, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(result.StandardOutput))
+        {
+            if (commandRunner is not IStreamingLinuxCommandRunner)
+            {
+                AppendLog(TrimForLog(result.StandardOutput));
+            }
+        }
+
+        if (result.ExitCode != 0 && !string.IsNullOrWhiteSpace(result.StandardError))
+        {
+            if (commandRunner is not IStreamingLinuxCommandRunner)
+            {
+                AppendLog(TrimForLog(result.StandardError));
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<HostUpdateScheduleSettings> LoadScheduleAsync(CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var store = scope.ServiceProvider.GetRequiredService<IHostUpdateScheduleStore>();
+        return await store.GetAsync(cancellationToken);
+    }
+
+    private void CompleteRefresh(
+        HostOsReleaseInfo os,
+        IReadOnlyList<HostUpgradeablePackage> packages,
+        (bool Required, IReadOnlyList<string> Packages) reboot,
+        HostOsReleaseUpgradeInfo release,
+        HostUpdateScheduleSettings schedule,
+        DateTimeOffset refreshedAtUtc,
+        HostSystemUpdateJobState state = HostSystemUpdateJobState.Completed,
+        string? summary = null,
+        string? detail = null,
+        int progressPercent = 100,
+        bool needsAttention = false)
+    {
+        var securityCount = packages.Count(item => item.IsSecurity);
+        lock (syncRoot)
+        {
+            var job = snapshot.Job with
+            {
+                State = state,
+                Summary = summary ?? (packages.Count == 0
+                    ? "Host packages are current"
+                    : $"{packages.Count} package update(s) available"),
+                Detail = detail ?? (reboot.Required
+                    ? "A reboot is already pending on this host."
+                    : securityCount > 0
+                        ? $"{securityCount} security update(s) included."
+                        : "Review package updates, OS upgrades, or schedule automatic maintenance."),
+                ProgressPercent = progressPercent,
+                CompletedAtUtc = refreshedAtUtc,
+                LogLines = snapshot.Job.LogLines.ToArray(),
+                NeedsAttention = needsAttention
+            };
+            snapshot = new HostSystemUpdateSnapshot(
+                os,
+                packages.Count,
+                securityCount,
+                reboot.Required,
+                reboot.Packages,
+                packages,
+                release,
+                refreshedAtUtc,
+                job,
+                schedule);
+        }
+    }
+
+    private void SetJob(
+        HostSystemUpdateJobState state,
+        string summary,
+        string detail,
+        int progressPercent,
+        DateTimeOffset? startedAtUtc = null,
+        bool clearPackages = false,
+        bool clearLog = false)
+    {
+        lock (syncRoot)
+        {
+            var updatedSnapshot = snapshot with
+            {
+                Job = snapshot.Job with
+                {
+                    State = state,
+                    Summary = summary,
+                    Detail = detail,
+                    ProgressPercent = progressPercent,
+                    StartedAtUtc = startedAtUtc ?? snapshot.Job.StartedAtUtc ?? timeProvider.GetUtcNow(),
+                    CompletedAtUtc = state is HostSystemUpdateJobState.Completed or HostSystemUpdateJobState.Failed
+                        ? timeProvider.GetUtcNow()
+                        : null,
+                    NeedsAttention = state == HostSystemUpdateJobState.Failed,
+                    LogLines = clearLog ? Array.Empty<string>() : snapshot.Job.LogLines
+                }
+            };
+
+            snapshot = clearPackages
+                ? updatedSnapshot with
+                {
+                    UpgradeableCount = 0,
+                    SecurityCount = 0,
+                    Packages = Array.Empty<HostUpgradeablePackage>(),
+                    LastRefreshedAtUtc = null
+                }
+                : updatedSnapshot;
+        }
+    }
+
+    private void SetProgress(int progressPercent)
+    {
+        lock (syncRoot)
+        {
+            snapshot = snapshot with
+            {
+                Job = snapshot.Job with { ProgressPercent = Math.Clamp(progressPercent, 0, 100) }
+            };
+        }
+    }
+
+    private void FailJob(string summary, string detail)
+    {
+        AppendLog(detail);
+        SetJob(HostSystemUpdateJobState.Failed, summary, FailureStatusDetail, 100);
+    }
+
+    internal static bool HasActionableAptDiagnostics(LinuxCommandResult result)
+    {
+        var output = $"{result.StandardOutput}\n{result.StandardError}";
+        return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(line =>
+                line.StartsWith("W:", StringComparison.OrdinalIgnoreCase) ||
+                line.StartsWith("E:", StringComparison.OrdinalIgnoreCase) ||
+                line.StartsWith("Err:", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("Failed to fetch", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("configured multiple times", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void AppendLog(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        lock (syncRoot)
+        {
+            var lines = snapshot.Job.LogLines.ToList();
+            foreach (var part in line.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                lines.Add($"[{timeProvider.GetUtcNow():HH:mm:ss}] {part}");
+            }
+
+            if (lines.Count > MaxLogLines)
+            {
+                lines = lines.TakeLast(MaxLogLines).ToList();
+            }
+
+            snapshot = snapshot with
+            {
+                Job = snapshot.Job with { LogLines = lines }
+            };
+        }
+    }
+
+    private static HostSystemUpdateSnapshot CreateEmptySnapshot() =>
+        new(
+            new HostOsReleaseInfo("Unknown", "unknown", string.Empty, string.Empty),
+            0,
+            0,
+            false,
+            Array.Empty<string>(),
+            Array.Empty<HostUpgradeablePackage>(),
+            new HostOsReleaseUpgradeInfo(false, false, "Not checked yet", "Refresh to inspect package and OS updates.", null),
+            null,
+            new HostSystemUpdateJobStatus(
+                HostSystemUpdateJobState.Idle,
+                "Ready",
+                "Check for package updates, apply them from LMS, or schedule automatic maintenance.",
+                0,
+                Array.Empty<string>(),
+                null,
+                null),
+            new HostUpdateScheduleSettings(
+                false,
+                3,
+                0,
+                true,
+                false,
+                false,
+                false,
+                null,
+                null,
+                null,
+                DateTimeOffset.UnixEpoch));
+
+    private static HostSystemUpdateSnapshot Clone(HostSystemUpdateSnapshot source) =>
+        source with
+        {
+            Packages = source.Packages.ToArray(),
+            RebootRequiredPackages = source.RebootRequiredPackages.ToArray(),
+            Job = source.Job with { LogLines = source.Job.LogLines.ToArray() }
+        };
+
+    private static HostOsReleaseInfo ReadOsRelease()
+    {
+        try
+        {
+            if (!File.Exists("/etc/os-release"))
+            {
+                return new HostOsReleaseInfo(Environment.OSVersion.ToString(), "linux", string.Empty, string.Empty);
+            }
+
+            var values = File.ReadAllLines("/etc/os-release")
+                .Select(line => line.Split('=', 2))
+                .Where(parts => parts.Length == 2)
+                .ToDictionary(
+                    parts => parts[0].Trim(),
+                    parts => parts[1].Trim().Trim('"'),
+                    StringComparer.OrdinalIgnoreCase);
+            return new HostOsReleaseInfo(
+                values.GetValueOrDefault("PRETTY_NAME") ?? "Linux",
+                values.GetValueOrDefault("ID") ?? "linux",
+                values.GetValueOrDefault("VERSION_ID") ?? string.Empty,
+                values.GetValueOrDefault("VERSION_CODENAME") ?? string.Empty);
+        }
+        catch
+        {
+            return new HostOsReleaseInfo(Environment.OSVersion.ToString(), "linux", string.Empty, string.Empty);
+        }
+    }
+
+    private static (bool Required, IReadOnlyList<string> Packages) ReadRebootRequired()
+    {
+        var required = File.Exists("/var/run/reboot-required");
+        if (!required)
+        {
+            return (false, Array.Empty<string>());
+        }
+
+        try
+        {
+            if (!File.Exists("/var/run/reboot-required.pkgs"))
+            {
+                return (true, Array.Empty<string>());
+            }
+
+            var packages = File.ReadAllLines("/var/run/reboot-required.pkgs")
+                .Select(line => line.Trim())
+                .Where(line => line.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(line => line, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            return (true, packages);
+        }
+        catch
+        {
+            return (true, Array.Empty<string>());
+        }
+    }
+
+    private static string BuildFailureDetail(LinuxCommandResult result)
+    {
+        if (!string.IsNullOrWhiteSpace(result.StandardError))
+        {
+            return TrimForLog(result.StandardError);
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.StandardOutput))
+        {
+            return TrimForLog(result.StandardOutput);
+        }
+
+        return $"Exit code {result.ExitCode.ToString(CultureInfo.InvariantCulture)}.";
+    }
+
+    private static string TrimForLog(string value)
+    {
+        var trimmed = value.Trim();
+        return trimmed.Length <= 1_500 ? trimmed : trimmed[..1_500] + "…";
+    }
+
+    private static void EnsureLinux()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            throw new InvalidOperationException("Host package updates are only available on Linux.");
+        }
+    }
+
+    [GeneratedRegex(
+        @"^(?<name>[^/\s]+)/(?<suite>\S+)\s+(?<candidate>\S+)\s+\S+\s+\[upgradable from:\s*(?<current>[^\]]+)\]",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
+    private static partial Regex UpgradeablePackageRegex();
+
+    [GeneratedRegex(
+        @"New release\s+(?:['""](?<release>[^'""\r\n]+)['""]|(?<release>\S+))\s+available",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
+    private static partial Regex NewReleaseRegex();
+
+    [GeneratedRegex(@"(?:^|\D)(\d{2,4})\.(\d{2})(?:\.\d+)?", RegexOptions.CultureInvariant)]
+    private static partial Regex UbuntuVersionRegex();
+}

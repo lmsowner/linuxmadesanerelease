@@ -1,0 +1,155 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@implements IDisposable
+@using LinuxMadeSane.Core.Models.Vulnerabilities
+@using LinuxMadeSane.Application.Vulnerabilities
+@using LinuxMadeSane.Core.Models.Ai
+@inject VulnerabilityCoordinator Scanner
+
+<section class="surface-card vulnerability-panel" aria-label="Vulnerabilities">
+    <div class="table-header"><div><h2>Vulnerabilities</h2><p class="meta-text">OS packages · Local scanning is free. Portal processing is optional and paid.</p></div></div>
+    @if(state is null){<p role="status">Loading scanner status…</p>}
+    else if(state.UnavailableReason is {} reason)
+    {
+        <p class="callout info" role="status">@reason</p>
+    }
+    else
+    {
+        <div class="vulnerability-settings">
+            <UiSelectField TValue="VulnerabilityScanMode" Label="Scanning mode" @bind-Value="mode" Disabled="@state.Running" Compact="true">
+                <option value="@VulnerabilityScanMode.Local">Local Trivy — Free</option>
+                <option value="@VulnerabilityScanMode.Portal">LMS Portal — Managed</option>
+            </UiSelectField>
+            <UiNumberField TValue="int" Label="Scan interval (hours)" @bind-Value="scanHours" Disabled="@state.Running" />
+            <UiNumberField TValue="int" Label="Database interval (hours)" @bind-Value="dbHours" Disabled="@state.Running" />
+        </div>
+        <div class="toolbar-row">
+            <UiCheckboxField Label="Automatic scans" @bind-Value="automatic" Disabled="@state.Running" Compact="true" />
+            <UiCheckboxField Label="Rescan after package updates" @bind-Value="afterUpdates" Disabled="@state.Running" Compact="true" />
+            <UiCommandButton Label="Save settings" Glyph="UiIconGlyph.Save" Disabled="@(busy||state.Running)" OnClick="SaveAsync" />
+        </div>
+        <p class="meta-text">@(state.Settings.Mode==VulnerabilityScanMode.Local ? state.Installed?$"Trivy {state.Version} installed":"Trivy is not installed. Package Updates works normally without it.":"Managed processing requires Portal vulnerability analysis on this machine’s assigned licence.")</p>
+        <div class="toolbar-row">
+            @if(state.Settings.Mode==VulnerabilityScanMode.Local)
+            {
+                @if(!state.Installed){<UiCommandButton Label="Install Trivy" Glyph="UiIconGlyph.Download" Disabled="@(busy||state.Running)" OnClick="@(()=>ManageAsync("install"))" />}
+                else
+                {
+                    <UiCommandButton Label="Update Trivy" Glyph="UiIconGlyph.Download" Disabled="@(busy||state.Running)" OnClick="@(()=>ManageAsync("upgrade"))" />
+                    <UiCommandButton Label="Refresh database" Glyph="UiIconGlyph.Refresh" Disabled="@(busy||state.Running)" OnClick="RefreshDbAsync" />
+                    <UiCommandButton Label="Remove Trivy" Glyph="UiIconGlyph.Uninstall" Disabled="@(busy||state.Running)" OnClick="@(()=>ManageAsync("remove"))" />
+                }
+            }
+            <UiCommandButton Label="Scan now" Glyph="UiIconGlyph.Search" Disabled="@(busy||state.Running||state.Settings.Mode==VulnerabilityScanMode.Local&&!state.Installed)" OnClick="ScanAsync" />
+            @if(state.Running&&!busy){<UiCommandButton Label="Cancel scan" Glyph="UiIconGlyph.Stop" OnClick="CancelAsync" />}
+        </div>
+        <p class="callout @(state.Error is not null?"warning":"info")" role="status" aria-live="polite">@(feedback??state.Error??state.Status)</p>
+        @if(state.Latest is not null)
+        {
+            <UiSelectField TValue="Guid" Label="Scan history" Value="@historyId" ValueChanged="SelectHistoryAsync" Compact="true">
+                <option value="@Guid.Empty">Latest assessment</option>
+                @foreach(var previous in state.History){<option value="@previous.ScanId">@previous.CompletedAtUtc.ToLocalTime().ToString("g") · @previous.Mode</option>}
+            </UiSelectField>
+        }
+        @if((historyId==Guid.Empty?latestReport:historicalReport) is {} report)
+        {
+            var grouped=Grouped(report,showResolved);
+            <div class="summary-pill-row">
+                @foreach(var severity in new[]{"CRITICAL","HIGH","MEDIUM","LOW"}){<UiPill Tone="@(severity is "CRITICAL" or "HIGH"?UiPillTone.Warning:UiPillTone.Neutral)">@severity: @SeverityCount(Grouped(report,false).Counts,severity)</UiPill>}
+                @if(historyId!=Guid.Empty){<UiPill Tone="UiPillTone.Neutral">Historical scan</UiPill>}
+                @if(state.Stale){<UiPill Tone="UiPillTone.Warning">Stale results</UiPill>}
+            </div>
+            <p class="meta-text">Last successful scan: @report.CompletedAtUtc.ToLocalTime().ToString("g") · Inventory: @report.InventoryAtUtc.ToLocalTime().ToString("g") · Database: @(report.DatabaseUpdatedAtUtc?.ToLocalTime().ToString("g")??"Not reported") · @report.Mode</p>
+            <p class="meta-text">Vendor package advisories include backported fixes. Severity is not a measurement of network exposure.</p>
+            @if(report.ResolvedFindings.Count>0){<UiCheckboxField Label="@($"Show resolved vulnerabilities ({Grouped(report,true).Counts.UniqueVulnerabilities})")" @bind-Value="showResolved" Compact="true" />}
+            <UiFilterInput AriaLabel="Filter vulnerabilities" @bind-Value="filter" Placeholder="CVE, package or severity" />
+            <p class="meta-text"><strong>@grouped.Counts.UniqueVulnerabilities unique vulnerabilities</strong> · @grouped.Counts.AffectedPackages affected packages · @grouped.Counts.PackageFindings package findings. Expand a package to inspect its CVEs, versions and fixes. CVEs affecting several packages count once in the totals.</p>
+            <div class="vulnerability-groups">
+            @foreach(var package in grouped.Groups.Where(Matches).Take(200))
+            {
+                <details class="vulnerability-group" @key="package" open="@expandedPackages.Contains(package.Package)">
+                    <summary @onclick="@(()=>TogglePackage(package.Package))" @onclick:preventDefault="true"><span class="vulnerability-heading"><strong>@package.Package</strong><span>@package.Severity</span><span>@package.Total CVEs</span></span></summary>
+                    @if(expandedPackages.Contains(package.Package))
+                    {
+                var matching=package.Vulnerabilities.Where(g=>g.Matches(filter)||package.Package.Contains(filter,StringComparison.OrdinalIgnoreCase)).ToArray();
+                var page=Math.Clamp(advisoryPages.GetValueOrDefault(package.Package),0,Math.Max(0,(matching.Length-1)/VulnerabilityPackageGrouping.AdvisoryPageSize));
+                    <p class="meta-text">Available update: @AvailableUpdate(package.Package)</p>
+                    <div class="table-scroll"><table><thead><tr><th>CVE</th><th>Severity</th><th>Installed</th><th>Vendor fixed version</th><th></th></tr></thead><tbody>
+                    @foreach(var group in matching.Skip(page*VulnerabilityPackageGrouping.AdvisoryPageSize).Take(VulnerabilityPackageGrouping.AdvisoryPageSize))
+                    {
+                        <tr><td><details><summary>@group.Finding.Id</summary><p class="meta-text">@group.Finding.Description</p></details></td><td>@group.Finding.Severity</td>
+                        <td>@foreach(var version in group.Packages){<div>@version.InstalledVersion</div>}</td>
+                        <td>@foreach(var version in group.Packages){<div>@(string.IsNullOrEmpty(version.FixedVersion)?"Not yet published":version.FixedVersion) · @version.Assessment · @version.Source</div>}</td>
+                        <td>@foreach(var version in group.Packages){<UiCommandButton Label="@($"Inspect {version.InstalledVersion}")" Glyph="UiIconGlyph.Info" OnClick="@(()=>{selected=group.ForPackage(version);aiFinding=null;})" />}</td></tr>
+                    }
+                    </tbody></table></div>
+                    @if(matching.Length>VulnerabilityPackageGrouping.AdvisoryPageSize)
+                    {
+                        <div class="toolbar-row">
+                            <UiCommandButton Label="Previous CVEs" HideIcon="true" Disabled="@(page==0)" OnClick="@(()=>advisoryPages[package.Package]=page-1)" />
+                            <span class="meta-text">CVEs @(page*VulnerabilityPackageGrouping.AdvisoryPageSize+1)–@Math.Min((page+1)*VulnerabilityPackageGrouping.AdvisoryPageSize,matching.Length) of @matching.Length</span>
+                            <UiCommandButton Label="Next CVEs" HideIcon="true" Disabled="@((page+1)*VulnerabilityPackageGrouping.AdvisoryPageSize>=matching.Length)" OnClick="@(()=>advisoryPages[package.Package]=page+1)" />
+                        </div>
+                    }
+                    }
+                </details>
+            }
+            </div>
+            @if(grouped.Groups.Count(Matches)>200){<p class="meta-text">Showing the first 200 matching packages. Filter by CVE or package to narrow the list.</p>}
+        }
+    }
+</section>
+<UiModal IsOpen="@(selected is not null)" Title="@(selected?.Id??"Vulnerability")" OnClose="@(()=>{selected=null;aiFinding=null;})">
+    <ChildContent>
+        @if(selected is {} f)
+        {
+            <p><strong>@f.Package @f.InstalledVersion</strong> · @f.Severity · @f.Assessment</p><p>@f.Description</p>
+            @if(f.Advisory.Length>0){<a href="@f.Advisory" target="_blank" rel="noopener noreferrer">Vendor advisory</a>}
+            <div class="toolbar-row"><UiCommandButton Label="Investigate with AI" Glyph="UiIconGlyph.Ai" OnClick="@(()=>aiFinding=f)" Disabled="@(!AiAvailable)" /><UiCommandButton Label="Rescan" Glyph="UiIconGlyph.Refresh" OnClick="ScanAsync" Disabled="@(state?.Running==true)" /></div>
+            @if(!AiAvailable){<p class="meta-text">Configure an AI provider in LMS to investigate and propose repairs.</p>}
+            @if(aiFinding is not null){<FleetPackageAiSession @key="aiFinding" Host="@AiLocalMachine.CreateManagedHost()" Prompt="@TrivyFindings.AiPrompt(aiFinding)" OnVerified="VerifiedAsync" OnAttention="AttentionAsync" />}
+        }
+    </ChildContent>
+    <Footer><UiCommandButton Label="Close" Glyph="UiIconGlyph.Clear" OnClick="@(()=>{selected=null;aiFinding=null;})" /></Footer>
+</UiModal>
+@code {
+    [Parameter] public bool AiAvailable {get;set;}
+    [Parameter] public IReadOnlyDictionary<string,string> AvailableUpdates {get;set;}=new Dictionary<string,string>();
+    private VulnerabilityState? state;private VulnerabilityFinding? selected,aiFinding;
+    private Guid historyId;
+    private VulnerabilityReport? historicalReport,latestReport;
+    private async Task SelectHistoryAsync(Guid id){historyId=id;historicalReport=id==Guid.Empty?null:await Scanner.GetReportAsync(id);}
+
+    private VulnerabilityScanMode mode;private bool automatic,afterUpdates,busy,disposed,showResolved;private int scanHours=24,dbHours=24;private string filter="";private string? feedback;
+    protected override async Task OnInitializedAsync(){Scanner.Changed+=Changed;await LoadAsync();ApplySettings();}
+    private void ApplySettings(){if(state is null)return;mode=state.Settings.Mode;automatic=state.Settings.Automatic;afterUpdates=state.Settings.ScanAfterUpdates;scanHours=state.Settings.ScanIntervalHours;dbHours=state.Settings.DatabaseIntervalHours;}
+    private async Task LoadAsync()
+    {
+        state=await Scanner.GetStatusAsync();
+        if(state.Latest is {} latest && latest.ScanId!=latestReport?.ScanId)
+            latestReport=await Scanner.GetReportAsync(latest.ScanId);
+    }
+    private void Changed(){if(!disposed)_=InvokeAsync(async()=>{await LoadAsync();StateHasChanged();});}
+    private async Task ActionAsync(string message,Func<Task> action){busy=true;feedback=message;await InvokeAsync(StateHasChanged);try{await action();feedback=null;}catch(Exception e){feedback=e.Message;}finally{busy=false;await LoadAsync();}}
+    private Task SaveAsync()=>ActionAsync("Saving scanner settings…",()=>Scanner.SaveSettingsAsync(new(mode,automatic,scanHours,dbHours,afterUpdates)));
+    private Task ManageAsync(string action)=>ActionAsync(action=="remove"?"Removing scanner; finding history is preserved…":"Installing checksum-verified scanner…",()=>Scanner.ManageInstallationAsync(action));
+    private Task ScanAsync()=>ActionAsync("Starting OS package assessment…",async()=>{await Scanner.RequestScanAsync();});
+    private Task RefreshDbAsync()=>ActionAsync("Updating vulnerability database…",()=>Scanner.RefreshDatabaseAsync());
+    private Task CancelAsync()=>Scanner.CancelAsync();
+    private Task VerifiedAsync(string evidence)=>ScanAsync();
+    private Task AttentionAsync(string message){feedback=message;return Task.CompletedTask;}
+    private VulnerabilityReport? groupedReport;
+    private VulnerabilityPackageGrouping? openGroups,resolvedGroups;
+    private readonly Dictionary<string,int> advisoryPages=new(StringComparer.Ordinal);
+    private readonly HashSet<string> expandedPackages=new(StringComparer.Ordinal);
+    private void TogglePackage(string package){if(!expandedPackages.Add(package))expandedPackages.Remove(package);}
+    private bool Matches(VulnerabilityPackageGroup package)=>string.IsNullOrWhiteSpace(filter)||package.Package.Contains(filter,StringComparison.OrdinalIgnoreCase)||package.Vulnerabilities.Any(g=>g.Matches(filter));
+    private static int SeverityCount(VulnerabilityCounts counts,string severity)=>severity switch{"CRITICAL"=>counts.Critical,"HIGH"=>counts.High,"MEDIUM"=>counts.Medium,"LOW"=>counts.Low,_=>0};
+    private VulnerabilityPackageGrouping Grouped(VulnerabilityReport report,bool resolved)
+    {
+        if(!ReferenceEquals(report,groupedReport)){groupedReport=report;openGroups=null;resolvedGroups=null;advisoryPages.Clear();}
+        return resolved ? resolvedGroups??=new(report.ResolvedFindings) : openGroups??=new(report.Findings);
+    }
+    private string AvailableUpdate(string package)=>AvailableUpdates.TryGetValue(package,out var version)?version:"No pending update reported";
+    public void Dispose(){disposed=true;Scanner.Changed-=Changed;}
+}

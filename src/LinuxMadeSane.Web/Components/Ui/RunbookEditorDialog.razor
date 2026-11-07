@@ -1,0 +1,753 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Contracts.Ai
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
+@inject IJSRuntime JSRuntime
+@inject IAiThreadService ThreadService
+@inject IRunbookAiDraftService RunbookAiDraftService
+
+<UiModal IsOpen="@IsOpen"
+         Title="@ResolveDialogTitle()"
+         Subtitle="@ResolveDialogSubtitle()"
+         Class="runbook-editor-modal"
+         Resizable="true"
+         Draggable="true"
+         CloseOnBackdrop="false"
+         OnClose="HandleCloseAsync">
+    <HeaderActions>
+        @if (!Editor.IsTemplate)
+        {
+            <div class="runbook-editor-header-toggle">
+                <UiCompactCheckbox Label="Host favourite"
+                                   Value="@Editor.IsQuickAccess"
+                                   ValueChanged="SetQuickAccessAsync" />
+                <span>Host favourite</span>
+            </div>
+            <div class="runbook-editor-header-toggle">
+                <UiCompactCheckbox Label="Global favourite"
+                                   Value="@Editor.IsGlobalFavorite"
+                                   ValueChanged="SetGlobalFavoriteAsync" />
+                <span>Global favourite</span>
+            </div>
+        }
+    </HeaderActions>
+    <ChildContent>
+        <EditForm id="@formId" Model="@Editor" OnValidSubmit="HandleSaveAsync" class="runbook-editor-form">
+            <DataAnnotationsValidator />
+
+            <div class="runbook-studio">
+                <div class="runbook-studio-details">
+                    <h3>Runbook setup</h3>
+            <div class="runbook-editor-top-grid">
+                <UiTextField Value="@Editor.Name"
+                             ValueChanged="SetNameAsync"
+                             ValueExpression="@(() => Editor.Name)"
+                             Label="Title"
+                             Placeholder="Restart nginx"
+                             Compact="true"
+                             Class="runbook-editor-field-name" />
+
+                <UiField Label="Access"
+                         Compact="true"
+                         Class="runbook-editor-field-access">
+                    <ChildContent>
+                        <div class="runbook-editor-choice-row">
+                            <button type="button"
+                                    class="@GetChoiceButtonClass(!Editor.RequiresSudo)"
+                                    @onclick="SetUserModeAsync">
+                                User
+                            </button>
+                            <button type="button"
+                                    class="@GetChoiceButtonClass(Editor.RequiresSudo)"
+                                    @onclick="SetSudoModeAsync">
+                                sudo
+                            </button>
+                        </div>
+                    </ChildContent>
+                </UiField>
+            </div>
+
+            <div class="runbook-editor-secondary-grid">
+                <UiTextField Value="@Editor.Description"
+                             ValueChanged="SetDescriptionAsync"
+                             ValueExpression="@(() => Editor.Description)"
+                             Label="Summary"
+                             Placeholder="Restart the service after a deploy."
+                             Compact="true"
+                             Class="runbook-editor-field-summary" />
+
+            </div>
+
+            @if (!Editor.IsTemplate && Editor.RequiresSudo)
+            {
+                <p class="callout warning runbook-editor-sudo-note">
+                    sudo runbooks use non-interactive sudo. The selected machine account must have explicit passwordless sudo runner access, otherwise LMS will fail fast instead of waiting for a password prompt.
+                </p>
+            }
+
+            @if (!Editor.IsTemplate)
+            {
+                <section class="runbook-editor-host-card" aria-label="Target machines">
+                    <span class="runbook-editor-host-label">Targets</span>
+
+                    <div class="runbook-editor-host-grid">
+                        @foreach (var host in OrderedHosts)
+                        {
+                            var isSelected = Editor.SelectedHostIds.Contains(host.Id);
+                            <div class="runbook-editor-host-chip @(isSelected ? "selected" : string.Empty)"
+                                 @key="host.Id"
+                                 @onclick="@(() => ToggleHostSelectedAsync(host.Id))">
+                                <UiCompactCheckbox Label="@($"Select {host.Name}")"
+                                                   Value="@isSelected"
+                                                   ValueChanged="@((bool value) => SetHostSelectedAsync(host.Id, value))" />
+                                <span class="runbook-editor-host-chip-copy">@host.Name</span>
+                            </div>
+                        }
+                    </div>
+                </section>
+            }
+
+            <UiSelectField TValue="RunbookTargetKind" Label="Input" Compact="true" Value="@Editor.TargetKind" ValueChanged="SetTargetKindAsync" Helper="Paths come from the file browser, terminal prompt or schedule. The same script works in each place.">
+                    <option value="@RunbookTargetKind.Machine">Machine (no paths)</option>
+                    <option value="@RunbookTargetKind.File">One file</option>
+                    <option value="@RunbookTargetKind.Folder">One folder</option>
+                    <option value="@RunbookTargetKind.Files">Multiple files</option>
+                    <option value="@RunbookTargetKind.Folders">Multiple folders</option>
+                    <option value="@RunbookTargetKind.FilesAndFolders">Files and folders</option>
+            </UiSelectField>
+
+                    <div class="runbook-starter-actions">
+                        <strong>Script inputs</strong>
+                        <p class="helper-text">@RunbookScaffold.Describe(Editor.TargetKind)</p>
+                        <CompactUIButton Label="Replace with starter script" Glyph="UiIconGlyph.Plus" OnClick="InsertStarterAsync" />
+                        <p class="helper-text">Checks inputs and required commands on every target before prepare → process → finish. Add tools to required_commands; missing tools stop execution with installation guidance.</p>
+                    </div>
+                    <details class="runbook-script-review">
+                        <summary>Inspect and edit Bash script</summary>
+                            <UiTextAreaField Value="@Editor.CommandText"
+                                             ValueChanged="SetCommandTextAsync"
+                                             ValueExpression="@(() => Editor.CommandText)"
+                                             Label="Bash script"
+                                             Placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;systemctl restart nginx"
+                                             Rows="11"
+                                             Compact="true"
+                                             Class="runbook-editor-script-field"
+                                             InputClass="runbook-editor-script-input" />
+
+                    </details>
+                </div>
+                    <section class="runbook-editor-ai-pane">
+                        <div class="runbook-editor-section-header runbook-editor-ai-header">
+                            <div class="stack-tight">
+                                <strong>AI runbook builder</strong>
+                                <span class="helper-text">@ResolveAiHelperSubtitle()</span>
+                            </div>
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(aiStatusMessage))
+                        {
+                            <p class="callout @aiStatusTone">@aiStatusMessage</p>
+                        }
+
+                        @if (isAiAvailabilityLoading || (aiThreadEditorContext is null && !aiAvailabilityRequested))
+                        {
+                            <div class="empty-state compact-empty-state">
+                                <p>Checking AI helper availability...</p>
+                            </div>
+                        }
+                        else if (!HasConfiguredAiProvider)
+                        {
+                            <div class="empty-state compact-empty-state runbook-editor-ai-empty">
+                                <p>No enabled AI provider is configured.</p>
+                                <p class="meta-text">Configure a provider first, then come back here and draft the runbook inline.</p>
+                                <CompactUIButton Label="Configure AI"
+                                                 Glyph="UiIconGlyph.Ai"
+                                                 Href="/ai/providers" />
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="runbook-editor-ai-shell">
+                                <AiProviderSwitcher Providers="@AvailableAiProviders"
+                                                    Models="@(aiThreadEditorContext?.Models ?? [])"
+                                                    ProviderKey="@(aiThreadEditorContext?.Editor.ProviderKey ?? string.Empty)"
+                                                    ProviderKeyChanged="HandleAiProviderSelectionChangedAsync"
+                                                    ModelId="@(aiThreadEditorContext?.Editor.ModelId ?? string.Empty)"
+                                                    ModelIdChanged="HandleAiModelSelectionChangedAsync"
+                                                    Disabled="@isAiSending"
+                                                    ProviderLabel="AI provider"
+                                                    ModelLabel="Model"
+                                                    Class="runbook-editor-ai-provider-switcher" />
+
+                                @if (aiConversationTurns.Count == 0)
+                                {
+                                    <div class="runbook-ai-welcome">
+                                        <h3>Turn an idea into a Linux tool</h3>
+                                        <p>Describe the outcome, the files or machines it should work on, and how you want the results. Refine it together here; inspect the generated Bash on the left before saving.</p>
+                                        <div class="runbook-editor-choice-row">
+                                            <button type="button" class="runbook-editor-choice-button" @onclick='() => SetAiPromptAsync("Build a tool for the selected runbook input type. Ask me what outcome I want before writing the script.")'>Help me design a tool</button>
+                                            <button type="button" class="runbook-editor-choice-button" @onclick='() => SetAiPromptAsync("Review this script and add checks for all prerequisite commands, permissions and configuration on each target machine before it does any work. Explain installation steps for missing packages.")'>Check prerequisites</button>
+                                            <button type="button" class="runbook-editor-choice-button" @onclick='() => SetAiPromptAsync("Review this script for safe handling of filenames with spaces, quotes and leading hyphens, validate all inputs before side effects, and add clear progress and actionable error messages.")'>Improve safety &amp; feedback</button>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (aiConversationTurns.Count > 0)
+                                {
+                                    <div class="runbook-editor-ai-history" aria-label="AI helper conversation history">
+                                        @foreach (var turn in aiConversationTurns)
+                                        {
+                                            <article class="runbook-editor-ai-message user" @key="@($"user-{turn.Id}")">
+                                                <span class="runbook-editor-ai-role">You</span>
+                                                <p>@turn.UserPrompt</p>
+                                            </article>
+                                            <article class="runbook-editor-ai-message assistant" @key="@($"assistant-{turn.Id}")">
+                                                <span class="runbook-editor-ai-role">@turn.ProviderDisplayName</span>
+                                                <p>@turn.AssistantText</p>
+                                            </article>
+                                        }
+                                    </div>
+                                }
+
+                                <div class="runbook-editor-ai-compose-form">
+                                    <UiTextAreaField Value="@aiComposer.Content"
+                                                     ValueChanged="SetAiPromptAsync"
+                                                     ValueExpression="@(() => aiComposer.Content)"
+                                                     Label="What would you like to build or change?"
+                                                     Placeholder="@ResolveAiPromptPlaceholder()"
+                                                     Rows="4"
+                                                     Compact="true"
+                                                     Class="runbook-editor-ai-prompt-field" />
+
+                                    <div class="runbook-editor-ai-compose-actions">
+                                        <CompactUIButton Label="@(isAiSending ? "Asking..." : "Build with AI")"
+                                                         Glyph="UiIconGlyph.Send"
+                                                         Disabled="@isAiSending"
+                                                         OnClick="HandleAiSendAsync" />
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </section>            </div>
+        </EditForm>
+    </ChildContent>
+
+    <Footer>
+        <div class="runbook-editor-footer">
+            @if (!string.IsNullOrWhiteSpace(StatusMessage))
+            {
+                <p class="callout @StatusTone runbook-editor-status">@StatusMessage</p>
+            }
+
+            <div class="runbook-editor-actions">
+                <CompactUIButton Label="Close"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Disabled="@IsBusy"
+                                 OnClick="HandleCloseAsync" />
+                @if (Editor.Id.HasValue)
+                {
+                    <CompactUIButton Label="@(isDeleteArmed ? "Click to Confirm!" : "Delete")"
+                                     Glyph="UiIconGlyph.Delete"
+                                     Class="@(isDeleteArmed ? "runbook-editor-action-danger runbook-delete-armed" : "runbook-editor-action-danger")"
+                                     Disabled="@IsBusy"
+                                     OnClick="ConfirmOrDeleteAsync" />
+                }
+                <CompactUIButton Label="@(IsBusy ? "Saving..." : "Save runbook")"
+                                 Glyph="UiIconGlyph.Save"
+                                 Disabled="@IsBusy"
+                                 Type="submit"
+                                 form="@formId" />
+            </div>
+        </div>
+    </Footer>
+</UiModal>
+
+@code {
+    private readonly string formId = $"runbook-editor-form-{Guid.NewGuid():N}";
+    private const int MaxAiConversationTurns = 12;
+    private RunbookEditor? trackedEditor;
+    private bool isDeleteArmed;
+    private AiChatThreadEditorContextViewModel? aiThreadEditorContext;
+    private readonly AiChatMessageComposer aiComposer = new();
+    private readonly List<RunbookAiConversationTurn> aiConversationTurns = [];
+    private Guid aiConversationThreadId = Guid.NewGuid();
+    private bool isAiAvailabilityLoading;
+    private bool isAiSending;
+    private bool aiAvailabilityRequested;
+    private string aiStatusMessage = string.Empty;
+    private string aiStatusTone = "info";
+
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter, EditorRequired] public RunbookEditor Editor { get; set; } = new();
+    [Parameter] public IReadOnlyList<ManagedHost> Hosts { get; set; } = [];
+    [Parameter] public string? StatusMessage { get; set; }
+    [Parameter] public string StatusTone { get; set; } = "info";
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnSave { get; set; }
+    [Parameter] public EventCallback OnDelete { get; set; }
+
+    private IReadOnlyList<ManagedHost> OrderedHosts =>
+        Hosts
+            .OrderBy(ManagedHostCapabilities.GetSortRank)
+            .ThenBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private bool HasConfiguredAiProvider =>
+        AvailableAiProviders.Count > 0;
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> AvailableAiProviders =>
+        aiThreadEditorContext is null
+            ? []
+            : aiThreadEditorContext.ConfiguredProviders
+                .Where(provider =>
+                    (provider.IsEnabled &&
+                     aiThreadEditorContext.SupportedProviders.FirstOrDefault(definition => definition.ProviderType == provider.ProviderType)?.IsRuntimeImplemented != false) ||
+                    provider.ProviderKey.Equals(aiThreadEditorContext.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(provider => provider.IsDefault)
+                .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    protected override void OnParametersSet()
+    {
+        if (!ReferenceEquals(trackedEditor, Editor))
+        {
+            trackedEditor = Editor;
+            isDeleteArmed = false;
+            EnsureEditorDefaults();
+            ResetAiState();
+        }
+
+        if (!IsOpen)
+        {
+            isDeleteArmed = false;
+        }
+    }
+
+    private async Task ConfirmOrDeleteAsync()
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        if (!isDeleteArmed)
+        {
+            isDeleteArmed = true;
+            return;
+        }
+
+        isDeleteArmed = false;
+        await OnDelete.InvokeAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!IsOpen || aiThreadEditorContext is not null || isAiAvailabilityLoading || aiAvailabilityRequested)
+        {
+            return;
+        }
+
+        aiAvailabilityRequested = true;
+        await EnsureAiAvailabilityAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private Task SetNameAsync(string? value)
+    {
+        Editor.Name = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetHostIdAsync(Guid value)
+    {
+        if (Editor.HostId != value)
+        {
+            ResetAiState();
+        }
+
+        Editor.HostId = value;
+        if (!Editor.SelectedHostIds.Contains(value))
+        {
+            Editor.SelectedHostIds = [value];
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetDescriptionAsync(string? value)
+    {
+        Editor.Description = value?.Trim() ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetQuickAccessAsync(bool value)
+    {
+        Editor.IsQuickAccess = !Editor.IsTemplate && value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetGlobalFavoriteAsync(bool value)
+    {
+        Editor.IsGlobalFavorite = !Editor.IsTemplate && value;
+        return Task.CompletedTask;
+    }
+
+    private Task SetCommandTextAsync(string? value)
+    {
+        Editor.CommandText = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetAiPromptAsync(string? value)
+    {
+        aiComposer.Content = value ?? string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private Task SetUserModeAsync()
+    {
+        Editor.RequiresSudo = false;
+        return Task.CompletedTask;
+    }
+
+    private Task SetSudoModeAsync()
+    {
+        Editor.RequiresSudo = true;
+        return Task.CompletedTask;
+    }
+
+    private Task SetHostSelectedAsync(Guid hostId, bool value)
+    {
+        if (value)
+        {
+            if (!Editor.SelectedHostIds.Contains(hostId))
+            {
+                Editor.SelectedHostIds.Add(hostId);
+            }
+
+            Editor.HostId = hostId;
+        }
+        else
+        {
+            Editor.SelectedHostIds.Remove(hostId);
+            if (Editor.SelectedHostIds.Count == 0)
+            {
+                Editor.SelectedHostIds.Add(hostId);
+            }
+
+            if (!Editor.SelectedHostIds.Contains(Editor.HostId))
+            {
+                Editor.HostId = Editor.SelectedHostIds[0];
+            }
+        }
+
+        ResetAiState();
+        return Task.CompletedTask;
+    }
+
+    private Task ToggleHostSelectedAsync(Guid hostId) =>
+        SetHostSelectedAsync(hostId, !Editor.SelectedHostIds.Contains(hostId));
+
+    private async Task EnsureAiAvailabilityAsync()
+    {
+        if (aiThreadEditorContext is not null || isAiAvailabilityLoading)
+        {
+            return;
+        }
+
+        isAiAvailabilityLoading = true;
+        aiStatusMessage = string.Empty;
+
+        try
+        {
+            aiThreadEditorContext = await ThreadService.GetEditorAsync();
+        }
+        catch (Exception exception)
+        {
+            aiStatusMessage = exception.Message;
+            aiStatusTone = "error";
+        }
+        finally
+        {
+            isAiAvailabilityLoading = false;
+        }
+    }
+
+    private async Task HandleAiSendAsync()
+    {
+        await EnsureAiAvailabilityAsync();
+        if (!HasConfiguredAiProvider)
+        {
+            aiStatusMessage = "Configure an enabled AI provider before using the runbook helper.";
+            aiStatusTone = "warning";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(aiComposer.Content))
+        {
+            return;
+        }
+
+        var userPrompt = aiComposer.Content.Trim();
+        isAiSending = true;
+        aiStatusMessage = "Asking AI to update the script...";
+        aiStatusTone = "info";
+
+        try
+        {
+            var result = await RunbookAiDraftService.DraftAsync(new RunbookAiDraftRequest(
+                Editor,
+                OrderedHosts,
+                userPrompt,
+                aiThreadEditorContext?.Editor.ProviderKey ?? string.Empty,
+                aiThreadEditorContext?.Editor.ModelId ?? string.Empty,
+                BuildAiMessageHistory()));
+
+            if (string.IsNullOrWhiteSpace(result.ScriptDraft))
+            {
+                AddAiConversationTurn(userPrompt, result.AssistantText, result.ProviderDisplayName);
+                aiStatusMessage = "AI replied, but did not return a bash script block. The runbook was not changed.";
+                aiStatusTone = "warning";
+                return;
+            }
+
+            ApplyScriptDraft(result.ScriptDraft);
+            AddAiConversationTurn(userPrompt, result.AssistantText, result.ProviderDisplayName);
+            aiComposer.Content = string.Empty;
+            if (result.SanitizationSummary.Applied)
+            {
+                aiStatusMessage = $"{result.SanitizationSummary.Message} Script updated from {result.ProviderDisplayName}.";
+                aiStatusTone = "warning";
+            }
+            else
+            {
+                aiStatusMessage = $"Script updated from {result.ProviderDisplayName}.";
+                aiStatusTone = "success";
+            }
+        }
+        catch (Exception exception)
+        {
+            aiStatusMessage = exception.Message;
+            aiStatusTone = "error";
+        }
+        finally
+        {
+            isAiSending = false;
+        }
+    }
+
+    private IReadOnlyList<AiChatMessage> BuildAiMessageHistory()
+    {
+        if (aiConversationTurns.Count == 0)
+        {
+            return [];
+        }
+
+        var messages = new List<AiChatMessage>(aiConversationTurns.Count * 2);
+        var sequenceNumber = 1;
+        foreach (var turn in aiConversationTurns)
+        {
+            messages.Add(new AiChatMessage(
+                Guid.NewGuid(),
+                aiConversationThreadId,
+                sequenceNumber++,
+                AiChatMessageRole.User,
+                turn.UserPrompt,
+                turn.CreatedAtUtc));
+            messages.Add(new AiChatMessage(
+                Guid.NewGuid(),
+                aiConversationThreadId,
+                sequenceNumber++,
+                AiChatMessageRole.Assistant,
+                turn.AssistantText,
+                turn.CreatedAtUtc));
+        }
+
+        return messages;
+    }
+
+    private void AddAiConversationTurn(
+        string userPrompt,
+        string assistantText,
+        string providerDisplayName)
+    {
+        aiConversationTurns.Add(new RunbookAiConversationTurn(
+            Guid.NewGuid(),
+            userPrompt.Trim(),
+            assistantText.Trim(),
+            string.IsNullOrWhiteSpace(providerDisplayName) ? "AI" : providerDisplayName.Trim(),
+            DateTimeOffset.UtcNow));
+
+        while (aiConversationTurns.Count > MaxAiConversationTurns)
+        {
+            aiConversationTurns.RemoveAt(0);
+        }
+    }
+
+    private void ApplyScriptDraft(string scriptDraft)
+    {
+        var script = scriptDraft.Trim();
+        if (script.StartsWith("sudo ", StringComparison.OrdinalIgnoreCase))
+        {
+            Editor.RequiresSudo = true;
+            script = script[5..].Trim();
+        }
+
+        Editor.CommandText = RunbookExecutionCommandBuilder.NormalizeStoredScript(script);
+    }
+
+    private async Task HandleAiProviderSelectionChangedAsync(string providerKey)
+    {
+        if (aiThreadEditorContext is null)
+        {
+            return;
+        }
+
+        aiThreadEditorContext.Editor.ProviderKey = providerKey?.Trim() ?? string.Empty;
+        SyncAiModelSelectionForProvider();
+        await ApplyAiProviderSelectionAsync();
+    }
+
+    private async Task HandleAiModelSelectionChangedAsync(string modelId)
+    {
+        if (aiThreadEditorContext is null)
+        {
+            return;
+        }
+
+        aiThreadEditorContext.Editor.ModelId = modelId?.Trim() ?? string.Empty;
+        await ApplyAiProviderSelectionAsync();
+    }
+
+    private void SyncAiModelSelectionForProvider()
+    {
+        if (aiThreadEditorContext is null)
+        {
+            return;
+        }
+
+        var selection = AiProviderSelectionResolver.Resolve(
+            aiThreadEditorContext.Editor.ProviderKey,
+            aiThreadEditorContext.Editor.ModelId,
+            aiThreadEditorContext.Editor.ProviderKey,
+            string.Empty,
+            AvailableAiProviders,
+            aiThreadEditorContext.Models);
+        aiThreadEditorContext.Editor.ProviderKey = selection.ProviderKey;
+        aiThreadEditorContext.Editor.ModelId = selection.ModelId;
+    }
+
+    private async Task ApplyAiProviderSelectionAsync()
+    {
+        if (aiThreadEditorContext is null)
+        {
+            return;
+        }
+
+        aiStatusMessage = string.Empty;
+        await Task.CompletedTask;
+    }
+
+    private Task SetTargetKindAsync(RunbookTargetKind kind)
+    {
+        if (Editor.CommandText == RunbookScaffold.Build(Editor.TargetKind))
+            Editor.CommandText = RunbookScaffold.Build(kind);
+        Editor.TargetKind = kind;
+        return Task.CompletedTask;
+    }
+
+    private Task InsertStarterAsync()
+    {
+        Editor.CommandText = RunbookScaffold.Build(Editor.TargetKind);
+        aiStatusMessage = "Starter hooks added. Review the Bash script, then ask AI to fill in the process hook and required commands.";
+        aiStatusTone = "info";
+        return Task.CompletedTask;
+    }
+
+    private Task HandleSaveAsync()
+    {
+        return OnSave.InvokeAsync();
+    }
+
+    private Task HandleCloseAsync() =>
+        OnClose.InvokeAsync();
+
+    private void ResetAiState()
+    {
+        aiThreadEditorContext = null;
+        aiConversationTurns.Clear();
+        aiConversationThreadId = Guid.NewGuid();
+        aiComposer.Content = string.Empty;
+        aiStatusMessage = string.Empty;
+        aiStatusTone = "info";
+        isAiAvailabilityLoading = false;
+        isAiSending = false;
+        aiAvailabilityRequested = false;
+    }
+
+    private void EnsureEditorDefaults()
+    {
+        Editor.IsTemplate = false;
+        Editor.TemplateSourceId = null;
+        if (Editor.SelectedHostIds.Count == 0)
+        {
+            if (Editor.HostId != Guid.Empty)
+            {
+                Editor.SelectedHostIds = [Editor.HostId];
+            }
+            else if (OrderedHosts.Count > 0)
+            {
+                Editor.HostId = OrderedHosts[0].Id;
+                Editor.SelectedHostIds = [Editor.HostId];
+            }
+        }
+
+        foreach (var parameter in Editor.Parameters)
+        {
+            parameter.Name = RunbookTemplateRenderer.NormalizeParameterName(parameter.Name);
+        }
+
+        EnsureScriptDraft();
+    }
+
+    private string ResolveDialogTitle() => Editor.Id.HasValue ? $"Edit {Editor.Name}" : "Add runbook";
+    private string ResolveDialogSubtitle() => "Create a Bash tool with AI. Choose its inputs, review the script and save.";
+    private string ResolveAiHelperSubtitle() => "Build and refine the script together. Paths are supplied when it runs.";
+    private string ResolveAiPromptPlaceholder() => "Describe the tool you want and what it should do with the selected files or folders.";
+
+    private string GetChoiceButtonClass(bool selected) =>
+        selected
+            ? "runbook-editor-choice-button selected"
+            : "runbook-editor-choice-button";
+
+    private void EnsureScriptDraft()
+    {
+        if (string.IsNullOrWhiteSpace(Editor.CommandText))
+        {
+            Editor.CommandText = RunbookScaffold.Build(Editor.TargetKind);
+            return;
+        }
+
+        Editor.CommandText = RunbookExecutionCommandBuilder.NormalizeStoredScript(Editor.CommandText);
+    }
+
+    private sealed record RunbookAiConversationTurn(
+        Guid Id,
+        string UserPrompt,
+        string AssistantText,
+        string ProviderDisplayName,
+        DateTimeOffset CreatedAtUtc);
+
+    public ValueTask DisposeAsync()
+    {
+        return ValueTask.CompletedTask;
+    }
+}

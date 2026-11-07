@@ -1,0 +1,64 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@page "/hosts/{HostId:guid}/connect"
+@layout PopupLayout
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IDisposable
+@using LinuxMadeSane.Core.Abstractions
+@inject IManagedHostStore Hosts
+@inject ISavedCredentialAccessContext Access
+@inject LmsHostUpdateAvailabilityService Availability
+@inject RemoteLmsSshTunnelService Relay
+@inject NavigationManager Navigation
+
+<PageTitle>Connect to LMS | Linux Made Sane</PageTitle>
+<PopupThemeInitializer />
+<section class="surface-card">
+    <h1>@title</h1>
+    <p role="status">@message</p>
+    @if (failed) { <button type="button" @onclick="ConnectAsync">Retry connection</button> }
+</section>
+
+@code {
+    [Parameter] public Guid HostId { get; set; }
+    private readonly CancellationTokenSource lifetime = new();
+    private string title = "Opening LMS", message = "Resolving the saved host connection…";
+    private bool failed;
+    protected override Task OnInitializedAsync() => ConnectAsync();
+    private async Task ConnectAsync()
+    {
+        failed = false;
+        try
+        {
+            if (await Access.GetAuthenticatedUserIdAsync(lifetime.Token) is null)
+                throw new InvalidOperationException("Sign in to LMS before connecting to a saved host.");
+            var host = await Hosts.GetAsync(HostId, lifetime.Token);
+            if (host is null || host.Kind != ManagedHostKind.LmsHost)
+                throw new InvalidOperationException("This saved LMS host is no longer available.");
+            title = $"Connecting to {host.Name}";
+            message = "Checking the registered LMS address…";
+            await InvokeAsync(StateHasChanged);
+            if (AiLocalMachine.IsLocalMachine(host.Id))
+            {
+                Navigation.NavigateTo(Navigation.BaseUri, forceLoad: true, replace: true);
+                return;
+            }
+            var url = Availability.GetDirectBaseUrl(host.Id);
+            if (url is null)
+            {
+                await Availability.CheckDirectWebAccessAsync(host, lifetime.Token);
+                url = Availability.GetDirectBaseUrl(host.Id);
+            }
+            if (url is null)
+            {
+                message = $"Opening the saved SSH connection and registered LMS relay for {host.Name}…";
+                await InvokeAsync(StateHasChanged);
+                url = (await Relay.ConnectAsync(host.Id, cancellationToken: lifetime.Token)).Url;
+            }
+            Navigation.NavigateTo(url, forceLoad: true, replace: true);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception ex) { failed = true; message = ex.Message; }
+    }
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
+}

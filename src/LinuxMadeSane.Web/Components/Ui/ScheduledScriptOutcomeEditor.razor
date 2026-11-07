@@ -1,0 +1,51 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Core.Models.Scheduling
+<details class="script-outcome-settings" open="@Expanded">
+    <summary @onclick="(() => ExpandedChanged.InvokeAsync(!Expanded))" @onclick:preventDefault="true">After this script finishes</summary>
+    <div class="script-outcome-body">
+        <p>By default, exit code 0 means success. Describe other codes here if your script uses them differently. Informational outcomes count as successful for follow-up selection.</p>
+        <h4>Exit-code meanings</h4>
+        @foreach (var meaning in Settings.ExitCodes)
+        {
+            <div class="script-meaning-row" @key="meaning">
+                <label>Exit code<input type="number" min="0" max="255" class="ui-control-input" @bind="meaning.Code" /></label>
+                <label>Meaning<input class="ui-control-input" maxlength="160" placeholder="For example: No files found" @bind="meaning.Description" /></label>
+                <label>Outcome<select class="ui-control-input" @bind="meaning.Disposition"><option value="Success">Success</option><option value="Information">Information</option><option value="Error">Error</option></select></label>
+                <UiIconButton Label="Remove exit-code meaning" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Toolbar" OnClick="(() => Settings.ExitCodes.Remove(meaning))" />
+            </div>
+        }
+        <UiCommandButton Label="Add exit-code meaning" Class="script-outcome-add" HideIcon="true" Variant="UiButtonVariant.Ghost" Disabled="@(Settings.ExitCodes.Count >= 32)" OnClick="(() => Settings.ExitCodes.Add(new()))" />
+        <h4>Follow-up scripts</h4>
+        <p>Run one follow-up using this task’s Linux user. A specific code takes priority over success/other. Follow-ups do not start further scripts; their own exit code 0 means success.</p>
+        @foreach (var rule in Settings.FollowUps)
+        {
+            <div class="script-follow-up" @key="rule">
+                <div class="script-rule-heading">
+                    <label>When<select class="ui-control-input" @bind="rule.Condition"><option value="Success">Successful or informational outcome</option><option value="Other">Any other exit code</option><option value="ExitCode">Specific exit code</option></select></label>
+                    @if (rule.Condition == ScriptFollowUpCondition.ExitCode)
+                    { <label>Exit code<input class="ui-control-input" type="number" min="0" max="255" @bind="rule.ExitCode" /></label> }
+                    <UiIconButton Label="Remove follow-up" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Toolbar" OnClick="(() => Settings.FollowUps.Remove(rule))" />
+                </div>
+                <div class="script-rule-path">
+                    <label>Script path<input class="ui-control-input" @bind="rule.ScriptPath" /></label>
+                    <UiIconButton Label="Select follow-up script" Glyph="UiIconGlyph.FolderOpen" Variant="UiButtonVariant.Toolbar" OnClick="(() => Browse.InvokeAsync(rule))" />
+                </div>
+                <div class="script-rule-fields">
+                    <label>Arguments (optional)<input class="ui-control-input" placeholder="Add parameters to run with this script" @bind="rule.Arguments" /></label>
+                    <label>Working directory (optional)<input class="ui-control-input" placeholder="Defaults to the script’s folder" @bind="rule.WorkingDirectory" /></label>
+                </div>
+            </div>
+        }
+        <UiCommandButton Label="Add follow-up script" Class="script-outcome-add" HideIcon="true" Variant="UiButtonVariant.Ghost" Disabled="@(Settings.FollowUps.Count >= 16)" OnClick="AddFollowUp" />
+        <p>Stopping a run or a launch/timeout error will not start a follow-up. Codes 124, 126, 127 and 128–255 are reserved for those errors and interruptions.</p>
+    </div>
+</details>
+@code {
+    [Parameter] public bool Expanded { get; set; }
+    [Parameter] public EventCallback<bool> ExpandedChanged { get; set; }
+    [Parameter, EditorRequired] public ScheduledScriptOutcomes Settings { get; set; } = new();
+    [Parameter] public EventCallback<ScriptFollowUp> Browse { get; set; }
+    private void AddFollowUp() => Settings.FollowUps.Add(new()
+    { Condition = Settings.FollowUps.Any(x => x.Condition == ScriptFollowUpCondition.Success) ? ScriptFollowUpCondition.Other : ScriptFollowUpCondition.Success });
+}

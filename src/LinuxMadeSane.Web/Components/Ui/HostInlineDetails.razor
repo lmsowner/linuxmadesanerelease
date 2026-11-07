@@ -1,0 +1,122 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@implements IDisposable
+@inject IServiceScopeFactory ScopeFactory
+
+<div class="host-inline-details">
+    <section class="host-inline-health" aria-label="Server health">
+        <div class="host-inline-heading">
+            <h3>Server health</h3>
+            <UiCommandButton Label="@(loading ? "Checking…" : "Refresh health")" HideIcon="true" Variant="UiButtonVariant.Ghost" Disabled="@loading" OnClick="LoadAsync" />
+        </div>
+        @if (loading) { <p class="meta-text" role="status" aria-live="polite">Checking this host’s connection and health…</p> }
+        @if (error is not null) { <p class="callout error" role="alert">@error</p> }
+        @if (details is { } snapshot)
+        {
+            @if (snapshot.ConnectionTest.Status != ConnectionTestStatus.Succeeded)
+            { <p class="callout warning" role="status"><strong>@snapshot.ConnectionTest.Summary</strong> @snapshot.ConnectionTest.Detail</p> }
+            else
+            { <p class="host-inline-connection">@snapshot.ConnectionTest.Summary <span>Checked @snapshot.ConnectionTest.CheckedAtUtc.ToLocalTime().ToString("g")</span></p> }
+            @if (HasHealthReadings(snapshot.HealthSnapshot))
+            {
+                var health = snapshot.HealthSnapshot;
+                <dl class="host-inline-metrics">
+                    <div><dt>CPU</dt><dd>@Percent(health.CpuUsagePercent)</dd></div>
+                    <div><dt>Memory available</dt><dd>@MemorySummary(health)</dd></div>
+                    <div><dt>Root disk used</dt><dd>@Percent(health.DiskUsagePercent)</dd></div>
+                    <div><dt>Root disk free</dt><dd>@Reported(health.RootDiskAvailable)</dd></div>
+                    <div><dt>Load</dt><dd>@Reported(health.LoadAverage)</dd></div>
+                    <div><dt>Uptime</dt><dd>@Reported(health.Uptime)</dd></div>
+                </dl>
+            }
+            else if (!loading)
+            { <p class="meta-text">@(snapshot.ConnectionTest.Status == ConnectionTestStatus.Succeeded ? "No live health readings were returned by this host." : "Health readings require a working connection.")</p> }
+        }
+    </section>
+    <section aria-label="Host configuration">
+        <h3>Host configuration</h3>
+        <dl class="host-inline-profile">
+            <div><dt>Operating system</dt><dd>@Reported(Host.Platform)</dd></div>
+            <div><dt>Execution</dt><dd>@(IsLocal ? "Local machine" : "SSH")</dd></div>
+            @if (!IsLocal)
+            {
+                <div><dt>SSH endpoint</dt><dd>@Host.Hostname:@Host.Port</dd></div>
+                <div><dt>SSH user</dt><dd>@Reported(Host.Username)</dd></div>
+                <div><dt>Primary authentication</dt><dd>@ManagedHostAuthenticationPolicy.GetDisplayLabel(Host.PrimaryAuthenticationType)</dd></div>
+                <div><dt>Fallback authentication</dt><dd>@(Host.FallbackAuthenticationType is { } fallback ? ManagedHostAuthenticationPolicy.GetDisplayLabel(fallback) : "None")</dd></div>
+                <div><dt>Saved credentials</dt><dd>@(!string.IsNullOrWhiteSpace(Host.PasswordSecretReference) || !string.IsNullOrWhiteSpace(Host.PrivateKeySecretReference) ? "Yes · encrypted secret store" : "No")</dd></div>
+            }
+            @if (!string.IsNullOrWhiteSpace(LmsEndpoint))
+            { <div><dt>LMS endpoint</dt><dd>@LmsEndpoint</dd></div> }
+            @if (ManagedHostCapabilities.IsLmsHost(Host))
+            {
+                <div><dt>LMS version</dt><dd>@Reported(InstalledVersion)</dd></div>
+                <div><dt>Release channel</dt><dd>@(ReleaseChannel switch { "development" => "Development", "stable" => "Stable", _ => "Not reported" })</dd></div>
+            }
+            <div><dt>Working directory</dt><dd>@Reported(Host.DefaultWorkingDirectory)</dd></div>
+        </dl>
+    </section>
+</div>
+@code {
+    [Parameter, EditorRequired] public ManagedHost Host { get; set; } = null!;
+    [Parameter] public bool IsExpanded { get; set; } = true;
+    [Parameter] public string? InstalledVersion { get; set; }
+    [Parameter] public string? ReleaseChannel { get; set; }
+    [Parameter] public string? LmsEndpoint { get; set; }
+    private ManagedHostDetailsViewModel? details;
+    private Guid? loadedHostId;
+    private CancellationTokenSource? request;
+    private bool loading, disposed;
+    private DateTimeOffset loadedAt;
+    internal Task LoadingTask { get; private set; } = Task.CompletedTask;
+    private string? error;
+    private bool IsLocal => ManagedHostCapabilities.Describe(Host).IsLocalLmsHost;
+    protected override void OnParametersSet()
+    {
+        if(!IsExpanded) { request?.Cancel(); return; }
+        if(loadedHostId==Host.Id && ((loading && request?.IsCancellationRequested==false) || ((details is not null || error is not null) && DateTimeOffset.UtcNow-loadedAt<TimeSpan.FromSeconds(30)))) return;
+        _ = LoadAsync();
+    }
+    private Task LoadAsync()=>LoadingTask=LoadCoreAsync();
+    private async Task LoadCoreAsync()
+    {
+        request?.Cancel(); request?.Dispose();
+        var current = new CancellationTokenSource(); request = current;
+        var token = current.Token; var hostId = Host.Id;
+        if (loadedHostId != hostId) details = null;
+        loadedHostId = hostId; loading = true; error = null;
+        try
+        {
+            // SSH connection/health probes include synchronous I/O. Never run them on the circuit.
+            var result = await Task.Run(async () =>
+            {
+                await using var scope = ScopeFactory.CreateAsyncScope();
+                return await scope.ServiceProvider.GetRequiredService<IManagedHostService>().GetDetailsAsync(hostId, token);
+            }, token);
+            if (disposed || token.IsCancellationRequested || Host.Id != hostId) return;
+            details = result;
+            if (result is null) error = "This host is no longer in the inventory.";
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception e) { if (!disposed && !token.IsCancellationRequested) error = "Could not read host health: " + e.Message; }
+        finally
+        {
+            if(request==current)
+            {
+                loading=false;
+                if(!disposed && !token.IsCancellationRequested)
+                { loadedAt=DateTimeOffset.UtcNow; await InvokeAsync(StateHasChanged); }
+            }
+        }
+    }
+    private static bool HasHealthReadings(ServerHealthSnapshot health) => health.CpuUsagePercent.HasValue || health.MemoryAvailableBytes.HasValue || health.DiskUsagePercent.HasValue || !string.IsNullOrWhiteSpace(health.RootDiskAvailable);
+    private static string MemorySummary(ServerHealthSnapshot health) => GiB(health.MemoryAvailableBytes) + (health.MemoryFreePercent.HasValue ? $" ({Percent(health.MemoryFreePercent)} free)" : string.Empty);
+    private static string Reported(string? value) => string.IsNullOrWhiteSpace(value) || (value.Equals("Unknown", StringComparison.OrdinalIgnoreCase) || value.Equals("Unavailable", StringComparison.OrdinalIgnoreCase)) ? "Not reported" : value;
+    private static string Percent(double? value) => value.HasValue ? $"{value:0.#}%" : "Not reported";
+    private static string GiB(long? value) => value.HasValue ? $"{value.Value / 1073741824d:0.##} GiB" : "Not reported";
+    public void Dispose() { if(disposed) return; disposed = true; request?.Cancel(); request?.Dispose(); }
+}

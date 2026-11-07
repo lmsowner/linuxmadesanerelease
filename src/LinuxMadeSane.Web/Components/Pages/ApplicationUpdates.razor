@@ -1,0 +1,1210 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@page "/updates"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Contracts.Updates
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.Ai
+@inject ApplicationUpdateService LmsUpdateService
+@inject IHostSystemUpdateService HostUpdateService
+@inject IAiThreadService AiThreadService
+@inject IJSRuntime Js
+
+<PageTitle>Updates | Linux Made Sane</PageTitle>
+
+<div class="page-shell application-updates-shell">
+    <UiHeroPanel Title="Updates" Compact="true">
+        <Actions>
+            @if (activeTab == "upgrades")
+            {
+                <UiCommandButton Label="@(IsHostBusy ? "Checking…" : "Check Ubuntu release")"
+                                 Glyph="UiIconGlyph.Search"
+                                 Variant="UiButtonVariant.Ghost"
+                                 OnClick="CheckReleaseUpgradeAsync"
+                                 Disabled="@IsHostBusy" />
+            }
+            else if (activeTab is "packages" or "schedule")
+            {
+                <UiCommandButton Label="@(IsHostBusy ? "Working…" : "Refresh")"
+                                 Glyph="UiIconGlyph.Refresh"
+                                 Variant="UiButtonVariant.Ghost"
+                                 OnClick="RefreshHostAsync"
+                                 Disabled="@IsHostBusy" />
+            }
+            @if (hostSnapshot.RebootRequired)
+            {
+                <UiCommandButton Label="Reboot now"
+                                 Glyph="UiIconGlyph.Restart"
+                                 Variant="UiButtonVariant.PrimaryMuted"
+                                 OnClick="RebootHostAsync"
+                                 Disabled="@IsHostBusy" />
+            }
+        </Actions>
+    </UiHeroPanel>
+
+    @if (hostSnapshot.RebootRequired)
+    {
+        <section class="updates-reboot-banner" aria-label="Reboot required">
+            <div>
+                <span class="updates-eyebrow">Reboot required</span>
+                <strong>Linux needs a restart to finish applying updates.</strong>
+                <small>
+                    @(hostSnapshot.RebootRequiredPackages.Count == 0
+                        ? "Kernel or core packages were updated."
+                        : string.Join(", ", hostSnapshot.RebootRequiredPackages.Take(8)) + (hostSnapshot.RebootRequiredPackages.Count > 8 ? "…" : string.Empty))
+                </small>
+            </div>
+            <UiCommandButton Label="Reboot server"
+                             Glyph="UiIconGlyph.Restart"
+                             Variant="UiButtonVariant.Primary"
+                             OnClick="RebootHostAsync"
+                             Disabled="@IsHostBusy" />
+        </section>
+    }
+
+    @if (hostSnapshot.ReleaseUpgrade.IsAvailable)
+    {
+        <section class="updates-release-banner" aria-label="New distro available">
+            <div>
+                <span class="updates-eyebrow">New distro available</span>
+                <strong>
+                    @(string.IsNullOrWhiteSpace(hostSnapshot.ReleaseUpgrade.TargetRelease)
+                        ? "A newer OS release is available for this server."
+                        : $"OS release {hostSnapshot.ReleaseUpgrade.TargetRelease} is available.")
+                </strong>
+                <small>
+                    Running @hostSnapshot.OperatingSystem.PrettyName.
+                    Open Server Upgrades when you are ready — this is a check only, nothing has been started.
+                </small>
+            </div>
+            <UiCommandButton Label="Review upgrade"
+                             Glyph="UiIconGlyph.Info"
+                             Variant="UiButtonVariant.PrimaryMuted"
+                             OnClick="OpenUpgradesTabAsync" />
+        </section>
+    }
+
+    <TabControl ActiveValue="@activeTab"
+                ActiveValueChanged="ChangeTabAsync"
+                Class="page-tab-control updates-tabs"
+                PanelClass="page-tab-panel updates-tab-panel">
+        <ChildContent>
+            <TabPage Value="server" Title="Server Updates">
+                <ChildContent>
+                    <section class="surface-card update-summary-card">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Linux Made Sane</p>
+                                <h2>@lmsStatus.Summary</h2>
+                                <p class="meta-text">@lmsStatus.Detail</p>
+                            </div>
+                            <UiPill Tone="@GetLmsStateTone()">@GetLmsStateLabel()</UiPill>
+                        </div>
+
+                        @if (lmsStatus.Edition == "community")
+                        {
+                            <div class="updates-action-row updates-channel-actions">
+                                <UiComboboxField TValue="string" Label="CE update channel" Class="updates-channel-field" Compact="true"
+                                                 @bind-Value="selectedReleaseChannel" Disabled="@IsLmsBusy">
+                                    <option value="stable">Stable</option>
+                                    <option value="development">Development</option>
+                                </UiComboboxField>
+                                <UiCommandButton Label="Save update channel" OnClick="SaveReleaseChannelAsync" Disabled="@(IsLmsBusy || selectedReleaseChannel == lmsStatus.Channel)" />
+                            </div>
+                            <p class="meta-text updates-channel-help">Stable receives approved releases; Development receives the latest tested builds. Switching never downgrades the installed version.</p>
+                            @if (!string.IsNullOrWhiteSpace(channelMessage)) { <p class="meta-text" role="status">@channelMessage</p> }
+                        }
+
+                        <div class="update-metric-grid">
+                            <ServiceMetricComponent TagName="div" Label="Running" Value="@lmsStatus.CurrentVersion" />
+                            <ServiceMetricComponent TagName="div" Label="Latest" Value="@lmsStatus.LatestVersion" />
+                            <ServiceMetricComponent TagName="div" Label="Edition" Value="@lmsStatus.Edition" />
+                            <ServiceMetricComponent TagName="div" Label="Runtime" Value="@lmsStatus.Rid" />
+                        </div>
+
+                        <div class="update-progress-shell" aria-label="LMS update progress">
+                            <div class="update-progress-bar" style="@($"width: {LmsProgressPercent}%;")"></div>
+                        </div>
+
+                        <div class="updates-action-row updates-lms-actions">
+                            <UiCommandButton Label="Check now"
+                                             Glyph="UiIconGlyph.Refresh"
+                                             Variant="UiButtonVariant.Ghost"
+                                             OnClick="CheckLmsAsync"
+                                             Disabled="@IsLmsBusy" />
+                            <UiCommandButton Label="@(lmsStatus.IsUpdateAvailable ? "Install update" : "Install latest")"
+                                             Glyph="UiIconGlyph.Download"
+                                             Variant="UiButtonVariant.PrimaryMuted"
+                                             OnClick="InstallLmsAsync"
+                                             Disabled="@(!CanInstallLms)" />
+                        </div>
+
+                        <div class="token-row compact-token-row">
+                            <span class="status-pill @(lmsStatus.ScheduledChecksEnabled ? "success" : "neutral")">
+                                @(lmsStatus.ScheduledChecksEnabled ? $"Scheduled every {lmsStatus.CheckIntervalMinutes} min" : "Scheduled checks off")
+                            </span>
+                            <span class="status-pill @(lmsStatus.InstallAutomatically ? "warning" : "neutral")">
+                                @(lmsStatus.InstallAutomatically ? "Auto-install on" : "Manual install")
+                            </span>
+                        </div>
+                    </section>
+
+                    <section class="surface-card">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Updater log</p>
+                                <h2>LMS activity</h2>
+                            </div>
+                        </div>
+                        @if (lmsStatus.LogLines.Count == 0)
+                        {
+                            <p class="meta-text">No LMS update activity has been recorded yet.</p>
+                        }
+                        else
+                        {
+                            <pre class="update-log">@string.Join(Environment.NewLine, lmsStatus.LogLines)</pre>
+                        }
+                    </section>
+                </ChildContent>
+            </TabPage>
+
+            <TabPage Value="packages" Title="Package Updates">
+                <ChildContent>
+                    <TabControl @bind-ActiveValue="packageView" Class="page-tab-control">
+                        <TabPage Value="packages" Title="Packages">
+
+                    <section class="updates-status-strip">
+                        <div>
+                            <span class="updates-eyebrow">Host packages</span>
+                            <strong>@hostSnapshot.Job.Summary</strong>
+                            <small>@hostSnapshot.Job.Detail</small>
+                        </div>
+                        <div class="updates-status-metrics">
+                            <span><em>@hostSnapshot.UpgradeableCount</em> pending</span>
+                            <span><em>@hostSnapshot.SecurityCount</em> security</span>
+                            <span><em>@hostSnapshot.OperatingSystem.PrettyName</em></span>
+                        </div>
+                    </section>
+
+                    <div class="update-progress-shell updates-host-progress" aria-label="Package update progress">
+                        <div class="update-progress-bar" style="@($"width: {HostProgressPercent}%;")"></div>
+                    </div>
+
+                    @if (HasAiRepairProvider || hostSnapshot.Job.NeedsAttention)
+                    {
+                        <section class="surface-card updates-ai-repair-offer">
+                            <div>
+                                <p class="eyebrow">Guided repair</p>
+                                <h2>@(hostSnapshot.Job.NeedsAttention ? "Package updates need attention" : "AI Update/Repair")</h2>
+                                <p class="meta-text">
+                                    @if (HasAiRepairProvider)
+                                    {
+                                        <text>Ask @aiRepairProviderLabel to inspect or repair package updates through the same guided agent used in Terminal.</text>
+                                    }
+                                    else
+                                    {
+                                        <text>Review the Host update log, then use Terminal to investigate and repair the package system.</text>
+                                    }
+                                </p>
+                            </div>
+                            <div class="updates-action-row">
+                                @if (HasAiRepairProvider)
+                                {
+                                    <UiCommandButton Label="AI Update/Repair"
+                                                     Glyph="UiIconGlyph.Ai"
+                                                     Variant="UiButtonVariant.PrimaryMuted"
+                                                     OnClick="OpenAiRepairAsync" />
+                                }
+                                <UiCommandButton Label="Open Terminal"
+                                                 Glyph="UiIconGlyph.Terminal"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Href="@LocalTerminalHref" />
+                            </div>
+                        </section>
+                    }
+
+                    <section class="surface-card updates-actions-card">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Apply from LMS</p>
+                                <h2>Install package updates</h2>
+                                <p class="meta-text">Non-interactive APT with preserved local config files. No shell guesswork.</p>
+                            </div>
+                        </div>
+                        <div class="updates-action-row">
+                            <UiCommandButton Label="Repair APT"
+                                             Glyph="UiIconGlyph.Repair"
+                                             Variant="UiButtonVariant.Ghost"
+                                             OnClick="RepairAptAsync"
+                                             Disabled="@IsHostBusy" />
+                            <UiCommandButton Label="@(hostSnapshot.SecurityCount > 0 ? $"Install {hostSnapshot.SecurityCount} security" : "Security updates")"
+                                             Glyph="UiIconGlyph.Lock"
+                                             Variant="UiButtonVariant.PrimaryMuted"
+                                             OnClick="(() => ApplyPackagesAsync(HostPackageUpdateMode.SecurityOnly, false))"
+                                             Disabled="@(IsHostBusy || hostSnapshot.SecurityCount == 0)" />
+                            <UiCommandButton Label="@(hostSnapshot.UpgradeableCount > 0 ? $"Install all {hostSnapshot.UpgradeableCount}" : "Install all")"
+                                             Glyph="UiIconGlyph.Download"
+                                             Variant="UiButtonVariant.Primary"
+                                             OnClick="(() => ApplyPackagesAsync(HostPackageUpdateMode.AllPackages, false))"
+                                             Disabled="@(IsHostBusy || hostSnapshot.UpgradeableCount == 0)" />
+                            <UiCommandButton Label="Install + reboot if needed"
+                                             Glyph="UiIconGlyph.Restart"
+                                             Variant="UiButtonVariant.Ghost"
+                                             OnClick="(() => ApplyPackagesAsync(HostPackageUpdateMode.AllPackages, true))"
+                                             Disabled="@(IsHostBusy || hostSnapshot.UpgradeableCount == 0)" />
+                        </div>
+                        <UiCheckboxField @bind-Value="rebootAfterPackages"
+                                         Label="Prefer reboot after this apply when Linux marks one as required" />
+                    </section>
+
+                    <section class="surface-card">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Pending packages</p>
+                                <h2>What will change</h2>
+                            </div>
+                            @if (hostSnapshot.LastRefreshedAtUtc is not null)
+                            {
+                                <span class="meta-text">Checked @hostSnapshot.LastRefreshedAtUtc.Value.ToLocalTime().ToString("g")</span>
+                            }
+                        </div>
+
+                        @if (hostSnapshot.Job.State == HostSystemUpdateJobState.Refreshing)
+                        {
+                            <div class="updates-empty">
+                                <strong>Checking the current package state…</strong>
+                                <span>The previous package list was cleared. LMS is rebuilding it from APT now.</span>
+                            </div>
+                        }
+                        else if (hostSnapshot.Packages.Count == 0)
+                        {
+                            <div class="updates-empty">
+                                <strong>Nothing pending</strong>
+                                <span>Package metadata looks current. Refresh after adding repos or waiting for new advisories.</span>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="updates-package-table" role="table">
+                                <div class="updates-package-head" role="row">
+                                    <span role="columnheader">Package</span>
+                                    <span role="columnheader">Installed</span>
+                                    <span role="columnheader">Available</span>
+                                    <span role="columnheader">Channel</span>
+                                </div>
+                                @foreach (var package in hostSnapshot.Packages)
+                                {
+                                    <div class="updates-package-row" role="row">
+                                        <span role="cell">
+                                            <strong>@package.Name</strong>
+                                            @if (package.IsSecurity)
+                                            {
+                                                <UiPill Tone="UiPillTone.Warning">Security</UiPill>
+                                            }
+                                        </span>
+                                        <span role="cell">@package.CurrentVersion</span>
+                                        <span role="cell">@package.CandidateVersion</span>
+                                        <span role="cell">@package.Suite</span>
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </section>
+
+                    <section class="surface-card">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Activity</p>
+                                <h2>Host update log</h2>
+                            </div>
+                        </div>
+                        @if (hostSnapshot.Job.LogLines.Count == 0)
+                        {
+                            <p class="meta-text">No host update activity yet.</p>
+                        }
+                        else
+                        {
+                            <pre class="update-log">@string.Join(Environment.NewLine, hostSnapshot.Job.LogLines)</pre>
+                        }
+                    </section>
+
+                        </TabPage>
+                        <TabPage Value="vulnerabilities" Title="Vulnerabilities">
+                            <VulnerabilitiesPanel AiAvailable="@HasAiRepairProvider" AvailableUpdates="@hostSnapshot.Packages.GroupBy(p=>p.Name).ToDictionary(g=>g.Key,g=>g.First().CandidateVersion)" />
+                        </TabPage>
+                    </TabControl>
+                </ChildContent>
+            </TabPage>
+
+            <TabPage Value="upgrades" Title="Server Upgrades">
+                <Header>
+                    <span class="tab-trigger-title">Server Upgrades</span>
+                    @if (hostSnapshot.ReleaseUpgrade.IsAvailable)
+                    {
+                        <span class="updates-tab-badge">New distro</span>
+                    }
+                </Header>
+                <ChildContent>
+                    <div class="updates-upgrade-grid">
+                    <section class="surface-card updates-release-card @(hostSnapshot.ReleaseUpgrade.IsAvailable ? "is-available" : string.Empty)">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Ubuntu version upgrade</p>
+                                <h2>@hostSnapshot.ReleaseUpgrade.Summary</h2>
+                                <p class="meta-text">@hostSnapshot.ReleaseUpgrade.Detail</p>
+                            </div>
+                            <div class="updates-release-status">
+                                <UiPill Tone="@GetReleaseTone()">@GetReleaseLabel()</UiPill>
+                                @if (hostSnapshot.ReleaseUpgrade.LastCheckedAtUtc is not null)
+                                {
+                                    <span class="meta-text">Checked @hostSnapshot.ReleaseUpgrade.LastCheckedAtUtc.Value.ToLocalTime().ToString("g")</span>
+                                }
+                            </div>
+                        </div>
+
+                        <div class="update-metric-grid updates-release-metrics">
+                            <ServiceMetricComponent TagName="div" Label="Current OS" Value="@hostSnapshot.OperatingSystem.PrettyName" />
+                            <ServiceMetricComponent TagName="div" Label="Current version" Value="@(string.IsNullOrWhiteSpace(hostSnapshot.OperatingSystem.VersionId) ? "—" : hostSnapshot.OperatingSystem.VersionId)" />
+                            <ServiceMetricComponent TagName="div" Label="Upgrade track" Value="@GetReleaseChannelLabel()" />
+                            <ServiceMetricComponent TagName="div" Label="Next release" Value="@(hostSnapshot.ReleaseUpgrade.TargetRelease ?? (hostSnapshot.ReleaseUpgrade.LastCheckedAtUtc is null ? "Not checked" : "None"))" />
+                        </div>
+
+                        <div class="updates-action-row">
+                            <UiCommandButton Label="@(IsHostBusy ? "Checking…" : "Check Ubuntu release")"
+                                             Glyph="UiIconGlyph.Search"
+                                             Variant="UiButtonVariant.Ghost"
+                                             OnClick="CheckReleaseUpgradeAsync"
+                                             Disabled="@IsHostBusy" />
+                        </div>
+
+                        @if (IsUbuntu && hostSnapshot.ReleaseUpgrade.ToolAvailable)
+                        {
+                            <div class="updates-release-track">
+                                <div>
+                                    <strong>Choose which Ubuntu releases this server follows</strong>
+                                    <span>LTS only is recommended for servers. Every stable release includes the six-month interim versions.</span>
+                                </div>
+                                <div class="updates-action-row">
+                                    <UiCommandButton Label="Use LTS releases"
+                                                     Glyph="UiIconGlyph.Lock"
+                                                     Variant="UiButtonVariant.PrimaryMuted"
+                                                     OnClick="(() => SetReleaseUpgradeChannelAsync(HostReleaseUpgradeChannel.LtsOnly))"
+                                                     Disabled="@(IsHostBusy || IsLtsReleaseChannel)" />
+                                    <UiCommandButton Label="Use every stable release"
+                                                     Glyph="UiIconGlyph.Refresh"
+                                                     Variant="UiButtonVariant.Ghost"
+                                                     OnClick="(() => SetReleaseUpgradeChannelAsync(HostReleaseUpgradeChannel.AllStableReleases))"
+                                                     Disabled="@(IsHostBusy || IsNormalReleaseChannel)" />
+                                </div>
+                            </div>
+                        }
+
+                        @if (hostSnapshot.ReleaseUpgrade.CheckState == HostReleaseUpgradeCheckState.Disabled)
+                        {
+                            <div class="updates-release-warning">
+                                <strong>Release checks are switched off on this server.</strong>
+                                <span>Select <strong>Use LTS releases</strong> above. LMS will update Ubuntu's setting and immediately check for the next supported LTS.</span>
+                            </div>
+                        }
+                        else if (hostSnapshot.ReleaseUpgrade.CheckState == HostReleaseUpgradeCheckState.NoRelease)
+                        {
+                            <div class="updates-empty">
+                                <strong>Ubuntu did not offer an upgrade on this track.</strong>
+                                <span>Ubuntu's live feed does not list a newer release on the selected track. The exact release-upgrader output is available below.</span>
+                            </div>
+                        }
+                        else if (hostSnapshot.ReleaseUpgrade.CheckState == HostReleaseUpgradeCheckState.PublishedButUpgradeClosed)
+                        {
+                            <div class="updates-release-warning">
+                                <strong>Why the newer Ubuntu exists but cannot be selected yet</strong>
+                                <span>Ubuntu can publish installation media before enabling its supported in-place LTS upgrade path. The live LTS feed currently says <code>Supported=0</code> for this next step.</span>
+                                <span>Changing to every stable release does not make this LTS upgrade path supported; it changes which Ubuntu release feed the server follows.</span>
+                                <span>Ubuntu's normal release feed may already offer the published release. LMS can switch to that feed, check again immediately, and show the guided upgrade if Ubuntu accepts the path.</span>
+                                <div class="updates-action-row">
+                                    <UiCommandButton Label="@GetAlternateReleaseFeedLabel()"
+                                                     Glyph="UiIconGlyph.Refresh"
+                                                     Variant="UiButtonVariant.PrimaryMuted"
+                                                     OnClick="(() => SetReleaseUpgradeChannelAsync(HostReleaseUpgradeChannel.AllStableReleases))"
+                                                     Disabled="@IsHostBusy" />
+                                </div>
+                            </div>
+                        }
+                        else if (hostSnapshot.ReleaseUpgrade.CheckState == HostReleaseUpgradeCheckState.TemporarilyUnavailable)
+                        {
+                            <div class="updates-release-warning">
+                                <strong>The supported upgrade path is temporarily paused.</strong>
+                                <span>Retry later. LMS will not force a development release or bypass Canonical's rollout hold.</span>
+                            </div>
+                        }
+                        else if (hostSnapshot.ReleaseUpgrade.CheckState == HostReleaseUpgradeCheckState.ToolMissing)
+                        {
+                            <div class="updates-recovery-block">
+                                <strong>Install Ubuntu's release upgrader</strong>
+                                <code>@InstallReleaseUpgraderCommand</code>
+                                <div class="updates-action-row">
+                                    <UiCommandButton Label="Copy install command" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Ghost" OnClick='@(() => CopyReleaseCommandAsync(InstallReleaseUpgraderCommand, "Install command copied."))' />
+                                    <UiCommandButton Label="Open Terminal" Glyph="UiIconGlyph.Terminal" Variant="UiButtonVariant.PrimaryMuted" Href="@LocalTerminalHref" />
+                                </div>
+                            </div>
+                        }
+                        else if (hostSnapshot.ReleaseUpgrade.CheckState == HostReleaseUpgradeCheckState.Failed)
+                        {
+                            <div class="updates-recovery-block">
+                                <strong>Run the same check in Terminal</strong>
+                                <span>The exact output is below. Retry here first; if it fails again, copy the diagnostic command and run it in LMS Terminal.</span>
+                                <code>@ReleaseCheckCommand</code>
+                                <div class="updates-action-row">
+                                    <UiCommandButton Label="Retry check" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.PrimaryMuted" OnClick="CheckReleaseUpgradeAsync" Disabled="@IsHostBusy" />
+                                    <UiCommandButton Label="Copy diagnostic command" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Ghost" OnClick='@(() => CopyReleaseCommandAsync(ReleaseCheckCommand, "Diagnostic command copied."))' />
+                                    <UiCommandButton Label="Open Terminal" Glyph="UiIconGlyph.Terminal" Variant="UiButtonVariant.Ghost" Href="@LocalTerminalHref" />
+                                </div>
+                            </div>
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(hostSnapshot.ReleaseUpgrade.Diagnostic) &&
+                             hostSnapshot.ReleaseUpgrade.CheckState is HostReleaseUpgradeCheckState.Failed or HostReleaseUpgradeCheckState.TemporarilyUnavailable or HostReleaseUpgradeCheckState.PublishedButUpgradeClosed or HostReleaseUpgradeCheckState.NoRelease)
+                        {
+                            <details class="updates-release-diagnostic">
+                                <summary>Exact release-check output</summary>
+                                <pre class="update-log">@hostSnapshot.ReleaseUpgrade.Diagnostic</pre>
+                            </details>
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(releaseActionMessage))
+                        {
+                            <p class="meta-text">@releaseActionMessage</p>
+                        }
+                    </section>
+
+                    @if (hostSnapshot.ReleaseUpgrade.IsAvailable)
+                    {
+                        <section class="surface-card updates-release-workflow">
+                            <div class="table-header">
+                                <div>
+                                    <p class="eyebrow">Guided upgrade</p>
+                                    <h2>Upgrade @hostSnapshot.OperatingSystem.VersionId → @hostSnapshot.ReleaseUpgrade.TargetRelease</h2>
+                                    <p class="meta-text">Ubuntu release upgrades are interactive. LMS opens its own Terminal so you can see package removals and answer configuration prompts instead of running a hidden background job.</p>
+                                    @if (IsNormalReleaseChannel && (hostSnapshot.ReleaseUpgrade.TargetRelease?.Contains("LTS", StringComparison.OrdinalIgnoreCase) ?? false))
+                                    {
+                                        <p class="meta-text">This release was offered through Ubuntu's normal feed. After the OS upgrade completes, return here and select <strong>Use LTS releases</strong> to put this server back on the LTS-only track.</p>
+                                    }
+                                </div>
+                            </div>
+
+                            <ol class="updates-release-steps">
+                                <li>
+                                    <div>
+                                        <strong>Bring the current release fully up to date</strong>
+                                        @if (hostSnapshot.LastRefreshedAtUtc is null)
+                                        {
+                                            <span>Package readiness has not been checked yet.</span>
+                                        }
+                                        else if (hostSnapshot.UpgradeableCount > 0)
+                                        {
+                                            <span>@hostSnapshot.UpgradeableCount package update(s) must be installed first.</span>
+                                        }
+                                        else if (hostSnapshot.RebootRequired)
+                                        {
+                                            <span>Packages are current, but Ubuntu requires a reboot before the release upgrade.</span>
+                                        }
+                                        else
+                                        {
+                                            <span>Packages are current and no reboot is pending.</span>
+                                        }
+                                    </div>
+                                    <div class="updates-action-row">
+                                        @if (hostSnapshot.LastRefreshedAtUtc is null)
+                                        {
+                                            <UiCommandButton Label="Check package readiness" Glyph="UiIconGlyph.Search" Variant="UiButtonVariant.PrimaryMuted" OnClick="RefreshHostAsync" Disabled="@IsHostBusy" />
+                                        }
+                                        else if (hostSnapshot.UpgradeableCount > 0)
+                                        {
+                                            <UiCommandButton Label="Install all package updates" Glyph="UiIconGlyph.Download" Variant="UiButtonVariant.PrimaryMuted" OnClick="(() => ApplyPackagesAsync(HostPackageUpdateMode.AllPackages, false))" Disabled="@IsHostBusy" />
+                                        }
+                                        else if (hostSnapshot.RebootRequired)
+                                        {
+                                            <UiCommandButton Label="Reboot now" Glyph="UiIconGlyph.Restart" Variant="UiButtonVariant.PrimaryMuted" OnClick="RebootHostAsync" Disabled="@IsHostBusy" />
+                                        }
+                                        else
+                                        {
+                                            <UiPill Tone="UiPillTone.Success">Ready</UiPill>
+                                        }
+                                    </div>
+                                </li>
+                                <li>
+                                    <div>
+                                        <strong>Confirm a usable backup or snapshot</strong>
+                                        <span>The upgrade changes the OS and can interrupt LMS and SSH until the server reboots.</span>
+                                    </div>
+                                    <UiCheckboxField @bind-Value="releaseAcknowledged" Label="I have a backup / snapshot and a maintenance window" />
+                                </li>
+                                <li>
+                                    <div>
+                                        <strong>Run Ubuntu's interactive upgrader</strong>
+                                        <span>Open LMS Terminal, paste the command, review Ubuntu's package summary, and answer its prompts.</span>
+                                        <code>@UpgradeCommand</code>
+                                    </div>
+                                    <div class="updates-action-row">
+                                        <UiCommandButton Label="Copy upgrade command" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Ghost" OnClick='@(() => CopyReleaseCommandAsync(UpgradeCommand, "Upgrade command copied."))' Disabled="@(!CanOpenReleaseUpgradeTerminal)" />
+                                        <UiCommandButton Label="Open upgrade terminal" Glyph="UiIconGlyph.Terminal" Variant="UiButtonVariant.Primary" Href="@(CanOpenReleaseUpgradeTerminal ? LocalTerminalHref : null)" Disabled="@(!CanOpenReleaseUpgradeTerminal)" />
+                                    </div>
+                                </li>
+                            </ol>
+                        </section>
+                    }
+
+                    <section class="surface-card updates-upgrade-card">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Packages only — does not change Ubuntu version</p>
+                                <h2>Resolve package dependency changes</h2>
+                                <p class="meta-text"><code>apt-get dist-upgrade</code> updates packages inside the current Ubuntu release. Use the Ubuntu version upgrade workflow above to move this server to a new Ubuntu release.</p>
+                            </div>
+                            <UiPill Tone="@(hostSnapshot.UpgradeableCount > 0 ? UiPillTone.Warning : UiPillTone.Success)">@(hostSnapshot.UpgradeableCount > 0 ? $"{hostSnapshot.UpgradeableCount} pending" : "Current")</UiPill>
+                        </div>
+                        <div class="updates-action-row">
+                            <UiCommandButton Label="Run package dist-upgrade" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.PrimaryMuted" OnClick="(() => ApplyPackagesAsync(HostPackageUpdateMode.DistUpgrade, rebootAfterUpgrade))" Disabled="@IsHostBusy" />
+                        </div>
+                        <UiCheckboxField @bind-Value="rebootAfterUpgrade" Label="Reboot if required afterwards" />
+                    </section>
+                    </div>
+                </ChildContent>
+            </TabPage>
+
+            <TabPage Value="schedule" Title="Schedule">
+                <ChildContent>
+                    <section class="surface-card">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Automatic maintenance</p>
+                                <h2>Nightly host updates</h2>
+                                <p class="meta-text">LMS can apply package updates on a daily schedule and reboot only when Linux says it must.</p>
+                            </div>
+                            <UiPill Tone="@(scheduleEditor.Enabled ? UiPillTone.Success : UiPillTone.Neutral)">
+                                @(scheduleEditor.Enabled ? "Enabled" : "Off")
+                            </UiPill>
+                        </div>
+
+                        <div class="updates-schedule-grid">
+                            <UiCheckboxField @bind-Value="scheduleEditor.Enabled" Label="Enable daily auto-updates" />
+                            <UiCheckboxField @bind-Value="scheduleEditor.ApplyPackageUpdates" Label="Apply package updates" Helper="Runs APT at the scheduled local time." />
+                            <UiCheckboxField @bind-Value="scheduleEditor.SecurityOnly" Label="Security packages only" Helper="Skip non-security upgrades." />
+                            <UiCheckboxField @bind-Value="scheduleEditor.UseDistUpgrade" Label="Use dist-upgrade" Helper="Allows dependency changes; overrides security-only." />
+                            <UiCheckboxField @bind-Value="scheduleEditor.RebootIfRequired" Label="Reboot if required" Helper="Only reboots when /var/run/reboot-required is present after a successful run." />
+                        </div>
+
+                        <div class="updates-schedule-time">
+                            <UiNumberField TValue="int" @bind-Value="scheduleEditor.HourLocal" Label="Hour (local)" AdditionalAttributes="@HourAttributes" />
+                            <UiNumberField TValue="int" @bind-Value="scheduleEditor.MinuteLocal" Label="Minute" AdditionalAttributes="@MinuteAttributes" />
+                        </div>
+
+                        <div class="updates-action-row">
+                            <UiCommandButton Label="@(isSavingSchedule ? "Saving…" : "Save schedule")"
+                                             Glyph="UiIconGlyph.Save"
+                                             Variant="UiButtonVariant.PrimaryMuted"
+                                             OnClick="SaveScheduleAsync"
+                                             Disabled="@isSavingSchedule" />
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(scheduleMessage))
+                        {
+                            <p class="meta-text">@scheduleMessage</p>
+                        }
+
+                        <div class="token-row compact-token-row">
+                            @if (scheduleEditor.LastRunAtUtc is not null)
+                            {
+                                <span class="status-pill neutral">Last run @scheduleEditor.LastRunAtUtc.Value.ToLocalTime().ToString("g")</span>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(scheduleEditor.LastRunSummary))
+                            {
+                                <span class="status-pill neutral">@scheduleEditor.LastRunSummary</span>
+                            }
+                        </div>
+                    </section>
+
+                    <section class="surface-card updates-tips-card">
+                        <div class="table-header">
+                            <div>
+                                <p class="eyebrow">Why this exists</p>
+                                <h2>Make Linux updates boring</h2>
+                            </div>
+                        </div>
+                        <ul class="updates-tips">
+                            <li>See pending packages with clear security markers before anything runs.</li>
+                            <li>Apply updates from the UI with non-interactive APT defaults.</li>
+                            <li>Schedule quiet maintenance and only reboot when the kernel actually needs it.</li>
+                            <li>Keep LMS self-updates on the Server Updates tab, separate from OS packages.</li>
+                        </ul>
+                    </section>
+                </ChildContent>
+            </TabPage>
+        </ChildContent>
+    </TabControl>
+</div>
+
+<UiModal IsOpen="@isUpdateDialogOpen"
+         Title="@(updateRestartExpected ? "LMS update in progress" : "Installing LMS update")"
+         Subtitle="Keep this page open while Linux Made Sane applies the update."
+         Class="updates-install-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseUpdateDialogAsync">
+    <ChildContent>
+        <div class="updates-install-dialog" aria-live="polite">
+            @if (updateCountdownSeconds > 0)
+            {
+                <div class="updates-install-countdown" data-lms-update-countdown>
+                    <span class="updates-eyebrow">Restarting shortly</span>
+                    <strong data-lms-update-countdown-value>@updateCountdownSeconds</strong>
+                    <span>seconds</span>
+                </div>
+                <p>@updateDialogMessage</p>
+                <div class="update-progress-shell" aria-label="LMS restart countdown">
+                    <div class="update-progress-bar" data-lms-update-countdown-bar style="@($"width: {UpdateCountdownProgressPercent}%;")"></div>
+                </div>
+            }
+            else
+            {
+                <div class="updates-install-status">
+                    <UiPill Tone="@(updateRestartExpected ? UiPillTone.Warning : GetLmsStateTone())">
+                        @(updateRestartExpected ? "Restart pending" : GetLmsStateLabel())
+                    </UiPill>
+                    <strong>@updateDialogMessage</strong>
+                    <span>@lmsStatus.Detail</span>
+                </div>
+            }
+        </div>
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Close"
+                         Variant="UiButtonVariant.Ghost"
+                         OnClick="CloseUpdateDialogAsync"
+                         Disabled="@(updateCountdownSeconds > 0 || IsLmsBusy)" />
+    </Footer>
+</UiModal>
+
+<UpdateAiRepairDialog IsOpen="@isAiRepairOpen"
+                      FailureSummary="@hostSnapshot.Job.Summary"
+                      FailureLog="@hostSnapshot.Job.LogLines"
+                      PendingPackages="@hostSnapshot.Packages"
+                      NeedsAttention="@hostSnapshot.Job.NeedsAttention"
+                      OnClose="CloseAiRepairAsync" />
+
+@code {
+    private string? packageView="packages";
+
+    private static readonly Dictionary<string, object> HourAttributes = new() { ["min"] = 0, ["max"] = 23 };
+    private static readonly Dictionary<string, object> MinuteAttributes = new() { ["min"] = 0, ["max"] = 59 };
+    private const string UpgradeCommand = "sudo do-release-upgrade";
+    private const string ReleaseCheckCommand = "sudo do-release-upgrade -c";
+    private const string InstallReleaseUpgraderCommand = "sudo apt-get update && sudo apt-get install ubuntu-release-upgrader-core";
+
+    private string activeTab = "server";
+    private ApplicationUpdateStatus lmsStatus = null!;
+    private string selectedReleaseChannel = "stable";
+    private string? channelMessage;
+    private HostSystemUpdateSnapshot hostSnapshot = null!;
+    private ScheduleEditorModel scheduleEditor = new();
+    private CancellationTokenSource? pollingCancellationTokenSource;
+    private Task pollingTask = Task.CompletedTask;
+    private bool disposed;
+    private bool rebootAfterPackages;
+    private bool rebootAfterUpgrade;
+    private bool releaseAcknowledged;
+    private bool isSavingSchedule;
+    private bool isAiRepairOpen;
+    private bool isUpdateDialogOpen;
+    private bool updateRestartExpected;
+    private bool updateCountdownClientStarted;
+    private IJSObjectReference? updateCountdownModule;
+    private int updateCountdownSeconds;
+    private const int UpdateCountdownStartSeconds = 30;
+    private string updateDialogMessage = string.Empty;
+    private string aiRepairProviderLabel = string.Empty;
+    private string? scheduleMessage;
+    private string? releaseActionMessage;
+
+    private bool IsLmsBusy =>
+        lmsStatus.State is ApplicationUpdateState.Checking or ApplicationUpdateState.Installing;
+
+    private bool IsHostBusy =>
+        hostSnapshot.ReleaseUpgrade.IsChecking ||
+        hostSnapshot.Job.State is HostSystemUpdateJobState.Refreshing or HostSystemUpdateJobState.Applying;
+
+    private bool CanInstallLms =>
+        !IsLmsBusy &&
+        (lmsStatus.IsUpdateAvailable || lmsStatus.State is ApplicationUpdateState.Failed or ApplicationUpdateState.Idle);
+
+    private int LmsProgressPercent => Math.Clamp(lmsStatus.ProgressPercent, 0, 100);
+    private int UpdateCountdownProgressPercent =>
+        Math.Clamp((UpdateCountdownStartSeconds - updateCountdownSeconds) * 100 / UpdateCountdownStartSeconds, 0, 100);
+    private int HostProgressPercent => Math.Clamp(hostSnapshot.Job.ProgressPercent, 0, 100);
+    private bool HasAiRepairProvider => !string.IsNullOrWhiteSpace(aiRepairProviderLabel);
+    private static string LocalTerminalHref => $"/hosts/{AiLocalMachine.ManagedHostId}/terminal";
+    private bool IsUbuntu => hostSnapshot.OperatingSystem.Id.Equals("ubuntu", StringComparison.OrdinalIgnoreCase);
+    private bool IsLtsReleaseChannel => hostSnapshot.ReleaseUpgrade.UpgradeChannel.Equals("lts", StringComparison.OrdinalIgnoreCase);
+    private bool IsNormalReleaseChannel => hostSnapshot.ReleaseUpgrade.UpgradeChannel.Equals("normal", StringComparison.OrdinalIgnoreCase);
+    private bool CanOpenReleaseUpgradeTerminal =>
+        !IsHostBusy &&
+        releaseAcknowledged &&
+        hostSnapshot.LastRefreshedAtUtc is not null &&
+        hostSnapshot.UpgradeableCount == 0 &&
+        !hostSnapshot.RebootRequired;
+
+    protected override async Task OnInitializedAsync()
+    {
+        lmsStatus = LmsUpdateService.GetStatus();
+        selectedReleaseChannel = lmsStatus.Channel;
+        hostSnapshot = HostUpdateService.GetSnapshot();
+        scheduleEditor = ScheduleEditorModel.From(hostSnapshot.Schedule);
+        pollingCancellationTokenSource = new CancellationTokenSource();
+        pollingTask = PollStatusAsync(pollingCancellationTokenSource.Token);
+        await LoadAiRepairAvailabilityAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (isUpdateDialogOpen && updateCountdownSeconds > 0 && !updateCountdownClientStarted)
+        {
+            try
+            {
+                updateCountdownModule ??= await Js.InvokeAsync<IJSObjectReference>(
+                    "import",
+                    "./Components/Pages/ApplicationUpdates.razor.js");
+                await updateCountdownModule.InvokeVoidAsync("startCountdown", UpdateCountdownStartSeconds);
+                updateCountdownClientStarted = true;
+            }
+            catch (JSDisconnectedException)
+            {
+                // The service may be restarting; the reconnect page will take over.
+            }
+        }
+
+        if (!firstRender)
+        {
+            return;
+        }
+
+        await LmsUpdateService.CheckForUpdatesAsync(CancellationToken.None);
+        if (!disposed)
+        {
+            RefreshLmsStatus();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+        if (pollingCancellationTokenSource is null)
+        {
+            return;
+        }
+
+        await pollingCancellationTokenSource.CancelAsync();
+        await pollingTask;
+        pollingCancellationTokenSource.Dispose();
+        if (updateCountdownModule is not null)
+        {
+            await updateCountdownModule.DisposeAsync();
+        }
+    }
+
+    private Task ChangeTabAsync(string value)
+    {
+        activeTab = value;
+        if (value == "upgrades" &&
+            hostSnapshot.ReleaseUpgrade.LastCheckedAtUtc is null &&
+            !IsHostBusy)
+        {
+            _ = HostUpdateService.CheckReleaseUpgradeAsync(CancellationToken.None);
+        }
+        else if ((value is "packages" or "schedule") &&
+            hostSnapshot.LastRefreshedAtUtc is null &&
+            !IsHostBusy)
+        {
+            _ = HostUpdateService.RefreshAsync(refreshMetadata: true, CancellationToken.None);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task OpenUpgradesTabAsync()
+    {
+        activeTab = "upgrades";
+        if (hostSnapshot.ReleaseUpgrade.LastCheckedAtUtc is null && !IsHostBusy)
+        {
+            _ = HostUpdateService.CheckReleaseUpgradeAsync(CancellationToken.None);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveReleaseChannelAsync()
+    {
+        try
+        {
+            lmsStatus = await LmsUpdateService.SelectChannelAsync(selectedReleaseChannel);
+            channelMessage = $"{lmsStatus.Channel} updates selected and saved. The installed version has not changed.";
+        }
+        catch (Exception ex) { channelMessage = ex.Message; selectedReleaseChannel = LmsUpdateService.GetStatus().Channel; }
+    }
+
+    private async Task CheckLmsAsync()
+    {
+        await LmsUpdateService.CheckForUpdatesAsync(CancellationToken.None);
+        RefreshLmsStatus();
+    }
+
+    private async Task InstallLmsAsync()
+    {
+        if (!CanInstallLms)
+        {
+            return;
+        }
+
+        isUpdateDialogOpen = true;
+        updateRestartExpected = false;
+        updateCountdownSeconds = 0;
+        updateCountdownClientStarted = false;
+        updateDialogMessage = "Preparing the LMS update…";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var result = await LmsUpdateService.InstallLatestAsync(CancellationToken.None);
+            lmsStatus = result;
+
+            if (result.State == ApplicationUpdateState.Installing &&
+                result.Detail.Contains("outside the LMS web process", StringComparison.OrdinalIgnoreCase))
+            {
+                updateRestartExpected = true;
+                updateCountdownSeconds = UpdateCountdownStartSeconds;
+                updateCountdownClientStarted = false;
+                updateDialogMessage = "The update has been handed to the system updater. LMS will restart automatically.";
+                await InvokeAsync(StateHasChanged);
+                await RunUpdateCountdownAsync();
+            }
+            else
+            {
+                updateDialogMessage = result.State switch
+                {
+                    ApplicationUpdateState.Completed => "The LMS update completed successfully.",
+                    ApplicationUpdateState.Failed => "The LMS update failed. Review the updater log below.",
+                    ApplicationUpdateState.UpToDate => "LMS is already up to date.",
+                    _ => result.Summary
+                };
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            updateDialogMessage = "The LMS update was cancelled.";
+            RefreshLmsStatus();
+        }
+        catch (Exception ex)
+        {
+            updateDialogMessage = $"The LMS update failed: {ex.Message}";
+            RefreshLmsStatus();
+        }
+    }
+
+    private async Task RunUpdateCountdownAsync()
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(UpdateCountdownStartSeconds));
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (disposed)
+        {
+            return;
+        }
+
+        updateCountdownSeconds = 0;
+        updateDialogMessage = "LMS is restarting to finish the update. This page will reconnect when it is ready.";
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private Task CloseUpdateDialogAsync()
+    {
+        if (updateCountdownSeconds > 0 || IsLmsBusy)
+        {
+            return Task.CompletedTask;
+        }
+
+        isUpdateDialogOpen = false;
+        return Task.CompletedTask;
+    }
+
+    private Task RefreshHostAsync()
+    {
+        _ = HostUpdateService.RefreshAsync(refreshMetadata: true, CancellationToken.None);
+        RefreshHostStatus();
+        return Task.CompletedTask;
+    }
+
+    private Task CheckReleaseUpgradeAsync()
+    {
+        releaseActionMessage = null;
+        _ = HostUpdateService.CheckReleaseUpgradeAsync(CancellationToken.None);
+        RefreshHostStatus();
+        return Task.CompletedTask;
+    }
+
+    private Task SetReleaseUpgradeChannelAsync(HostReleaseUpgradeChannel channel)
+    {
+        releaseActionMessage = null;
+        _ = HostUpdateService.SetReleaseUpgradeChannelAsync(channel, CancellationToken.None);
+        RefreshHostStatus();
+        return Task.CompletedTask;
+    }
+
+    private Task ApplyPackagesAsync(HostPackageUpdateMode mode, bool rebootIfRequired)
+    {
+        var shouldReboot = rebootIfRequired || (mode != HostPackageUpdateMode.DistUpgrade && rebootAfterPackages);
+        _ = HostUpdateService.ApplyPackageUpdatesAsync(mode, shouldReboot, CancellationToken.None);
+        RefreshHostStatus();
+        return Task.CompletedTask;
+    }
+
+    private Task RepairAptAsync()
+    {
+        _ = HostUpdateService.RepairAptAsync(CancellationToken.None);
+        RefreshHostStatus();
+        return Task.CompletedTask;
+    }
+
+    private Task OpenAiRepairAsync()
+    {
+        if (HasAiRepairProvider)
+        {
+            isAiRepairOpen = true;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task CloseAiRepairAsync()
+    {
+        isAiRepairOpen = false;
+        _ = HostUpdateService.RefreshAsync(refreshMetadata: true, CancellationToken.None);
+        RefreshHostStatus();
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadAiRepairAvailabilityAsync()
+    {
+        try
+        {
+            var context = await AiThreadService.GetEditorAsync();
+            var runnableProviders = context.ConfiguredProviders
+                .Where(item =>
+                    item.IsEnabled &&
+                    context.SupportedProviders.FirstOrDefault(definition => definition.ProviderType == item.ProviderType)?.IsRuntimeImplemented != false)
+                .ToArray();
+            var provider = runnableProviders.FirstOrDefault(item =>
+                               item.ProviderKey.Equals(context.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                           ?? runnableProviders.FirstOrDefault(item => item.IsDefault)
+                           ?? runnableProviders.FirstOrDefault();
+            aiRepairProviderLabel = provider?.DisplayName ?? string.Empty;
+        }
+        catch
+        {
+            aiRepairProviderLabel = string.Empty;
+        }
+    }
+
+    private async Task CopyReleaseCommandAsync(string command, string successMessage)
+    {
+        var copied = await Js.InvokeAsync<bool>("lmsClipboard.writeText", command);
+        releaseActionMessage = copied
+            ? successMessage
+            : "Clipboard access was blocked. Select the command and copy it manually.";
+    }
+
+    private async Task RebootHostAsync()
+    {
+        try
+        {
+            await HostUpdateService.RebootAsync();
+        }
+        catch (Exception ex)
+        {
+            scheduleMessage = ex.Message;
+        }
+    }
+
+    private async Task SaveScheduleAsync()
+    {
+        isSavingSchedule = true;
+        scheduleMessage = null;
+        try
+        {
+            var saved = await HostUpdateService.SaveScheduleAsync(scheduleEditor.ToSettings());
+            scheduleEditor = ScheduleEditorModel.From(saved);
+            scheduleMessage = scheduleEditor.Enabled
+                ? $"Daily updates scheduled for {scheduleEditor.HourLocal:00}:{scheduleEditor.MinuteLocal:00} local time."
+                : "Automatic host updates are off.";
+            RefreshHostStatus();
+        }
+        catch (Exception ex)
+        {
+            scheduleMessage = ex.Message;
+        }
+        finally
+        {
+            isSavingSchedule = false;
+        }
+    }
+
+    private async Task PollStatusAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                await InvokeAsync(() =>
+                {
+                    if (disposed || cancellationToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    RefreshLmsStatus();
+                    RefreshHostStatus();
+                    StateHasChanged();
+                });
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+        }
+    }
+
+    private void RefreshLmsStatus() => lmsStatus = LmsUpdateService.GetStatus();
+
+    private void RefreshHostStatus()
+    {
+        hostSnapshot = HostUpdateService.GetSnapshot();
+        if (!isSavingSchedule)
+        {
+            scheduleEditor.SyncMetadata(hostSnapshot.Schedule);
+        }
+    }
+
+    private string GetLmsStateLabel() => lmsStatus.State switch
+    {
+        ApplicationUpdateState.Checking => "Checking",
+        ApplicationUpdateState.UpToDate => "Current",
+        ApplicationUpdateState.UpdateAvailable => "Update available",
+        ApplicationUpdateState.Installing => "Installing",
+        ApplicationUpdateState.Completed => "Installed",
+        ApplicationUpdateState.Failed => "Failed",
+        _ => "Not checked"
+    };
+
+    private UiPillTone GetLmsStateTone() => lmsStatus.State switch
+    {
+        ApplicationUpdateState.UpToDate or ApplicationUpdateState.Completed => UiPillTone.Success,
+        ApplicationUpdateState.UpdateAvailable or ApplicationUpdateState.Checking or ApplicationUpdateState.Installing => UiPillTone.Warning,
+        ApplicationUpdateState.Failed => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+
+    private string GetReleaseLabel() => hostSnapshot.ReleaseUpgrade.CheckState switch
+    {
+        HostReleaseUpgradeCheckState.Available => "Upgrade available",
+        HostReleaseUpgradeCheckState.NoRelease => "Checked",
+        HostReleaseUpgradeCheckState.Disabled => "Checks disabled",
+        HostReleaseUpgradeCheckState.TemporarilyUnavailable => "Rollout paused",
+        HostReleaseUpgradeCheckState.PublishedButUpgradeClosed => "Upgrade not open",
+        HostReleaseUpgradeCheckState.Failed => "Check needs attention",
+        HostReleaseUpgradeCheckState.ToolMissing => "Tool missing",
+        _ => "Not checked"
+    };
+
+    private UiPillTone GetReleaseTone() => hostSnapshot.ReleaseUpgrade.CheckState switch
+    {
+        HostReleaseUpgradeCheckState.Available or
+        HostReleaseUpgradeCheckState.Disabled or
+        HostReleaseUpgradeCheckState.TemporarilyUnavailable or
+        HostReleaseUpgradeCheckState.PublishedButUpgradeClosed => UiPillTone.Warning,
+        HostReleaseUpgradeCheckState.NoRelease => UiPillTone.Success,
+        HostReleaseUpgradeCheckState.Failed => UiPillTone.Failure,
+        _ => UiPillTone.Neutral
+    };
+
+    private string GetReleaseChannelLabel() => hostSnapshot.ReleaseUpgrade.UpgradeChannel.ToLowerInvariant() switch
+    {
+        "lts" => "LTS releases",
+        "normal" => "Every stable release",
+        "never" => "Disabled",
+        _ => "Unknown"
+    };
+
+    private string GetAlternateReleaseFeedLabel() =>
+        string.IsNullOrWhiteSpace(hostSnapshot.ReleaseUpgrade.TargetRelease)
+            ? "Try Ubuntu's normal release feed"
+            : $"Try {hostSnapshot.ReleaseUpgrade.TargetRelease} through the normal feed";
+
+    private sealed class ScheduleEditorModel
+    {
+        public bool Enabled { get; set; }
+        public int HourLocal { get; set; } = 3;
+        public int MinuteLocal { get; set; }
+        public bool ApplyPackageUpdates { get; set; } = true;
+        public bool SecurityOnly { get; set; }
+        public bool UseDistUpgrade { get; set; }
+        public bool RebootIfRequired { get; set; }
+        public DateTimeOffset? LastRunAtUtc { get; set; }
+        public string? LastRunSummary { get; set; }
+        public string? LastRunDayKey { get; set; }
+        public DateTimeOffset UpdatedAtUtc { get; set; }
+
+        public static ScheduleEditorModel From(HostUpdateScheduleSettings settings) =>
+            new()
+            {
+                Enabled = settings.Enabled,
+                HourLocal = settings.HourLocal,
+                MinuteLocal = settings.MinuteLocal,
+                ApplyPackageUpdates = settings.ApplyPackageUpdates,
+                SecurityOnly = settings.SecurityOnly,
+                UseDistUpgrade = settings.UseDistUpgrade,
+                RebootIfRequired = settings.RebootIfRequired,
+                LastRunAtUtc = settings.LastRunAtUtc,
+                LastRunSummary = settings.LastRunSummary,
+                LastRunDayKey = settings.LastRunDayKey,
+                UpdatedAtUtc = settings.UpdatedAtUtc
+            };
+
+        public HostUpdateScheduleSettings ToSettings() =>
+            new(
+                Enabled,
+                HourLocal,
+                MinuteLocal,
+                ApplyPackageUpdates,
+                SecurityOnly,
+                UseDistUpgrade,
+                RebootIfRequired,
+                LastRunAtUtc,
+                LastRunSummary,
+                LastRunDayKey,
+                UpdatedAtUtc);
+
+        public void SyncMetadata(HostUpdateScheduleSettings settings)
+        {
+            LastRunAtUtc = settings.LastRunAtUtc;
+            LastRunSummary = settings.LastRunSummary;
+            LastRunDayKey = settings.LastRunDayKey;
+            UpdatedAtUtc = settings.UpdatedAtUtc;
+        }
+    }
+}

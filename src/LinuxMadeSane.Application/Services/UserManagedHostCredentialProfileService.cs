@@ -1,0 +1,260 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Application.Contracts;
+using LinuxMadeSane.Application.Interfaces;
+using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Models;
+
+namespace LinuxMadeSane.Application.Services;
+
+public sealed class UserManagedHostCredentialProfileService(
+    IUserManagedHostCredentialProfileStore store,
+    ISecretStore secretStore,
+    ISavedConnectionCredentialService? savedCredentials = null,
+    IManagedHostStore? hosts = null,
+    ISavedCredentialAccessContext? accessContext = null) : IUserManagedHostCredentialProfileService
+{
+    private async Task<Guid> GetSavedCredentialOwnerAsync(Guid profileOwner, CancellationToken token) =>
+        accessContext is null ? profileOwner :
+        await accessContext.GetAuthenticatedUserIdAsync(token) ?? throw new UnauthorizedAccessException("Credential access is not authorised.");
+
+    private static bool MatchesHost(SavedConnectionCredentialSummary credential, ManagedHost host) =>
+        (credential.Kind is ConnectionCredentialKind.Ssh or ConnectionCredentialKind.Sftp or ConnectionCredentialKind.SshKeyPair) &&
+        (credential.Kind == ConnectionCredentialKind.SshKeyPair && string.IsNullOrWhiteSpace(credential.Server) ||
+         credential.Server.TrimEnd('.').Equals(host.Hostname.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase) && credential.Port == host.Port);
+
+    private const int MaxNameLength = 80;
+    private const int MaxUsernameLength = 128;
+
+    public async Task<IReadOnlyList<UserManagedHostCredentialProfileSummary>> ListAsync(
+        Guid userId,
+        Guid managedHostId,
+        CancellationToken cancellationToken = default)
+    {
+        var profiles = await store.ListAsync(userId, managedHostId, cancellationToken);
+        var summaries = profiles.Select(MapSummary).ToList();
+        if (savedCredentials is not null && hosts is not null && await hosts.GetAsync(managedHostId, cancellationToken) is { } host)
+        {
+            try
+            {
+                var credentialOwner = await GetSavedCredentialOwnerAsync(userId, cancellationToken);
+                summaries.AddRange((await savedCredentials.ListAsync(credentialOwner, cancellationToken)).Where(x => MatchesHost(x, host))
+                    .Select(x => new UserManagedHostCredentialProfileSummary(x.Id, x.Name + " · credential store", string.IsNullOrWhiteSpace(x.Username) ? host.Username : x.Username, x.HasPassword, x.HasPrivateKey, x.HasPassphrase, x.UpdatedAtUtc)));
+            }
+            catch (UnauthorizedAccessException) { /* No authenticated store identity in this circuit. */ }
+        }
+        return summaries.ToArray();
+    }
+
+    public async Task<UserManagedHostCredentialProfileCredentials?> ResolveAsync(
+        Guid userId,
+        Guid managedHostId,
+        Guid profileId,
+        CancellationToken cancellationToken = default)
+    {
+        var profile = await store.GetAsync(profileId, cancellationToken);
+        if (profile is null)
+        {
+            if (savedCredentials is not null && hosts is not null && await hosts.GetAsync(managedHostId, cancellationToken) is { } host)
+            {
+                var credentialOwner = await GetSavedCredentialOwnerAsync(userId, cancellationToken);
+                var summary = (await savedCredentials.ListAsync(credentialOwner, cancellationToken)).FirstOrDefault(x => x.Id == profileId && MatchesHost(x, host));
+                if (summary is not null && await savedCredentials.ResolveAsync(credentialOwner, profileId, cancellationToken) is { } credential)
+                    return new(profileId, summary.Name, string.IsNullOrWhiteSpace(summary.Username) ? host.Username : summary.Username, credential.Password, credential.PrivateKey, credential.Passphrase);
+            }
+            return null;
+        }
+        if (profile.UserId != userId || profile.ManagedHostId != managedHostId) return null;
+
+        return new UserManagedHostCredentialProfileCredentials(
+            profile.Id,
+            profile.Name,
+            profile.Username,
+            await ResolveOptionalSecretAsync(profile.PasswordSecretReference, cancellationToken),
+            await ResolveOptionalSecretAsync(profile.PrivateKeySecretReference, cancellationToken),
+            await ResolveOptionalSecretAsync(profile.PrivateKeyPassphraseSecretReference, cancellationToken));
+    }
+
+    public async Task<UserManagedHostCredentialProfileSummary> SaveAsync(
+        UserManagedHostCredentialProfileEditor editor,
+        CancellationToken cancellationToken = default)
+    {
+        var name = NormalizeName(editor.Name, editor.Username);
+        var username = NormalizeUsername(editor.Username);
+        var existing = await ResolveExistingAsync(editor, name, cancellationToken);
+
+        var now = DateTimeOffset.UtcNow;
+        var profileId = existing?.Id ?? Guid.NewGuid();
+        var passwordReference = await UpdateSecretAsync(
+            existing?.PasswordSecretReference,
+            editor.Password,
+            editor.ClearStoredPassword,
+            $"SSH profile password {profileId:N}",
+            cancellationToken);
+        var privateKeyReference = await UpdateSecretAsync(
+            existing?.PrivateKeySecretReference,
+            editor.PrivateKey,
+            editor.ClearStoredPrivateKey,
+            $"SSH profile private key {profileId:N}",
+            cancellationToken);
+        var privateKeyPassphraseReference = await UpdateSecretAsync(
+            existing?.PrivateKeyPassphraseSecretReference,
+            editor.PrivateKeyPassphrase,
+            editor.ClearStoredPrivateKeyPassphrase,
+            $"SSH profile private key passphrase {profileId:N}",
+            cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(passwordReference) && string.IsNullOrWhiteSpace(privateKeyReference))
+        {
+            throw new InvalidOperationException("Save a password or private key for this connection profile.");
+        }
+
+        var profile = new UserManagedHostCredentialProfile(
+            profileId,
+            editor.UserId,
+            editor.ManagedHostId,
+            name,
+            username,
+            passwordReference,
+            privateKeyReference,
+            privateKeyPassphraseReference,
+            existing?.CreatedAtUtc ?? now,
+            now);
+
+        await store.SaveAsync(profile, cancellationToken);
+        return MapSummary(profile);
+    }
+
+    public async Task DeleteAsync(
+        Guid userId,
+        Guid managedHostId,
+        Guid profileId,
+        CancellationToken cancellationToken = default)
+    {
+        var profile = await store.GetAsync(profileId, cancellationToken);
+        if (profile is null)
+        {
+            if (savedCredentials is not null && (await savedCredentials.ListAsync(await GetSavedCredentialOwnerAsync(userId, cancellationToken), cancellationToken)).Any(x => x.Id == profileId))
+                throw new InvalidOperationException("Manage this saved credential in Security & Networking → Credentials.");
+            return;
+        }
+        if (profile.UserId != userId || profile.ManagedHostId != managedHostId) return;
+
+        await store.DeleteAsync(profile.Id, cancellationToken);
+        await DeleteSecretIfPresentAsync(profile.PasswordSecretReference, cancellationToken);
+        await DeleteSecretIfPresentAsync(profile.PrivateKeySecretReference, cancellationToken);
+        await DeleteSecretIfPresentAsync(profile.PrivateKeyPassphraseSecretReference, cancellationToken);
+    }
+
+    private async Task<UserManagedHostCredentialProfile?> ResolveExistingAsync(
+        UserManagedHostCredentialProfileEditor editor,
+        string normalizedName,
+        CancellationToken cancellationToken)
+    {
+        if (editor.Id.HasValue)
+        {
+            var existing = await store.GetAsync(editor.Id.Value, cancellationToken);
+            if (existing is null ||
+                existing.UserId != editor.UserId ||
+                existing.ManagedHostId != editor.ManagedHostId)
+            {
+                throw new InvalidOperationException("Credential profile not found.");
+            }
+
+            return existing;
+        }
+
+        return await store.FindByNameAsync(
+            editor.UserId,
+            editor.ManagedHostId,
+            normalizedName,
+            cancellationToken);
+    }
+
+    private async Task<string?> UpdateSecretAsync(
+        string? existingReference,
+        string value,
+        bool clearExisting,
+        string purpose,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            var newReference = await secretStore.StoreSecretAsync(value, purpose, cancellationToken);
+            await DeleteSecretIfPresentAsync(existingReference, cancellationToken);
+            return newReference;
+        }
+
+        if (clearExisting)
+        {
+            await DeleteSecretIfPresentAsync(existingReference, cancellationToken);
+            return null;
+        }
+
+        return existingReference;
+    }
+
+    private async Task<string> ResolveOptionalSecretAsync(
+        string? secretReference,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(secretReference))
+        {
+            return string.Empty;
+        }
+
+        var secret = await secretStore.ResolveSecretAsync(secretReference, cancellationToken);
+        if (string.IsNullOrEmpty(secret))
+        {
+            throw new InvalidOperationException(
+                "A saved connection credential is missing. Check that the LMS database and protection keys were preserved during the update.");
+        }
+
+        return secret;
+    }
+
+    private async Task DeleteSecretIfPresentAsync(
+        string? secretReference,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(secretReference))
+        {
+            await secretStore.DeleteSecretAsync(secretReference, cancellationToken);
+        }
+    }
+
+    private static UserManagedHostCredentialProfileSummary MapSummary(UserManagedHostCredentialProfile profile) =>
+        new(
+            profile.Id,
+            profile.Name,
+            profile.Username,
+            !string.IsNullOrWhiteSpace(profile.PasswordSecretReference),
+            !string.IsNullOrWhiteSpace(profile.PrivateKeySecretReference),
+            !string.IsNullOrWhiteSpace(profile.PrivateKeyPassphraseSecretReference),
+            profile.UpdatedAtUtc);
+
+    private static string NormalizeName(string name, string username)
+    {
+        var normalized = string.IsNullOrWhiteSpace(name)
+            ? username.Trim()
+            : name.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new InvalidOperationException("A profile name is required.");
+        }
+
+        return normalized.Length > MaxNameLength ? normalized[..MaxNameLength] : normalized;
+    }
+
+    private static string NormalizeUsername(string username)
+    {
+        var normalized = username.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new InvalidOperationException("A Linux username is required.");
+        }
+
+        return normalized.Length > MaxUsernameLength ? normalized[..MaxUsernameLength] : normalized;
+    }
+}

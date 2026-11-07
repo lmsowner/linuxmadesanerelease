@@ -1,0 +1,1827 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2026 LMS Developer. All rights reserved.
+# Applicable licence and release scope: see LICENSE.md for details.
+
+
+set -euo pipefail
+
+lms_repo_root() {
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  cd "$script_dir/../.." >/dev/null 2>&1 && pwd
+}
+
+lms_log() {
+  printf '[lms] %s\n' "$*"
+}
+
+lms_die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+lms_require_command() {
+  command -v "$1" >/dev/null 2>&1 || lms_die "required command not found: $1"
+}
+
+lms_release_source_commit() {
+  local repository_root="${1:-$(lms_repo_root)}"
+  git -C "$repository_root" rev-parse HEAD
+}
+
+lms_require_approved_licensing() {
+  local repository_root="${1:-$(lms_repo_root)}"
+  if [[ -f "$repository_root/LICENSE" ]] && grep -Fq 'LMS-LICENCE-DRAFT' "$repository_root/LICENSE"; then
+    lms_die "licensing is an unapproved legal-review draft; source export, packaging and publication are blocked"
+  fi
+  if [[ -f "$repository_root/LICENSE.md" ]] && grep -Fq 'LMS-LICENCE-DRAFT' "$repository_root/LICENSE.md"; then
+    lms_die "licensing is an unapproved legal-review draft; publication is blocked"
+  fi
+}
+
+lms_require_clean_pushed_release_source() {
+  local repository_root="${1:-$(lms_repo_root)}"
+  local remote="${RELEASE_GIT_REMOTE:-origin}"
+  local branch="${RELEASE_GIT_BRANCH:-}"
+  local head_commit
+  local remote_commit
+
+  lms_require_approved_licensing "$repository_root"
+  lms_require_command git
+  git -C "$repository_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    lms_die "release source is not a git working tree: $repository_root"
+
+  if [[ -n "$(git -C "$repository_root" status --porcelain --untracked-files=normal)" ]]; then
+    lms_die "release source has uncommitted or untracked files; commit and push the complete release first"
+  fi
+
+  head_commit="$(git -C "$repository_root" rev-parse HEAD)"
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD || true)"
+  fi
+  [[ -n "$branch" ]] ||
+    lms_die "release source is detached; set RELEASE_GIT_BRANCH to the remote branch containing $head_commit"
+
+  remote_commit="$(git -C "$repository_root" ls-remote --exit-code --heads "$remote" "refs/heads/$branch" | awk 'NR == 1 { print $1 }')" ||
+    lms_die "could not verify $remote/$branch before release"
+  [[ -n "$remote_commit" ]] || lms_die "remote branch was not found: $remote/$branch"
+  [[ "$head_commit" == "$remote_commit" ]] ||
+    lms_die "release commit $head_commit is not the current pushed commit on $remote/$branch ($remote_commit)"
+
+  lms_log "Verified clean pushed release source $head_commit on $remote/$branch"
+}
+
+lms_shell_quote() {
+  printf '%q' "$1"
+}
+
+lms_is_truthy() {
+  case "${1:-}" in
+    true|True|TRUE|1|yes|Yes|YES|on|On|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+lms_has_systemd() {
+  command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
+}
+
+lms_prepare_caddy_repository() (
+  # Fresh Ubuntu installations (including focal) may not offer Caddy at all.
+  # Bootstrap TLS/key tools without including Caddy in this first apt transaction.
+  lms_log "Preparing the official Caddy stable package repository"
+  DEBIAN_FRONTEND=noninteractive apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -- ca-certificates curl gnupg
+  local work
+  work="$(mktemp -d)"
+  trap 'rm -rf -- "$work"' EXIT
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 90 \
+    https://dl.cloudsmith.io/public/caddy/stable/gpg.key -o "$work/caddy.key"
+  gpg --batch --yes --dearmor -o "$work/caddy.gpg" "$work/caddy.key"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 90 \
+    https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt -o "$work/caddy-stable.list"
+  [[ -s "$work/caddy.gpg" && -s "$work/caddy-stable.list" ]] || \
+    lms_die "The official Caddy repository key or source list was empty; no host packages were changed beyond bootstrap tools"
+  install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d
+  install -m 0644 "$work/caddy.gpg" /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  install -m 0644 "$work/caddy-stable.list" /etc/apt/sources.list.d/caddy-stable.list
+)
+
+lms_install_host_packages() {
+  local packages=("$@")
+  [[ ${#packages[@]} -gt 0 ]] || return
+
+  case "${INSTALL_SYSTEM_PACKAGES:-true}" in
+    false|False|FALSE|0|no|No|NO|off|Off|OFF)
+      lms_log "Skipping host package install: ${packages[*]}"
+      return
+      ;;
+  esac
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    lms_log "Skipping host package install while staging under LMS_DEST_ROOT: ${packages[*]}"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    lms_log "Skipping host package install because the installer is not running as root: ${packages[*]}"
+    return
+  fi
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    lms_log "No supported package manager found. Install manually: ${packages[*]}"
+    return
+  fi
+
+  local missing=()
+  local package
+  if command -v dpkg-query >/dev/null 2>&1; then
+    for package in "${packages[@]}"; do
+      if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+        missing+=("$package")
+      fi
+    done
+  else
+    missing=("${packages[@]}")
+  fi
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    lms_log "Host packages already installed: ${packages[*]}"
+    return
+  fi
+
+  for package in "${missing[@]}"; do
+    if [[ "$package" == caddy ]]; then
+      lms_prepare_caddy_repository
+      break
+    fi
+  done
+
+  lms_log "Installing host packages: ${missing[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -- "${missing[@]}"
+}
+
+# Test the feature, not a version string: distro builds may backport it.
+lms_caddy_supports_source_binding() {
+  printf 'http://127.0.0.1:18088 {\n reverse_proxy 127.0.0.1:18089 {\n transport http {\n local_address 127.0.0.1\n }\n }\n}\n' |
+    "$1" adapt --config - --adapter caddyfile >/dev/null 2>&1
+}
+
+lms_lock_caddy_upgrade() {
+  install -d -m 0755 /run/linuxmadesane-caddy-upgrade
+  exec 9>/run/linuxmadesane-caddy-upgrade/lock
+  flock -w 120 9 || lms_die "Another Caddy dependency upgrade is running"
+}
+
+# Ubuntu still ships Caddy 2.6, which cannot bind an upstream source address.
+# Run on CE installs AND updates, before switching LMS. Keep package ownership;
+# never replace /usr/bin/caddy with an unmanaged downloaded executable.
+lms_ensure_caddy_source_binding() (
+  local config_directory="${1:-/etc/caddy}"
+  [[ -z "${LMS_DEST_ROOT:-}" ]] || exit 0
+  lms_is_truthy "${INSTALL_SYSTEM_PACKAGES:-true}" || exit 0
+  [[ "$(id -u)" == 0 ]] || exit 0
+  if command -v caddy >/dev/null 2>&1 && lms_caddy_supports_source_binding caddy; then
+    lms_log "Caddy supports On-Demand App source-address binding"
+    exit 0
+  fi
+
+  command -v apt-get >/dev/null 2>&1 ||
+    lms_die "Connect as LMS server requires Caddy with local_address support. Install a supported Caddy package for this distribution."
+  if command -v caddy >/dev/null 2>&1 && [[ "$(readlink -f "$(command -v caddy)")" != /usr/bin/caddy ]]; then
+    lms_die "A custom Caddy executable is in use; upgrade that installation to support local_address before updating LMS."
+  fi
+
+  lms_install_host_packages ca-certificates curl gnupg
+  local work candidate installed was_active=false
+  work="$(mktemp -d)"
+  trap 'rm -rf -- "$work"' EXIT
+  lms_lock_caddy_upgrade
+  lms_caddy_supports_source_binding caddy && exit 0
+
+  lms_log "Preparing a supported Caddy package from the official stable repository"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 90 \
+    https://dl.cloudsmith.io/public/caddy/stable/gpg.key -o "$work/caddy.key"
+  gpg --batch --yes --dearmor -o "$work/caddy.gpg" "$work/caddy.key"
+  install -m 0644 "$work/caddy.gpg" /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  printf '%s\n' 'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main' > "$work/caddy-stable.list"
+  install -m 0644 "$work/caddy-stable.list" /etc/apt/sources.list.d/caddy-stable.list
+  # An unrelated broken third-party repository must not block this repair.
+  mkdir "$work/empty-sources"
+  apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/caddy-stable.list \
+    -o Dir::Etc::sourceparts="$work/empty-sources" -o APT::Get::List-Cleanup=0 -o APT::Update::Error-Mode=any
+  candidate="$(apt-cache madison caddy | awk '/dl.cloudsmith.io\/public\/caddy\/stable/ {print $3; exit}')"
+  [[ -n "$candidate" ]] || lms_die "No Caddy package found in the official stable repository"
+  installed="$(dpkg-query -W -f='${Version}' caddy 2>/dev/null || true)"
+  if [[ -n "$installed" ]]; then
+    dpkg --compare-versions "$candidate" gt "$installed" ||
+      lms_die "The available Caddy package is not newer than the incompatible installed package"
+  fi
+
+  mkdir "$work/new" "$work/old"
+  (cd "$work/new" && apt-get download "caddy=$candidate")
+  local packages=("$work"/new/*.deb)
+  [[ ${#packages[@]} == 1 && -f "${packages[0]}" ]] || lms_die "Expected one verified Caddy package"
+  dpkg-deb -x "${packages[0]}" "$work/staged"
+  lms_caddy_supports_source_binding "$work/staged/usr/bin/caddy" ||
+    lms_die "Candidate Caddy still lacks source-address binding; the running Caddy was not changed"
+  if [[ -f "$config_directory/Caddyfile" ]]; then
+    lms_log "Validating existing Caddy routes with the new executable before upgrading"
+    "$work/staged/usr/bin/caddy" validate --config "$config_directory/Caddyfile" --adapter caddyfile ||
+      lms_die "New Caddy rejected the existing configuration; the running Caddy was not changed"
+    cp -a "$config_directory" "$work/config-backup"
+  fi
+  # Refuse to replace an existing package unless it can be restored locally.
+  if [[ -n "$installed" ]]; then
+    (cd "$work/old" && apt-get download "caddy=$installed") ||
+      lms_die "Could not retain the installed Caddy package for rollback; Caddy was not changed"
+  fi
+  if lms_has_systemd && systemctl is-active --quiet caddy.service; then
+    was_active=true
+  fi
+
+  lms_log "Installing Caddy $candidate, preserving /etc/caddy"
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confold "${packages[0]}" &&
+     lms_caddy_supports_source_binding caddy &&
+     { [[ "$was_active" != true ]] || { systemctl restart caddy.service && systemctl is-active --quiet caddy.service; }; }; then
+    lms_log "Caddy upgraded successfully; Connect as LMS server is supported"
+    exit 0
+  fi
+
+  lms_log "Caddy upgrade failed; restoring the previous package and configuration"
+  if [[ -n "$installed" ]]; then
+    DEBIAN_FRONTEND=noninteractive dpkg --force-confold -i "$work"/old/*.deb || true
+  fi
+  if [[ -d "$work/config-backup" ]]; then
+    cp -a "$work/config-backup/." "$config_directory/"
+  fi
+  if [[ "$was_active" == true ]]; then
+    systemctl restart caddy.service || lms_log "Caddy rollback restart failed; inspect systemctl status caddy"
+  fi
+  lms_die "Caddy dependency upgrade failed; LMS was not switched to the new release"
+)
+
+lms_install_optional_host_packages() {
+  local packages=("$@")
+  [[ ${#packages[@]} -gt 0 ]] || return
+
+  case "${INSTALL_SYSTEM_PACKAGES:-true}" in
+    false|False|FALSE|0|no|No|NO|off|Off|OFF)
+      lms_log "Skipping optional host package install: ${packages[*]}"
+      return
+      ;;
+  esac
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    lms_log "Skipping optional host package install while staging under LMS_DEST_ROOT: ${packages[*]}"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    lms_log "Skipping optional host package install because the installer is not running as root: ${packages[*]}"
+    return
+  fi
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    lms_log "No supported package manager found for optional host packages: ${packages[*]}"
+    return
+  fi
+
+  local missing=()
+  local package
+  if command -v dpkg-query >/dev/null 2>&1; then
+    for package in "${packages[@]}"; do
+      if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+        missing+=("$package")
+      fi
+    done
+  else
+    missing=("${packages[@]}")
+  fi
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    lms_log "Optional host packages already installed: ${packages[*]}"
+    return
+  fi
+
+  local available=()
+  if command -v apt-cache >/dev/null 2>&1; then
+    for package in "${missing[@]}"; do
+      if apt-cache show "$package" >/dev/null 2>&1; then
+        available+=("$package")
+      else
+        lms_log "Optional host package is not available from configured apt sources: $package"
+      fi
+    done
+  else
+    available=("${missing[@]}")
+  fi
+
+  [[ ${#available[@]} -gt 0 ]] || return
+  lms_log "Installing optional host packages: ${available[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get update || {
+    lms_log "Could not refresh apt metadata for optional host packages"
+    return
+  }
+
+  for package in "${available[@]}"; do
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -- "$package" ||
+      lms_log "Optional host package could not be installed: $package"
+  done
+}
+
+lms_enable_openssh_server() {
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return
+  fi
+
+  if ! lms_has_systemd; then
+    lms_log "systemd not detected; skipping OpenSSH service enable/start"
+    return
+  fi
+
+  if systemctl list-unit-files ssh.service >/dev/null 2>&1; then
+    lms_log "Enabling OpenSSH server"
+    systemctl enable --now ssh.service
+    return
+  fi
+
+  if systemctl list-unit-files sshd.service >/dev/null 2>&1; then
+    lms_log "Enabling OpenSSH server"
+    systemctl enable --now sshd.service
+    return
+  fi
+
+  lms_log "OpenSSH server unit was not found; install or start sshd before using local terminal sessions"
+}
+
+lms_remove_caddy_packaged_default_site() {
+  local file="/etc/caddy/Caddyfile"
+  local backup
+  local temp_file
+
+  [[ "${LMS_DEST_ROOT:-}" == "" ]] || return 0
+  [[ "$(id -u)" -eq 0 ]] || return 0
+  [[ -f "$file" ]] || return 0
+
+  temp_file="$(mktemp)"
+  awk '
+function delta(line, tmp, opens, closes) {
+  tmp=line; opens=gsub(/\{/, "{", tmp);
+  tmp=line; closes=gsub(/\}/, "}", tmp);
+  return opens - closes;
+}
+BEGIN { skip=0; depth=0; block=""; has_root=0; has_file_server=0; }
+skip == 0 && $0 ~ /^[[:space:]]*:80[[:space:]]*\{/ {
+  skip=1; depth=delta($0); block=$0 ORS; has_root=0; has_file_server=0; next;
+}
+skip == 1 {
+  block=block $0 ORS;
+  if ($0 ~ /^[[:space:]]*root[[:space:]]+\*[[:space:]]+\/usr\/share\/caddy[[:space:]]*$/) has_root=1;
+  if ($0 ~ /^[[:space:]]*file_server[[:space:]]*$/) has_file_server=1;
+  depth += delta($0);
+  if (depth <= 0) {
+    if (!(has_root && has_file_server)) printf "%s", block;
+    skip=0; depth=0; block="";
+  }
+  next;
+}
+{ print; }
+END { if (skip == 1) printf "%s", block; }
+' "$file" > "$temp_file"
+
+  if cmp -s "$file" "$temp_file"; then
+    rm -f "$temp_file"
+    return 0
+  fi
+
+  backup="/etc/caddy/Caddyfile.lms-backup-$(date +%Y%m%d%H%M%S)"
+  cp -a "$file" "$backup" || true
+  install -m 0644 "$temp_file" "$file"
+  rm -f "$temp_file"
+  lms_log "Removed the packaged Caddy :80 static site from $file so LMS does not claim port 80 by default"
+}
+
+lms_enable_caddy_service() {
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return
+  fi
+
+  if ! lms_has_systemd; then
+    lms_log "systemd not detected; skipping Caddy service enable/start"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    lms_log "Skipping Caddy service enable/start because the installer is not running as root"
+    return
+  fi
+
+  if ! systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+    lms_log "Caddy service unit was not found; Edge Gateway will report Caddy as unavailable"
+    return
+  fi
+
+  lms_remove_caddy_packaged_default_site
+
+  lms_log "Enabling Caddy service"
+  if ! systemctl enable caddy.service >/dev/null 2>&1; then
+    lms_log "Caddy service is installed, but systemd could not enable it"
+    return
+  fi
+
+  if systemctl restart caddy.service >/dev/null 2>&1; then
+    return
+  fi
+
+  lms_log "Caddy service is installed and enabled, but it did not start cleanly; Edge Gateway will show the Caddy status inside LMS"
+  systemctl show caddy.service -p ActiveState -p SubState -p Result -p ExecMainStatus 2>/dev/null |
+    sed 's/^/[lms] Caddy /' >&2 || true
+  if [[ "${LMS_VERBOSE:-}" == "1" ]]; then
+    systemctl --no-pager --full status caddy.service >&2 || true
+  fi
+}
+
+lms_prepare_desktop_session_socket_directory() {
+  local socket_path="$1"
+  local service_user="$2"
+  local service_group="$3"
+  local socket_dir
+
+  [[ "${LMS_DEST_ROOT:-}" == "" ]] || return 0
+  [[ "$(id -u)" -eq 0 ]] || return 0
+  [[ -n "$socket_path" ]] || return 0
+
+  socket_dir="$(dirname "$socket_path")"
+  case "$socket_dir" in
+    /run/linuxmadesane|/run/linuxmadesane/*)
+      ;;
+    *)
+      lms_log "Desktop Assistant broker socket directory is custom; systemd must prepare $socket_dir"
+      return 0
+      ;;
+  esac
+
+  mkdir -p "$socket_dir"
+  chown "$service_user:$service_group" "$socket_dir" 2>/dev/null || true
+  chmod 0755 "$socket_dir" 2>/dev/null || true
+}
+
+lms_wait_for_file_socket() {
+  local socket_path="$1"
+  local timeout_seconds="${2:-30}"
+
+  [[ -n "$socket_path" ]] || return 1
+
+  for _ in $(seq 1 "$timeout_seconds"); do
+    if [[ -S "$socket_path" ]]; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  return 1
+}
+
+lms_prepare_local_ssh_runner() {
+  local service_user="$1"
+  local service_group="$2"
+  local config_root="$3"
+  local runner_user="$4"
+  local runner_group="$5"
+  local runner_home="$6"
+  local enable_local_sudo="${7:-true}"
+  local runner_workspace="${8:-$runner_home/workspace}"
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    lms_log "Skipping localhost SSH runner while staging under LMS_DEST_ROOT"
+    return
+  fi
+
+  lms_require_command useradd
+  lms_require_command ssh-keygen
+
+  if getent group "$runner_group" >/dev/null 2>&1; then
+    :
+  else
+    groupadd --system "$runner_group"
+  fi
+
+  if id -u "$runner_user" >/dev/null 2>&1; then
+    usermod --shell /bin/bash "$runner_user" >/dev/null 2>&1 || true
+    mkdir -p "$runner_home"
+  else
+    useradd \
+      --system \
+      --gid "$runner_group" \
+      --home-dir "$runner_home" \
+      --create-home \
+      --shell /bin/bash \
+      "$runner_user"
+  fi
+
+  passwd -l "$runner_user" >/dev/null 2>&1 || true
+
+  local ssh_dir="$runner_home/.ssh"
+  local workspace_dir="$runner_workspace"
+  local key_dir="$config_root/ssh"
+  local key_file="$key_dir/lms_local_runner_ed25519"
+  local public_key_file="$key_file.pub"
+  local authorized_keys="$ssh_dir/authorized_keys"
+
+  mkdir -p "$ssh_dir" "$workspace_dir" "$key_dir"
+  if [[ ! -s "$key_file" || ! -s "$public_key_file" ]]; then
+    rm -f "$key_file" "$public_key_file"
+    ssh-keygen -q -t ed25519 -N "" -C "linux-made-sane-local-runner@$(hostname 2>/dev/null || printf localhost)" -f "$key_file"
+  fi
+
+  touch "$authorized_keys"
+  if ! grep -Fxq "$(cat "$public_key_file")" "$authorized_keys"; then
+    cat "$public_key_file" >> "$authorized_keys"
+    printf '\n' >> "$authorized_keys"
+  fi
+
+  chown -R "$runner_user:$runner_group" "$runner_home"
+  chown -R "$runner_user:$runner_group" "$workspace_dir"
+  usermod -a -G "$runner_group" "$service_user" >/dev/null 2>&1 || true
+  chmod 750 "$runner_home"
+  chmod 770 "$workspace_dir"
+  chmod 700 "$ssh_dir"
+  chmod 600 "$authorized_keys"
+  chown -R "$service_user:$service_group" "$key_dir"
+  chmod 750 "$key_dir"
+  chmod 600 "$key_file"
+  chmod 644 "$public_key_file"
+
+  lms_configure_local_runner_ssh_pam "$runner_user"
+
+  if lms_is_truthy "$enable_local_sudo"; then
+    lms_write_local_sudoers "$service_user" "$runner_user"
+  fi
+
+  lms_log "Prepared localhost SSH runner $runner_user with key-only authentication"
+}
+
+lms_configure_local_runner_ssh_pam() {
+  local runner_user="$1"
+  local pam_source="/etc/pam.d/sshd"
+  local pam_service="linux-made-sane-runner"
+  local pam_target="/etc/pam.d/$pam_service"
+  local ssh_drop_in_dir="/etc/ssh/sshd_config.d"
+  local ssh_drop_in="$ssh_drop_in_dir/95-linux-made-sane-local-runner.conf"
+  local sshd_binary
+
+  if [[ ! "$runner_user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
+    lms_die "Invalid local SSH runner username: $runner_user"
+  fi
+
+  if [[ ! -f "$pam_source" ]]; then
+    lms_log "Skipping local runner PAM optimization because $pam_source is unavailable"
+    return
+  fi
+
+  sshd_binary="$(command -v sshd || true)"
+  if [[ -z "$sshd_binary" ]]; then
+    lms_log "Skipping local runner PAM optimization because sshd is unavailable"
+    return
+  fi
+
+  mkdir -p "$ssh_drop_in_dir"
+  awk '
+    /^[[:space:]]*session[[:space:]].*pam_motd\.so([[:space:]]|$)/ { next }
+    { print }
+  ' "$pam_source" > "$pam_target.tmp"
+  chmod 0644 "$pam_target.tmp"
+  chown root:root "$pam_target.tmp"
+  mv "$pam_target.tmp" "$pam_target"
+
+  cat > "$ssh_drop_in.tmp" <<EOF
+# Managed by Linux Made Sane. Manual edits will be overwritten.
+# The dedicated automation account does not need PAM's interactive MOTD.
+Match all
+Match User $runner_user
+    PAMServiceName $pam_service
+Match all
+EOF
+  chmod 0644 "$ssh_drop_in.tmp"
+  chown root:root "$ssh_drop_in.tmp"
+  mv "$ssh_drop_in.tmp" "$ssh_drop_in"
+
+  "$sshd_binary" -t
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet ssh.service; then
+      systemctl reload ssh.service
+    elif systemctl is-active --quiet sshd.service; then
+      systemctl reload sshd.service
+    fi
+  fi
+
+  lms_log "Configured fast PAM sessions for local SSH runner $runner_user"
+}
+
+lms_write_local_sudoers() {
+  local service_user="$1"
+  local runner_user="$2"
+  local sudoers_file="/etc/sudoers.d/linux-made-sane"
+
+  command -v sudo >/dev/null 2>&1 || {
+    lms_log "sudo is not installed; skipping passwordless sudo policy"
+    return
+  }
+
+  cat > "$sudoers_file" <<SUDOERS
+$service_user ALL=(ALL) NOPASSWD:ALL
+$runner_user ALL=(ALL) NOPASSWD:ALL
+SUDOERS
+  chmod 440 "$sudoers_file"
+
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "$sudoers_file" >/dev/null
+  fi
+}
+
+lms_detect_installer_identity() {
+  local username="${SUDO_USER:-${USER:-}}"
+  if [[ -z "$username" ]]; then
+    username="$(id -un 2>/dev/null || true)"
+  fi
+
+  LMS_INSTALLER_USERNAME="$username"
+  LMS_INSTALLER_UID=""
+  LMS_INSTALLER_HOME=""
+  LMS_INSTALLER_SHELL=""
+  LMS_INSTALLER_INSTALLED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ -n "$username" ]]; then
+    LMS_INSTALLER_UID="$(id -u "$username" 2>/dev/null || true)"
+    if command -v getent >/dev/null 2>&1; then
+      local passwd_entry
+      passwd_entry="$(getent passwd "$username" 2>/dev/null || true)"
+      if [[ -n "$passwd_entry" ]]; then
+        LMS_INSTALLER_HOME="$(printf '%s' "$passwd_entry" | cut -d: -f6)"
+        LMS_INSTALLER_SHELL="$(printf '%s' "$passwd_entry" | cut -d: -f7)"
+      fi
+    fi
+  fi
+}
+
+lms_resolve_desktop_helper_choice() {
+  local requested="${1:-auto}"
+  local preference_file="$2"
+  local legacy_unit_file="$3"
+  local legacy_autostart_file="$4"
+  local unit_name="$5"
+  local saved_choice=""
+
+  case "$requested" in
+    true|True|TRUE|1|yes|Yes|YES|on|On|ON)
+      printf 'true\n'
+      return
+      ;;
+    false|False|FALSE|0|no|No|NO|off|Off|OFF)
+      printf 'false\n'
+      return
+      ;;
+    auto|Auto|AUTO|"")
+      ;;
+    *)
+      lms_die "INSTALL_DESKTOP_HELPER must be true, false, or auto"
+      ;;
+  esac
+
+  if [[ -f "$preference_file" ]]; then
+    saved_choice="$(sed -n '1p' "$preference_file" 2>/dev/null | tr -d '\r\n')"
+    if lms_is_truthy "$saved_choice"; then
+      printf 'true\n'
+    else
+      printf 'false\n'
+    fi
+    return
+  fi
+
+  # Old releases wrote helper files on every host. Their presence is not opt-in consent.
+  printf 'false\n'
+}
+
+lms_install_desktop_helper_manager() {
+  local source_path="$1"
+  local manager_destination="$2"
+  local manager_runtime_path="$3"
+  local config_destination="$4"
+  local config_runtime_path="$5"
+  local preference_runtime_path="$6"
+  local sudoers_destination="$7"
+  local service_user="$8"
+  local unit_name="$9"
+  local unit_runtime_path="${10}"
+  local autostart_runtime_path="${11}"
+  local launcher_runtime_path="${12}"
+  local executable_runtime_path="${13}"
+  local socket_path="${14}"
+  local local_lms_url="${15}"
+  local tray_icon_runtime_path="${16}"
+  local service_group="${17}"
+  local installer_username="${18:-}"
+  local launcher_source_path="${19}"
+  local launcher_destination="${20}"
+  local helper_directory_runtime_path="${21}"
+  local payload_archive_runtime_path="${22}"
+  local install_root_runtime_path="${23}"
+  local sudoers_temp_file
+
+  [[ -f "$source_path" ]] || {
+    lms_log "Desktop Helper setup command was not found at $source_path"
+    return 1
+  }
+
+  [[ -f "$launcher_source_path" ]] || {
+    lms_log "Desktop Helper launcher was not found at $launcher_source_path"
+    return 1
+  }
+
+  mkdir -p \
+    "$(dirname "$manager_destination")" \
+    "$(dirname "$launcher_destination")" \
+    "$(dirname "$config_destination")" \
+    "$(dirname "$sudoers_destination")"
+  install -m 0755 "$source_path" "$manager_destination" || return 1
+  install -m 0755 "$launcher_source_path" "$launcher_destination" || return 1
+  {
+    printf 'LMS_DESKTOP_HELPER_PREFERENCE_FILE=%q\n' "$preference_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_UNIT=%q\n' "$unit_name"
+    printf 'LMS_DESKTOP_HELPER_UNIT_FILE=%q\n' "$unit_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_AUTOSTART_FILE=%q\n' "$autostart_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_LAUNCHER_PATH=%q\n' "$launcher_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_EXECUTABLE_PATH=%q\n' "$executable_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_DIRECTORY=%q\n' "$helper_directory_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_PAYLOAD_ARCHIVE=%q\n' "$payload_archive_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_INSTALL_ROOT=%q\n' "$install_root_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_SOCKET_PATH=%q\n' "$socket_path"
+    printf 'LMS_DESKTOP_HELPER_LOCAL_LMS_URL=%q\n' "$local_lms_url"
+    printf 'LMS_DESKTOP_HELPER_TRAY_ICON_PATH=%q\n' "$tray_icon_runtime_path"
+    printf 'LMS_DESKTOP_HELPER_SERVICE_GROUP=%q\n' "$service_group"
+    printf 'LMS_DESKTOP_HELPER_INSTALLER_USERNAME=%q\n' "$installer_username"
+  } > "$config_destination" || return 1
+  chmod 0644 "$config_destination" || return 1
+
+  sudoers_temp_file="$(mktemp "$(dirname "$sudoers_destination")/.linux-made-sane-desktop-helper.XXXXXX")" || return 1
+  cat > "$sudoers_temp_file" <<SUDOERS
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path status
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path enable
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path disable
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path desktop-status
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path desktop-disable
+$service_user ALL=(root) NOPASSWD: $manager_runtime_path desktop-enable
+SUDOERS
+  chmod 0440 "$sudoers_temp_file" || return 1
+  mv -f "$sudoers_temp_file" "$sudoers_destination" || return 1
+
+  if [[ "${LMS_DEST_ROOT:-}" == "" ]]; then
+    chown root:root "$manager_destination" "$launcher_destination" "$config_destination" "$sudoers_destination" 2>/dev/null || true
+    if command -v visudo >/dev/null 2>&1; then
+      visudo -cf "$sudoers_destination" >/dev/null
+    fi
+  fi
+}
+
+lms_prepare_desktop_helper_access() {
+  local service_group="$1"
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    lms_log "Skipping desktop helper group membership while staging under LMS_DEST_ROOT"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    lms_log "Skipping desktop helper group membership because the installer is not running as root"
+    return
+  fi
+
+  local username="${LMS_INSTALLER_USERNAME:-}"
+  if [[ -z "$username" || "$username" == "root" ]]; then
+    lms_log "Desktop helper installed; add each GUI user that should report sessions to the $service_group group"
+    return
+  fi
+
+  if ! id "$username" >/dev/null 2>&1; then
+    lms_log "Desktop helper installed; installer user $username was not found for group membership"
+    return
+  fi
+
+  usermod -a -G "$service_group" "$username" >/dev/null 2>&1 || true
+  lms_log "Granted $username access to the LMS desktop helper socket via group $service_group"
+  lms_log "Desktop helper launcher will use the new group membership immediately when possible"
+}
+
+lms_disable_user_debug_desktop_helper_files() {
+  local username="$1"
+  local unit_name="$2"
+  local user_home="${LMS_INSTALLER_HOME:-}"
+  local passwd_entry primary_group backup_dir timestamp moved=false
+  local local_unit local_autostart wants_link
+
+  if [[ -z "$user_home" && -n "$username" ]] && command -v getent >/dev/null 2>&1; then
+    passwd_entry="$(getent passwd "$username" 2>/dev/null || true)"
+    if [[ -n "$passwd_entry" ]]; then
+      user_home="$(printf '%s' "$passwd_entry" | cut -d: -f6)"
+    fi
+  fi
+
+  [[ -n "$user_home" && -d "$user_home" ]] || return 0
+
+  backup_dir="$user_home/.local/share/linuxmadesane/disabled-desktop-helper-debug"
+  timestamp="$(date -u +%Y%m%d%H%M%S)"
+  local_unit="$user_home/.config/systemd/user/$unit_name"
+  wants_link="$user_home/.config/systemd/user/default.target.wants/$unit_name"
+  local_autostart="$user_home/.config/autostart/linux-made-sane-desktop-helper.desktop"
+
+  if [[ -f "$local_unit" ]] &&
+     grep -Eq 'local debug|dev-desktop-helper-launcher|/tmp/linux-made-sane-desktop-session\.sock' "$local_unit"; then
+    mkdir -p "$backup_dir"
+    mv "$local_unit" "$backup_dir/$unit_name.$timestamp"
+    rm -f "$wants_link"
+    moved=true
+  fi
+
+  if [[ -f "$local_autostart" ]] &&
+     grep -Eq 'local debug|dev-desktop-helper-launcher|/tmp/linux-made-sane-desktop-session\.sock' "$local_autostart"; then
+    mkdir -p "$backup_dir"
+    mv "$local_autostart" "$backup_dir/linux-made-sane-desktop-helper.desktop.$timestamp"
+    moved=true
+  fi
+
+  if [[ "$moved" == "true" ]]; then
+    primary_group="$(id -gn "$username" 2>/dev/null || true)"
+    if [[ -n "$primary_group" ]]; then
+      chown -R "$username:$primary_group" "$backup_dir" >/dev/null 2>&1 || true
+    fi
+
+    lms_log "Disabled stale local debug Desktop Assistant helper files for $username"
+  fi
+}
+
+lms_write_desktop_helper_launcher() {
+  local launcher_path="$1"
+  local service_group="$2"
+  local executable_path="$3"
+  local socket_path="${4:-/run/linuxmadesane/desktop-session.sock}"
+  local local_lms_url="${5:-http://127.0.0.1:5080/desktop-assistant}"
+  local tray_icon_path="${6:-}"
+  local launcher_dir executable_dir quoted_group quoted_executable quoted_executable_dir quoted_socket quoted_local_lms_url quoted_tray_icon
+
+  launcher_dir="$(dirname "$launcher_path")"
+  executable_dir="$(dirname "$executable_path")"
+  quoted_group="$(lms_shell_quote "$service_group")"
+  quoted_executable="$(lms_shell_quote "$executable_path")"
+  quoted_executable_dir="$(lms_shell_quote "$executable_dir")"
+  quoted_socket="$(lms_shell_quote "$socket_path")"
+  quoted_local_lms_url="$(lms_shell_quote "$local_lms_url")"
+  quoted_tray_icon="$(lms_shell_quote "$tray_icon_path")"
+
+  mkdir -p "$launcher_dir"
+  cat > "$launcher_path" <<LAUNCHER
+#!/usr/bin/env bash
+set -euo pipefail
+
+export NO_AT_BRIDGE=1
+export LMS_DESKTOP_HELPER_SOCKET=$quoted_socket
+export LMS_DESKTOP_HELPER_LMS_URL=$quoted_local_lms_url
+export LMS_DESKTOP_HELPER_TRAY_ICON=$quoted_tray_icon
+open_window="\${LMS_DESKTOP_HELPER_OPEN_WINDOW:-false}"
+
+if [[ "\${LMS_DESKTOP_HELPER_SG_ACTIVE:-}" != "1" ]] &&
+   command -v sg >/dev/null 2>&1 &&
+   getent group $quoted_group >/dev/null 2>&1 &&
+   ! id -nG | tr ' ' '\\n' | grep -qx $quoted_group; then
+  group_entry="\$(getent group $quoted_group)"
+  group_members="\${group_entry##*:}"
+  current_user="\$(id -un)"
+  if [[ ",\$group_members," == *",\$current_user,"* ]]; then
+    exec sg $quoted_group -c "LMS_DESKTOP_HELPER_SG_ACTIVE=1 LMS_DESKTOP_HELPER_OPEN_WINDOW=\$(printf '%q' "\$open_window") exec \$(printf '%q' "\$0")"
+  fi
+fi
+
+cd $quoted_executable_dir
+exec $quoted_executable
+LAUNCHER
+  chmod 755 "$launcher_path"
+}
+
+lms_run_as_user() {
+  local username="$1"
+  shift
+
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$username" -- "$@"
+    return
+  fi
+
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -u "$username" "$@"
+    return
+  fi
+
+  return 127
+}
+
+lms_enable_desktop_helper_global_unit() {
+  local unit_name="$1"
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return 0
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    return 0
+  fi
+
+  if ! lms_has_systemd; then
+    return 0
+  fi
+
+  systemctl --global enable "$unit_name" >/dev/null 2>&1 ||
+    lms_log "Desktop helper installed; could not enable the user service globally"
+}
+
+lms_add_desktop_helper_user() {
+  local candidate="$1"
+  local -n target_users="$2"
+  local existing
+
+  [[ -n "$candidate" && "$candidate" != "root" ]] || return 0
+  id "$candidate" >/dev/null 2>&1 || return 0
+
+  for existing in "${target_users[@]}"; do
+    if [[ "$existing" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+
+  target_users+=("$candidate")
+}
+
+lms_collect_desktop_helper_users() {
+  local -n target_users="$1"
+  local session_id username session_class session_state session_type
+
+  lms_add_desktop_helper_user "${LMS_INSTALLER_USERNAME:-}" "$1"
+
+  command -v loginctl >/dev/null 2>&1 || return 0
+
+  while read -r session_id _; do
+    [[ -n "$session_id" ]] || continue
+    username="$(loginctl show-session "$session_id" -p Name --value 2>/dev/null || true)"
+    session_class="$(loginctl show-session "$session_id" -p Class --value 2>/dev/null || true)"
+    session_state="$(loginctl show-session "$session_id" -p State --value 2>/dev/null || true)"
+    session_type="$(loginctl show-session "$session_id" -p Type --value 2>/dev/null || true)"
+
+    [[ "$session_class" == "user" ]] || continue
+    [[ "$session_state" == "active" || "$session_state" == "online" || "$session_state" == "closing" ]] || continue
+    [[ "$session_type" == "x11" || "$session_type" == "wayland" || "$session_type" == "mir" || -z "$session_type" ]] || continue
+    lms_add_desktop_helper_user "$username" "$1"
+  done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
+}
+
+lms_start_desktop_helper_for_user() {
+  local username="$1"
+  local unit_name="$2"
+  local user_id runtime_dir bus_path
+
+  if [[ -z "$username" || "$username" == "root" ]] || ! id "$username" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  user_id="$(id -u "$username" 2>/dev/null || true)"
+  runtime_dir="/run/user/$user_id"
+  bus_path="$runtime_dir/bus"
+  if [[ -z "$user_id" || ! -d "$runtime_dir" || ! -S "$bus_path" ]]; then
+    return 1
+  fi
+
+  local -a user_env=(
+    "XDG_RUNTIME_DIR=$runtime_dir"
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=$bus_path"
+  )
+
+  lms_run_as_user "$username" env "${user_env[@]}" systemctl --user disable "$unit_name" >/dev/null 2>&1 || true
+  lms_disable_user_debug_desktop_helper_files "$username" "$unit_name"
+
+  lms_run_as_user "$username" env "${user_env[@]}" systemctl --user import-environment \
+    DISPLAY \
+    WAYLAND_DISPLAY \
+    XDG_CURRENT_DESKTOP \
+    XDG_SESSION_DESKTOP \
+    DESKTOP_SESSION \
+    XDG_SESSION_TYPE \
+    XAUTHORITY >/dev/null 2>&1 || true
+
+  if lms_run_as_user "$username" env "${user_env[@]}" systemctl --user daemon-reload >/dev/null 2>&1 &&
+     lms_run_as_user "$username" env "${user_env[@]}" systemctl --user enable --now "$unit_name" >/dev/null 2>&1 &&
+     lms_run_as_user "$username" env "${user_env[@]}" systemctl --user restart "$unit_name" >/dev/null 2>&1; then
+    lms_log "Started Desktop Assistant helper for $username"
+    return 0
+  fi
+
+  return 1
+}
+
+lms_try_start_desktop_helper_for_installer_user() {
+  local unit_name="$1"
+  local username
+  local -a usernames=()
+  local started=false
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return 0
+  fi
+
+  if ! lms_has_systemd; then
+    lms_log "Desktop helper installed; it will start from desktop autostart on graphical login"
+    return 0
+  fi
+
+  lms_collect_desktop_helper_users usernames
+
+  for username in "${usernames[@]}"; do
+    if lms_start_desktop_helper_for_user "$username" "$unit_name"; then
+      started=true
+    fi
+  done
+
+  if [[ "$started" == "true" ]]; then
+    return 0
+  else
+    lms_log "Desktop helper installed; it will start automatically on the next graphical login"
+  fi
+}
+
+lms_write_update_helper() {
+  local service_user="$1"
+  local base_url="${2:-https://www.linuxmadesane.com}"
+  local helper_path="${3:-/usr/local/sbin/linux-made-sane-update}"
+  local install_root="${4:-/opt/linuxmadesane/ce}"
+  local data_root="${5:-/var/lib/linuxmadesane/ce}"
+  local config_root="${6:-/etc/linuxmadesane/ce}"
+  local service_group="${7:-linuxmadesane}"
+  local service_unit="${8:-linux-made-sane.service}"
+  local service_port="${9:-5080}"
+  local database_connection_string="${10:-Data Source=${data_root}/linuxmadesane.db}"
+  local data_protection_key_directory="${11:-${data_root}/protection-keys}"
+
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    lms_log "Skipping update helper while staging under LMS_DEST_ROOT"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    lms_log "Skipping update helper because the installer is not running as root"
+    return
+  fi
+
+  local helper_dir
+  helper_dir="$(dirname "$helper_path")"
+  mkdir -p "$helper_dir"
+
+  cat > "$helper_path" <<HELPER
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_URL="\${LMS_INSTALL_URL:-$base_url/install.sh}"
+SOURCE="\${LMS_SOURCE:-lms-auto-update}"
+PRESERVES_LMS_STATE_PATHS=true
+SUPPORTS_RELEASE_CHANNELS=true
+CHANNEL="\${LMS_CHANNEL:-${LMS_CHANNEL:-stable}}"
+TARGET_VERSION="\${LMS_VERSION:-}"
+INSTALL_ROOT="\${LMS_INSTALL_ROOT:-$install_root}"
+DATA_ROOT="\${LMS_DATA_ROOT:-$data_root}"
+CONFIG_ROOT="\${LMS_CONFIG_ROOT:-$config_root}"
+DATABASE_CONNECTION_STRING="\${LMS_DATABASE_CONNECTION_STRING:-$database_connection_string}"
+DATA_PROTECTION_KEY_DIRECTORY="\${LMS_DATA_PROTECTION_KEY_DIRECTORY:-$data_protection_key_directory}"
+SERVICE_USER="\${LMS_SERVICE_USER:-$service_user}"
+SERVICE_GROUP="\${LMS_SERVICE_GROUP:-$service_group}"
+SERVICE_UNIT="\${LMS_SERVICE_UNIT:-$service_unit}"
+SERVICE_PORT="\${LMS_SERVICE_PORT:-$service_port}"
+CURRENT_DIR="\${LMS_CURRENT_DIR:-\$INSTALL_ROOT/current}"
+EXPECT_SERVICE_ACTIVE=true
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required" >&2
+  exit 127
+fi
+
+BACKGROUND=false
+INSTALL_ARGS=()
+while [[ "\$#" -gt 0 ]]; do
+  argument="\$1"; shift
+  case "\$argument" in
+    --channel) CHANNEL="\$1"; shift ;;
+    --version) TARGET_VERSION="\$1"; shift ;;
+    --background|--detached|--no-wait)
+      BACKGROUND=true
+      ;;
+    --no-start|--uninstall|--purge)
+      EXPECT_SERVICE_ACTIVE=false
+      INSTALL_ARGS+=("\$argument")
+      ;;
+    --start)
+      EXPECT_SERVICE_ACTIVE=true
+      INSTALL_ARGS+=("\$argument")
+      ;;
+    *)
+      INSTALL_ARGS+=("\$argument")
+      ;;
+  esac
+done
+
+case "\$CHANNEL" in stable|development) ;; *) echo "Invalid release channel" >&2; exit 1 ;; esac
+INSTALL_URL="\${INSTALL_URL%%\?*}?channel=\$CHANNEL"
+if [[ -n "\$TARGET_VERSION" ]]; then
+  [[ "\$TARGET_VERSION" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]] || exit 1
+  INSTALL_URL="\$INSTALL_URL&version=\$TARGET_VERSION"
+fi
+
+if [[ -z "\${LMS_UPDATE_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  UNIT_NAME="linux-made-sane-self-update-\$(date -u +%Y%m%d%H%M%S)"
+  SYSTEMD_RUN_ARGS=(
+    --unit="\$UNIT_NAME"
+    --collect
+    --property=Type=exec
+  )
+  if [[ "\$BACKGROUND" != "true" ]]; then
+    SYSTEMD_RUN_ARGS+=(--wait)
+  fi
+
+  exec systemd-run "\${SYSTEMD_RUN_ARGS[@]}" \
+    env \
+      LMS_UPDATE_DETACHED=1 \
+      LMS_INSTALL_URL="\$INSTALL_URL" \
+      LMS_CHANNEL="\$CHANNEL" \
+      LMS_VERSION="\$TARGET_VERSION" \
+      LMS_SOURCE="\$SOURCE" \
+      LMS_BASE_URL="$base_url" \
+      LMS_INSTALL_ROOT="\$INSTALL_ROOT" \
+      LMS_DATA_ROOT="\$DATA_ROOT" \
+      LMS_CONFIG_ROOT="\$CONFIG_ROOT" \
+      LMS_DATABASE_CONNECTION_STRING="\$DATABASE_CONNECTION_STRING" \
+      LMS_DATA_PROTECTION_KEY_DIRECTORY="\$DATA_PROTECTION_KEY_DIRECTORY" \
+      LMS_SERVICE_USER="\$SERVICE_USER" \
+      LMS_SERVICE_GROUP="\$SERVICE_GROUP" \
+      LMS_SERVICE_UNIT="\$SERVICE_UNIT" \
+      LMS_SERVICE_PORT="\$SERVICE_PORT" \
+      "\$0" "\${INSTALL_ARGS[@]}"
+fi
+
+PREVIOUS_CURRENT_TARGET=""
+SERVICE_WAS_ACTIVE=false
+if [[ -e "\$CURRENT_DIR" || -L "\$CURRENT_DIR" ]]; then
+  PREVIOUS_CURRENT_TARGET="\$(readlink -f "\$CURRENT_DIR" 2>/dev/null || true)"
+fi
+
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]] && systemctl is-active --quiet "\$SERVICE_UNIT"; then
+  SERVICE_WAS_ACTIVE=true
+fi
+
+HOME_LAB_DATA_PATH="\$DATA_ROOT/home-lab"
+HOME_LAB_HOLD_PATH="\$(dirname "\$DATA_ROOT")/.lms-home-lab-preserve-\$(basename "\$DATA_ROOT")-\$\$"
+HOME_LAB_DATA_PRESERVED=false
+
+preserve_home_lab_data() {
+  if [[ -d "\$HOME_LAB_DATA_PATH" ]]; then
+    [[ ! -e "\$HOME_LAB_HOLD_PATH" ]] || return 1
+    mv "\$HOME_LAB_DATA_PATH" "\$HOME_LAB_HOLD_PATH"
+    HOME_LAB_DATA_PRESERVED=true
+  fi
+}
+
+restore_home_lab_data() {
+  [[ "\$HOME_LAB_DATA_PRESERVED" == "true" ]] || return 0
+  if [[ -d "\$HOME_LAB_DATA_PATH" ]]; then
+    rmdir "\$HOME_LAB_DATA_PATH" || {
+      echo "Cannot restore Home Lab data because \$HOME_LAB_DATA_PATH is not empty." >&2
+      return 1
+    }
+  fi
+  mv "\$HOME_LAB_HOLD_PATH" "\$HOME_LAB_DATA_PATH"
+  HOME_LAB_DATA_PRESERVED=false
+}
+
+rollback_self_update() {
+  local reason="\$1"
+  echo "Linux Made Sane self-update failed: \$reason" >&2
+  if [[ -n "\$PREVIOUS_CURRENT_TARGET" && -d "\$PREVIOUS_CURRENT_TARGET" ]]; then
+    echo "Rolling back to \$PREVIOUS_CURRENT_TARGET" >&2
+    ln -sfn "\$PREVIOUS_CURRENT_TARGET" "\$CURRENT_DIR" || true
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]] && { [[ "\$SERVICE_WAS_ACTIVE" == "true" ]] || [[ -n "\$PREVIOUS_CURRENT_TARGET" ]]; }; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart "\$SERVICE_UNIT" >/dev/null 2>&1 || true
+  fi
+}
+
+verify_self_update_active() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  [[ -d /run/systemd/system ]] || return 0
+  for _ in \$(seq 1 30); do
+    if systemctl is-active --quiet "\$SERVICE_UNIT"; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  systemctl --no-pager --full status "\$SERVICE_UNIT" >&2 || true
+  return 1
+}
+
+perform_self_update() {
+  if ! preserve_home_lab_data; then
+    rollback_self_update "Home Lab data could not be protected before install"
+    return 1
+  fi
+
+  if ! curl -fsSL "\$INSTALL_URL" | env \
+  LMS_INSTALL_SECOND_STAGE=1 \
+  LMS_CHANNEL="\$CHANNEL" \
+  LMS_VERSION="\$TARGET_VERSION" \
+  LMS_SOURCE="\$SOURCE" \
+  LMS_BASE_URL="$base_url" \
+  LMS_INSTALL_ROOT="\$INSTALL_ROOT" \
+  LMS_DATA_ROOT="\$DATA_ROOT" \
+  LMS_CONFIG_ROOT="\$CONFIG_ROOT" \
+  LMS_DATABASE_CONNECTION_STRING="\$DATABASE_CONNECTION_STRING" \
+  LMS_DATA_PROTECTION_KEY_DIRECTORY="\$DATA_PROTECTION_KEY_DIRECTORY" \
+  LMS_SERVICE_USER="\$SERVICE_USER" \
+  LMS_SERVICE_GROUP="\$SERVICE_GROUP" \
+  LMS_SERVICE_UNIT="\$SERVICE_UNIT" \
+  LMS_SERVICE_PORT="\$SERVICE_PORT" \
+    bash -s -- --install "\${INSTALL_ARGS[@]}"; then
+    restore_home_lab_data || true
+    rollback_self_update "installer returned a non-zero exit code"
+    return 1
+  fi
+
+  if ! restore_home_lab_data; then
+    rollback_self_update "Home Lab data could not be restored after install"
+    return 1
+  fi
+
+  if [[ "\$EXPECT_SERVICE_ACTIVE" == "true" ]] && ! verify_self_update_active; then
+    rollback_self_update "service did not become active after install"
+    return 1
+  fi
+}
+
+# The installer replaces this helper while it runs. Bash parses a function body
+# before executing it, so the restore path remains in memory after replacement.
+perform_self_update
+HELPER
+  chmod 755 "$helper_path"
+  chown root:root "$helper_path" 2>/dev/null || true
+
+  command -v sudo >/dev/null 2>&1 || {
+    lms_log "sudo is not installed; skipping update helper sudo policy"
+    return
+  }
+
+  local sudoers_file="/etc/sudoers.d/linux-made-sane-update"
+  cat > "$sudoers_file" <<SUDOERS
+$service_user ALL=(root) NOPASSWD: $helper_path
+$service_user ALL=(root) NOPASSWD: $helper_path *
+SUDOERS
+  chmod 440 "$sudoers_file"
+
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "$sudoers_file" >/dev/null
+  fi
+
+  lms_log "Prepared LMS update helper $helper_path"
+}
+
+lms_print_access_urls() {
+  local service_port="${1:-5080}"
+
+  printf '\nOpen LMS from a browser that can reach this machine:\n'
+
+  local seen=" "
+  lms_add_setup_url() {
+    local host="$1"
+    host="${host%% *}"
+    host="${host%/}"
+    [[ -n "$host" ]] || return 0
+    [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "::1" ]] && return 0
+
+    if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+      host="[$host]"
+    fi
+
+    case "$seen" in
+      *" $host "*) return 0 ;;
+    esac
+
+    seen="$seen$host "
+    printf '  http://%s:%s/\n' "$host" "$service_port"
+  }
+
+  lms_add_setup_url "$(hostname -f 2>/dev/null || true)"
+  lms_add_setup_url "$(hostname -s 2>/dev/null || true)"
+  lms_add_setup_url "$(hostname 2>/dev/null || true)"
+
+  if command -v ip >/dev/null 2>&1; then
+    while read -r address; do
+      lms_add_setup_url "$address"
+    done < <(ip -o -4 addr show scope global 2>/dev/null | awk '{ split($4, parts, "/"); print parts[1] }')
+  fi
+
+  if command -v hostname >/dev/null 2>&1; then
+    for address in $(hostname -I 2>/dev/null || true); do
+      lms_add_setup_url "$address"
+    done
+  fi
+
+  printf '  http://127.0.0.1:%s/  (server console only)\n' "$service_port"
+}
+
+lms_reset_dir() {
+  local path="$1"
+  rm -rf "$path"
+  mkdir -p "$path"
+}
+
+lms_abs_path() {
+  local path="$1"
+  if [[ -d "$path" ]]; then
+    (cd "$path" >/dev/null 2>&1 && pwd)
+    return
+  fi
+
+  local directory
+  directory="$(cd "$(dirname "$path")" >/dev/null 2>&1 && pwd)"
+  printf '%s/%s\n' "$directory" "$(basename "$path")"
+}
+
+lms_create_tarball() {
+  local source_dir="$1"
+  local destination="$2"
+
+  mkdir -p "$(dirname "$destination")"
+  tar -C "$(dirname "$source_dir")" -czf "$destination" "$(basename "$source_dir")"
+}
+
+lms_version_file() {
+  local repo_root
+  repo_root="${REPO_ROOT:-$(lms_repo_root)}"
+  printf '%s\n' "${LINUX_MADE_SANE_VERSION_FILE:-$repo_root/VERSION}"
+}
+
+lms_read_version_file() {
+  local version_file version
+  version_file="$(lms_version_file)"
+  [[ -f "$version_file" ]] || return 1
+
+  version="$(awk 'NF { print $1; exit }' "$version_file")"
+  [[ -n "$version" ]] || return 1
+  printf '%s\n' "$version"
+}
+
+lms_keep_expanded_release_outputs() {
+  local default_value="${1:-false}"
+
+  case "${KEEP_EXPANDED_RELEASE_OUTPUTS:-$default_value}" in
+    true|True|TRUE|1|yes|Yes|YES|on|On|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+lms_cleanup_expanded_release_output() {
+  local package_root="$1"
+  local default_keep="${2:-false}"
+
+  if lms_keep_expanded_release_outputs "$default_keep"; then
+    lms_log "Keeping expanded package output at $package_root"
+    return
+  fi
+
+  lms_log "Removing expanded package output at $package_root"
+  rm -rf "$package_root"
+}
+
+lms_resolve_version_date() {
+  local version_file_version
+
+  if [[ -n "${LINUX_MADE_SANE_VERSION:-}" ]]; then
+    lms_extract_version_date "$LINUX_MADE_SANE_VERSION"
+    return
+  fi
+
+  if [[ -n "${VERSION:-}" ]]; then
+    lms_extract_version_date "$VERSION"
+    return
+  fi
+
+  if [[ -n "${LINUX_MADE_SANE_VERSION_DATE:-}" ]]; then
+    printf '%s\n' "$LINUX_MADE_SANE_VERSION_DATE"
+    return
+  fi
+
+  if [[ -n "${VERSION_DATE:-}" ]]; then
+    printf '%s\n' "$VERSION_DATE"
+    return
+  fi
+
+  if version_file_version="$(lms_read_version_file)"; then
+    lms_extract_version_date "$version_file_version"
+    return
+  fi
+
+  date +%Y.%m.%d.%H.%M
+}
+
+lms_resolve_version_revision() {
+  local version_file_version
+
+  if [[ -n "${LINUX_MADE_SANE_VERSION:-}" ]]; then
+    lms_extract_version_revision "$LINUX_MADE_SANE_VERSION"
+    return
+  fi
+
+  if [[ -n "${VERSION:-}" ]]; then
+    lms_extract_version_revision "$VERSION"
+    return
+  fi
+
+  if [[ -n "${LINUX_MADE_SANE_VERSION_REVISION:-}" ]]; then
+    printf '%s\n' "$LINUX_MADE_SANE_VERSION_REVISION"
+    return
+  fi
+
+  if [[ -n "${VERSION_REVISION:-}" ]]; then
+    printf '%s\n' "$VERSION_REVISION"
+    return
+  fi
+
+  if version_file_version="$(lms_read_version_file)"; then
+    lms_extract_version_revision "$version_file_version"
+    return
+  fi
+
+  printf '0\n'
+}
+
+lms_resolve_version() {
+  local version_file_version
+
+  if [[ -n "${LINUX_MADE_SANE_VERSION:-}" ]]; then
+    printf '%s\n' "$LINUX_MADE_SANE_VERSION"
+    return
+  fi
+
+  if [[ -n "${VERSION:-}" ]]; then
+    printf '%s\n' "$VERSION"
+    return
+  fi
+
+  if [[ -n "${LINUX_MADE_SANE_VERSION_DATE:-}" || -n "${VERSION_DATE:-}" ]]; then
+    printf 'v%s\n' "$(lms_resolve_version_date)"
+    return
+  fi
+
+  if version_file_version="$(lms_read_version_file)"; then
+    printf '%s\n' "$version_file_version"
+    return
+  fi
+
+  printf 'v%s\n' "$(lms_resolve_version_date)"
+}
+
+lms_extract_version_date() {
+  local version="$1"
+  if [[ "$version" =~ ^v([0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2})$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return
+  fi
+
+  if [[ "$version" =~ ^([0-9]{4}\.[0-9]{2}\.[0-9]{2})\.([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return
+  fi
+
+  lms_die "version must match vyyyy.MM.dd.HH.mm, got: $version"
+}
+
+lms_extract_version_revision() {
+  local version="$1"
+  if [[ "$version" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]]; then
+    printf '0\n'
+    return
+  fi
+
+  if [[ "$version" =~ ^([0-9]{4}\.[0-9]{2}\.[0-9]{2})\.([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    return
+  fi
+
+  lms_die "version must match vyyyy.MM.dd.HH.mm, got: $version"
+}
+
+lms_resolve_next_version_revision() {
+  local version_date="$1"
+  local repo_root package_dir public_site_root live_public_site_root date_regex max_revision path base revision
+
+  repo_root="${REPO_ROOT:-$(lms_repo_root)}"
+  package_dir="${PACKAGE_DIR:-$repo_root/artifacts/packages}"
+  public_site_root="$repo_root/artifacts/public-site"
+  live_public_site_root="${LIVE_PUBLIC_SITE_RELEASE_ROOT:-/var/lib/linuxmadesane/public-site/releases}"
+  date_regex="${version_date//./\\.}"
+  max_revision=-1
+
+  shopt -s nullglob
+  for path in \
+    "$package_dir"/release-manifest-"$version_date".*.json \
+    "$package_dir"/linux-made-sane-*-"$version_date".*-*.tar.gz \
+    "$public_site_root"/community/"$version_date".* \
+    "$public_site_root"/pro/"$version_date".* \
+    "$live_public_site_root"/community/"$version_date".* \
+    "$live_public_site_root"/pro/"$version_date".*
+  do
+    base="$(basename "$path")"
+    if [[ "$base" =~ $date_regex\.([0-9]+) ]]; then
+      revision="${BASH_REMATCH[1]}"
+      if (( revision > max_revision )); then
+        max_revision="$revision"
+      fi
+    fi
+  done
+  shopt -u nullglob
+
+  if (( max_revision < 0 )); then
+    printf '0\n'
+    return
+  fi
+
+  printf '%s\n' "$((max_revision + 1))"
+}
+
+lms_validate_version() {
+  local version="$1"
+  [[ "$version" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ||
+     "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]] ||
+    lms_die "version must match vyyyy.MM.dd.HH.mm, got: $version"
+}
+
+lms_find_latest_artifact() {
+  local pattern="$1"
+  local directory="$2"
+  local matches=()
+
+  shopt -s nullglob
+  matches=("$directory"/$pattern)
+  shopt -u nullglob
+
+  [[ ${#matches[@]} -gt 0 ]] || return 1
+
+  ls -1t "${matches[@]}" | head -n 1
+}
+
+lms_unpack_artifact() {
+  local artifact_path="$1"
+  local scratch_dir="$2"
+
+  case "$artifact_path" in
+    *.tar.gz|*.tgz)
+      mkdir -p "$scratch_dir"
+      tar -xzf "$artifact_path" -C "$scratch_dir"
+      local extracted_entries=("$scratch_dir"/*)
+      [[ ${#extracted_entries[@]} -eq 1 ]] || lms_die "expected one top-level entry in $artifact_path"
+      printf '%s\n' "${extracted_entries[0]}"
+      ;;
+    *)
+      printf '%s\n' "$artifact_path"
+      ;;
+  esac
+}
+
+lms_render_systemd_unit() {
+  local template_path="$1"
+  local destination_path="$2"
+  local description="$3"
+  local service_user="$4"
+  local service_group="$5"
+  local working_directory="$6"
+  local env_file="$7"
+  local exec_start="$8"
+
+  sed \
+    -e "s|__DESCRIPTION__|$(printf '%s' "$description" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__SERVICE_USER__|$(printf '%s' "$service_user" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__SERVICE_GROUP__|$(printf '%s' "$service_group" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__WORKING_DIRECTORY__|$(printf '%s' "$working_directory" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__ENV_FILE__|$(printf '%s' "$env_file" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__EXEC_START__|$(printf '%s' "$exec_start" | sed 's/[&|]/\\&/g')|g" \
+    "$template_path" > "$destination_path"
+}
+
+lms_render_desktop_helper_file() {
+  local template_path="$1"
+  local destination_path="$2"
+  local socket_path="$3"
+  local exec_start="$4"
+  local local_lms_url="${5:-http://127.0.0.1:5080/desktop-assistant}"
+  local tray_icon_path="${6:-}"
+
+  sed \
+    -e "s|__SOCKET_PATH__|$(printf '%s' "$socket_path" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__LOCAL_LMS_URL__|$(printf '%s' "$local_lms_url" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__TRAY_ICON_PATH__|$(printf '%s' "$tray_icon_path" | sed 's/[&|]/\\&/g')|g" \
+    -e "s|__EXEC_START__|$(printf '%s' "$exec_start" | sed 's/[&|]/\\&/g')|g" \
+    "$template_path" > "$destination_path"
+}
+
+lms_read_env_value() {
+  local env_file="$1"
+  local key="$2"
+  local line
+
+  [[ -f "$env_file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "$key="*)
+        printf '%s' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done < "$env_file"
+
+  return 1
+}
+
+lms_write_env_file() {
+  local destination_path="$1"
+  shift
+
+  : > "$destination_path"
+  for line in "$@"; do
+    printf '%s\n' "$line" >> "$destination_path"
+  done
+}
+
+lms_prepare_live_service_user() {
+  local service_user="$1"
+  local service_group="$2"
+  local home_directory="$3"
+
+  # Security contract: this account runs the LMS web service and owns LMS data.
+  # Privileged local access is configured separately by lms_prepare_local_ssh_runner.
+  if getent group "$service_group" >/dev/null 2>&1; then
+    :
+  else
+    groupadd --system "$service_group"
+  fi
+
+  if id "$service_user" >/dev/null 2>&1; then
+    :
+  else
+    useradd \
+      --system \
+      --gid "$service_group" \
+      --home-dir "$home_directory" \
+      --create-home \
+      --shell /usr/sbin/nologin \
+      "$service_user"
+  fi
+}
+
+lms_maybe_chown() {
+  local owner="$1"
+  local path="$2"
+  if [[ "${LMS_DEST_ROOT:-}" == "" ]]; then
+    chown -R "$owner" "$path"
+  fi
+}
+
+lms_maybe_chown_directory() {
+  local owner="$1"
+  local path="$2"
+  if [[ "${LMS_DEST_ROOT:-}" == "" ]]; then
+    chown "$owner" "$path"
+  fi
+}
+
+lms_migrate_http_discovery_state() {
+  local previous_release="$1"
+  local data_root="$2"
+  local legacy_root="${previous_release%/}/data/http-service-discovery"
+  local persistent_root="${data_root%/}/http-service-discovery"
+
+  [[ -n "$previous_release" && -d "$legacy_root" ]] || return 0
+  [[ "$(readlink -f "$legacy_root" 2>/dev/null || printf '%s' "$legacy_root")" != "$(readlink -f "$persistent_root" 2>/dev/null || printf '%s' "$persistent_root")" ]] || return 0
+
+  mkdir -p "$persistent_root"
+  local source_path destination_path migrated=false
+  for source_path in "$legacy_root"/*.json; do
+    [[ -f "$source_path" ]] || continue
+    destination_path="$persistent_root/$(basename "$source_path")"
+    if [[ ! -e "$destination_path" ]]; then
+      cp -a -- "$source_path" "$destination_path"
+      migrated=true
+    fi
+  done
+
+  if [[ "$migrated" == "true" ]]; then
+    lms_log "Preserved HTTP/S discovery cache and settings in $persistent_root"
+  fi
+}
+
+lms_maybe_systemctl_reload() {
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return
+  fi
+
+  command -v systemctl >/dev/null 2>&1 || return
+  systemctl daemon-reload
+}
+
+lms_maybe_systemctl_enable() {
+  local unit_name="$1"
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return
+  fi
+
+  command -v systemctl >/dev/null 2>&1 || return
+  systemctl enable "$unit_name"
+}
+
+lms_current_release_target() {
+  local current_dir="$1"
+  if [[ -e "$current_dir" || -L "$current_dir" ]]; then
+    readlink -f "$current_dir" 2>/dev/null || true
+  fi
+}
+
+lms_systemctl_is_active() {
+  local unit_name="$1"
+  [[ "${LMS_DEST_ROOT:-}" == "" ]] || return 1
+  lms_has_systemd || return 1
+  systemctl is-active --quiet "$unit_name"
+}
+
+lms_rollback_current_release() {
+  local current_dir="$1"
+  local unit_name="$2"
+  local previous_current_target="$3"
+  local should_restart="${4:-true}"
+
+  lms_log "Install failed; attempting to restore the previous release"
+  if [[ -n "$previous_current_target" && -d "$previous_current_target" ]]; then
+    ln -sfn "$previous_current_target" "$current_dir" || true
+    lms_log "Restored current release link to $previous_current_target"
+  fi
+
+  if lms_is_truthy "$should_restart" && lms_has_systemd; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart "$unit_name" >/dev/null 2>&1 || true
+  fi
+}
+
+lms_maybe_systemctl_restart() {
+  local unit_name="$1"
+  if [[ "${LMS_DEST_ROOT:-}" != "" ]]; then
+    return
+  fi
+
+  lms_has_systemd || return
+  systemctl restart "$unit_name"
+  for _ in $(seq 1 30); do
+    if systemctl is-active --quiet "$unit_name"; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  systemctl --no-pager --full status "$unit_name" >&2 || true
+  return 1
+}
+
+# Shared completion notice for LMS application installers.
+lms_print_responsibility_notice() {
+  cat <<'LMS_RESPONSIBILITY_NOTICE'
+
+LMS use and support responsibilities
+
+LMS and its installation, deployment, administration, backup, recovery and integration features are used at your own risk.
+
+To the extent permitted by law, LMS is provided “as is” and “as available”, without warranties, express or implied. You are responsible for reviewing actions before authorising them, securing your systems, maintaining backups and testing recovery.
+
+Third-party software and services remain subject to their own licences and terms. Support is limited to what is expressly agreed.
+
+Nothing in this notice excludes liability or statutory rights that cannot lawfully be excluded, or overrides obligations expressly accepted in a paid support or service agreement.
+LMS_RESPONSIBILITY_NOTICE
+}

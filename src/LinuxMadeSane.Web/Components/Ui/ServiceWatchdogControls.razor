@@ -1,0 +1,49 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@using LinuxMadeSane.Core.Abstractions
+@inject IServiceWatchdog Watchdog
+
+<div class="surface-card">
+    <h4>Service watchdog</h4>
+    <p>Restart failed services with increasing delays, up to five attempts. Intentional stops are preserved. Save again to reset the retry budget.</p>
+    @if (status is null && !string.IsNullOrWhiteSpace(message))
+    { <p role="alert">@message</p> }
+    @if (status is not null)
+    {
+        <label><input type="checkbox" @bind="enabled" disabled="@busy" /> Automatically restart @UnitName on failure</label>
+        <label>Notification email (optional) <input type="email" @bind="recipient" disabled="@busy" /></label>
+        <p>Email requires enabled server email delivery. Alerts cover failure, exhausted retries and recovery.</p>
+        <button type="button" @onclick="SaveAsync" disabled="@busy">Save watchdog</button>
+        <button type="button" @onclick="RefreshAsync" disabled="@busy">Refresh watchdog status</button>
+        <p role="status">@message</p>
+        <p>@status.Message Attempts: @status.Attempts/5. Last attempt: @status.LastAttemptUtc?.ToLocalTime()</p>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string UnitName { get; set; } = "";
+    private ServiceWatchdogStatus? status;
+    private bool enabled, busy;
+    private string recipient = "", message = "";
+    private string? loadedUnit;
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedUnit == UnitName) return;
+        loadedUnit = UnitName;
+        await RefreshAsync();
+    }
+    private async Task RefreshAsync()
+    {
+        try { status = await Watchdog.GetAsync(UnitName); enabled = status.Policy.Enabled; recipient = status.Policy.EmailRecipient; }
+        catch (Exception ex) { message = ex.Message; }
+    }
+    private async Task SaveAsync()
+    {
+        busy = true; message = "Saving watchdog policy…";
+        await InvokeAsync(StateHasChanged);
+        try { await Watchdog.SaveAsync(new(UnitName, enabled, recipient)); await RefreshAsync(); message = "Watchdog policy saved."; }
+        catch (Exception ex) { message = ex.Message; }
+        finally { busy = false; }
+    }
+}

@@ -1,0 +1,63 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@implements IDisposable
+@using LinuxMadeSane.Core.Models
+@inject PortalAddonBootstrapService Registration
+@inject FleetPortalRegistrationService Fleet
+
+<UiModal IsOpen="@open" Title="Register LMS hosts with Portal" OnClose="Close">
+    <ChildContent>
+        <div class="stack">
+            <p>Register selected hosts with <strong>@accountName</strong>, using their saved SSH access. Existing registrations are kept. Each new host installs the signed Portal connector and restarts LMS.</p>
+            <fieldset disabled="@(Fleet.IsRunning || Fleet.IsChecking)"><UiMultiSelect Label="LMS hosts" Placeholder="Choose hosts…" Items="@Options" @bind-Value="selected" /></fieldset>
+            <div class="toolbar">
+                <UiCommandButton Label="Select all" HideIcon="true" Disabled="@(Fleet.IsRunning || Fleet.IsChecking || !Eligible.Any())" OnClick="@(()=>selected=string.Join(',',Eligible.Select(x=>x.Id)))" />
+                <UiCommandButton Label="Register selected" Glyph="UiIconGlyph.Connection" Disabled="@(Fleet.IsRunning || Fleet.IsChecking || Targets.Count==0)" OnClick="Start" />
+            </div>
+            <p class="callout info" role="status">@(Fleet.IsChecking ? "Checking which hosts are already registered…" : Fleet.IsRunning ? "Registration is running in the background. You can close this dialog." : Fleet.Results.Count>0 ? "Registration finished. Review the results below." : "Choose hosts to register. Update older LMS hosts first.")</p>
+            @if(!Fleet.IsChecking && !Eligible.Any() && Hosts.Count>0 && Hosts.All(x=>Fleet.Status(x.Id) is {Registered:true}))
+            { <p class="meta-text">All LMS hosts are already registered with Portal.</p> }
+            <p class="meta-text">Registration is not blocked by licence availability. Licence requirements are shown in Portal; local LMS remains available.</p>
+            @foreach(var host in Hosts.Where(x=>Fleet.CheckError(x.Id) is not null))
+            { <p class="meta-text">@host.Name: @Fleet.CheckError(host.Id)</p> }
+            @foreach(var result in Fleet.Results)
+            {
+                <div><strong>@result.Host.Name — @result.State</strong><p>@result.Detail</p></div>
+            }
+        </div>
+    </ChildContent>
+    <Footer><UiCommandButton Label="Close" HideIcon="true" OnClick="Close" /></Footer>
+</UiModal>
+
+@code {
+    [Parameter] public IReadOnlyList<ManagedHost> Hosts {get;set;}=[];
+    private bool open,disposed;
+    private string accountName="",selected="";
+    private IEnumerable<ManagedHost> Eligible=>Hosts.Where(x=>Fleet.CanRegister(x.Id));
+    private IReadOnlyList<UiIdentityTokenPickerItem> Options=>Eligible.Select(x=>new UiIdentityTokenPickerItem(x.Id.ToString(),$"{x.Name} · {x.Hostname}")).ToArray();
+    private IReadOnlyList<ManagedHost> Targets=>Eligible.Where(x=>selected.Split(',',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries).Contains(x.Id.ToString(),StringComparer.OrdinalIgnoreCase)).ToArray();
+    protected override async Task OnInitializedAsync()
+    { Fleet.Changed+=Changed;var status=await Registration.StatusAsync();accountName=status?.PortalOrganizationName ?? "this Portal account"; }
+    private string checkedHosts="";
+    protected override Task OnParametersSetAsync()
+    {
+        var key=string.Join(',',Hosts.Select(x=>x.Id).Order());
+        if(key!=checkedHosts){checkedHosts=key;_=Fleet.RefreshAsync(Hosts);}
+        return Task.CompletedTask;
+    }
+    public void Open(Guid? hostId=null){selected=hostId?.ToString() ?? "";open=true;StateHasChanged();_=Fleet.RefreshAsync(Hosts);}
+    private void Close()=>open=false;
+    private void Start()=>Fleet.Start(Targets);
+    private void RefreshSelection()
+    {
+        // Successful hosts leave the picker. Remove their selection at the same
+        // time so UiMultiSelect never falls back to displaying their raw IDs.
+        selected=string.Join(',',selected.Split(',',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries)
+            .Where(value=>Guid.TryParse(value,out var id) && Fleet.Status(id) is not {Registered:true}));
+    }
+    private void Changed()
+    {
+        if(!disposed) _=InvokeAsync(()=>{RefreshSelection();StateHasChanged();});
+    }
+    public void Dispose(){disposed=true;Fleet.Changed-=Changed;}
+}

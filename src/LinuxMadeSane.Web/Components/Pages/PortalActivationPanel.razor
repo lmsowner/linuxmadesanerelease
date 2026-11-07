@@ -1,0 +1,84 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@inject LinuxMadeSane.Web.Services.PortalAddonBootstrapService Activation
+@inject IConfiguration Configuration
+@inject IJSRuntime JS
+
+<section class="surface-card">
+    <div class="table-header"><div><h2>LMS Portal registration</h2><p class="meta-text">Paste a free PORTAL- registration code from your Portal account. Existing LMS- codes are also accepted.</p></div>
+        <UiCommandButton Label="Open Portal" Glyph="UiIconGlyph.Website" Href="@Activation.PortalUrl" Target="_blank" Rel="noopener noreferrer" />
+    </div>
+    @if (!string.IsNullOrWhiteSpace(message)) { <p class="callout @(failed ? "error" : "info")" role="status">@message</p> }
+    @if(registered)
+    {
+        <p class="meta-text">Registered with @organization. @connectionStatus</p>
+        <div class="toolbar"><UiCommandButton Label="Update Portal add-on" Glyph="UiIconGlyph.Refresh" OnClick="UpdateAsync" Disabled="@busy" />
+            <UiCommandButton Label="Unregister" OnClick="UnregisterAsync" Disabled="@busy" /></div>
+        <p class="meta-text">Unregister removes the Portal connection and preserves your local settings and data.</p>
+    }
+    @if(!registered)
+    {
+    <EditForm Model="this" OnSubmit="ActivateAsync" class="stack-form portal-activation-form">
+        <UiTextField Label="Portal registration or licence code" aria-label="Portal registration or licence code" Type="text" Placeholder="PORTAL-… or LMS-…" @bind-Value="code" Autocomplete="off" Disabled="@busy" />
+        <UiSelectField TValue="string" Label="Add-on channel" aria-label="Add-on channel" @bind-Value="channel" Disabled="@busy"><option value="stable">Stable</option><option value="development">Development</option></UiSelectField>
+        <div class="toolbar">
+            <UiCommandButton Label="@(busy ? "Activating…" : "Register with Portal")" Glyph="UiIconGlyph.Key" Type="submit" Variant="UiButtonVariant.Primary" Disabled="@(busy || registered || string.IsNullOrWhiteSpace(code))" />
+            @if (installed) { <UiCommandButton Label="Restart LMS to connect" Glyph="UiIconGlyph.Refresh" OnClick="RestartAsync" Disabled="@busy" /> }
+        </div>
+    </EditForm>
+    }
+    @if(installed && registered) { <UiCommandButton Label="Restart LMS to connect" Glyph="UiIconGlyph.Refresh" OnClick="RestartAsync" Disabled="@busy" /> }
+    <p class="meta-text">Instance registration is free and unlimited. Remote Portal services use separate account allowances. Local LMS functionality and Professional software licensing are independent.</p>
+</section>
+
+@code {
+    [Parameter] public EventCallback OnStatusChanged { get; set; }
+    private string? code;
+    private string channel = "stable";
+    private string? message;
+    private bool busy, failed, installed, registered;
+    private string? organization,connectionStatus;
+    protected override async Task OnInitializedAsync()
+    {
+        channel=Configuration["ApplicationUpdates:Channel"] == "development" ? "development" : "stable";
+        await ReadStatusAsync();
+    }
+    private async Task ReadStatusAsync(){var status=await Activation.StatusAsync();registered=status?.IsEnabled==true&&status.PortalInstanceId.HasValue;organization=status?.PortalOrganizationName;connectionStatus=status?.LastConnectionStatus;installed=registered&&connectionStatus?.Contains("Restart LMS",StringComparison.OrdinalIgnoreCase)==true;await OnStatusChanged.InvokeAsync();}
+    private async Task UpdateAsync()
+    {
+        busy=true;failed=false;message="Checking Portal add-on…";
+        try{message=await Activation.UpdateAsync(channel,new Progress<string>(text=>{_=InvokeAsync(()=>{message=text;StateHasChanged();});}),beforeRestart: BeginRestartAsync);installed=true;}
+        catch(Exception e)when(e is InvalidOperationException or ArgumentException or HttpRequestException or IOException or System.Security.Cryptography.CryptographicException or JSException){failed=true;message=e.Message;await CancelRestartAsync();}
+        finally{busy=false;}
+    }
+    private async Task UnregisterAsync()
+    {
+        busy=true;failed=false;message="Removing the Portal registration…";
+        try{await Activation.UnregisterAsync(beforeRestart: BeginRestartAsync);await ReadStatusAsync();message="Portal registration removed. Local settings and data are unchanged.";installed=false;}
+        catch(Exception e)when(e is InvalidOperationException or IOException or HttpRequestException or JSException){failed=true;message=e.Message;await CancelRestartAsync();}
+        finally{busy=false;}
+    }
+    private async Task ActivateAsync()
+    {
+        if(busy || string.IsNullOrWhiteSpace(code))return;
+        busy=true;failed=false;message="Validating Portal registration…";
+        try {
+            var progress=new Progress<string>(text => { _=InvokeAsync(()=>{message=text;StateHasChanged();}); });
+            message=await Activation.ActivateAsync(code,channel,progress,beforeRestart: BeginRestartAsync);code="";installed=true;await ReadStatusAsync();
+        }
+        catch(Exception exception) when(exception is InvalidOperationException or ArgumentException or HttpRequestException or IOException or System.Security.Cryptography.CryptographicException or JSException) { failed=true;message=exception.Message;await CancelRestartAsync();await ReadStatusAsync(); }
+        finally{busy=false;}
+    }
+    private Task BeginRestartAsync() => JS.InvokeVoidAsync("lmsRestart.begin").AsTask();
+    private async Task CancelRestartAsync()
+    {
+        try { await JS.InvokeVoidAsync("lmsRestart.cancel"); }
+        catch (JSDisconnectedException) { }
+    }
+    private async Task RestartAsync()
+    {
+        busy=true;failed=false;message="Restarting LMS to load the Portal add-on…";
+        try { await Activation.RestartAsync(BeginRestartAsync); }
+        catch(Exception exception) when(exception is InvalidOperationException or JSException){failed=true;message=exception.Message;await CancelRestartAsync();busy=false;}
+    }
+}

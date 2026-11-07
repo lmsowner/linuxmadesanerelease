@@ -1,0 +1,802 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@using System.Security.Claims
+@using LinuxMadeSane.Application.Contracts.EdgeGateway
+@using LinuxMadeSane.Application.Services.EdgeGateway
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models.Cloudflare
+@using LinuxMadeSane.Core.Models.Caddy
+@using LinuxMadeSane.Application.Interfaces
+@using Microsoft.AspNetCore.Components.Authorization
+@implements IDisposable
+@inject ILocalHttpServiceDiscoveryService HttpServiceDiscovery
+@inject OnDemandAppService OnDemandApps
+@inject HttpServiceDiscoveryCoordinator DiscoveryCoordinator
+@inject NavigationManager Navigation
+@inject ICaddyIntegrationService CaddyIntegrationService
+
+<div class="on-demand-apps">
+    @if (FavouriteServices.Any())
+    {
+        <section class="on-demand-favourites" aria-labelledby="on-demand-favourites-title">
+            <div class="on-demand-favourites-heading">
+                <h2 id="on-demand-favourites-title">Quick links</h2>
+                <span>@FavouriteServices.Count() favourite@(FavouriteServices.Count() == 1 ? string.Empty : "s")</span>
+            </div>
+            <div class="on-demand-apps-grid on-demand-favourites-grid" role="list">
+                @foreach (var service in FavouriteServices)
+                {
+                    var key = LocalHttpServiceDiscoveryRanking.StableKey(service);
+                    <OnDemandAppCard Service="service"
+                                     Href="@(CanOpen ? BuildOpenUrl(key) : null)"
+                                     CanOpen="@CanOpen"
+                                     IsFavourite="true"
+                                     FavouriteDisabled="@(string.IsNullOrWhiteSpace(userId) || favouriteChangeInProgress.Contains(key))"
+                                     OnToggleFavourite="@(() => ToggleFavouriteAsync(service))"
+                                     OnOpenSettings="@(() => OpenFavouriteSettings(service))" />
+                }
+            </div>
+        </section>
+    }
+
+    <section class="surface-card on-demand-apps-toolbar">
+        <div class="on-demand-apps-toolbar-title">
+            <h2>Discover apps</h2>
+            <p class="meta-text">Resume scans only new or unfinished targets. Force rescan checks every target again.</p>
+        </div>
+        <div class="on-demand-apps-scan-controls">
+            <UiCheckboxField Value="@includeDocker"
+                             ValueChanged="SetIncludeDockerAsync"
+                             Label="Docker"
+                             Disabled="@isFlushingCache"
+                             Compact="true" />
+            <UiCheckboxField Value="@includeLan"
+                             ValueChanged="SetIncludeLanAsync"
+                             Label="LAN"
+                             Disabled="@isFlushingCache"
+                             Compact="true" />
+            <UiCheckboxField Value="@includeTailnet"
+                             ValueChanged="SetIncludeTailnetAsync"
+                             Label="Tailscale"
+                             Disabled="@isFlushingCache"
+                             Compact="true" />
+            <UiSelectField TValue="int"
+                           Value="refreshIntervalMinutes"
+                           ValueChanged="SetRefreshIntervalAsync"
+                           ValueExpression="@(() => refreshIntervalMinutes)"
+                           Label="Refresh"
+                           Disabled="@isFlushingCache"
+                           Compact="true"
+                           Inline="true">
+                <option value="0">Manual only</option>
+                <option value="60">Every hour</option>
+                <option value="180">Every 3 hours</option>
+                <option value="360">Every 6 hours</option>
+                <option value="720">Every 12 hours</option>
+                <option value="1440">Daily</option>
+            </UiSelectField>
+            @if (isScanning)
+            {
+                <UiCommandButton Label="Stop scan"
+                                 Glyph="UiIconGlyph.Stop"
+                                 Variant="UiButtonVariant.Danger"
+                                 Disabled="@isFlushingCache"
+                                 OnClick="StopScanAsync" />
+            }
+            else
+            {
+                <UiCommandButton Label="Resume scan"
+                                 Glyph="UiIconGlyph.Search"
+                                 Variant="UiButtonVariant.Primary"
+                                 Disabled="@isFlushingCache"
+                                 OnClick="ScanAsync" />
+            }
+            <UiCommandButton Label="Force rescan"
+                             Glyph="UiIconGlyph.Refresh"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@(isScanning || isFlushingCache)"
+                             OnClick="ForceRescanAsync" />
+            <UiCommandButton Label="@(isFlushingCache ? "Flushing..." : "Flush Cache")"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@(isScanning || isFlushingCache)"
+                             OnClick="FlushCacheAsync" />
+        </div>
+    </section>
+
+    @if (availability is null)
+    {
+        <p class="callout info">Checking the published LMS address and Edge Gateway relay…</p>
+    }
+    else if (!availability.IsAvailable)
+    {
+        <p class="callout warning"><strong>Opening apps is unavailable.</strong> @availability.Message Discovery and favourites remain available.</p>
+    }
+
+    @if (isScanning)
+    {
+        <section class="surface-subcard on-demand-apps-progress" role="status" aria-live="polite">
+            <span class="on-demand-apps-progress-bar"><span></span></span>
+            <span>@BuildScanSummary()</span>
+        </section>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(message))
+    {
+        <p class="meta-text on-demand-apps-message">@message</p>
+    }
+
+    @if (!DiscoveredServices.Any() && !FavouriteServices.Any() && !isScanning)
+    {
+        <section class="empty-state">
+            <h3>No cached HTTP/S apps</h3>
+            <p>Run Scan to search localhost, exposed Docker containers and the private LAN. Enable Tailscale only when you want tailnet peers included.</p>
+        </section>
+    }
+    else if (DiscoveredServices.Any())
+    {
+        <div class="on-demand-apps-grid" role="list">
+            @foreach (var service in DiscoveredServices)
+            {
+                var key = LocalHttpServiceDiscoveryRanking.StableKey(service);
+                <OnDemandAppCard Service="service"
+                                 Href="@(CanOpen ? BuildOpenUrl(key) : null)"
+                                 CanOpen="@CanOpen"
+                                 FavouriteDisabled="@(string.IsNullOrWhiteSpace(userId) || favouriteChangeInProgress.Contains(key))"
+                                 OnToggleFavourite="@(() => ToggleFavouriteAsync(service))"
+                                 OnOpenSettings="@(() => OpenFavouriteSettings(service))" />
+            }
+        </div>
+    }
+
+    <UiModal IsOpen="@showFavouriteSettings"
+             Title="Favourite connection settings"
+             Subtitle="@favouriteSettingsTitle"
+             Class="on-demand-favourite-settings-modal"
+             OnClose="CloseFavouriteSettings">
+        <ChildContent>
+            @if (favouriteSettingsService is not null)
+            {
+                <p class="meta-text">These settings apply only to this saved favourite. Changes apply when you open a new app window. Test connection checks reachability and an HTTP response; it does not verify application login.</p>
+                <div class="on-demand-favourite-settings-grid">
+                    <UiSelectField TValue="bool" @bind-Value="favouriteSettingsEditor.ConnectAsLms"
+                                   Label="Connection mode" Helper="@ConnectionModeHelp" Compact="true">
+                        <option value="false">Current behaviour</option>
+                        <option value="true">Connect as LMS server</option>
+                    </UiSelectField>
+                    @if (favouriteSettingsEditor.ConnectAsLms)
+                    {
+                        <UiSelectField TValue="string" @bind-Value="favouriteSettingsEditor.SourceSelection"
+                                       Label="Source interface / IPv4 address"
+                                       Helper="Choose LAN for a LAN service or Tailscale for a destination reachable through Tailscale. LMS checks the route and never silently substitutes another interface. Requires Caddy source-address binding support."
+                                       Compact="true">
+                            <option value="">Select an available interface</option>
+                            @foreach (var source in sourceOptions)
+                            {
+                                <option value="@($"{source.InterfaceName}|{source.Address}")">@source.InterfaceName — @source.Address</option>
+                            }
+                        </UiSelectField>
+                        @if (!string.IsNullOrEmpty(favouriteSettingsEditor.SourceSelection) &&
+                             !sourceOptions.Any(item => $"{item.InterfaceName}|{item.Address}" == favouriteSettingsEditor.SourceSelection))
+                        {
+                            <p class="callout warning">The saved source address is unavailable. Select a current interface before testing or saving.</p>
+                        }
+                    }
+                    <UiSelectField TValue="OnDemandAppTargetAddressPreference"
+                                   @bind-Value="favouriteSettingsEditor.TargetAddress"
+                                   Label="Connect using"
+                                   Helper="@TargetAddressHelp"
+                                   Compact="true">
+                        <option value="@OnDemandAppTargetAddressPreference.DiscoveredIp">Discovered IP (recommended)</option>
+                        <option value="@OnDemandAppTargetAddressPreference.DiscoveredHostname">Discovered hostname</option>
+                    </UiSelectField>
+                    <UiSelectField TValue="OnDemandAppSchemePreference"
+                                   @bind-Value="favouriteSettingsEditor.Scheme"
+                                   Label="Protocol"
+                                   Helper="@ProtocolHelp"
+                                   Compact="true">
+                        <option value="@OnDemandAppSchemePreference.Automatic">Automatic</option>
+                        <option value="@OnDemandAppSchemePreference.Http">HTTP</option>
+                        <option value="@OnDemandAppSchemePreference.Https">HTTPS</option>
+                    </UiSelectField>
+                    <UiSelectField TValue="OnDemandAppHostHeaderPreference"
+                                   @bind-Value="favouriteSettingsEditor.HostHeader"
+                                   Label="Host header"
+                                   Helper="@HostHeaderHelp"
+                                   Compact="true">
+                        <option value="@OnDemandAppHostHeaderPreference.Automatic">Automatic</option>
+                        <option value="@OnDemandAppHostHeaderPreference.Upstream">Target address</option>
+                        <option value="@OnDemandAppHostHeaderPreference.Public">Temporary public address</option>
+                    </UiSelectField>
+                    <UiSelectField TValue="OnDemandAppForwardedForPreference"
+                                   @bind-Value="favouriteSettingsEditor.EffectiveForwardedFor"
+                                   Label="Client IP header"
+                                   Helper="@ClientIpHelp"
+                                   Disabled="@favouriteSettingsEditor.ConnectAsLms"
+                                   Compact="true">
+                        <option value="@OnDemandAppForwardedForPreference.Automatic">Automatic</option>
+                        <option value="@OnDemandAppForwardedForPreference.Strip">Strip X-Forwarded-For</option>
+                        <option value="@OnDemandAppForwardedForPreference.Preserve">Forward client IP</option>
+                    </UiSelectField>
+                </div>
+                <div class="on-demand-favourite-endpoint">
+                    <span>Discovered IP</span><strong>@(favouriteSettingsService.IpAddress ?? "Unavailable")</strong>
+                    <span>Discovered hostname</span><strong>@favouriteSettingsService.Host</strong>
+                    <span>Port</span><strong>@favouriteSettingsService.Port</strong>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(favouriteSettingsMessage))
+                {
+                    <p class="meta-text on-demand-apps-message">@favouriteSettingsMessage</p>
+                }
+                @if (caddyUpgradeRequired)
+                {
+                    <p class="meta-text">Upgrade Caddy installs a supported package from Caddy's official stable repository, checks your existing configuration first and restarts Caddy. Open proxy connections may briefly reconnect.</p>
+                    <UiCommandButton Label="@(isUpgradingCaddy ? "Upgrading Caddy..." : "Upgrade Caddy")"
+                                     Disabled="@(isUpgradingCaddy || isTestingFavouriteSettings || isSavingFavouriteSettings)"
+                                     OnClick="UpgradeCaddyAsync" />
+                }
+                @if (!string.IsNullOrWhiteSpace(caddyUpgradeLog))
+                {
+                    <details>
+                        <summary>Caddy upgrade log</summary>
+                        <pre style="max-height: 16rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;">@caddyUpgradeLog</pre>
+                    </details>
+                }
+            }
+        </ChildContent>
+        <Footer>
+            <UiCommandButton Label="@(isTestingFavouriteSettings ? "Testing..." : "Test connection")"
+                             Glyph="UiIconGlyph.Connection"
+                             Disabled="@(isSavingFavouriteSettings || isTestingFavouriteSettings || isUpgradingCaddy || !CanOpen)"
+                             OnClick="TestFavouriteConnectionAsync" />
+            <UiCommandButton Label="Save favourite settings"
+                             Glyph="UiIconGlyph.Save"
+                             Variant="UiButtonVariant.Primary"
+                             Disabled="@(isSavingFavouriteSettings || isTestingFavouriteSettings || isUpgradingCaddy)"
+                             OnClick="SaveFavouriteSettingsAsync" />
+        </Footer>
+    </UiModal>
+</div>
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private readonly CancellationTokenSource lifetime = new();
+    private readonly HashSet<string> favouriteChangeInProgress = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<LocalHttpServiceEndpoint> services = [];
+    private Dictionary<string, OnDemandAppFavourite> favouriteProfiles = new(StringComparer.OrdinalIgnoreCase);
+    private OnDemandAppsAvailability? availability;
+    private string userId = string.Empty;
+    private string message = string.Empty;
+    private string scanStatus = string.Empty;
+    private bool includeDocker = true;
+    private bool includeLan = true;
+    private bool includeTailnet;
+    private bool isScanning;
+    private bool isFlushingCache;
+    private bool showFavouriteSettings;
+    private bool isSavingFavouriteSettings;
+    private bool isTestingFavouriteSettings;
+    private bool caddyUpgradeRequired;
+    private bool isUpgradingCaddy;
+    private string caddyUpgradeLog = string.Empty;
+    private IReadOnlyList<UiNetworkInterfaceIpOption> sourceOptions = [];
+
+    private string ConnectionModeHelp => favouriteSettingsEditor.ConnectAsLms
+        ? "Use this LMS server's selected network address and remove external client-IP headers on the application hop. Useful for apps that accept local clients only. LMS authentication still applies."
+        : "Keep the existing proxy behaviour. Use this for apps that already work; Linux chooses the outgoing network address.";
+    private string TargetAddressHelp => favouriteSettingsEditor.TargetAddress == OnDemandAppTargetAddressPreference.DiscoveredIp
+        ? "Connect directly to the discovered IP. Avoids DNS selecting a different or external destination."
+        : "Resolve the discovered hostname. In LMS-server mode the tested IPv4 destination is pinned for that app window.";
+    private string ProtocolHelp => favouriteSettingsEditor.Scheme switch
+    {
+        OnDemandAppSchemePreference.Http => "Use HTTP between LMS and the app. Your browser still uses the public HTTPS address.",
+        OnDemandAppSchemePreference.Https => "Use HTTPS between LMS and the app. Internal self-signed or expired certificates are accepted by the existing On-Demand policy.",
+        _ => "Test HTTP and HTTPS and choose a responding profile. This controls the LMS-to-app connection."
+    };
+    private string HostHeaderHelp => favouriteSettingsEditor.HostHeader switch
+    {
+        OnDemandAppHostHeaderPreference.Upstream => "Send the internal target address as Host. Can help apps that reject unfamiliar public hostnames; some apps may then redirect to an internal address.",
+        OnDemandAppHostHeaderPreference.Public => "Send the temporary public hostname as Host. Can help generate public links and redirects; the app must accept that hostname.",
+        _ => "Test internal and public Host headers. A successful page response does not prove login or cookies will work."
+    };
+    private string ClientIpHelp => favouriteSettingsEditor.ConnectAsLms
+        ? "Controlled by Connect as LMS server: remove forwarded external client-IP headers from the app request. LMS access checks retain the real visitor address."
+        : favouriteSettingsEditor.ForwardedFor switch
+        {
+            OnDemandAppForwardedForPreference.Strip => "Remove X-Forwarded-For only. Other headers can still identify the visitor; this does not change the TCP source address.",
+            OnDemandAppForwardedForPreference.Preserve => "Forward client-IP information. The app may require trusted-proxy configuration. This does not change the TCP source address.",
+            _ => "Test with and without X-Forwarded-For. This tests compatibility, not the app's trust or login policy."
+        };
+    private int probedCount;
+    private int totalProbeCount;
+    private int foundCount;
+    private int refreshIntervalMinutes = 180;
+    private DateTimeOffset? observedCompletionUtc;
+    private LocalHttpServiceEndpoint? favouriteSettingsService;
+    private FavouriteSettingsEditor favouriteSettingsEditor = new();
+    private string favouriteSettingsTitle = string.Empty;
+    private string favouriteSettingsMessage = string.Empty;
+
+    private bool CanOpen => availability?.IsAvailable == true && !string.IsNullOrWhiteSpace(userId);
+
+    private IEnumerable<LocalHttpServiceEndpoint> FavouriteServices => favouriteProfiles.Values
+        .Where(favourite => favourite.Endpoint is not null)
+        .OrderByDescending(favourite => favourite.UpdatedAtUtc)
+        .Select(favourite => favourite.Endpoint!)
+        .Where(service => !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(service))
+        .DistinctBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase);
+
+    private IEnumerable<LocalHttpServiceEndpoint> DiscoveredServices => services
+        .Where(service => !LocalHttpServiceDiscoveryRanking.IsHiddenFromPicker(service))
+        .Where(service => !favouriteProfiles.ContainsKey(LocalHttpServiceDiscoveryRanking.StableKey(service)))
+        .DistinctBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase)
+        .OrderBy(LocalHttpServiceDiscoveryRanking.PresentationRank)
+        .ThenBy(LocalHttpServiceDiscoveryRanking.PickerLabel, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(service => service.Host, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(service => service.Port);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var preferences = DiscoveryCoordinator.GetPreferences();
+        includeDocker = preferences.IncludeDocker;
+        includeLan = preferences.IncludeLan;
+        includeTailnet = preferences.IncludeTailnet;
+        refreshIntervalMinutes = preferences.RefreshIntervalMinutes;
+
+        try
+        {
+            var uri = new Uri(Navigation.Uri);
+            availability = await OnDemandApps.GetAvailabilityAsync(uri.Host, uri.Scheme == Uri.UriSchemeHttps, lifetime.Token);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            availability = new OnDemandAppsAvailability(false, $"Edge Gateway readiness could not be checked: {exception.Message}");
+        }
+
+        try
+        {
+            if (AuthenticationStateTask is not null)
+            {
+                var authenticationState = await AuthenticationStateTask;
+                userId = authenticationState.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(userId))
+                {
+                    favouriteProfiles = (await OnDemandApps.GetFavouritesAsync(userId, lifetime.Token))
+                        .ToDictionary(item => item.ServiceKey, StringComparer.OrdinalIgnoreCase);
+                }
+            }
+
+            SetServices(await HttpServiceDiscovery.GetCachedAsync(lifetime.Token));
+            message = services.Count == 0
+                ? "No cached apps yet. Run Scan to discover them."
+                : $"Showing {VisibleServiceCount} cached app(s).";
+
+            await RefreshBackgroundStateAsync();
+            _ = ObserveBackgroundDiscoveryAsync();
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"Apps could not be loaded: {exception.Message}";
+        }
+    }
+
+    private async Task ScanAsync()
+    {
+        await StartScanAsync(forceRescan: false);
+    }
+
+    private async Task ForceRescanAsync()
+    {
+        await StartScanAsync(forceRescan: true);
+    }
+
+    private async Task StopScanAsync()
+    {
+        if (!isScanning)
+        {
+            return;
+        }
+
+        if (DiscoveryCoordinator.TryStopScan())
+        {
+            message = "Stopping discovery… current network probes will cancel as they reach their cancellation point.";
+        }
+
+        await RefreshBackgroundStateAsync();
+    }
+
+    private Task SetIncludeDockerAsync(bool value) => SetScanScopeAsync(() => includeDocker = value);
+
+    private Task SetIncludeLanAsync(bool value) => SetScanScopeAsync(() => includeLan = value);
+
+    private Task SetIncludeTailnetAsync(bool value) => SetScanScopeAsync(() => includeTailnet = value);
+
+    private async Task SetScanScopeAsync(Action update)
+    {
+        update();
+        try
+        {
+            await DiscoveryCoordinator.SavePreferencesAsync(CurrentPreferences(), lifetime.Token);
+            message = isScanning
+                ? "Scan interfaces saved. The current scan will finish with its existing scope; the next scan will use these selections."
+                : "Scan interfaces saved.";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"The scan interface settings could not be saved: {exception.Message}";
+        }
+    }
+
+    private async Task StartScanAsync(bool forceRescan)
+    {
+        if (isScanning)
+        {
+            return;
+        }
+
+        try
+        {
+            var preferences = CurrentPreferences();
+            await DiscoveryCoordinator.SavePreferencesAsync(preferences, lifetime.Token);
+            var request = preferences.ToRequest() with { ForceRescan = forceRescan };
+            if (DiscoveryCoordinator.TryStartScan(request))
+            {
+                message = forceRescan
+                    ? "Full discovery is running in the background. Every target will be scanned again."
+                    : "Discovery is resuming in the background. Fully scanned targets will be skipped.";
+            }
+
+            await RefreshBackgroundStateAsync();
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"HTTP/S discovery could not be started: {exception.Message}";
+        }
+    }
+
+    private async Task SetRefreshIntervalAsync(int value)
+    {
+        refreshIntervalMinutes = value;
+        try
+        {
+            await DiscoveryCoordinator.SavePreferencesAsync(CurrentPreferences(), lifetime.Token);
+            message = value == 0
+                ? "Automatic discovery is off. Cached apps remain available until you flush the cache."
+                : $"Automatic discovery will scan {FormatRefreshInterval(value)}. Existing cached apps are kept.";
+            await RefreshBackgroundStateAsync();
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"The discovery refresh setting could not be saved: {exception.Message}";
+        }
+    }
+
+    private async Task FlushCacheAsync()
+    {
+        if (isScanning || isFlushingCache)
+        {
+            return;
+        }
+
+        isFlushingCache = true;
+        try
+        {
+            var removedCount = await DiscoveryCoordinator.FlushCacheAsync(lifetime.Token);
+            observedCompletionUtc = DiscoveryCoordinator.GetStatus().CompletedUtc;
+            SetServices(await HttpServiceDiscovery.GetCachedAsync(lifetime.Token));
+            message = $"Flushed {removedCount} cached app(s). Saved favourites were kept.";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            message = $"The discovery cache could not be flushed: {exception.Message}";
+        }
+        finally
+        {
+            isFlushingCache = false;
+        }
+    }
+
+    private async Task ObserveBackgroundDiscoveryAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            while (await timer.WaitForNextTickAsync(lifetime.Token))
+            {
+                await InvokeAsync(async () =>
+                {
+                    await RefreshBackgroundStateAsync();
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+    }
+
+    private async Task RefreshBackgroundStateAsync()
+    {
+        var background = DiscoveryCoordinator.GetStatus();
+        isScanning = background.IsActive;
+        scanStatus = background.Message;
+        probedCount = background.ProbedCount;
+        totalProbeCount = background.TotalProbeCount;
+        foundCount = background.FoundCount;
+        refreshIntervalMinutes = background.RefreshIntervalMinutes;
+
+        if (background.IsActive)
+        {
+            SetServices(await HttpServiceDiscovery.GetCachedAsync(lifetime.Token));
+            message = "Discovery is running in the background. Cached apps remain available while results arrive.";
+        }
+        else if (!string.IsNullOrWhiteSpace(background.Error))
+        {
+            message = $"HTTP/S discovery failed: {background.Error}";
+        }
+        else if (background.CompletedUtc.HasValue && background.CompletedUtc != observedCompletionUtc)
+        {
+            observedCompletionUtc = background.CompletedUtc;
+            SetServices(await HttpServiceDiscovery.GetCachedAsync(lifetime.Token));
+            message = VisibleServiceCount == 0
+                ? "Background discovery completed. No HTTP/S apps responded."
+                : $"Background discovery completed. {VisibleServiceCount} app(s) are cached.";
+        }
+    }
+
+    private async Task ToggleFavouriteAsync(LocalHttpServiceEndpoint service)
+    {
+        var serviceKey = LocalHttpServiceDiscoveryRanking.StableKey(service);
+        if (string.IsNullOrWhiteSpace(userId) || !favouriteChangeInProgress.Add(serviceKey))
+        {
+            return;
+        }
+
+        try
+        {
+            if (favouriteProfiles.ContainsKey(serviceKey))
+            {
+                await OnDemandApps.RemoveFavouriteAsync(userId, serviceKey, lifetime.Token);
+                favouriteProfiles.Remove(serviceKey);
+            }
+            else
+            {
+                var preferences = new OnDemandAppProxyPreferences();
+                await OnDemandApps.SaveFavouriteAsync(userId, service, preferences, lifetime.Token);
+                favouriteProfiles[serviceKey] = new OnDemandAppFavourite(
+                    serviceKey,
+                    service,
+                    preferences,
+                    DateTimeOffset.UtcNow);
+            }
+        }
+        catch (Exception exception)
+        {
+            message = $"Favourite could not be updated: {exception.Message}";
+        }
+        finally
+        {
+            favouriteChangeInProgress.Remove(serviceKey);
+        }
+    }
+
+    private void OpenFavouriteSettings(LocalHttpServiceEndpoint service)
+    {
+        if (string.IsNullOrWhiteSpace(userId))
+        {
+            message = "Sign in with an LMS account to save favourite settings.";
+            return;
+        }
+
+        var key = LocalHttpServiceDiscoveryRanking.StableKey(service);
+        var preferences = favouriteProfiles.TryGetValue(key, out var favourite)
+            ? favourite.ProxyPreferences
+            : new OnDemandAppProxyPreferences();
+        sourceOptions = UiNetworkInterfaceIpCatalog.GetOptions(ipv4Only: true, includeAllIpv4: false, includeLoopback: false)
+            .Where(item => !System.Net.IPAddress.IsLoopback(System.Net.IPAddress.Parse(item.Address))).ToArray();
+        favouriteSettingsService = service;
+        favouriteSettingsEditor = FavouriteSettingsEditor.From(preferences);
+        favouriteSettingsTitle = LocalHttpServiceDiscoveryRanking.PickerLabel(service);
+        caddyUpgradeRequired = false;
+        caddyUpgradeLog = string.Empty;
+        favouriteSettingsMessage = string.Empty;
+        showFavouriteSettings = true;
+    }
+
+    private async Task SaveFavouriteSettingsAsync()
+    {
+        if (favouriteSettingsService is null || string.IsNullOrWhiteSpace(userId) || isSavingFavouriteSettings)
+        {
+            return;
+        }
+
+        isSavingFavouriteSettings = true;
+        favouriteSettingsMessage = string.Empty;
+        try
+        {
+            var preferences = favouriteSettingsEditor.ToPreferences();
+            if (preferences.ConnectAsLms)
+            {
+                _ = await CheckFavouriteConnectionAsync(preferences);
+            }
+            await OnDemandApps.SaveFavouriteAsync(userId, favouriteSettingsService, preferences, lifetime.Token);
+            var key = LocalHttpServiceDiscoveryRanking.StableKey(favouriteSettingsService);
+            favouriteProfiles[key] = new OnDemandAppFavourite(
+                key,
+                favouriteSettingsService,
+                preferences,
+                DateTimeOffset.UtcNow);
+            showFavouriteSettings = false;
+            message = $"Saved connection settings for {LocalHttpServiceDiscoveryRanking.PickerLabel(favouriteSettingsService)}.";
+        }
+        catch (Exception exception)
+        {
+            caddyUpgradeRequired = exception is CaddySourceBindingRequiredException;
+            favouriteSettingsMessage = $"Favourite settings could not be saved: {exception.Message}";
+        }
+        finally
+        {
+            isSavingFavouriteSettings = false;
+        }
+    }
+
+    private Task<LocalHttpServiceProxyProfile> CheckFavouriteConnectionAsync(OnDemandAppProxyPreferences preferences)
+    {
+        if (favouriteSettingsService is null || availability?.IsAvailable != true)
+        {
+            throw new InvalidOperationException("Open LMS through its published HTTPS address before testing a connection.");
+        }
+        return OnDemandApps.TestConnectionAsync(favouriteSettingsService,
+            $"ondemand-test.{availability.DomainName}", preferences, lifetime.Token);
+    }
+
+    private async Task TestFavouriteConnectionAsync()
+    {
+        if (isTestingFavouriteSettings || isSavingFavouriteSettings) return;
+        isTestingFavouriteSettings = true;
+        favouriteSettingsMessage = "Testing the selected connection settings...";
+        try
+        {
+            var preferences = favouriteSettingsEditor.ToPreferences();
+            var result = await CheckFavouriteConnectionAsync(preferences);
+            caddyUpgradeRequired = false;
+            var source = preferences.ConnectAsLms
+                ? $"{preferences.SourceInterface} ({preferences.SourceAddress})"
+                : "system-selected source address";
+            favouriteSettingsMessage = $"Source: {source}. Destination: {result.Endpoint.Scheme}://{result.Endpoint.Host}:{result.Endpoint.Port}. " +
+                $"{result.SelectionReason} Host: {(result.UsePublicHostHeader ? "public test hostname" : "target address")}. " +
+                "Application login has not been verified. No public route was created.";
+        }
+        catch (Exception exception)
+        {
+            caddyUpgradeRequired = exception is CaddySourceBindingRequiredException;
+            favouriteSettingsMessage = $"Connection test failed: {exception.Message}";
+        }
+        finally
+        {
+            isTestingFavouriteSettings = false;
+        }
+    }
+
+    private async Task UpgradeCaddyAsync()
+    {
+        if (isUpgradingCaddy || isTestingFavouriteSettings || isSavingFavouriteSettings || string.IsNullOrWhiteSpace(userId)) return;
+        isUpgradingCaddy = true;
+        favouriteSettingsMessage = "Preparing Caddy. Your current configuration will be checked before the package is replaced...";
+        try
+        {
+            var result = await CaddyIntegrationService.InstallAsync();
+            caddyUpgradeLog = string.Join(Environment.NewLine, result.Logs.Select(log =>
+                $"{log.Message}{Environment.NewLine}{log.StandardOutput}{Environment.NewLine}{log.StandardError}"));
+            caddyUpgradeRequired = !result.Success;
+            favouriteSettingsMessage = result.Summary;
+        }
+        catch (Exception exception)
+        {
+            favouriteSettingsMessage = $"Caddy could not be upgraded: {exception.Message}";
+        }
+        finally
+        {
+            isUpgradingCaddy = false;
+        }
+    }
+
+    private void CloseFavouriteSettings()
+    {
+        showFavouriteSettings = false;
+        favouriteSettingsMessage = string.Empty;
+    }
+
+    private void SetServices(IReadOnlyList<LocalHttpServiceEndpoint> cached)
+    {
+        services = favouriteProfiles.Values
+            .Select(item => item.Endpoint)
+            .OfType<LocalHttpServiceEndpoint>()
+            .Concat(cached)
+            .GroupBy(LocalHttpServiceDiscoveryRanking.StableKey, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.Last())
+            .ToArray();
+    }
+
+    private int VisibleServiceCount => FavouriteServices.Count() + DiscoveredServices.Count();
+
+    private HttpServiceDiscoveryPreferences CurrentPreferences() =>
+        new(refreshIntervalMinutes, includeDocker, includeLan, includeTailnet);
+
+    private static string FormatRefreshInterval(int minutes) => minutes switch
+    {
+        60 => "every hour",
+        180 => "every 3 hours",
+        360 => "every 6 hours",
+        720 => "every 12 hours",
+        1440 => "daily",
+        _ => "on the selected schedule"
+    };
+
+    private string BuildOpenUrl(string serviceKey) =>
+        $"/on-demand-apps/open?service={Uri.EscapeDataString(serviceKey)}";
+
+    private string BuildScanSummary()
+    {
+        var progress = totalProbeCount > 0 ? $"{probedCount}/{totalProbeCount} checked" : "Preparing";
+        return $"{scanStatus} {progress}, {foundCount} found.";
+    }
+
+    public void Dispose()
+    {
+        lifetime.Cancel();
+        lifetime.Dispose();
+    }
+
+    private sealed class FavouriteSettingsEditor
+    {
+        public OnDemandAppTargetAddressPreference TargetAddress { get; set; } = OnDemandAppTargetAddressPreference.DiscoveredIp;
+        public OnDemandAppSchemePreference Scheme { get; set; } = OnDemandAppSchemePreference.Automatic;
+        public OnDemandAppHostHeaderPreference HostHeader { get; set; } = OnDemandAppHostHeaderPreference.Automatic;
+        public OnDemandAppForwardedForPreference ForwardedFor { get; set; } = OnDemandAppForwardedForPreference.Automatic;
+
+        public bool ConnectAsLms { get; set; }
+        public string SourceSelection { get; set; } = string.Empty;
+        public OnDemandAppForwardedForPreference EffectiveForwardedFor
+        {
+            get => ConnectAsLms ? OnDemandAppForwardedForPreference.Strip : ForwardedFor;
+            set => ForwardedFor = value;
+        }
+
+        public static FavouriteSettingsEditor From(OnDemandAppProxyPreferences preferences) => new()
+        {
+            TargetAddress = preferences.TargetAddress,
+            Scheme = preferences.Scheme,
+            HostHeader = preferences.HostHeader,
+            ForwardedFor = preferences.ForwardedFor,
+            ConnectAsLms = preferences.ConnectAsLms,
+            SourceSelection = string.IsNullOrEmpty(preferences.SourceAddress) ? string.Empty : $"{preferences.SourceInterface}|{preferences.SourceAddress}"
+        };
+
+        public OnDemandAppProxyPreferences ToPreferences() =>
+            new(TargetAddress, Scheme, HostHeader, ForwardedFor, ConnectAsLms,
+                SourceSelection.Split('|').FirstOrDefault() ?? string.Empty,
+                SourceSelection.Split('|').ElementAtOrDefault(1) ?? string.Empty);
+    }
+}

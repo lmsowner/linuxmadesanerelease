@@ -1,0 +1,111 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Abstractions
+@implements IAsyncDisposable
+@inject IManagedHostFileAccessService FileAccess
+
+<UiModal IsOpen="true" Title="De-duplicate folder" Subtitle="@FolderPath" OnClose="CloseAsync">
+    <ChildContent>
+        <div class="duplicate-feedback" role="status" aria-live="polite">@message</div>
+        @if (busy) { <progress class="duplicate-progress" aria-label="Checking files" /> }
+        <p class="duplicate-explanation">Full SHA-256 checks run on this host, one file at a time. Keep one copy and move identical files into <strong>LMS Duplicates</strong>. Original names are preferred over numbered copies. Subfolders are left alone.</p>
+        @if (result is not null)
+        {
+            @foreach (var warning in result.Warnings)
+            {
+                <p class="duplicate-warning">@warning</p>
+            }
+            <div class="duplicate-groups">
+                @foreach (var group in result.Groups)
+                {
+                    <section class="duplicate-group">
+                        <div><span class="duplicate-label">Keep</span><strong>@group.Keep.Name</strong></div>
+                        @foreach (var copy in group.Duplicates)
+                        {
+                            <div><span class="duplicate-label">@(finished ? "Copy" : "Move")</span><span>@copy.Name</span></div>
+                        }
+                    </section>
+                }
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="@(busy ? "Cancel" : "Close")" Glyph="UiIconGlyph.Clear" OnClick="CloseAsync" />
+        @if (!finished)
+        {
+            <UiCommandButton Label="Move duplicates" Glyph="UiIconGlyph.FolderOpen" Variant="UiButtonVariant.Primary"
+                Disabled="@(busy || result is null || result.Groups.Count == 0)" OnClick="MoveAsync" />
+        }
+    </Footer>
+</UiModal>
+
+@code {
+    [Parameter, EditorRequired] public ManagedHost Host { get; set; } = null!;
+    [Parameter, EditorRequired] public ManagedHostConnectionProfile Profile { get; set; } = null!;
+    [Parameter, EditorRequired] public string FolderPath { get; set; } = "";
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback FilesChanged { get; set; }
+    private readonly CancellationTokenSource cancellation = new();
+    private FolderDuplicateResult? result;
+    private Task? operation;
+    private bool busy = true, finished, moving, disposed;
+    private string message = "Checking file sizes and SHA-256 hashes… No files are being moved.";
+
+    protected override Task OnInitializedAsync() => operation = ScanAsync();
+
+    private async Task ScanAsync()
+    {
+        try
+        {
+            result = await FileAccess.ScanFolderDuplicatesAsync(Host, FolderPath, Profile, cancellation.Token);
+            var count = result.Groups.Sum(group => group.Duplicates.Count);
+            message = count == 0 ? $"No identical copies found in {result.FilesScanned} files."
+                : $"{count} duplicate{(count == 1 ? "" : "s")} found in {result.FilesScanned} files. Review the kept files below, then move the copies. Nothing will be deleted or overwritten.";
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        catch (Exception error) { message = error.Message; }
+        finally { busy = false; }
+    }
+
+    private Task MoveAsync() => operation = MoveCoreAsync();
+
+    private async Task MoveCoreAsync()
+    {
+        if (busy || result is null || finished) return;
+        busy = true; moving = true;
+        message = "Rechecking each file, then moving identical copies into LMS Duplicates…";
+        try
+        {
+            result = await FileAccess.MoveFolderDuplicatesAsync(Host, result, Profile, cancellation.Token);
+            finished = true;
+            message = $"Moved {result.MovedFiles.Count} file{(result.MovedFiles.Count == 1 ? "" : "s")} into LMS Duplicates. Kept files remain in this folder.";
+            await FilesChanged.InvokeAsync();
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            finished = true;
+            message = error.Message + " Some copies may already have moved into LMS Duplicates. Refresh and scan again before retrying.";
+            await FilesChanged.InvokeAsync();
+        }
+        finally { busy = false; moving = false; }
+    }
+
+    private async Task CloseAsync()
+    {
+        var changed = moving;
+        await cancellation.CancelAsync();
+        if (operation is not null) await operation;
+        if (changed) await FilesChanged.InvokeAsync();
+        await OnClose.InvokeAsync();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (disposed) return;
+        disposed = true;
+        await cancellation.CancelAsync();
+        cancellation.Dispose();
+    }
+}

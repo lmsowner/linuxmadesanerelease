@@ -1,0 +1,906 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
+@inject IManagedHostService HostService
+@inject IJSRuntime JSRuntime
+@inject ISshKeyPairGenerator SshKeyPairGenerator
+
+<UiModal IsOpen="@IsOpen"
+         Title="@(IsEditMode ? $"Edit {Editor.Name}" : "Add managed host")"
+         Subtitle="Choose saved server credentials, review the host details, then test and save."
+         Class="managed-host-editor-modal"
+         CloseOnBackdrop="false"
+         OnClose="OnClose">
+    <ChildContent>
+        <EditForm id="@formId" Model="@Editor" OnValidSubmit="HandleSaveAsync" class="managed-host-editor-form">
+            <DataAnnotationsValidator />
+            <SavedCredentialPicker @ref="credentialPicker" ShowAddButton="true" AddRequested="OpenCredentialEditorAsync" SavedOnly="true" Cleared="ClearSavedCredentialAsync" Selected="ApplySavedCredentialAsync" Disabled="@(IsBusy || IsTestingConnection)" />
+
+            <div class="managed-host-editor-grid managed-host-editor-grid-primary">
+                <UiTextField @bind-Value="Editor.Name"
+                             Label="Name"
+                             Placeholder="Production web node"
+                             Class="managed-host-editor-field-name"
+                             Compact="true"
+                             data-testid="managed-host-name" />
+
+                <UiField Label="Hostname"
+                         Compact="true"
+                         Class="managed-host-editor-field-hostname">
+                    <ChildContent>
+                        <div class="managed-host-editor-input-with-button">
+                            <InputText Value="@Editor.Hostname"
+                                       ValueChanged="HandleHostnameChangedAsync"
+                                       ValueExpression="() => Editor.Hostname"
+                                       class="ui-control-input managed-host-editor-hostname-input"
+                                       data-testid="managed-host-hostname"
+                                       placeholder="server01.example.net" />
+                            <UiIconButton Label="Lookup SSH hosts"
+                                          Title="Lookup SSH hosts on the LMS LAN or tailnet"
+                                          Glyph="UiIconGlyph.Search"
+                                          Class="managed-host-editor-input-suffix-button"
+                                          Disabled="@(IsBusy || IsTestingConnection || IsDiscoveringHosts)"
+                                          OnClick="OpenHostLookupDialog" />
+                        </div>
+                    </ChildContent>
+                    <ValidationContent>
+                        <ValidationMessage For="() => Editor.Hostname" />
+                    </ValidationContent>
+                </UiField>
+
+                <UiNumberField TValue="int"
+                               Value="@Editor.Port"
+                               ValueChanged="HandlePortChangedAsync"
+                               ValueExpression="() => Editor.Port"
+                               Label="Port"
+                               Placeholder="22"
+                               Class="managed-host-editor-field-port"
+                               InputClass="managed-host-editor-port-input"
+                               min="1"
+                               max="65535"
+                               step="1"
+                               inputmode="numeric"
+                               Compact="true"
+                               data-testid="managed-host-port" />
+
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(Editor.Username))
+            {
+                <p class="meta-text">Login: <strong>@Editor.Username</strong> · @GetAuthenticationOptionLabel(Editor.PrimaryAuthenticationType)@(selectedCredentialId.HasValue ? " · from saved credentials" : " · existing host login")</p>
+            }
+            @if (!string.IsNullOrWhiteSpace(credentialNotice)) { <p class="callout info">@credentialNotice</p> }
+
+            <details class="managed-host-editor-advanced">
+                <summary>Additional settings</summary>
+
+                <div class="managed-host-editor-grid managed-host-editor-grid-advanced">
+                <UiPathAutocompleteField Value="@Editor.DefaultWorkingDirectory"
+                                         ValueChanged="HandleWorkingDirectoryChangedAsync"
+                                         ValueExpression="() => Editor.DefaultWorkingDirectory"
+                                         Label="Working directory"
+                                         Placeholder="@SuggestedHomeDirectory"
+                                         Helper="Defaults to this user's home directory. Change it only when you need a different starting folder."
+                                         Suggestions="@WorkingDirectorySuggestions"
+                                         Class="managed-host-editor-field-workdir"
+                                         Compact="true" />
+
+                    <UiTextField @bind-Value="Editor.Platform"
+                                 Label="Platform"
+                                 Placeholder="Ubuntu 24.04 LTS"
+                                 Helper="Optional note for the OS or distro."
+                                 Compact="true" />
+
+                    <UiComboboxField TValue="ManagedHostKind"
+                                   @bind-Value="Editor.HostKind"
+                                   Label="Host type"
+                                   Helper="Mark this as an LMS host only when that machine also runs Linux Made Sane."
+                                   Disabled="@IsLocalManagedHost"
+                                   Compact="true"
+                                   data-testid="managed-host-kind">
+                        <option value="@ManagedHostKind.SshHost">SSH host</option>
+                        <option value="@ManagedHostKind.LmsHost">LMS host</option>
+                    </UiComboboxField>
+
+                    <UiComboboxField TValue="HostOperatingStatus"
+                                   @bind-Value="Editor.OperatingStatus"
+                                   Label="Status hint"
+                                   Helper="Manual dashboard badge. Leave Unknown unless you want to flag this host yourself."
+                                   Compact="true">
+                        @foreach (var option in Enum.GetValues<HostOperatingStatus>())
+                        {
+                            <option value="@option">@option</option>
+                        }
+                    </UiComboboxField>
+
+                </div>
+
+                <UiTextAreaField @bind-Value="Editor.Description"
+                                 Label="Description"
+                                 Rows="3"
+                                 Helper="Short notes for operators. This stays in LMS only."
+                                 Compact="true"
+                                 InputClass="managed-host-editor-slim-textarea" />
+            </details>
+        </EditForm>
+    </ChildContent>
+
+    <Footer>
+        <div class="managed-host-editor-footer">
+            @if (!string.IsNullOrWhiteSpace(StatusMessage))
+            {
+                <p class="callout @StatusTone managed-host-editor-status">@StatusMessage</p>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(ConnectionTestMessage))
+            {
+                <p class="callout @ConnectionTestTone managed-host-editor-status">@ConnectionTestMessage</p>
+            }
+
+            <div class="managed-host-editor-actions">
+                <UiCommandButton Label="@(IsTestingConnection ? "Testing..." : "Test connection")"
+                                 Glyph="UiIconGlyph.Connect"
+                                 Variant="UiButtonVariant.ActionSubtle"
+                                 Disabled="@(IsBusy || IsTestingConnection || !HasConnectionCredentials)"
+                                 OnClick="HandleTestConnectionAsync" />
+                <UiCommandButton Label="Close"
+                                 Glyph="UiIconGlyph.Clear"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@(IsBusy || IsTestingConnection)"
+                                 OnClick="OnClose" />
+                <UiCommandButton Label="@(IsBusy ? "Saving..." : "Save host")"
+                                 Glyph="UiIconGlyph.Save"
+                                 Disabled="@(IsBusy || IsTestingConnection || !HasConnectionCredentials)"
+                                 Type="submit"
+                                 form="@formId" />
+            </div>
+        </div>
+    </Footer>
+</UiModal>
+
+<SavedCredentialsPanel @ref="credentialEditor" EditorOnly="true" SshOnly="true" Saved="SelectCreatedCredentialAsync" />
+
+<UiModal IsOpen="@ShowHostLookupDialog"
+         Title="Find SSH or LMS host"
+         Subtitle="Probe the LMS server's LAN or, when available, its tailnet for reachable SSH servers. LMS hosts are detected from their health endpoint on port 5080."
+         Class="managed-host-lookup-modal"
+         CloseOnBackdrop="false"
+         OnClose="CloseHostLookupDialog">
+    <ChildContent>
+        <div class="managed-host-editor-host-lookup">
+            <div class="managed-host-editor-discovery-actions">
+                <UiCommandButton Label="@(IsDiscoveringHosts && ActiveDiscoveryScope == SshHostDiscoveryScope.Lan ? "Scanning LAN..." : "Scan LAN")"
+                                 Glyph="UiIconGlyph.Analyze"
+                                 Variant="UiButtonVariant.ActionSubtle"
+                                 Disabled="@(IsBusy || IsTestingConnection || IsDiscoveringHosts)"
+                                 OnClick="HandleScanLanHostsAsync" />
+                <UiCommandButton Label="@(IsDiscoveringHosts && ActiveDiscoveryScope == SshHostDiscoveryScope.Tailnet ? "Scanning Tailnet..." : "Scan tailnet")"
+                                 Glyph="UiIconGlyph.Connection"
+                                 Variant="UiButtonVariant.ActionSubtle"
+                                 Disabled="@(IsBusy || IsTestingConnection || IsDiscoveringHosts)"
+                                 OnClick="HandleScanTailnetHostsAsync" />
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(HostDiscoveryMessage))
+            {
+                <div class="managed-host-editor-discovery-status-stack">
+                    <p class="callout @HostDiscoveryTone managed-host-editor-discovery-status">@HostDiscoveryMessage</p>
+                    @if (!string.IsNullOrWhiteSpace(HostDiscoveryProgressDetail))
+                    {
+                        <p class="meta-text managed-host-editor-discovery-progress">@HostDiscoveryProgressDetail</p>
+                    }
+                </div>
+            }
+
+            @if (HostDiscoveryNotes.Count > 0)
+            {
+                <details class="managed-host-editor-discovery-notes">
+                    <summary>Discovery notes</summary>
+                    <div class="decision-list">
+                        @foreach (var note in HostDiscoveryNotes)
+                        {
+                            <InfoPill Eyebrow="Lookup note" Text="@note" />
+                        }
+                    </div>
+                </details>
+            }
+
+            @if (DiscoveredHosts.Count == 0 && string.IsNullOrWhiteSpace(HostDiscoveryMessage))
+            {
+                <div class="empty-state managed-host-editor-discovery-empty">
+                    <h3>No scan run yet</h3>
+                    <p>Choose `Scan LAN` or `Scan tailnet` to look for reachable SSH servers and detect Linux Made Sane hosts.</p>
+                </div>
+            }
+            else if (DiscoveredHosts.Count > 0)
+            {
+                <div class="managed-host-editor-discovery-results">
+                    @foreach (var host in DiscoveredHosts)
+                    {
+                        <article class="managed-host-editor-discovery-row">
+                            <div class="managed-host-editor-discovery-line">
+                                <strong class="managed-host-editor-discovery-name">@host.DisplayName</strong>
+                                <span class="meta-text managed-host-editor-discovery-inline">
+                                    @host.Target
+                                    @if (!string.IsNullOrWhiteSpace(host.IpAddress) &&
+                                         !host.Target.Equals(host.IpAddress, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <text> · @host.IpAddress</text>
+                                    }
+                                </span>
+
+                                <span class="meta-text managed-host-editor-discovery-inline">@host.ScopeLabel</span>
+
+                                @if (!string.IsNullOrWhiteSpace(host.Platform))
+                                {
+                                    <span class="meta-text managed-host-editor-discovery-inline">@host.Platform</span>
+                                }
+
+                                @if (host.IsLinuxMadeSaneHost)
+                                {
+                                    <UiPill Tone="UiPillTone.Success">@FormatLmsDiscoveryLabel(host)</UiPill>
+                                }
+                            </div>
+
+                            <div class="managed-host-editor-discovery-pick">
+                                <UiCommandButton Label="@(host.IsLinuxMadeSaneHost ? "Add LMS Server" : "Use this host")"
+                                                 Glyph="@(host.IsLinuxMadeSaneHost ? UiIconGlyph.Plus : UiIconGlyph.Connect)"
+                                                 Variant="UiButtonVariant.Action"
+                                                 Disabled="@(IsBusy || IsTestingConnection)"
+                                                 OnClick="@(() => HandleUseDiscoveredHostAsync(host))" />
+                            </div>
+                        </article>
+                    }
+                </div>
+            }
+        </div>
+    </ChildContent>
+    <Footer>
+        <div class="managed-host-editor-actions">
+            <UiCommandButton Label="Close"
+                             Glyph="UiIconGlyph.Clear"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@(IsTestingConnection || IsDiscoveringHosts)"
+                             OnClick="CloseHostLookupDialog" />
+        </div>
+    </Footer>
+</UiModal>
+
+@code {
+    private SavedCredentialPicker? credentialPicker;
+    private SavedCredentialsPanel? credentialEditor;
+    private Task OpenCredentialEditorAsync() => credentialEditor?.OpenCreateAsync(Editor.Name, Editor.Hostname, Editor.Port) ?? Task.CompletedTask;
+    private Task SelectCreatedCredentialAsync(SavedConnectionCredentialSummary saved) => credentialPicker?.SelectCreatedAsync(saved.Id) ?? Task.CompletedTask;
+
+    private Guid? selectedCredentialId;
+    private string? credentialNotice;
+    private string originalUsername = "";
+    private AuthenticationType originalAuthentication;
+    private AuthenticationType? originalFallback;
+    private bool HasConnectionCredentials => IsEditMode || selectedCredentialId.HasValue && !string.IsNullOrWhiteSpace(Editor.Username);
+    private Task ClearSavedCredentialAsync()
+    {
+        selectedCredentialId = null;
+        credentialNotice = null;
+        Editor.Password = ""; Editor.PrivateKey = ""; Editor.PrivateKeyPassphrase = "";
+        Editor.Username = IsEditMode ? originalUsername : "";
+        Editor.PrimaryAuthenticationType = originalAuthentication;
+        Editor.FallbackAuthenticationType = originalFallback;
+        Editor.ClearStoredPassword = false; Editor.ClearStoredPrivateKey = false; Editor.ClearStoredPrivateKeyPassphrase = false;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private Task ApplySavedCredentialAsync(SavedConnectionCredential credential)
+    {
+        var saved = credential.Summary;
+        selectedCredentialId = saved.Id;
+        credentialNotice = string.IsNullOrWhiteSpace(saved.Username) && !IsEditMode ? "Add a username to this entry in Manage saved credentials before using it for a new host." : null;
+        if (!string.IsNullOrWhiteSpace(saved.Server)) { Editor.Hostname = saved.Server; Editor.Port = saved.Port; }
+        if (!string.IsNullOrWhiteSpace(saved.Username)) Editor.Username = saved.Username;
+        else if (!IsEditMode) Editor.Username = "";
+        if (workingDirectoryFollowsUserHome) Editor.DefaultWorkingDirectory = SuggestedHomeDirectory;
+        Editor.Password = credential.Password;
+        Editor.PrivateKey = credential.PrivateKey;
+        Editor.PrivateKeyPassphrase = credential.Passphrase;
+        Editor.PrimaryAuthenticationType = saved.HasPrivateKey ? AuthenticationType.PrivateKey : AuthenticationType.Password;
+        Editor.FallbackAuthenticationType = null;
+        Editor.ClearStoredPassword = saved.HasPrivateKey;
+        Editor.ClearStoredPrivateKey = !saved.HasPrivateKey;
+        Editor.ClearStoredPrivateKeyPassphrase = !saved.HasPassphrase;
+        if (string.IsNullOrWhiteSpace(Editor.Name)) Editor.Name = saved.Name;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private readonly string formId = $"managed-host-editor-form-{Guid.NewGuid():N}";
+    private ManagedHostEditor? observedEditor;
+    private bool workingDirectoryFollowsUserHome = true;
+
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter, EditorRequired] public ManagedHostEditor Editor { get; set; } = new();
+    [Parameter] public bool IsEditMode { get; set; }
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter] public string? StatusMessage { get; set; }
+    [Parameter] public string StatusTone { get; set; } = "info";
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnSave { get; set; }
+
+    private SshKeyGenerationProfile SelectedKeyGenerationProfile { get; set; } = SshKeyGenerationProfile.Ed25519;
+
+    private string? KeyWorkflowMessage { get; set; }
+
+    private string KeyWorkflowTone { get; set; } = "info";
+
+    private string? GeneratedPublicKey { get; set; }
+
+    private string? GeneratedPublicKeyFingerprint { get; set; }
+
+    private bool IsDiscoveringHosts { get; set; }
+
+    private SshHostDiscoveryScope? ActiveDiscoveryScope { get; set; }
+
+    private IReadOnlyList<DiscoveredSshHost> DiscoveredHosts { get; set; } = [];
+
+    private IReadOnlyList<string> HostDiscoveryNotes { get; set; } = [];
+
+    private string? HostDiscoveryMessage { get; set; }
+
+    private string HostDiscoveryTone { get; set; } = "info";
+
+    private string? HostDiscoveryProgressDetail { get; set; }
+
+    private bool ShowHostLookupDialog { get; set; }
+
+    private SshHostDiscoveryScope PreferredDiscoveryScope { get; set; } = SshHostDiscoveryScope.Lan;
+
+    private bool IsTestingConnection { get; set; }
+
+    private string? ConnectionTestMessage { get; set; }
+
+    private string ConnectionTestTone { get; set; } = "info";
+
+    private string SuggestedHomeDirectory => BuildSuggestedHomeDirectory(Editor.Username);
+
+    private IReadOnlyList<string> WorkingDirectorySuggestions => BuildWorkingDirectorySuggestions();
+
+    private bool IsLocalManagedHost => Editor.Id.HasValue && AiLocalMachine.IsLocalMachine(Editor.Id.Value);
+
+    private IReadOnlyList<AuthenticationType> PrimaryAuthenticationOptions =>
+        BuildAuthenticationOptions(Editor.PrimaryAuthenticationType);
+
+    private IReadOnlyList<AuthenticationType> FallbackAuthenticationOptions =>
+        Editor.FallbackAuthenticationType.HasValue
+            ? BuildAuthenticationOptions(Editor.FallbackAuthenticationType.Value)
+            : ManagedHostAuthenticationPolicy.OperatorSelectableModes;
+
+    private bool ShowClearStoredPasswordOption =>
+        Editor.HasStoredPassword &&
+        string.IsNullOrWhiteSpace(Editor.Password);
+
+    private bool ShowClearStoredKeyMaterialOption =>
+        HasStoredLegacyKeyMaterial;
+
+    private bool CanCopyPrivateKey => !string.IsNullOrWhiteSpace(Editor.PrivateKey);
+
+    private bool CanCopyGeneratedPublicKey => !string.IsNullOrWhiteSpace(GeneratedPublicKey);
+
+    private bool ShouldShowPasswordField =>
+        ManagedHostAuthenticationPolicy.UsesPassword(Editor.PrimaryAuthenticationType) ||
+        ManagedHostAuthenticationPolicy.UsesPassword(Editor.FallbackAuthenticationType) ||
+        Editor.HasStoredPassword ||
+        !string.IsNullOrWhiteSpace(Editor.Password);
+
+    private bool HasStoredLegacyKeyMaterial =>
+        Editor.HasStoredPrivateKey ||
+        Editor.HasStoredPrivateKeyPassphrase;
+
+    private bool ShouldShowPrivateKeyField =>
+        ManagedHostAuthenticationPolicy.UsesPrivateKeyMaterial(Editor.PrimaryAuthenticationType) ||
+        ManagedHostAuthenticationPolicy.UsesPrivateKeyMaterial(Editor.FallbackAuthenticationType) ||
+        !string.IsNullOrWhiteSpace(Editor.PrivateKey) ||
+        !string.IsNullOrWhiteSpace(Editor.PrivateKeyPassphrase);
+
+    private bool ClearStoredKeyMaterial
+    {
+        get => Editor.ClearStoredPrivateKey || Editor.ClearStoredPrivateKeyPassphrase;
+        set
+        {
+            Editor.ClearStoredPrivateKey = value;
+            Editor.ClearStoredPrivateKeyPassphrase = value;
+        }
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (ReferenceEquals(observedEditor, Editor))
+        {
+            return;
+        }
+
+        observedEditor = Editor;
+        originalUsername = Editor.Username;
+        originalAuthentication = Editor.PrimaryAuthenticationType;
+        originalFallback = Editor.FallbackAuthenticationType;
+        selectedCredentialId = null;
+        credentialNotice = null;
+        workingDirectoryFollowsUserHome = IsFollowingSuggestedHome(Editor.DefaultWorkingDirectory);
+        KeyWorkflowMessage = null;
+        KeyWorkflowTone = "info";
+        GeneratedPublicKey = null;
+        GeneratedPublicKeyFingerprint = null;
+        IsDiscoveringHosts = false;
+        ActiveDiscoveryScope = null;
+        DiscoveredHosts = [];
+        HostDiscoveryNotes = [];
+        HostDiscoveryMessage = null;
+        HostDiscoveryTone = "info";
+        HostDiscoveryProgressDetail = null;
+        ShowHostLookupDialog = false;
+        ClearConnectionTestState();
+    }
+
+    private Task HandleUsernameChangedAsync(string? value)
+    {
+        Editor.Username = value?.Trim() ?? string.Empty;
+        if (workingDirectoryFollowsUserHome)
+        {
+            Editor.DefaultWorkingDirectory = SuggestedHomeDirectory;
+        }
+
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private Task HandleHostnameChangedAsync(string? value)
+    {
+        Editor.Hostname = value?.Trim() ?? string.Empty;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private Task HandlePortChangedAsync(int value)
+    {
+        Editor.Port = value;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private Task HandlePrimaryAuthenticationTypeChangedAsync(AuthenticationType value)
+    {
+        Editor.PrimaryAuthenticationType = value;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private Task HandleFallbackAuthenticationTypeChangedAsync(AuthenticationType? value)
+    {
+        Editor.FallbackAuthenticationType = value;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private Task HandleWorkingDirectoryChangedAsync(string? value)
+    {
+        Editor.DefaultWorkingDirectory = value?.Trim() ?? string.Empty;
+        workingDirectoryFollowsUserHome = IsFollowingSuggestedHome(Editor.DefaultWorkingDirectory);
+        return Task.CompletedTask;
+    }
+
+    private Task HandlePasswordChangedAsync(string? value)
+    {
+        Editor.Password = value ?? string.Empty;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private Task HandlePrivateKeyChangedAsync(string? value)
+    {
+        Editor.PrivateKey = value ?? string.Empty;
+        GeneratedPublicKey = null;
+        GeneratedPublicKeyFingerprint = null;
+        if (!string.IsNullOrWhiteSpace(Editor.PrivateKey) && Editor.HasStoredPrivateKeyPassphrase)
+        {
+            Editor.ClearStoredPrivateKeyPassphrase = string.IsNullOrWhiteSpace(Editor.PrivateKeyPassphrase);
+        }
+
+        if (SshKeyMaterialClassifier.LooksLikePublicKey(Editor.PrivateKey))
+        {
+            KeyWorkflowMessage = "That is a public key. Paste the matching client private key here instead.";
+            KeyWorkflowTone = "warning";
+        }
+        else
+        {
+            KeyWorkflowMessage = null;
+            KeyWorkflowTone = "info";
+        }
+
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private Task HandlePrivateKeyPassphraseChangedAsync(string? value)
+    {
+        Editor.PrivateKeyPassphrase = value ?? string.Empty;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleGeneratePrivateKeyAsync()
+    {
+        var keyPair = await SshKeyPairGenerator.GenerateAsync(SelectedKeyGenerationProfile, BuildKeyComment());
+        Editor.PrivateKey = keyPair.PrivateKey;
+        GeneratedPublicKey = keyPair.PublicKey;
+        GeneratedPublicKeyFingerprint = keyPair.FingerprintSha256;
+
+        if (Editor.HasStoredPrivateKeyPassphrase && string.IsNullOrWhiteSpace(Editor.PrivateKeyPassphrase))
+        {
+            Editor.ClearStoredPrivateKeyPassphrase = true;
+        }
+
+        KeyWorkflowMessage = $"Generated {keyPair.Algorithm}. Install the generated public key on the server, then save the host if Linux Made Sane should reuse the private key for SSH.";
+        KeyWorkflowTone = "success";
+        ClearConnectionTestState();
+    }
+
+    private async Task HandleCopyPrivateKeyAsync()
+    {
+        if (string.IsNullOrWhiteSpace(Editor.PrivateKey))
+        {
+            KeyWorkflowMessage = "Generate or paste a private key before copying it.";
+            KeyWorkflowTone = "warning";
+            return;
+        }
+
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", Editor.PrivateKey);
+        KeyWorkflowMessage = copied
+            ? "Private key copied to the clipboard."
+            : "Clipboard copy was blocked by the browser. Select the key text manually.";
+        KeyWorkflowTone = copied ? "success" : "warning";
+    }
+
+    private async Task HandleCopyPublicKeyAsync()
+    {
+        if (string.IsNullOrWhiteSpace(GeneratedPublicKey))
+        {
+            KeyWorkflowMessage = "Generate a key pair before copying the public key.";
+            KeyWorkflowTone = "warning";
+            return;
+        }
+
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", GeneratedPublicKey);
+        KeyWorkflowMessage = copied
+            ? "Public key copied to the clipboard."
+            : "Clipboard copy was blocked by the browser. Select the public key text manually.";
+        KeyWorkflowTone = copied ? "success" : "warning";
+    }
+
+    private async Task HandleTestConnectionAsync()
+    {
+        if (IsTestingConnection || !HasConnectionCredentials)
+        {
+            return;
+        }
+
+        IsTestingConnection = true;
+        ConnectionTestMessage = "Testing SSH login...";
+        ConnectionTestTone = "info";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var result = await HostService.TestConnectionAsync(Editor);
+            ConnectionTestMessage = string.IsNullOrWhiteSpace(result.Detail)
+                ? result.Summary
+                : $"{result.Summary} {result.Detail}";
+            ConnectionTestTone = result.Status switch
+            {
+                ConnectionTestStatus.Succeeded => "success",
+                ConnectionTestStatus.Failed => "error",
+                _ => "warning"
+            };
+        }
+        catch (Exception exception)
+        {
+            ConnectionTestMessage = exception.Message;
+            ConnectionTestTone = "error";
+        }
+        finally
+        {
+            IsTestingConnection = false;
+        }
+    }
+
+    private Task HandleScanLanHostsAsync() => DiscoverHostsAsync(SshHostDiscoveryScope.Lan);
+
+    private Task HandleScanTailnetHostsAsync() => DiscoverHostsAsync(SshHostDiscoveryScope.Tailnet);
+
+    private async Task OpenHostLookupDialog()
+    {
+        ShowHostLookupDialog = true;
+        await LoadCachedDiscoveryAsync(PreferredDiscoveryScope);
+
+        if (!IsDiscoveringHosts)
+        {
+            _ = DiscoverHostsAsync(PreferredDiscoveryScope);
+        }
+    }
+
+    private Task CloseHostLookupDialog()
+    {
+        ShowHostLookupDialog = false;
+        return Task.CompletedTask;
+    }
+
+    private async Task DiscoverHostsAsync(SshHostDiscoveryScope scope)
+    {
+        PreferredDiscoveryScope = scope;
+        IsDiscoveringHosts = true;
+        ActiveDiscoveryScope = scope;
+        var cachedDiscovery = await HostService.GetCachedHostDiscoveryAsync(scope);
+        if (cachedDiscovery.Hosts.Count > 0)
+        {
+            DiscoveredHosts = MergeDiscoveredHosts(DiscoveredHosts, cachedDiscovery.Hosts);
+            HostDiscoveryNotes = cachedDiscovery.Notes;
+            HostDiscoveryMessage = cachedDiscovery.StatusMessage;
+            HostDiscoveryTone = "info";
+            HostDiscoveryProgressDetail = $"{cachedDiscovery.Hosts.Count} cached host(s)";
+        }
+        else
+        {
+            HostDiscoveryTone = "info";
+            HostDiscoveryMessage = scope == SshHostDiscoveryScope.Lan
+                ? "Scanning the LMS server's active LAN subnet(s) for SSH banners..."
+                : "Reading tailnet peers from Tailscale and probing them for SSH...";
+            HostDiscoveryProgressDetail = null;
+            DiscoveredHosts = [];
+            HostDiscoveryNotes = [];
+        }
+
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var progress = new Progress<SshHostDiscoveryProgressUpdate>(update =>
+            {
+                HostDiscoveryMessage = update.StatusMessage;
+                HostDiscoveryTone = update.Stage == SshHostDiscoveryStage.Completed
+                    ? (update.DiscoveredCount > 0 ? "success" : "warning")
+                    : "info";
+                HostDiscoveryProgressDetail = update.CurrentRangeLabel is null
+                    ? $"{update.ProbedCount}/{update.CandidateCount} probed · {update.DiscoveredCount} found"
+                    : $"{update.CurrentRangeLabel} · {update.ProbedCount}/{update.CandidateCount} probed · {update.DiscoveredCount} found";
+
+                if (update.NewHost is not null)
+                {
+                    DiscoveredHosts = MergeDiscoveredHosts(DiscoveredHosts, [update.NewHost]);
+                }
+
+                _ = InvokeAsync(StateHasChanged);
+            });
+
+            var discovery = await HostService.DiscoverHostsAsync(scope, progress);
+            DiscoveredHosts = discovery.Hosts;
+            HostDiscoveryNotes = discovery.Notes;
+            HostDiscoveryMessage = discovery.StatusMessage;
+            HostDiscoveryTone = discovery.Hosts.Count > 0 ? "success" : "warning";
+            HostDiscoveryProgressDetail = $"{discovery.Hosts.Count} host(s) found";
+        }
+        catch (Exception exception)
+        {
+            DiscoveredHosts = [];
+            HostDiscoveryNotes = [];
+            HostDiscoveryMessage = exception.Message;
+            HostDiscoveryTone = "error";
+            HostDiscoveryProgressDetail = null;
+        }
+        finally
+        {
+            IsDiscoveringHosts = false;
+            ActiveDiscoveryScope = null;
+        }
+    }
+
+    private async Task LoadCachedDiscoveryAsync(SshHostDiscoveryScope scope)
+    {
+        PreferredDiscoveryScope = scope;
+
+        try
+        {
+            var cachedDiscovery = await HostService.GetCachedHostDiscoveryAsync(scope);
+            DiscoveredHosts = cachedDiscovery.Hosts;
+            HostDiscoveryNotes = cachedDiscovery.Notes;
+            HostDiscoveryMessage = cachedDiscovery.StatusMessage;
+            HostDiscoveryTone = cachedDiscovery.Hosts.Count > 0 ? "info" : "warning";
+            HostDiscoveryProgressDetail = cachedDiscovery.Hosts.Count > 0
+                ? $"{cachedDiscovery.Hosts.Count} cached host(s)"
+                : null;
+        }
+        catch (Exception exception)
+        {
+            DiscoveredHosts = [];
+            HostDiscoveryNotes = [];
+            HostDiscoveryMessage = exception.Message;
+            HostDiscoveryTone = "error";
+            HostDiscoveryProgressDetail = null;
+        }
+    }
+
+    private static IReadOnlyList<DiscoveredSshHost> MergeDiscoveredHosts(
+        IReadOnlyList<DiscoveredSshHost> current,
+        IReadOnlyList<DiscoveredSshHost> incoming) =>
+        current
+            .Concat(incoming)
+            .DistinctBy(host => string.IsNullOrWhiteSpace(host.IpAddress) ? host.Target : host.IpAddress, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(host => host.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(host => host.Target, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private Task HandleUseDiscoveredHostAsync(DiscoveredSshHost host)
+    {
+        var currentName = Editor.Name.Trim();
+        var currentHostName = Editor.Hostname.Trim();
+
+        if (string.IsNullOrWhiteSpace(currentName) ||
+            string.Equals(currentName, currentHostName, StringComparison.OrdinalIgnoreCase))
+        {
+            Editor.Name = host.DisplayName;
+        }
+
+        Editor.Hostname = host.Target;
+        Editor.Port = host.Port;
+        Editor.HostKind = host.IsLinuxMadeSaneHost ? ManagedHostKind.LmsHost : ManagedHostKind.SshHost;
+
+        if (string.IsNullOrWhiteSpace(Editor.Platform) && !string.IsNullOrWhiteSpace(host.Platform))
+        {
+            Editor.Platform = host.Platform;
+        }
+
+        HostDiscoveryMessage = host.IsLinuxMadeSaneHost
+            ? $"Using {host.Target} as an LMS host. Choose a saved credential entry, then test and save the host."
+            : $"Using {host.Target}. Choose a saved credential entry, then test and save the host.";
+        HostDiscoveryTone = "success";
+        ShowHostLookupDialog = false;
+        ClearConnectionTestState();
+        return Task.CompletedTask;
+    }
+
+    private static string FormatLmsDiscoveryLabel(DiscoveredSshHost host) =>
+        string.IsNullOrWhiteSpace(host.LinuxMadeSaneVersion)
+            ? "LMS host"
+            : $"LMS {host.LinuxMadeSaneVersion}";
+
+    private Task HandleSaveAsync() => HasConnectionCredentials ? OnSave.InvokeAsync() : Task.CompletedTask;
+
+    private IReadOnlyList<string> BuildWorkingDirectorySuggestions()
+    {
+        var suggestions = new List<string>();
+
+        AddSuggestion(suggestions, SuggestedHomeDirectory);
+        AddSuggestion(suggestions, "/root");
+        AddSuggestion(suggestions, "/var/www");
+        AddSuggestion(suggestions, "/srv");
+        AddSuggestion(suggestions, "/opt");
+        AddSuggestion(suggestions, "/usr/local");
+
+        return suggestions;
+    }
+
+    private string BuildPrivateKeyHelperText()
+    {
+        if (!string.IsNullOrWhiteSpace(Editor.PrivateKey))
+        {
+            return "Paste the client private key here. The server should already trust the matching public key in `authorized_keys`.";
+        }
+
+        if (Editor.HasStoredPrivateKey)
+        {
+            return "Stored client keys stay hidden. Paste or generate a replacement private key if you need a new one.";
+        }
+
+        return "Required when the selected SSH mode uses public-key authentication. This field expects the client private key, not the public key.";
+    }
+
+    private string BuildPasswordHelperText() =>
+        Editor.HasStoredPassword
+            ? "Leave blank to keep the stored password."
+        : ManagedHostAuthenticationPolicy.UsesPassword(Editor.PrimaryAuthenticationType) || ManagedHostAuthenticationPolicy.UsesPassword(Editor.FallbackAuthenticationType)
+                ? "Required only when the selected SSH mode uses password auth."
+                : "This SSH mode does not currently use password auth.";
+
+    private string BuildPrivateKeyPassphraseHelperText()
+    {
+        if (!string.IsNullOrWhiteSpace(Editor.PrivateKey))
+        {
+            return "Optional. Only needed if this private key is encrypted.";
+        }
+
+        return Editor.HasStoredPrivateKeyPassphrase
+            ? "Leave blank to keep the stored passphrase, or enter a new one to replace it."
+            : "Optional. Only needed when the private key is encrypted.";
+    }
+
+    private bool IsFollowingSuggestedHome(string? workingDirectory) =>
+        string.IsNullOrWhiteSpace(workingDirectory) ||
+        string.Equals(workingDirectory.Trim(), SuggestedHomeDirectory, StringComparison.OrdinalIgnoreCase);
+
+    private static string BuildSuggestedHomeDirectory(string? username)
+    {
+        var normalizedUsername = username?.Trim() ?? string.Empty;
+        if (string.Equals(normalizedUsername, "root", StringComparison.OrdinalIgnoreCase))
+        {
+            return "/root";
+        }
+
+        return string.IsNullOrWhiteSpace(normalizedUsername)
+            ? "/home"
+            : $"/home/{normalizedUsername}";
+    }
+
+    private static void AddSuggestion(List<string> suggestions, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        var normalizedValue = value.Trim();
+        if (suggestions.Any(existing => string.Equals(existing, normalizedValue, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        suggestions.Add(normalizedValue);
+    }
+
+    private void ClearConnectionTestState()
+    {
+        ConnectionTestMessage = null;
+        ConnectionTestTone = "info";
+    }
+
+    private static IReadOnlyList<AuthenticationType> BuildAuthenticationOptions(AuthenticationType current)
+    {
+        if (ManagedHostAuthenticationPolicy.IsOperatorSelectable(current))
+        {
+            return ManagedHostAuthenticationPolicy.OperatorSelectableModes;
+        }
+
+        return
+        [
+            current,
+            .. ManagedHostAuthenticationPolicy.OperatorSelectableModes
+        ];
+    }
+
+    private static string GetAuthenticationOptionLabel(AuthenticationType type) =>
+        ManagedHostAuthenticationPolicy.GetDisplayLabel(type);
+
+    private static string GetKeyGenerationProfileLabel(SshKeyGenerationProfile profile) => profile switch
+    {
+        SshKeyGenerationProfile.Ed25519 => "Ed25519",
+        SshKeyGenerationProfile.Rsa2048 => "RSA 2048",
+        SshKeyGenerationProfile.Rsa3072 => "RSA 3072",
+        _ => "RSA 4096"
+    };
+
+    private string? BuildKeyComment()
+    {
+        var normalizedUser = Editor.Username.Trim();
+        var normalizedHost = Editor.Hostname.Trim();
+        if (!string.IsNullOrWhiteSpace(normalizedUser) && !string.IsNullOrWhiteSpace(normalizedHost))
+        {
+            return $"{normalizedUser}@{normalizedHost}";
+        }
+
+        return string.IsNullOrWhiteSpace(normalizedUser)
+            ? (string.IsNullOrWhiteSpace(normalizedHost) ? null : normalizedHost)
+            : normalizedUser;
+    }
+}
