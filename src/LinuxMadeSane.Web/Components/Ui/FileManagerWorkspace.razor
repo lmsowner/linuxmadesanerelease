@@ -1,0 +1,294 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
+@using Microsoft.Extensions.DependencyInjection
+@implements IAsyncDisposable
+@inject IServiceScopeFactory Scopes
+@inject ISavedCredentialAccessContext Access
+@inject TerminalWorkspaceAccessor WorkspaceAccessor
+@inject FileActionQueueService Actions
+@inject IJSRuntime JS
+
+<div class="file-manager @(split ? "split" : "single")">
+    @if (split || transferId.HasValue)
+    {
+        <div class="file-manager-transfer-bar" role="toolbar" aria-label="Transfer between file panes">
+            @if (split)
+            {
+            <CompactUIButton Label="Copy →" Disabled="@(!CanTransfer(false))" Glyph="UiIconGlyph.Copy" OnClick="@(() => TransferAsync(false, false))" />
+            <CompactUIButton Label="Move →" Disabled="@(!CanTransfer(false))" Glyph="UiIconGlyph.Cut" OnClick="@(() => TransferAsync(false, true))" />
+            <CompactUIButton Label="← Copy" Disabled="@(!CanTransfer(true))" Glyph="UiIconGlyph.Copy" OnClick="@(() => TransferAsync(true, false))" />
+            <CompactUIButton Label="← Move" Disabled="@(!CanTransfer(true))" Glyph="UiIconGlyph.Cut" OnClick="@(() => TransferAsync(true, true))" />
+            }
+            <CompactUIButton Label="File actions" Glyph="UiIconGlyph.ListView" Href="@ActionsUrl" Target="_blank" Rel="noopener"
+                OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,'_blank'))return false;" />
+            @if (split)
+            {
+                <CompactUIButton Label="Close second pane" Glyph="UiIconGlyph.Clear" OnClick="CloseSplitAsync" />
+            }
+            @if (IsTransferActive)
+            {
+                <CompactUIButton Label="@(cancellationRequestedFor == transferId ? "Cancelling…" : "Cancel")"
+                    Title="Cancel this transfer; files already copied remain at the destination"
+                    Glyph="UiIconGlyph.Stop" Disabled="@(!CanCancelTransfer)" OnClick="CancelTransferAsync" />
+            }
+            <span class="file-manager-status" role="status">@status</span>
+        </div>
+    }
+    <div class="file-manager-panes">
+        <section class="file-manager-pane" aria-label="Left file pane" oncontextmenu="@PaneHeaderMenuScript(false)">
+            <HostFileBrowserWorkspace @key="leftRevision" @ref="left" @attributes="LeftParameters" PreserveOnParentRender="true"
+                PaneControls="LeftControls" FavouriteSelected="@(shortcut => SelectFavouriteAsync(false, shortcut))" FavouritesChanged="RefreshLocationsAsync" TransferStateChanged="@(state => SetTransferState(false, state))" />
+        </section>
+        @if (split)
+        {
+            <section class="file-manager-pane" aria-label="Right file pane" oncontextmenu="@PaneHeaderMenuScript(true)">
+                <HostFileBrowserWorkspace @key="rightRevision" @ref="right" HostId="@rightHost" InitialPath="@rightPath" WorkspaceId="@sharedWorkspace"
+                    DetachedBrowserId="@rightDetachedBrowserId" SudoEnabledOverride="@rightSudo" InitialFavourite="@rightFavourite"
+                    ConnectionProfileKeyOverride="@rightFavourite?.ConnectionProfileKey"
+                    PreserveOnParentRender="true" InitiallyHideFolders="true" AllowPopout="false" ManagePageTitle="false"
+                    PaneControls="RightControls" FavouriteSelected="@(shortcut => SelectFavouriteAsync(true, shortcut))" FavouritesChanged="RefreshLocationsAsync" TransferStateChanged="@(state => SetTransferState(true, state))" />
+            </section>
+        }
+    </div>
+</div>
+@foreach (var pane in new[] { false, true })
+{
+    var isRight = pane;
+    <div id="@MenuId(isRight)" class="host-file-browser-context-menu file-manager-pane-menu" popover="manual" tabindex="-1"
+         role="menu" aria-label="@(isRight ? "Choose right pane location" : "Choose left pane location")" data-lms-context-menu="true"
+         onclick="if(!event.target.closest('.host-file-context-submenu-trigger') && event.target.closest('button,a'))this.hidePopover();">
+        <UiContextMenuButton Label="Refresh" Title="Reload this folder" Glyph="UiIconGlyph.Refresh"
+            OnClick="@(() => RefreshPaneAsync(isRight, false))" />
+        <UiContextMenuButton Label="Refresh all" Title="Reload this folder and rebuild its cached thumbnails" Glyph="UiIconGlyph.Refresh"
+            OnClick="@(() => RefreshPaneAsync(isRight, true))" />
+        <HostContextMenu OwnerUserId="@owner" SelectionOnly="true" HostSelected="@(id => SelectHostAsync(isRight, id, null))" />
+        <UiContextSubmenu Label="Favourites" Glyph="UiIconGlyph.FolderOpen">
+            @if (favourites.Count == 0) { <span class="host-menu-status">Right-click a folder to save a favourite.</span> }
+            @foreach (var favourite in favourites)
+            {
+                <UiContextMenuButton Label="@($"{HostName(favourite.ManagedHostId)} · {favourite.Label}{(favourite.UseSudo ? " · Sudo" : "")}")"
+                    Title="@($"{HostName(favourite.ManagedHostId)} · {favourite.TargetPath}")" Glyph="UiIconGlyph.FolderOpen"
+                    OnClick="@(() => SelectFavouriteAsync(isRight, favourite))" />
+            }
+        </UiContextSubmenu>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid? HostId { get; set; }
+    [Parameter] public Guid? DetachedBrowserId { get; set; }
+    [Parameter] public string? WorkspaceId { get; set; }
+    [Parameter] public string? RootPath { get; set; }
+    [Parameter] public string? InitialPath { get; set; }
+    [Parameter] public string? ConnectionUsernameOverride { get; set; }
+    [Parameter] public Guid? ConnectionSecretHandle { get; set; }
+    [Parameter] public bool? PreferStoredCredentialsOverride { get; set; }
+    [Parameter] public string? ConnectionProfileKeyOverride { get; set; }
+    [Parameter] public string? ConnectionProfileNameOverride { get; set; }
+    [Parameter] public bool? SudoEnabledOverride { get; set; }
+    [Parameter] public string Title { get; set; } = "Filesystem explorer";
+    [Parameter] public bool AllowPopout { get; set; } = true;
+    [Parameter] public bool ManagePageTitle { get; set; }
+    private HostFileBrowserWorkspace? left, right;
+    private Task RefreshPaneAsync(bool isRight, bool rebuildThumbnails) =>
+        (isRight ? right : left)?.RefreshPaneAsync(rebuildThumbnails) ?? Task.CompletedTask;
+    private bool split, leftOverride;
+    private bool leftSudo, rightSudo;
+    private FileBrowserShortcut? leftFavourite, rightFavourite;
+    private Guid? rightDetachedBrowserId;
+    private (bool Ready, bool HasSelection) leftState, rightState;
+    private bool CanTransfer(bool reverse)
+    {
+        var source = reverse ? rightState : leftState;
+        var destination = reverse ? leftState : rightState;
+        return split && source.Ready && source.HasSelection && destination.Ready;
+    }
+    private void SetTransferState(bool isRight, (bool Ready, bool HasSelection) state)
+    {
+        if (isRight) rightState = state; else leftState = state;
+    }
+    private int leftRevision, rightRevision;
+    private Guid? leftHost, rightHost, owner;
+    private string? leftPath, rightPath;
+    private string sharedWorkspace = "", status = "";
+    private readonly string menuPrefix = "file-pane-" + Guid.NewGuid().ToString("N");
+    private IReadOnlyList<FileBrowserShortcut> favourites = [];
+    private Dictionary<Guid, string> hosts = new();
+    private readonly CancellationTokenSource lifetime = new();
+    private Task? refreshTask;
+    private Guid? transferId, cancellationRequestedFor;
+    private FileActionJobStatus? transferStatus;
+    private bool IsTransferActive => transferStatus is FileActionJobStatus.Queued or FileActionJobStatus.Running or FileActionJobStatus.NeedsAttention;
+    private bool CanCancelTransfer => transferId.HasValue && IsTransferActive && cancellationRequestedFor != transferId;
+    private string MenuId(bool isRight) => menuPrefix + (isRight ? "-right" : "-left");
+    private string HostName(Guid id) => hosts.GetValueOrDefault(id, "Saved host");
+    private string ActionsUrl => "/file-actions-window?workspaceId=" + Uri.EscapeDataString(sharedWorkspace);
+    private string MenuScript(bool isRight) => $"lmsFileBrowser.openPaneMenu(event,'{MenuId(isRight)}');return false;";
+
+    private string PaneHeaderMenuScript(bool isRight) => $"if(event.target.closest('.file-browser-header-slot,.file-browser-tools-row')){{{MenuScript(isRight)}}}";
+
+    private RenderFragment LeftControls => @<text>
+        <CompactUIButton Label="Host / favourite" Glyph="UiIconGlyph.Connection" OnClientClick="@MenuScript(false)" oncontextmenu="@MenuScript(false)" Title="Choose host or favourite for this pane" />
+        @if (!split) { <CompactUIButton Label="Split view" Glyph="UiIconGlyph.SplitRight" OnClick="OpenSplitAsync" /> }
+    </text>;
+    private RenderFragment RightControls => @<text>
+        <CompactUIButton Label="Host / favourite" Glyph="UiIconGlyph.Connection" OnClientClick="@MenuScript(true)" oncontextmenu="@MenuScript(true)" Title="Choose host or favourite for this pane" />
+    </text>;
+
+    private IReadOnlyDictionary<string, object?> LeftParameters
+    {
+        get
+        {
+            var values = new Dictionary<string, object?> {
+                ["HostId"] = leftOverride ? leftHost : HostId,
+                ["InitialPath"] = leftOverride ? leftPath : InitialPath,
+                ["WorkspaceId"] = leftOverride ? sharedWorkspace : WorkspaceId, ["Title"] = Title,
+                ["AllowPopout"] = AllowPopout, ["ManagePageTitle"] = ManagePageTitle
+            };
+            // Switching hosts never carries the previous host's transient credentials or scoped root.
+            values["DetachedBrowserId"] = leftOverride ? null : DetachedBrowserId;
+            values["RootPath"] = leftOverride ? null : RootPath;
+            values["ConnectionUsernameOverride"] = leftOverride ? null : ConnectionUsernameOverride;
+            values["ConnectionSecretHandle"] = leftOverride ? null : ConnectionSecretHandle;
+            values["PreferStoredCredentialsOverride"] = leftOverride ? null : PreferStoredCredentialsOverride;
+            values["ConnectionProfileKeyOverride"] = leftOverride ? null : ConnectionProfileKeyOverride;
+            values["ConnectionProfileNameOverride"] = leftOverride ? null : ConnectionProfileNameOverride;
+            values["SudoEnabledOverride"] = leftOverride ? leftSudo : SudoEnabledOverride;
+            values["InitialFavourite"] = leftOverride ? leftFavourite : null;
+            if (leftOverride && leftFavourite?.ConnectionProfileKey is { } profileKey)
+                values["ConnectionProfileKeyOverride"] = profileKey;
+            return values;
+        }
+    }
+    protected override async Task OnInitializedAsync()
+    {
+        sharedWorkspace = WorkspaceId ?? WorkspaceAccessor.GetWorkspaceId();
+        owner = await Access.GetAuthenticatedUserIdAsync(lifetime.Token);
+        await RefreshLocationsAsync();
+        Actions.Changed += QueueChanged;
+    }
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) refreshTask = RefreshLocationsLoopAsync();
+        return Task.CompletedTask;
+    }
+    private async Task RefreshLocationsLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        try { while (await timer.WaitForNextTickAsync(lifetime.Token)) await InvokeAsync(async () => { await RefreshLocationsAsync(); StateHasChanged(); }); }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+    }
+    private async Task RefreshLocationsAsync()
+    {
+        try
+        {
+            var currentOwner = await Access.GetAuthenticatedUserIdAsync(lifetime.Token);
+            if (currentOwner is null) { owner = null; favourites = []; hosts.Clear(); return; }
+            await using var scope = Scopes.CreateAsyncScope();
+            var inventory = scope.ServiceProvider.GetRequiredService<IManagedHostStore>();
+            var names = (await inventory.ListAsync(lifetime.Token)).ToDictionary(h => h.Id, h => h.Name);
+            var saved = await scope.ServiceProvider.GetRequiredService<IFileBrowserShortcutService>().ListAllAsync(currentOwner.Value, lifetime.Token);
+            foreach (var id in saved.Select(f => f.ManagedHostId).Distinct().Where(id => !names.ContainsKey(id)))
+                if (await inventory.GetAsync(id, lifetime.Token) is { } host) names[id] = host.Name;
+            owner = currentOwner; hosts = names; favourites = saved;
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch { status = "Could not refresh saved locations. The previous cached list is retained."; }
+    }
+    private async Task OpenSplitAsync()
+    {
+        if (left?.BrowsedHostId is not { } id) { status = "Connect the first pane before adding a second pane."; return; }
+        sharedWorkspace = left.SharedWorkspaceId;
+        rightDetachedBrowserId = left.ClonePaneState();
+        rightSudo = left.SudoAccessEnabled;
+        rightFavourite = null;
+        rightState = default; rightHost = id; rightPath = left.BrowsedPath; split = true; status = "Select a host or favourite in either pane, then select files to transfer.";
+        await left.HideFoldersAsync();
+    }
+    private Task CloseSplitAsync() { split = false; right = null; rightState = default; return Task.CompletedTask; }
+    private async Task SelectFavouriteAsync(bool isRight, FileBrowserShortcut favourite)
+    {
+        await JS.InvokeVoidAsync("lmsFileBrowser.closePaneMenu", MenuId(isRight));
+        var pane = isRight ? right : left;
+        if (pane?.BrowsedHostId == favourite.ManagedHostId)
+        {
+            await pane.OpenFavouriteAsync(favourite);
+            return;
+        }
+        await SelectHostAsync(isRight, favourite.ManagedHostId, favourite.TargetPath);
+        if (isRight) { rightFavourite = favourite; rightSudo |= favourite.UseSudo; }
+        else { leftFavourite = favourite; leftSudo |= favourite.UseSudo; }
+    }
+    private async Task SelectHostAsync(bool isRight, Guid id, string? path)
+    {
+        await JS.InvokeVoidAsync("lmsFileBrowser.closePaneMenu", MenuId(isRight));
+        var pane = isRight ? right : left;
+        if (pane?.BrowsedHostId == id)
+        {
+            if (path is null) await pane.OpenHomeAsync();
+            else await pane.OpenFolderAsync(path);
+            return;
+        }
+        var useSudo = pane?.SudoAccessEnabled ?? false;
+        if (left is not null) sharedWorkspace = left.SharedWorkspaceId;
+        if (isRight) { rightState = default; rightHost = id; rightPath = path; rightSudo = useSudo; rightFavourite = null; rightDetachedBrowserId = null; rightRevision++; }
+        else { leftState = default; leftOverride = true; leftHost = id; leftPath = path; leftSudo = useSudo; leftFavourite = null; leftRevision++; }
+        if (!IsTransferActive) status = "";
+    }
+    private async Task TransferAsync(bool reverse, bool move)
+    {
+        status = move ? "Queuing move…" : "Queuing copy…";
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var source = reverse ? right : left;
+            var destination = reverse ? left : right;
+            if (source is null || destination is null) throw new InvalidOperationException("Connect both panes first.");
+            sharedWorkspace = source.SharedWorkspaceId;
+            transferId = source.QueueSelectionTo(destination, move);
+            UpdateTransferStatus();
+        }
+        catch (Exception ex) { status = ex.Message; }
+    }
+    private async Task CancelTransferAsync()
+    {
+        if (!CanCancelTransfer || transferId is not { } id) return;
+        cancellationRequestedFor = id;
+        status = "Cancelling transfer…";
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            await Actions.CancelAsync(sharedWorkspace, id);
+            UpdateTransferStatus();
+        }
+        catch (Exception ex)
+        {
+            cancellationRequestedFor = null;
+            status = $"Could not cancel the transfer: {ex.Message}";
+        }
+    }
+    private void QueueChanged(FileActionQueueChangedEvent update)
+    {
+        if (update.JobId == transferId && update.WorkspaceId == sharedWorkspace)
+            _ = InvokeAsync(() => { UpdateTransferStatus(); StateHasChanged(); });
+    }
+    private void UpdateTransferStatus()
+    {
+        var job = Actions.GetJobs(sharedWorkspace).FirstOrDefault(j => j.Id == transferId);
+        transferStatus = job?.Status;
+        if (job is not null)
+            status = cancellationRequestedFor == job.Id && IsTransferActive
+                ? "Cancelling transfer…"
+                : $"{job.Kind}: {job.Status} · {job.ProgressPercent:0}% · {(IsTransferActive ? job.CurrentDetail : job.StatusMessage)}" + (job.RequiresAttention ? " Open File actions to resolve the conflict." : "");
+    }
+    public async ValueTask DisposeAsync()
+    {
+        Actions.Changed -= QueueChanged; lifetime.Cancel();
+        if (refreshTask is not null) await refreshTask;
+        lifetime.Dispose();
+    }
+}

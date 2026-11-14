@@ -1,0 +1,872 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models.RdpOptimizer;
+using LinuxMadeSane.Core.Models.Services;
+using LinuxMadeSane.Infrastructure.Persistence;
+using LinuxMadeSane.Infrastructure.Persistence.Entities;
+using Microsoft.EntityFrameworkCore;
+
+namespace LinuxMadeSane.Infrastructure.Services;
+
+public sealed class SqliteLinuxServiceModuleDataService(
+    LinuxMadeSaneDbContext dbContext,
+    ILinuxCommandRunner commandRunner) : ILinuxServiceModuleDataService
+{
+    public async Task<IReadOnlyList<LinuxServiceDefinition>> ListServicesAsync(CancellationToken cancellationToken = default)
+    {
+        var liveServicesTask = LoadLiveServicesAsync(cancellationToken);
+        var overridesTask = dbContext.LinuxServices
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+
+        await Task.WhenAll(liveServicesTask, overridesTask);
+        var liveServices = await liveServicesTask;
+        var overrides = await overridesTask;
+        var overridesByUnit = overrides.ToDictionary(item => item.UnitName, StringComparer.OrdinalIgnoreCase);
+
+        return liveServices
+            .Where(service => !overridesByUnit.TryGetValue(service.UnitName, out var saved) || !saved.IsRemoved)
+            .Select(service => overridesByUnit.TryGetValue(service.UnitName, out var entity) ? Merge(service, entity) : service)
+            .OrderBy(service => service.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    public async Task<IReadOnlyList<LinuxServiceDefinition>> ListRemovedServicesAsync(CancellationToken cancellationToken = default) =>
+        (await dbContext.LinuxServices.AsNoTracking().Where(service => service.IsRemoved).ToListAsync(cancellationToken))
+            .Select(entity => Map(entity) with { IsRemoved = true, RuntimeState = ServiceRuntimeState.Stopped, UnitFileState = "masked" }).ToArray();
+
+    public async Task<LinuxServiceDefinition?> GetServiceAsync(Guid serviceId, CancellationToken cancellationToken = default)
+    {
+        var services = await ListServicesAsync(cancellationToken);
+        var selected = services.FirstOrDefault(service => service.Id == serviceId);
+        if (selected is not null)
+        {
+            var details = await GetLiveServiceDetailsAsync(selected.UnitName, cancellationToken);
+            return details is null ? selected : Merge(details, await FindOverrideAsync(selected.UnitName, cancellationToken));
+        }
+
+        var entity = await dbContext.LinuxServices
+            .AsNoTracking()
+            .SingleOrDefaultAsync(service => service.Id == serviceId, cancellationToken);
+
+        return entity is null ? null : Map(entity);
+    }
+
+    public async Task SaveServiceAsync(LinuxServiceDefinition service, CancellationToken cancellationToken = default)
+    {
+        var entity = await dbContext.LinuxServices
+            .SingleOrDefaultAsync(item => item.Id == service.Id || item.UnitName == service.UnitName, cancellationToken);
+
+        if (entity is null)
+        {
+            dbContext.LinuxServices.Add(Map(service));
+        }
+        else
+        {
+            entity.UnitName = service.UnitName;
+            entity.DisplayName = service.DisplayName;
+            entity.HostName = service.HostName;
+            entity.Summary = service.Summary;
+            entity.RuntimeState = (int)service.RuntimeState;
+            entity.HealthStatus = (int)service.HealthStatus;
+            entity.EnabledAtBoot = service.EnabledAtBoot;
+            entity.ActiveUnderSystemd = service.ActiveUnderSystemd;
+            entity.RunningUser = service.RunningUser;
+            entity.RunningGroup = service.RunningGroup;
+            entity.WorkingDirectory = service.WorkingDirectory;
+            entity.ExecStart = service.ExecStart;
+            entity.EnvironmentFile = service.EnvironmentFile;
+            entity.RestartCount = service.RestartCount;
+            entity.LastStartTime = service.LastStartTime;
+            entity.ListeningPort = service.ListeningPort;
+            entity.RecentErrorsJson = Serialize(service.RecentErrors);
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task DeleteServiceAsync(Guid serviceId, CancellationToken cancellationToken = default)
+    {
+        var entity = await dbContext.LinuxServices.SingleOrDefaultAsync(service => service.Id == serviceId, cancellationToken);
+        if (entity is null)
+        {
+            return;
+        }
+
+        dbContext.LinuxServices.Remove(entity);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task<ServiceControlResult> ControlServiceAsync(
+        Guid serviceId,
+        ServiceControlAction action,
+        CancellationToken cancellationToken = default)
+    {
+        var service = await ResolveServiceForLiveOperationAsync(serviceId, cancellationToken)
+            ?? throw new InvalidOperationException("Service was not found on the local machine.");
+
+        if (!System.Text.RegularExpressions.Regex.IsMatch(service.UnitName, @"\A[A-Za-z0-9_][A-Za-z0-9_.:@\\-]*\.service\z"))
+            throw new InvalidOperationException("Select a single system service unit; paths, patterns and options are not allowed.");
+        if (action is ServiceControlAction.Block or ServiceControlAction.Unblock or ServiceControlAction.Remove or ServiceControlAction.Restore)
+        {
+            var operation = action.ToString().ToLowerInvariant();
+            var lifecycle = await commandRunner.RunAsync(new LinuxCommandRequest("python3",
+                ["-c", SystemServiceLifecycle.Script, service.UnitName, operation], true, TimeSpan.FromMinutes(3),
+                $"{action} system service {service.UnitName}"), false, cancellationToken);
+            if (lifecycle.ExitCode == 0)
+            {
+                var entity = await dbContext.LinuxServices.SingleOrDefaultAsync(item => item.UnitName == service.UnitName, cancellationToken);
+                if (entity is null) { entity = Map(service); dbContext.LinuxServices.Add(entity); }
+                entity.IsRemoved = action == ServiceControlAction.Remove || (entity.IsRemoved && action != ServiceControlAction.Restore);
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+            return new(service.Id, service.UnitName, action, lifecycle.ExitCode == 0,
+                lifecycle.ExitCode == 0 ? lifecycle.StandardOutput.Trim() : NormalizeControlFailure(lifecycle.StandardError.Trim()));
+        }
+        if (service.IsRemoved) throw new InvalidOperationException("Restore this service before controlling it.");
+        var verb = action switch
+        {
+            ServiceControlAction.Start => "start",
+            ServiceControlAction.Stop => "stop",
+            ServiceControlAction.Restart => "restart",
+            ServiceControlAction.EnableBoot => "enable",
+            ServiceControlAction.DisableBoot => "disable",
+            _ => throw new ArgumentOutOfRangeException(nameof(action))
+        };
+
+        var result = await commandRunner.RunAsync(
+            new LinuxCommandRequest(
+                "systemctl",
+                [verb, "--", service.UnitName],
+                true,
+                TimeSpan.FromMinutes(2),
+                $"{action} {service.UnitName}"),
+            dryRun: false,
+            cancellationToken);
+
+        var success = result.ExitCode == 0;
+        var message = success
+            ? $"{action} sent to {service.UnitName}."
+            : string.IsNullOrWhiteSpace(result.StandardError)
+                ? $"systemctl {verb} {service.UnitName} failed with exit code {result.ExitCode}."
+                : NormalizeControlFailure(result.StandardError.Trim());
+
+        return new ServiceControlResult(service.Id, service.UnitName, action, success, message);
+    }
+
+    public async Task<ServiceInspectionResult> InspectServiceAsync(Guid serviceId, CancellationToken cancellationToken = default)
+    {
+        var service = await ResolveServiceForLiveOperationAsync(serviceId, cancellationToken)
+            ?? throw new InvalidOperationException("Service was not found on the local machine.");
+
+        var properties = await GetSystemdPropertiesAsync(service.UnitName, cancellationToken)
+            ?? throw new InvalidOperationException("systemd did not return details for this service.");
+
+        var liveLogLines = await GetJournalLinesAsync(service.UnitName, cancellationToken);
+        var environmentFile = NormalizeEnvironmentFile(properties);
+        var restartPolicy = GetProperty(properties, "Restart", "no");
+        var unitFileState = GetProperty(properties, "UnitFileState", service.EnabledAtBoot ? "enabled" : "disabled");
+        var lastExitCode = ParseInt(GetProperty(properties, "ExecMainStatus"));
+        var restartCount = ParseInt(GetProperty(properties, "NRestarts"));
+        var activeState = GetProperty(properties, "ActiveState", string.Empty);
+        var runningUser = NormalizeServiceIdentity(GetProperty(properties, "User"), GetProperty(properties, "UID"), "root");
+        var runningGroup = NormalizeServiceIdentity(GetProperty(properties, "Group"), GetProperty(properties, "GID"), "root");
+        var workingDirectory = GetProperty(properties, "WorkingDirectory", service.WorkingDirectory);
+        var execStart = NormalizeExecStart(GetProperty(properties, "ExecStart"), service.ExecStart);
+        var dependencies = ParseDependencies(GetProperty(properties, "After"));
+
+        var daemonReloadRequired = execStart.Contains("/current/", StringComparison.OrdinalIgnoreCase) && restartCount > 0;
+        var restartLoop = GetProperty(properties, "SubState") == "auto-restart";
+        // Historical journal text is context, not proof of a current fault.
+        var configDrift = GetProperty(properties, "Result", "success") is not ("success" or "done" or "");
+        var assessment = ServiceHealthAssessment.Assess(activeState, GetProperty(properties, "LoadState", "loaded"),
+            GetProperty(properties, "SubState"), GetProperty(properties, "Result", "success"));
+        var healthStatus = assessment.Status;
+        var portAvailable = service.ListeningPort == 0 || !restartLoop;
+
+        return new ServiceInspectionResult(
+            service.Id,
+            service.UnitName,
+            GetProperty(properties, "FragmentPath", $"/etc/systemd/system/{service.UnitName}"),
+            execStart,
+            workingDirectory,
+            environmentFile,
+            runningUser,
+            runningGroup,
+            restartPolicy,
+            dependencies,
+            liveLogLines,
+            lastExitCode,
+            healthStatus,
+            unitFileState,
+            BuildVersionHint(service.LastStartTime),
+            daemonReloadRequired,
+            !string.Equals(runningUser, "root", StringComparison.OrdinalIgnoreCase),
+            !string.IsNullOrWhiteSpace(workingDirectory),
+            !string.IsNullOrWhiteSpace(environmentFile),
+            portAvailable,
+            !execStart.Contains("previous", StringComparison.OrdinalIgnoreCase),
+            !execStart.Contains("old", StringComparison.OrdinalIgnoreCase),
+            false,
+            restartLoop,
+            configDrift,
+            BuildSummary(service with
+            {
+                RunningUser = runningUser,
+                RunningGroup = runningGroup,
+                WorkingDirectory = workingDirectory,
+                ExecStart = execStart,
+                EnvironmentFile = environmentFile,
+                HealthStatus = healthStatus
+            }, !string.IsNullOrWhiteSpace(environmentFile), daemonReloadRequired, healthStatus == ServiceHealthStatus.Healthy),
+            BuildFindings(service with
+            {
+                RuntimeState = MapRuntimeState(activeState, GetProperty(properties, "SubState")),
+                RunningUser = runningUser,
+                RunningGroup = runningGroup,
+                WorkingDirectory = workingDirectory,
+                ExecStart = execStart,
+                EnvironmentFile = environmentFile,
+                RestartCount = restartCount,
+                RecentErrors = liveLogLines.Where(line => line.Contains("fail", StringComparison.OrdinalIgnoreCase)).ToArray()
+            }, !string.IsNullOrWhiteSpace(environmentFile), daemonReloadRequired, portAvailable, configDrift))
+        { HealthReason = assessment.Reason, ActiveState = activeState, SubState = GetProperty(properties, "SubState") };
+    }
+
+    public async Task<ServiceUpdateIssueReport> GetUpdateIssueReportAsync(Guid serviceId, CancellationToken cancellationToken = default)
+    {
+        var service = await GetServiceAsync(serviceId, cancellationToken)
+            ?? throw new InvalidOperationException("Service was not found on the local machine.");
+
+        var issues = new List<ServiceRepairIssue>();
+
+        if (service.RuntimeState == ServiceRuntimeState.Failed)
+        {
+            issues.Add(new ServiceRepairIssue(
+                RepairRiskLevel.High,
+                ServiceDiagnosticSeverity.Critical,
+                "Service is already failed",
+                "The live systemd unit is already in a failed state.",
+                "Deploying on top of a broken baseline makes the next failure much harder to reason about.",
+                "Inspect live status and logs first."));
+        }
+
+        if (string.IsNullOrWhiteSpace(service.EnvironmentFile))
+        {
+            issues.Add(new ServiceRepairIssue(
+                RepairRiskLevel.Medium,
+                ServiceDiagnosticSeverity.Warning,
+                "No environment file configured",
+                "The service is not using a dedicated environment file.",
+                "That usually pushes runtime config into the unit or shell wrappers.",
+                "Move volatile settings into a clear environment file."));
+        }
+
+        if (service.RunningUser.Equals("root", StringComparison.OrdinalIgnoreCase))
+        {
+            issues.Add(new ServiceRepairIssue(
+                RepairRiskLevel.High,
+                ServiceDiagnosticSeverity.Warning,
+                "Service runs as root",
+                "The live unit appears to run under root defaults.",
+                "That widens blast radius and often hides ownership issues.",
+                "Move it to a dedicated service account if this is an app workload."));
+        }
+
+        if (issues.Count == 0)
+        {
+            issues.Add(new ServiceRepairIssue(
+                RepairRiskLevel.Low,
+                ServiceDiagnosticSeverity.Informational,
+                "No obvious update blockers",
+                "The live service looks stable enough for a controlled update.",
+                "That still does not replace validating the release payload and config changes.",
+                "Run through the update checks in order."));
+        }
+
+        var oneClick = new List<string>();
+        if (service.RuntimeState == ServiceRuntimeState.Failed)
+        {
+            oneClick.Add("Capture live status and recent logs before changing files.");
+        }
+
+        if (string.IsNullOrWhiteSpace(service.EnvironmentFile))
+        {
+            oneClick.Add("Define an environment file path before the next deployment.");
+        }
+
+        return new ServiceUpdateIssueReport(service.Id, service.UnitName, issues, oneClick);
+    }
+
+    public async Task<ServiceUpdatePlan> GetUpdatePlanAsync(Guid serviceId, CancellationToken cancellationToken = default)
+    {
+        var service = await GetServiceAsync(serviceId, cancellationToken)
+            ?? throw new InvalidOperationException("Service was not found on the local machine.");
+
+        var requiresConfigMerge = service.RecentErrors.Any(error => error.Contains("drift", StringComparison.OrdinalIgnoreCase));
+        var requiresOwnershipCorrection = service.RuntimeState == ServiceRuntimeState.Failed || service.RunningUser == "root";
+        var requiresDaemonReload = service.ExecStart.Contains("/current/", StringComparison.OrdinalIgnoreCase);
+
+        return new ServiceUpdatePlan(
+            service.Id,
+            service.UnitName,
+            BuildVersionHint(service.LastStartTime),
+            service.RuntimeState == ServiceRuntimeState.Failed ? RepairRiskLevel.High : RepairRiskLevel.Medium,
+            requiresDaemonReload,
+            requiresOwnershipCorrection,
+            !string.IsNullOrWhiteSpace(service.EnvironmentFile),
+            requiresConfigMerge,
+            ["Folder", "Archive", "Package"],
+            BuildValidationChecks(service),
+            BuildPlannedSteps(service, requiresDaemonReload, requiresOwnershipCorrection),
+            ["Service starts cleanly under systemd", "Expected port binds successfully", "Health endpoint or startup verification passes"],
+            ["Unit fails to start", "Port remains blocked", "New release validation fails"],
+            ["Skipping daemon-reload can leave systemd on stale metadata.", "Restarting before ownership correction can fail for the wrong reason."]);
+    }
+
+    public async Task<ServiceRepairPlan> GetRepairPlanAsync(Guid serviceId, CancellationToken cancellationToken = default)
+    {
+        var service = await GetServiceAsync(serviceId, cancellationToken)
+            ?? throw new InvalidOperationException("Service was not found on the local machine.");
+
+        var issues = new List<ServiceRepairIssue>();
+
+        if (service.RuntimeState == ServiceRuntimeState.Failed)
+        {
+            issues.Add(new ServiceRepairIssue(RepairRiskLevel.High, ServiceDiagnosticSeverity.Critical, "Service is failed", "The live unit is currently failed.", "Operators will chase deployment details while the baseline is already broken.", "Inspect live status and logs before touching release files."));
+        }
+
+        if (service.RunningUser == "root")
+        {
+            issues.Add(new ServiceRepairIssue(RepairRiskLevel.High, ServiceDiagnosticSeverity.Critical, "Runs as root", "The unit is relying on root defaults.", "That increases blast radius and often hides ownership mistakes until later.", "Move the unit to a dedicated service account where appropriate."));
+        }
+
+        if (string.IsNullOrWhiteSpace(service.EnvironmentFile))
+        {
+            issues.Add(new ServiceRepairIssue(RepairRiskLevel.Medium, ServiceDiagnosticSeverity.Warning, "No environment file", "Runtime settings are not separated from the unit or binary path.", "Operational changes will be brittle and harder to diff.", "Introduce an environment file and keep it under change control."));
+        }
+
+        if (service.ListeningPort > 0 && service.RuntimeState == ServiceRuntimeState.Failed)
+        {
+            issues.Add(new ServiceRepairIssue(RepairRiskLevel.Medium, ServiceDiagnosticSeverity.Warning, "Port may be blocked", $"The service expects port {service.ListeningPort}, but the unit is failed.", "A stale process may still be holding the port.", "Verify the active PID before restarting through systemd."));
+        }
+
+        if (issues.Count == 0)
+        {
+            issues.Add(new ServiceRepairIssue(RepairRiskLevel.Low, ServiceDiagnosticSeverity.Informational, "No high-risk repair flags", "The live service looks internally sane.", "You still need to confirm the deployment files and runtime dependencies.", "Run the repair sequence and compare it to live status."));
+        }
+
+        return new ServiceRepairPlan(
+            service.Id,
+            service.UnitName,
+            issues,
+            ["Capture `systemctl status` and recent logs.", "Verify user, group, working directory, and env file.", "Normalize ownership and runtime paths.", "Reload systemd if the unit definition changed.", "Restart and verify the expected port and health checks."]);
+    }
+
+    private async Task<IReadOnlyList<LinuxServiceDefinition>> LoadLiveServicesAsync(CancellationToken cancellationToken)
+    {
+        var serviceRowsTask = RunCommandAsync(
+            "systemctl",
+            ["list-units", "--type=service", "--all", "--no-legend", "--plain"],
+            cancellationToken);
+
+        var unitFileRowsTask = RunCommandAsync(
+            "systemctl",
+            ["list-unit-files", "--type=service", "--no-legend", "--plain"],
+            cancellationToken);
+
+        await Task.WhenAll(serviceRowsTask, unitFileRowsTask);
+        var serviceRows = await serviceRowsTask;
+        var unitFileRows = await unitFileRowsTask;
+        var unitStates = ParseUnitFileStates(unitFileRows);
+
+        return serviceRows
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(ParseListUnitRow)
+            .Where(row => row is not null)
+            .Select(row => Map(row!, unitStates))
+            .ToArray();
+    }
+
+    private async Task<LinuxServiceDefinition?> GetLiveServiceDetailsAsync(string unitName, CancellationToken cancellationToken)
+    {
+        var properties = await GetSystemdPropertiesAsync(unitName, cancellationToken);
+        if (properties is null)
+        {
+            return null;
+        }
+
+        var logs = await GetJournalLinesAsync(unitName, cancellationToken);
+        var activeState = GetProperty(properties, "ActiveState", string.Empty);
+        var subState = GetProperty(properties, "SubState", string.Empty);
+        var description = GetProperty(properties, "Description", unitName);
+        var environmentFile = NormalizeEnvironmentFile(properties);
+        var runningUser = NormalizeServiceIdentity(GetProperty(properties, "User"), GetProperty(properties, "UID"), "root");
+        var runningGroup = NormalizeServiceIdentity(GetProperty(properties, "Group"), GetProperty(properties, "GID"), "root");
+        var lastStart = ParseTimestamp(GetProperty(properties, "ExecMainStartTimestamp"));
+        var restartCount = ParseInt(GetProperty(properties, "NRestarts"));
+
+        return new LinuxServiceDefinition(
+            CreateStableId(unitName),
+            unitName,
+            description,
+            Environment.MachineName,
+            BuildSummaryText(activeState, subState, description),
+            MapRuntimeState(activeState, subState),
+            ServiceHealthAssessment.Assess(activeState, GetProperty(properties, "LoadState", "loaded"), subState, GetProperty(properties, "Result", "success")).Status,
+            GetProperty(properties, "UnitFileState", string.Empty).Contains("enabled", StringComparison.OrdinalIgnoreCase),
+            GetProperty(properties, "LoadState", "loaded").Equals("loaded", StringComparison.OrdinalIgnoreCase),
+            runningUser,
+            runningGroup,
+            GetProperty(properties, "WorkingDirectory", string.Empty),
+            NormalizeExecStart(GetProperty(properties, "ExecStart"), string.Empty),
+            environmentFile,
+            restartCount,
+            lastStart,
+            0,
+            logs.Where(line => line.Contains("fail", StringComparison.OrdinalIgnoreCase) || line.Contains("error", StringComparison.OrdinalIgnoreCase)).Take(5).ToArray())
+        {
+            UnitFileState = GetProperty(properties, "UnitFileState", "unknown"), ActiveState = activeState, SubState = subState,
+            HealthReason = ServiceHealthAssessment.Assess(activeState, GetProperty(properties, "LoadState", "loaded"), subState, GetProperty(properties, "Result", "success")).Reason
+        };
+    }
+
+    private async Task<LinuxServiceDefinition?> ResolveServiceForLiveOperationAsync(Guid serviceId, CancellationToken cancellationToken)
+    {
+        var services = await ListServicesAsync(cancellationToken);
+        var selected = services.FirstOrDefault(service => service.Id == serviceId);
+        if (selected is not null)
+        {
+            return selected;
+        }
+
+        var entity = await dbContext.LinuxServices
+            .AsNoTracking()
+            .SingleOrDefaultAsync(service => service.Id == serviceId, cancellationToken);
+
+        return entity is null ? null : Map(entity);
+    }
+
+    private async Task<Dictionary<string, string>?> GetSystemdPropertiesAsync(string unitName, CancellationToken cancellationToken)
+    {
+        var output = await RunCommandAsync(
+            "systemctl",
+            [
+                "show",
+                unitName,
+                "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,User,Group,WorkingDirectory,ExecStart,EnvironmentFiles,NRestarts,ExecMainStartTimestamp,FragmentPath,After,Result,UID,GID,Restart,ExecMainStatus",
+                "--no-pager"
+            ],
+            cancellationToken,
+            allowFailure: true);
+
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return null;
+        }
+
+        return output
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line => line.Split('=', 2))
+            .Where(parts => parts.Length == 2)
+            .ToDictionary(parts => parts[0], parts => parts[1], StringComparer.OrdinalIgnoreCase);
+    }
+
+    private async Task<IReadOnlyList<string>> GetJournalLinesAsync(string unitName, CancellationToken cancellationToken)
+    {
+        // System journals are normally unreadable to the LMS service account. Use
+        // the existing privileged command runner, retaining errors instead of
+        // presenting a denied/failed query as an empty journal.
+        var result = await commandRunner.RunAsync(new LinuxCommandRequest(
+            "journalctl", ["--unit", unitName, "--lines", "20", "--no-pager"], true,
+            TimeSpan.FromSeconds(30), $"Read recent journal entries for {unitName}"), false, cancellationToken);
+        if (result.ExitCode != 0)
+        {
+            var reason = string.IsNullOrWhiteSpace(result.StandardError)
+                ? $"journalctl exited with code {result.ExitCode}."
+                : result.StandardError.Trim();
+            return [$"Unable to read the journal for {unitName}: {reason}"];
+        }
+
+        var lines = result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return lines.Length == 0 || lines.All(line => line == "-- No entries --")
+            ? [$"No retained journal entries were found for {unitName}. The service may log to a file instead, or older entries may have been rotated out."]
+            : lines;
+    }
+
+    private async Task<LinuxServiceEntity?> FindOverrideAsync(string unitName, CancellationToken cancellationToken) =>
+        await dbContext.LinuxServices
+            .AsNoTracking()
+            .SingleOrDefaultAsync(item => item.UnitName == unitName, cancellationToken);
+
+    private static LinuxServiceDefinition Merge(LinuxServiceDefinition service, LinuxServiceEntity? entity)
+    {
+        if (entity is null)
+        {
+            return service;
+        }
+
+        return service with
+        {
+            DisplayName = string.IsNullOrWhiteSpace(entity.DisplayName) ? service.DisplayName : entity.DisplayName,
+            Summary = string.IsNullOrWhiteSpace(entity.Summary) ? service.Summary : entity.Summary,
+            EnvironmentFile = string.IsNullOrWhiteSpace(service.EnvironmentFile) ? NormalizeText(entity.EnvironmentFile) : service.EnvironmentFile,
+            ListeningPort = entity.ListeningPort > 0 ? entity.ListeningPort : service.ListeningPort
+        };
+    }
+
+    private static LinuxServiceDefinition Map(ServiceListRow row, IReadOnlyDictionary<string, string> unitStates) =>
+        new(
+            CreateStableId(row.UnitName),
+            NormalizeText(row.UnitName),
+            BuildDisplayName(row.Description, row.UnitName),
+            Environment.MachineName,
+            BuildSummaryText(row.ActiveState, row.SubState, row.Description),
+            MapRuntimeState(row.ActiveState, row.SubState),
+            ServiceHealthAssessment.Assess(row.ActiveState, row.LoadState, row.SubState).Status,
+            unitStates.TryGetValue(row.UnitName, out var unitState) && unitState is "enabled" or "enabled-runtime",
+            row.LoadState.Equals("loaded", StringComparison.OrdinalIgnoreCase),
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            null,
+            0,
+            DateTimeOffset.MinValue,
+            0,
+            Array.Empty<string>())
+        {
+            UnitFileState = unitStates.GetValueOrDefault(row.UnitName, "unknown"),
+            ActiveState = row.ActiveState, SubState = row.SubState,
+            HealthReason = ServiceHealthAssessment.Assess(row.ActiveState, row.LoadState, row.SubState).Reason
+        };
+
+    private static ServiceListRow? ParseListUnitRow(string line)
+    {
+        var parts = line.Split(' ', 5, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length < 5 ? null : new ServiceListRow(parts[0], parts[1], parts[2], parts[3], parts[4]);
+    }
+
+    private static Dictionary<string, string> ParseUnitFileStates(string output) =>
+        output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line => line.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .Where(parts => parts.Length == 2 && parts[0].EndsWith(".service", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(parts => parts[0], parts => parts[1].Split(' ', StringSplitOptions.RemoveEmptyEntries)[0], StringComparer.OrdinalIgnoreCase);
+
+    private static Guid CreateStableId(string value)
+    {
+        var hash = MD5.HashData(Encoding.UTF8.GetBytes(value.ToLowerInvariant()));
+        return new Guid(hash);
+    }
+
+    private static string BuildSummaryText(string activeState, string subState, string description) =>
+        $"{description}. systemd reports {activeState}/{subState}.";
+
+    private static string BuildVersionHint(DateTimeOffset lastStartTime) =>
+        lastStartTime == DateTimeOffset.MinValue
+            ? "live-unknown"
+            : $"live-{lastStartTime:yyyy.MM.dd-HHmm}";
+
+    private static ServiceRuntimeState MapRuntimeState(string activeState, string subState) =>
+        activeState.ToLowerInvariant() switch
+        {
+            "active" when subState.Equals("running", StringComparison.OrdinalIgnoreCase) => ServiceRuntimeState.Running,
+            "failed" => ServiceRuntimeState.Failed,
+            _ => ServiceRuntimeState.Stopped
+        };
+
+    private static string NormalizeExecStart(string value, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        var pathMarker = "path=";
+        var markerIndex = value.IndexOf(pathMarker, StringComparison.OrdinalIgnoreCase);
+        if (markerIndex < 0)
+        {
+            return value;
+        }
+
+        var start = markerIndex + pathMarker.Length;
+        var end = value.IndexOf(" ;", start, StringComparison.Ordinal);
+        return end > start ? value[start..end].Trim() : value[start..].Trim();
+    }
+
+    private static string? NormalizeEnvironmentFile(IReadOnlyDictionary<string, string> properties)
+    {
+        var raw = GetProperty(properties, "EnvironmentFiles");
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var value = raw.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)[0];
+        return value.Equals("[not set]", StringComparison.OrdinalIgnoreCase) ? null : value;
+    }
+
+    private static IReadOnlyList<string> ParseDependencies(string value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? Array.Empty<string>()
+            : value.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(6).ToArray();
+
+    private static string NormalizeServiceIdentity(string? explicitValue, string? numericValue, string fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(explicitValue) && !explicitValue.Equals("[not set]", StringComparison.OrdinalIgnoreCase))
+        {
+            return explicitValue;
+        }
+
+        if (!string.IsNullOrWhiteSpace(numericValue) && !numericValue.Equals("[not set]", StringComparison.OrdinalIgnoreCase))
+        {
+            return numericValue;
+        }
+
+        return fallback;
+    }
+
+    private static string GetProperty(IReadOnlyDictionary<string, string> properties, string key, string fallback = "") =>
+        properties.TryGetValue(key, out var value) ? value : fallback;
+
+    private static string NormalizeControlFailure(string standardError)
+    {
+        if (standardError.Contains("a password is required", StringComparison.OrdinalIgnoreCase) ||
+            standardError.Contains("a terminal is required", StringComparison.OrdinalIgnoreCase) ||
+            standardError.Contains("interactive authentication required", StringComparison.OrdinalIgnoreCase))
+        {
+            return "LMS could not control this service because the LMS service account does not have non-interactive sudo rights. Re-run the LMS installer to restore /etc/sudoers.d/linux-made-sane.";
+        }
+
+        return standardError;
+    }
+
+    private static int ParseInt(string? value) =>
+        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+
+    private static DateTimeOffset ParseTimestamp(string? value) =>
+        DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var parsed)
+            ? parsed
+            : DateTimeOffset.MinValue;
+
+    private static IReadOnlyList<string> BuildSummary(LinuxServiceDefinition service, bool environmentLoaded, bool daemonReloadRequired, bool healthyPath)
+    {
+        var summary = new List<string>
+        {
+            $"This service runs as {service.RunningUser}.",
+            string.IsNullOrWhiteSpace(service.WorkingDirectory)
+                ? "systemd does not declare a working directory for this unit."
+                : $"It starts from {service.WorkingDirectory}.",
+            service.EnabledAtBoot ? "It is enabled at boot." : "It is currently disabled at boot."
+        };
+
+        summary.Add(environmentLoaded
+            ? $"It expects runtime settings from {service.EnvironmentFile}."
+            : "It does not have a separate environment file configured.");
+
+        if (daemonReloadRequired)
+        {
+            summary.Add("Its ExecStart suggests a symlinked release path, so daemon-reload discipline matters.");
+        }
+
+        summary.Add(healthyPath
+            ? "The live service state looks healthy enough to manage confidently."
+            : "Review the current health explanation before changing this service.");
+
+        return summary;
+    }
+
+    private static IReadOnlyList<string> BuildFindings(LinuxServiceDefinition service, bool environmentLoaded, bool daemonReloadRequired, bool portAvailable, bool configDrift)
+    {
+        var findings = new List<string>();
+
+        if (!environmentLoaded)
+        {
+            findings.Add("No separate environment file is configured; this is normal unless the application requires one.");
+        }
+
+        if (daemonReloadRequired)
+        {
+            findings.Add("Symlink-style deployment path means daemon-reload hygiene matters.");
+        }
+
+        if (!portAvailable)
+        {
+            findings.Add($"Port {service.ListeningPort} may still be occupied after failure.");
+        }
+
+        if (configDrift)
+        {
+            findings.Add("Recent journal output suggests configuration or runtime drift.");
+        }
+
+        if (service.RuntimeState == ServiceRuntimeState.Failed)
+        {
+            findings.Add("Service is currently failed.");
+        }
+
+        if (findings.Count == 0)
+        {
+            findings.Add("No major findings were generated from the live service state.");
+        }
+
+        return findings;
+    }
+
+    private static IReadOnlyList<string> BuildValidationChecks(LinuxServiceDefinition service)
+    {
+        var checks = new List<string>
+        {
+            "Validate the release source contents before touching the live deployment.",
+            $"Confirm ExecStart still points at the intended binary: {service.ExecStart}.",
+            string.IsNullOrWhiteSpace(service.WorkingDirectory)
+                ? "Confirm the unit can start without a working directory override."
+                : $"Confirm working directory exists: {service.WorkingDirectory}."
+        };
+
+        if (!string.IsNullOrWhiteSpace(service.EnvironmentFile))
+        {
+            checks.Add($"Confirm the environment file exists and is readable: {service.EnvironmentFile}.");
+        }
+
+        if (service.ListeningPort > 0)
+        {
+            checks.Add($"Confirm port {service.ListeningPort} is available for the restarted process.");
+        }
+
+        return checks;
+    }
+
+    private static IReadOnlyList<string> BuildPlannedSteps(LinuxServiceDefinition service, bool requiresDaemonReload, bool requiresOwnershipCorrection)
+    {
+        var steps = new List<string>
+        {
+            "Stage and validate the new release.",
+            "Stop the unit cleanly and verify no stale process remains.",
+            "Back up the current release and runtime metadata.",
+            "Copy or switch to the new release payload."
+        };
+
+        if (requiresOwnershipCorrection)
+        {
+            steps.Add($"Normalize ownership for {service.RunningUser}:{service.RunningGroup} before restart.");
+        }
+
+        if (requiresDaemonReload)
+        {
+            steps.Add("Run daemon-reload before restarting the service.");
+        }
+
+        steps.Add("Restart the unit and verify health checks.");
+        return steps;
+    }
+
+    private static LinuxServiceDefinition Map(LinuxServiceEntity entity) =>
+        new(
+            entity.Id,
+            NormalizeText(entity.UnitName),
+            BuildDisplayName(entity.DisplayName, entity.UnitName),
+            NormalizeText(entity.HostName),
+            BuildSummaryText(entity.Summary, entity.UnitName),
+            (ServiceRuntimeState)entity.RuntimeState,
+            (ServiceHealthStatus)entity.HealthStatus,
+            entity.EnabledAtBoot,
+            entity.ActiveUnderSystemd,
+            NormalizeText(entity.RunningUser),
+            NormalizeText(entity.RunningGroup),
+            NormalizeText(entity.WorkingDirectory),
+            NormalizeText(entity.ExecStart),
+            NormalizeText(entity.EnvironmentFile),
+            entity.RestartCount,
+            entity.LastStartTime,
+            entity.ListeningPort,
+            Deserialize(entity.RecentErrorsJson)) { IsRemoved = entity.IsRemoved };
+
+    private static LinuxServiceEntity Map(LinuxServiceDefinition service) =>
+        new()
+        {
+            Id = service.Id,
+            UnitName = service.UnitName,
+            DisplayName = service.DisplayName,
+            HostName = service.HostName,
+            Summary = service.Summary,
+            RuntimeState = (int)service.RuntimeState,
+            HealthStatus = (int)service.HealthStatus,
+            EnabledAtBoot = service.EnabledAtBoot,
+            ActiveUnderSystemd = service.ActiveUnderSystemd,
+            RunningUser = service.RunningUser,
+            RunningGroup = service.RunningGroup,
+            WorkingDirectory = service.WorkingDirectory,
+            ExecStart = service.ExecStart,
+            EnvironmentFile = service.EnvironmentFile,
+            RestartCount = service.RestartCount,
+            LastStartTime = service.LastStartTime,
+            ListeningPort = service.ListeningPort,
+            RecentErrorsJson = Serialize(service.RecentErrors)
+        };
+
+    private static string Serialize(IReadOnlyList<string> values) => JsonSerializer.Serialize(values);
+
+    private static IReadOnlyList<string> Deserialize(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? Array.Empty<string>()
+            : JsonSerializer.Deserialize<string[]>(value) ?? Array.Empty<string>();
+
+    private static string NormalizeText(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
+
+    private static string BuildDisplayName(string? displayName, string? fallbackUnitName)
+    {
+        var normalizedDisplayName = NormalizeText(displayName);
+        if (!string.IsNullOrWhiteSpace(normalizedDisplayName))
+        {
+            return normalizedDisplayName;
+        }
+
+        var normalizedUnitName = NormalizeText(fallbackUnitName);
+        return string.IsNullOrWhiteSpace(normalizedUnitName) ? "Unnamed service" : normalizedUnitName;
+    }
+
+    private static string BuildSummaryText(string? summary, string? fallbackUnitName)
+    {
+        var normalizedSummary = NormalizeText(summary);
+        if (!string.IsNullOrWhiteSpace(normalizedSummary))
+        {
+            return normalizedSummary;
+        }
+
+        var normalizedUnitName = NormalizeText(fallbackUnitName);
+        return string.IsNullOrWhiteSpace(normalizedUnitName)
+            ? "No service summary is available."
+            : $"No summary is available for {normalizedUnitName}.";
+    }
+
+    private async Task<string> RunCommandAsync(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken,
+        bool allowFailure = false)
+    {
+        var result = await commandRunner.RunAsync(new LinuxCommandRequest(fileName, arguments, false,
+            TimeSpan.FromSeconds(30), $"Read service information using {fileName}"), false, cancellationToken);
+        if (result.ExitCode != 0 && !allowFailure)
+            throw new InvalidOperationException($"{fileName} exited with code {result.ExitCode}: {result.StandardError}");
+        return result.ExitCode == 0 ? result.StandardOutput : string.Empty;
+    }
+
+    private sealed record ServiceListRow(
+        string UnitName,
+        string LoadState,
+        string ActiveState,
+        string SubState,
+        string Description);
+
+
+}

@@ -1,0 +1,114 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@inherits LayoutComponentBase
+@using System.Security.Claims
+@using LinuxMadeSane.Application.Interfaces
+@using Microsoft.AspNetCore.Components.Authorization
+@using LinuxMadeSane.Web.Services
+@inject IUserDisplayPreferenceService UserDisplayPreferenceService
+@inject DesktopAssistantNativeThemeStore NativeThemeStore
+@inject IJSRuntime JSRuntime
+@inject PortalDisplayContext PortalDisplay
+
+<div class="app-frame" data-lms-app-frame data-lms-portal-origin="@portalOrigin">
+    <aside class="sidebar-shell sidebar-shell-docked">
+        <NavMenu IsAuthenticated="@IsAuthenticated"
+                 AuthenticatedEmail="@AuthenticatedEmail"
+                 AuthenticationMethod="@AccountAuthenticationMethod.GetLabel(currentPrincipal)"
+                 LinuxUsername="@Environment.UserName" />
+    </aside>
+
+    <button class="ui-button glass-button glass-button-toolbar ui-icon-button sidebar-restore-button"
+            type="button"
+            title="Show sidebar"
+            aria-label="Show sidebar"
+            data-sidebar-toggle="show">
+        <span class="ui-button-icon" aria-hidden="true">
+            <UiGlyphIcon Glyph="UiIconGlyph.SidebarExpand" />
+        </span>
+        <span class="ui-button-label">Show sidebar</span>
+    </button>
+
+    <div class="content-shell">
+        <main>
+            <LicensingNotice />
+            @Body
+        </main>
+    </div>
+</div>
+
+<AboutSplash />
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">x</span>
+</div>
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private string? portalOrigin;
+    private bool displayPreferencesLoaded;
+    private ClaimsPrincipal? currentPrincipal;
+
+    private bool IsAuthenticated => currentPrincipal?.Identity?.IsAuthenticated == true;
+
+    private string AuthenticatedEmail =>
+        currentPrincipal?.FindFirstValue(ClaimTypes.Email) ??
+        currentPrincipal?.Identity?.Name ??
+        "Authenticated";
+
+    protected override async Task OnInitializedAsync()
+    {
+        portalOrigin = await PortalDisplay.GetOriginAsync(HttpContext);
+        var authenticationState = AuthenticationStateTask is null
+            ? null
+            : await AuthenticationStateTask;
+        currentPrincipal = authenticationState?.User ?? HttpContext?.User;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || displayPreferencesLoaded)
+        {
+            return;
+        }
+
+        displayPreferencesLoaded = true;
+
+        var userIdValue = currentPrincipal?.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        if (!Guid.TryParse(userIdValue, out var userId))
+        {
+            return;
+        }
+
+        var preference = await UserDisplayPreferenceService.GetAsync(userId);
+        if (preference is null)
+        {
+            return;
+        }
+
+        NativeThemeStore.Update(
+            preference.ThemePaletteId,
+            null,
+            preference.ThemeMode,
+            null,
+            preference.FontScalePercent);
+
+        await JSRuntime.InvokeVoidAsync(
+            "lmsTheme.applyUserPreferences",
+            new
+            {
+                paletteId = preference.ThemePaletteId,
+                mode = preference.ThemeMode,
+                fontScalePercent = preference.FontScalePercent
+            });
+    }
+}

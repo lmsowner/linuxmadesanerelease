@@ -1,0 +1,63 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+<UiModal IsOpen="@IsOpen" Title="Set up MFA" Subtitle="@Hostname" OnClose="OnClose" Class="edge-mfa-modal">
+    <ChildContent>
+        <div class="stack-form">
+            <UiSelectField TValue="string" Label="Email address" Value="@Email" ValueChanged="OnEmailChanged" Disabled="@Busy">
+                <option value="">Select an LMS account</option>
+                @foreach (var email in Emails)
+                {
+                    <option value="@email">@email</option>
+                }
+            </UiSelectField>
+            @if (!string.IsNullOrWhiteSpace(Message))
+            {
+                <p class="callout @(Succeeded ? "success" : "info")" role="status">@Message</p>
+            }
+            @if (Qr is not null && !Succeeded)
+            {
+                <UiQrCode Payload="@Qr.OtpUri" Title="Authenticator setup" AriaLabel="Authenticator setup QR code" Caption="Scan with your authenticator app" />
+                <details><summary>Enter a setup key instead</summary><code>@Qr.ManualEntryKey</code></details>
+                <UiField Label="Authenticator code">
+                    <input class="ui-control-input" value="@Code" @oninput="HandleCodeInputAsync"
+                           placeholder="Six-digit code" autocomplete="one-time-code" inputmode="numeric" maxlength="6" disabled="@Busy" />
+                </UiField>
+            }
+        </div>
+    </ChildContent>
+    <Footer>
+        @if (Succeeded)
+        {
+            <UiCommandButton Label="Set up passkey" Glyph="UiIconGlyph.Key" Variant="UiButtonVariant.Primary"
+                             Href="@PasskeySetupHref" Target="_blank" Rel="noopener noreferrer" />
+        }
+        <UiCommandButton Label="@(Succeeded ? "Done" : "Cancel")" Glyph="UiIconGlyph.Clear" OnClick="OnClose" Disabled="@Busy" />
+    </Footer>
+</UiModal>
+
+@code {
+    private async Task HandleCodeInputAsync(ChangeEventArgs args)
+    {
+        if (Busy || Succeeded) return;
+        var code = args.Value?.ToString() ?? string.Empty;
+        await OnCodeChanged.InvokeAsync(code);
+        if (code.Length == 6 && code.All(character => character is >= '0' and <= '9'))
+            await OnConfirm.InvokeAsync();
+    }
+
+    [Parameter] public string? PasskeySetupHref { get; set; }
+    [Parameter] public bool IsOpen { get; set; }
+    [Parameter] public string Hostname { get; set; } = "";
+    [Parameter] public IReadOnlyList<string> Emails { get; set; } = [];
+    [Parameter] public string Email { get; set; } = "";
+    [Parameter] public string Code { get; set; } = "";
+    [Parameter] public string? Message { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public bool Succeeded { get; set; }
+    [Parameter] public LinuxMadeSane.Application.Services.EdgeGateway.EdgeGatewayMfaEnrollmentService.EnrollmentQr? Qr { get; set; }
+    [Parameter] public EventCallback<string> OnEmailChanged { get; set; }
+    [Parameter] public EventCallback<string?> OnCodeChanged { get; set; }
+    [Parameter] public EventCallback OnConfirm { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+}

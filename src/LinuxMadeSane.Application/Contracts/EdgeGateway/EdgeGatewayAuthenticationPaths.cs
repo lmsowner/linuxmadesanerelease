@@ -1,0 +1,21 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+namespace LinuxMadeSane.Application.Contracts.EdgeGateway;
+
+public static class EdgeGatewayAuthenticationPaths
+{
+    public const string Login = "/LMSMFALogin";
+    public const string ApiPrefix = "/LMSMFAAuth";
+    public const string Availability = $"{ApiPrefix}/availability";
+    public const string LoginPost = $"{ApiPrefix}/login";
+    public const string EmailSend = $"{ApiPrefix}/email/send";
+    public const string EmailComplete = $"{ApiPrefix}/email/complete";
+    public const string EmailLink = $"{ApiPrefix}/email/link";
+    public const string PasskeyOptions = $"{ApiPrefix}/passkeys/options";
+    public const string PasskeyComplete = $"{ApiPrefix}/passkeys/complete";
+    public const string PasskeySetup = $"{ApiPrefix}/setup-passkey";
+    public const string PasskeyVerify = $"{ApiPrefix}/passkeys/verify";
+    public const string PasskeyEnrollOptions = $"{ApiPrefix}/passkeys/enroll/options";
+    public const string PasskeyRegisterComplete = $"{ApiPrefix}/passkeys/register/complete";
+}

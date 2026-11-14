@@ -1,0 +1,48 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@* Copyright (c) 2026 LMS Developer. All rights reserved. *@
+@implements IDisposable
+@inject IServiceScopeFactory Scopes
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
+@using LinuxMadeSane.Core.Abstractions
+@if (hasDesktop)
+{
+<form method="post" action="@($"/remote-desktop/host/{HostId}/open")" target="_blank" style="display:inline" @onclick:stopPropagation="true" @onkeydown:stopPropagation="true">
+    <AntiforgeryToken />
+    <UiCommandButton Label="View desktop" Glyph="UiIconGlyph.Connect" Type="submit" Variant="UiButtonVariant.Action" Title="Open this LMS host’s desktop in the browser" />
+</form>
+}
+@code {
+    [Parameter, EditorRequired] public Guid HostId { get; set; }
+    private Guid? inspectedHost;
+    private bool hasDesktop;
+    private readonly CancellationTokenSource lifetime = new();
+    protected override void OnParametersSet()
+    {
+        if (inspectedHost != HostId) hasDesktop = false;
+    }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (inspectedHost == HostId) return;
+        var id = HostId;
+        inspectedHost = id;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        try
+        {
+            using var scope = Scopes.CreateScope();
+            var host = await scope.ServiceProvider.GetRequiredService<IManagedHostStore>().GetAsync(id, timeout.Token)
+                ?? (AiLocalMachine.IsLocalMachine(id) ? AiLocalMachine.CreateManagedHost() : null);
+            if (host is null || !ManagedHostCapabilities.IsLmsHost(host)) return;
+            // Inspection only: never install a desktop, start XRDP, or update LMS to display an action.
+            var available = await scope.ServiceProvider.GetRequiredService<LmsHostDesktopAvailabilityService>().GetAsync(host, timeout.Token);
+            if (id == HostId && !lifetime.IsCancellationRequested) hasDesktop = available;
+        }
+        catch (Exception) when (!lifetime.IsCancellationRequested) { hasDesktop = false; }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        if (!lifetime.IsCancellationRequested) await InvokeAsync(StateHasChanged);
+    }
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
+}

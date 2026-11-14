@@ -1,0 +1,54 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using System.ComponentModel.DataAnnotations;
+using LinuxMadeSane.Core.Enums;
+
+namespace LinuxMadeSane.Application.Contracts.EdgeGateway;
+
+public sealed class EdgeGatewayRouteEditor
+{
+    public Guid? Id { get; set; }
+    public bool Enabled { get; set; } = true;
+
+    [Required]
+    public string DisplayName { get; set; } = string.Empty;
+
+    [Required]
+    public string Hostname { get; set; } = string.Empty;
+
+    [Required]
+    public string DomainName { get; set; } = string.Empty;
+
+    public EdgeGatewayTargetScheme TargetScheme { get; set; } = EdgeGatewayTargetScheme.Http;
+
+    [Required]
+    public string TargetHost { get; set; } = string.Empty;
+
+    [Range(1, 65535)]
+    public int TargetPort { get; set; } = 80;
+
+    public string TargetPathPrefix { get; set; } = string.Empty;
+    public bool StripPathPrefix { get; set; } = true;
+    public bool ForwardPathPrefix { get; set; } = true;
+    public EdgeGatewayAuthMode AuthMode { get; set; } = EdgeGatewayAuthMode.RequireMfa;
+    public bool UsePublicHostHeader { get; set; } = true;
+    public string UpstreamSourceAddress { get; set; } = string.Empty;
+    public bool StripForwardedFor { get; set; } = true;
+    public bool SkipUpstreamTlsVerification { get; set; } = true;
+    public string AllowedUsers { get; set; } = string.Empty;
+    public string AllowedGroups { get; set; } = string.Empty;
+    public bool AllowLanOnly { get; set; }
+    public string AllowKnownIps { get; set; } = string.Empty;
+    public string TemporaryIpApprovalRecipients { get; set; } = string.Empty;
+    public string TemporaryIpApprovalAllowedCountryCodes { get; set; } = string.Empty;
+    public bool TemporaryIpApprovalUseNotFoundResponse { get; set; }
+
+    [Range(1, 1440)]
+    public int? TemporaryIpApprovalIdleTimeoutMinutes { get; set; }
+
+    [Range(1, 10080)]
+    public int? TemporaryIpApprovalMaxLifetimeMinutes { get; set; }
+
+    public string Notes { get; set; } = string.Empty;
+}

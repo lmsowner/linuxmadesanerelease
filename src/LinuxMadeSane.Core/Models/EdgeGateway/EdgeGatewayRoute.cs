@@ -1,0 +1,38 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Core.Enums;
+
+namespace LinuxMadeSane.Core.Models.EdgeGateway;
+
+public sealed record EdgeGatewayRoute(
+    Guid Id,
+    bool Enabled,
+    string DisplayName,
+    string Hostname,
+    string DomainName,
+    EdgeGatewayTargetScheme TargetScheme,
+    string TargetHost,
+    int TargetPort,
+    string TargetPathPrefix,
+    EdgeGatewayAuthMode AuthMode,
+    bool UsePublicHostHeader,
+    bool StripForwardedFor,
+    bool SkipUpstreamTlsVerification,
+    string AllowedUsers,
+    string AllowedGroups,
+    bool AllowLanOnly,
+    string AllowKnownIps,
+    string TemporaryIpApprovalRecipients,
+    string TemporaryIpApprovalAllowedCountryCodes,
+    bool TemporaryIpApprovalUseNotFoundResponse,
+    int? TemporaryIpApprovalIdleTimeoutMinutes,
+    int? TemporaryIpApprovalMaxLifetimeMinutes,
+    string Notes,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    EdgeGatewayDiagnosticStatus LastTestStatus,
+    string LastTestMessage,
+    string UpstreamSourceAddress = "",
+    bool StripPathPrefix = true,
+    bool ForwardPathPrefix = false);

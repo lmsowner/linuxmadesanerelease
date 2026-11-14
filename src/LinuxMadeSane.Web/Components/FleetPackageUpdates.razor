@@ -1,0 +1,138 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@implements IDisposable
+@using LinuxMadeSane.Core.Models
+@inject FleetPackageUpdateService Fleet
+
+<div class="fleet-package-modal-host">
+<UiModal IsOpen="@isOpen" Title="Package updates" Class="fleet-package-modal" OnClose="CloseAsync">
+    <ChildContent>
+    <div class="stack fleet-package-updates">
+        <fieldset disabled="@Fleet.IsRunning">
+            <UiMultiSelect Label="Servers" Placeholder="Choose servers…" Items="@ServerOptions" @bind-Value="selectedServers" />
+            <div class="toolbar fleet-selection-actions">
+                <UiCommandButton Label="Select all" HideIcon="true" Variant="UiButtonVariant.Ghost" OnClick="SelectAll" />
+                <UiCommandButton Label="Clear" HideIcon="true" Variant="UiButtonVariant.Ghost" OnClick="@(() => selectedServers=string.Empty)" />
+                <span class="meta-text">@SelectedTargets.Count selected</span>
+            </div>
+        </fieldset>
+        <p class="meta-text">Updates run on the selected APT servers using saved credentials, one at a time. Reboots remain manual.</p>
+        <UiTextAreaField Label="Ask AI to check or fix (optional)" aria-label="Ask AI to check or fix (optional)"
+            Helper="Applied to every selected server during AI update. Include a CVE identifier or vendor advisory for a specific security check."
+            @bind-Value="instruction" Disabled="@Fleet.IsRunning" Rows="3" maxlength="4000"
+            Placeholder="For example: update PHP and check whether the vendor’s fix for a specific CVE is installed." />
+        <div class="toolbar">
+            <UiCommandButton Label="Update selected" Glyph="UiIconGlyph.Download" Disabled="@(Fleet.IsRunning || SelectedTargets.Count==0)" OnClick="UpdateAllAsync" />
+            <UiCommandButton Label="AI fix and update selected" Glyph="UiIconGlyph.Ai" Disabled="@(Fleet.IsRunning || SelectedTargets.Count==0 || !AiAvailable)" OnClick="StartAiAsync" />
+        </div>
+        @if (!AiAvailable) { <p class="meta-text">Configure an AI provider to enable fleet AI repair.</p> }
+        <p class="callout info" role="status" aria-live="polite">@Status</p>
+        @if (aiHost is not null)
+        {
+            var repairHost=aiHost;
+            <section>
+                <h3>AI package repair: @aiHost.Name</h3>
+                <p>Keep this dialog open while AI works. Closing it stops the AI queue. Approve commands or enter administrator authentication when requested.</p>
+                <UiCommandButton Label="Skip this server" Glyph="UiIconGlyph.Run" OnClick="SkipAsync" />
+                <UiCommandButton Label="Stop AI queue" Glyph="UiIconGlyph.Stop" OnClick="StopAiAsync" />
+                <FleetPackageAiSession @key="repairHost.Id" Host="repairHost" Approval="@approvalScope" Prompt="@aiPrompt" OnVerified="@((string evidence)=>VerifiedAsync(repairHost.Id,evidence))" OnAttention="@((string detail)=>AttentionAsync(repairHost,detail))" />
+            </section>
+        }
+        @foreach(var result in Fleet.Results)
+        {
+            <details>
+                <summary>@result.Host.Name — @(result.State=="Completed" ? "Packages verified" : result.State)</summary>
+                <pre style="max-height:18rem;overflow:auto;white-space:pre-wrap">@result.Detail</pre>
+            </details>
+        }
+    </div>
+    </ChildContent>
+    <Footer><UiCommandButton Label="@(ownsAiQueue ? "Stop AI and close" : "Close")" HideIcon="true" OnClick="CloseAsync" /></Footer>
+</UiModal>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<ManagedHost> Hosts { get; set; } = [];
+    [Parameter] public bool AiAvailable { get; set; }
+    private IReadOnlyList<ManagedHost> Targets => Hosts.Where(FleetPackageUpdateService.IsTarget).DistinctBy(h=>h.Id).ToArray();
+    private bool isOpen;
+    private string selectedServers=string.Empty;
+    private IReadOnlyList<UiIdentityTokenPickerItem> ServerOptions => Targets.Select(h=>new UiIdentityTokenPickerItem(h.Id.ToString(),$"{h.Name} · {h.Hostname}")).ToArray();
+    private IReadOnlyList<ManagedHost> SelectedTargets
+    {
+        get
+        {
+            var ids=selectedServers.Split(',',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return Targets.Where(h=>ids.Contains(h.Id.ToString())).ToArray();
+        }
+    }
+    public void Open() { isOpen=true; StateHasChanged(); }
+    private void SelectAll() { selectedServers=string.Join(", ",Targets.Select(h=>h.Id)); }
+    private async Task CloseAsync() { if(ownsAiQueue) await StopAiAsync(); isOpen=false; }
+    private bool ownsAiQueue;
+    private bool disposed;
+    private string instruction="", aiInstruction="";
+    private ManagedHost? aiHost;
+    private string aiPrompt="";
+    private FleetPackageApprovalScope? approvalScope;
+    private readonly Queue<ManagedHost> aiQueue=new();
+    private string Status => Fleet.Results.Count==0 ? $"Choose the servers to update. {SelectedTargets.Count} selected." :
+        $"{(Fleet.IsRunning ? "Running" : "Finished")}: {Fleet.Results.Count(r=>r.State=="Completed")} completed, {Fleet.Results.Count(r=>r.State=="Needs attention")} need attention, {Fleet.Results.Count(r=>r.State=="Queued")} queued.";
+    protected override void OnInitialized() { Fleet.Changed+=Changed; }
+    private void Changed() { if(!disposed) _=InvokeAsync(StateHasChanged); }
+    private Task UpdateAllAsync()
+    {
+        isOpen=true;
+        Fleet.Start(SelectedTargets);
+        return Task.CompletedTask;
+    }
+    private Task StartAiAsync()
+    {
+        isOpen=true;
+        var targets=SelectedTargets;
+        if(!AiAvailable || !Fleet.Start(targets,ai:true)) return Task.CompletedTask;
+        approvalScope=new(targets.Select(host=>host.Id));
+        aiInstruction=instruction.Trim();
+        ownsAiQueue=true;
+        foreach(var host in targets) aiQueue.Enqueue(host);
+        Next();
+        return Task.CompletedTask;
+    }
+    private void Next()
+    {
+        aiHost=aiQueue.Count>0 ? aiQueue.Dequeue() : null;
+        if(aiHost is null) { approvalScope?.End(); approvalScope=null; Fleet.FinishAi(); ownsAiQueue=false; return; }
+        aiPrompt=FleetPackageUpdateService.BuildAiPrompt(aiHost,aiInstruction,"Fleet AI repair requested. Inspect the current server before making changes.");
+        Fleet.ReportAi(aiHost,"AI repair","Waiting for AI inspection, command approval or package verification.");
+    }
+    private Task VerifiedAsync(Guid hostId,string evidence)
+    {
+        if(disposed || aiHost?.Id!=hostId) return Task.CompletedTask;
+        if(aiHost is not null) Fleet.ReportAi(aiHost,"Completed",string.IsNullOrWhiteSpace(aiInstruction) ? evidence : $"Requested check on this server:\n{aiInstruction}\n\nPackage verification and AI findings:\n{evidence}");
+        Next(); return Task.CompletedTask;
+    }
+    private Task AttentionAsync(ManagedHost host,string detail)
+    {
+        if(!disposed && aiHost?.Id==host.Id) Fleet.ReportAi(host,"Needs attention",detail);
+        return Task.CompletedTask;
+    }
+    private Task SkipAsync()
+    {
+        if(aiHost is not null) Fleet.ReportAi(aiHost,"Needs attention","Skipped during AI repair. Review this server's package state before retrying.");
+        Next(); return Task.CompletedTask;
+    }
+    private Task StopAiAsync()
+    {
+        approvalScope?.End();approvalScope=null;
+        aiQueue.Clear(); aiHost=null;
+        if(ownsAiQueue) { Fleet.FinishAi(); ownsAiQueue=false; }
+        return Task.CompletedTask;
+    }
+    public void Dispose()
+    {
+        disposed=true;
+        approvalScope?.End();approvalScope=null;
+        Fleet.Changed-=Changed;
+        if(ownsAiQueue) Fleet.FinishAi();
+    }
+}

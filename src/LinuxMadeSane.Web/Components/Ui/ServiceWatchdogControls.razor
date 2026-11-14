@@ -1,0 +1,74 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@using LinuxMadeSane.Core.Abstractions
+@inject IServiceWatchdog Watchdog
+
+<section class="surface-subcard service-watchdog-controls" aria-label="Service watchdog">
+    <div class="watchdog-heading">
+        <h4>Service watchdog</h4>
+        @if (status is not null) { <span class="watchdog-state">@(status.Policy.Enabled ? "Enabled" : "Off")</span> }
+        <span class="meta-text">Up to five retries with backoff. Intentional stops are preserved.</span>
+    </div>
+    @if (status is not null)
+    {
+        <div class="watchdog-fields">
+            <UiCheckboxField @bind-Value="enabled" Label="Automatically restart on failure" Compact="true" Disabled="@busy" />
+            <UiTextField @bind-Value="recipient" Label="Notification email (optional)" Type="email" Compact="true" Disabled="@busy"
+                Placeholder="name@example.com" Helper="Requires server email. Alerts cover failure, exhausted retries and recovery." />
+        </div>
+    }
+    <div class="watchdog-actions">
+        @if (status is not null)
+        {
+            <CompactUIButton Label="@(saving ? "Saving…" : "Save watchdog")" Title="Save policy and reset the retry budget" Glyph="UiIconGlyph.Save" Disabled="@busy" OnClick="SaveAsync" />
+        }
+        <CompactUIButton Label="@(busy && !saving ? "Refreshing…" : "Refresh status")" Glyph="UiIconGlyph.Refresh" Disabled="@busy" OnClick="RefreshAsync" />
+        @if (!string.IsNullOrWhiteSpace(message)) { <span class="watchdog-feedback @(isError ? "error" : "")" role="status">@message</span> }
+    </div>
+    @if (status is not null)
+    {
+        <div class="watchdog-status meta-text">
+            <span>@status.Message</span>
+            <span><strong>Attempts</strong> @status.Attempts/5</span>
+            <span><strong>Last attempt</strong> @(status.LastAttemptUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "Never")</span>
+        </div>
+    }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public string UnitName { get; set; } = "";
+    private ServiceWatchdogStatus? status;
+    private bool enabled, busy, saving, isError;
+    private string recipient = "", message = "";
+    private string? loadedUnit;
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loadedUnit == UnitName) return;
+        loadedUnit = UnitName;
+        await RefreshAsync();
+    }
+    private async Task LoadStatusAsync()
+    {
+        status = await Watchdog.GetAsync(UnitName);
+        enabled = status.Policy.Enabled;
+        recipient = status.Policy.EmailRecipient;
+    }
+    private async Task RefreshAsync()
+    {
+        if (busy) return;
+        busy = true; isError = false; message = "Refreshing watchdog status…";
+        try { await LoadStatusAsync(); message = "Status refreshed."; }
+        catch (Exception ex) { isError = true; message = ex.Message; }
+        finally { busy = false; }
+    }
+    private async Task SaveAsync()
+    {
+        if (busy) return;
+        busy = saving = true; isError = false; message = "Saving watchdog policy…";
+        await InvokeAsync(StateHasChanged);
+        try { await Watchdog.SaveAsync(new(UnitName, enabled, recipient)); await LoadStatusAsync(); message = "Watchdog policy saved. Retry budget reset."; }
+        catch (Exception ex) { isError = true; message = ex.Message; }
+        finally { busy = saving = false; }
+    }
+}

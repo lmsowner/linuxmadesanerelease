@@ -1,0 +1,1103 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@page "/ai/engine"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Application.Contracts.LocalAi
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.LocalAi
+@using LinuxMadeSane.Infrastructure.Services
+@inject ILocalAiEngineManagerService LocalAiService
+@inject LocalAiPeerSharingService PeerSharing
+@inject NavigationManager Navigation
+
+@if (!Embedded)
+{
+    <PageTitle>Local AI | Linux Made Sane</PageTitle>
+}
+
+<div class="page-shell local-ai-page">
+    @if (!Embedded)
+    {
+        <UiHeroPanel Eyebrow="LinuxMadeSane.AI"
+                     Title="Local AI"
+                     Description="Share this server's default model and choose which local models are available.">
+            <Actions>
+                <UiCommandButton Label="Refresh"
+                                 Glyph="UiIconGlyph.Refresh"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Disabled="@isBusy"
+                                 OnClick="RefreshAsync" />
+                <UiCommandButton Label="Other AI providers"
+                                 Glyph="UiIconGlyph.Connection"
+                                 Variant="UiButtonVariant.Ghost"
+                                 Href="/ai/providers" />
+            </Actions>
+        </UiHeroPanel>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(statusMessage))
+    {
+        <p class="callout @statusTone">@statusMessage</p>
+    }
+
+    @if (!isLoaded || workspace is null)
+    {
+        <UiPanel>
+            <p class="meta-text">Loading Local AI...</p>
+        </UiPanel>
+    }
+    else
+    {
+        <div class="local-ai-tab-content">
+            <section class="surface-subcard local-ai-card local-ai-engine-card">
+                <div class="table-header">
+                    <div>
+                        <p class="eyebrow">Engine</p>
+                        <h2>@EngineStatusTitle</h2>
+                        <p class="meta-text">@workspace.Status.Runtime.Detail</p>
+                    </div>
+                    <UiPill Tone="@(IsEngineReady ? UiPillTone.Success : UiPillTone.Warning)">
+                        @(IsEngineReady ? "Ready for requests" : "Setup needed")
+                    </UiPill>
+                </div>
+
+                <div class="local-ai-engine-checks">
+                    <div class="@(workspace.Status.Runtime.IsInstalled ? "is-ready" : "")">
+                        <span>1</span>
+                        <strong>Installed</strong>
+                        <small>@(workspace.Status.Runtime.IsInstalled ? "Ollama found" : "Not installed")</small>
+                    </div>
+                    <div class="@(workspace.Status.Runtime.IsServiceActive ? "is-ready" : "")">
+                        <span>2</span>
+                        <strong>Running</strong>
+                        <small>@(workspace.Status.Runtime.IsServiceActive ? "Service active" : "Service stopped")</small>
+                    </div>
+                    <div class="@(workspace.Status.Runtime.IsApiReachable ? "is-ready" : "")">
+                        <span>3</span>
+                        <strong>Responding</strong>
+                        <small>@(workspace.Status.Runtime.IsApiReachable ? "API reachable" : "API unavailable")</small>
+                    </div>
+                    <div class="@(HasInstalledDefaultModel ? "is-ready" : "")">
+                        <span>4</span>
+                        <strong>Default model</strong>
+                        <small>@DefaultModelLabel</small>
+                    </div>
+                </div>
+
+                @if (!IsEngineReady)
+                {
+                    <div class="callout warning">
+                        <strong>@EngineNextAction</strong>
+                        <p>@EngineNextActionDetail</p>
+                    </div>
+                    @if (workspace.Status.Runtime.IsInstalled)
+                    {
+                        <div class="local-ai-inline-actions">
+                        <UiCommandButton Label="@EngineActionLabel"
+                                             Glyph="UiIconGlyph.Restart"
+                                             Disabled="@isBusy"
+                                             OnClick="RepairEngineAsync" />
+                        </div>
+                    }
+                }
+            </section>
+
+            @if (setupProgressUpdates.Count > 0)
+            {
+                <section class="surface-subcard local-ai-card local-ai-setup-progress" role="status" aria-live="polite">
+                    <div class="table-header">
+                        <div>
+                            <p class="eyebrow">Setup progress</p>
+                            <h2>@installProgressStep</h2>
+                            <p class="meta-text">@installProgressDetail</p>
+                        </div>
+                        <UiPill Tone="@(isBusy ? UiPillTone.Warning : IsEngineReady ? UiPillTone.Success : UiPillTone.Warning)">
+                            @(isBusy ? "Working" : IsEngineReady ? "Complete" : "Needs attention")
+                        </UiPill>
+                    </div>
+                    <div class="local-ai-setup-progress-list">
+                        @foreach (var update in setupProgressUpdates)
+                        {
+                            <div class="local-ai-setup-progress-row @GetProgressClass(update.State)">
+                                <span aria-hidden="true">@GetProgressMark(update.State)</span>
+                                <div>
+                                    <strong>@update.Step</strong>
+                                    <small>@update.Detail</small>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </section>
+            }
+
+            <section class="surface-subcard local-ai-card local-ai-sharing-card">
+                <div class="table-header">
+                    <div>
+                        <p class="eyebrow">Remote AI sharing</p>
+                        <h2>Offer this server's default model</h2>
+                        <p class="meta-text">Other LMS machines connect to this AI service and always use the default model selected below.</p>
+                    </div>
+                    <UiPill Tone="@(peerSharingStatus?.Enabled == true && IsEngineReady ? UiPillTone.Success : peerSharingStatus?.Enabled == true ? UiPillTone.Warning : UiPillTone.Neutral)">
+                        @(peerSharingStatus?.Enabled == true && IsEngineReady ? "Sharing ready" : peerSharingStatus?.Enabled == true ? "Sharing blocked" : "Sharing disabled")
+                    </UiPill>
+                </div>
+
+                @if (peerSharingStatus?.Enabled == true && !IsEngineReady)
+                {
+                    <div class="callout warning">
+                        The access key is enabled, but this server cannot answer remote AI requests until the engine is running and the default model is ready.
+                    </div>
+                }
+
+                <div class="local-ai-sharing-details">
+                    <div>
+                        <span class="local-ai-summary-label">AI service URL</span>
+                        <strong>@SharedAiServiceUrl</strong>
+                    </div>
+                    <div>
+                        <span class="local-ai-summary-label">Shared model</span>
+                        <strong>@DefaultModelLabel</strong>
+                    </div>
+                    @if (peerSharingStatus?.AccessKeyIssuedAtUtc is not null)
+                    {
+                        <div>
+                            <span class="local-ai-summary-label">Key issued</span>
+                            <strong>@peerSharingStatus.AccessKeyIssuedAtUtc.Value.ToLocalTime().ToString("dd MMM yyyy HH:mm")</strong>
+                        </div>
+                    }
+                </div>
+
+                @if (peerSharingStatus?.HasAccessKey == true && !string.IsNullOrWhiteSpace(peerSharingStatus.AccessKey))
+                {
+                    <div class="local-ai-stored-key">
+                        <UiField Label="Access key" Compact="true">
+                            <ChildContent>
+                                <input class="ui-control-input"
+                                       aria-label="Access key"
+                                       value="@peerSharingStatus.AccessKey"
+                                       type="@(showPeerAccessKey ? "text" : "password")"
+                                       autocomplete="off"
+                                       readonly
+                                       spellcheck="false" />
+                            </ChildContent>
+                        </UiField>
+                        <UiCommandButton Label="@(showPeerAccessKey ? "Hide key" : "Show key")"
+                                         Glyph="UiIconGlyph.Key"
+                                         Variant="UiButtonVariant.Ghost"
+                                         OnClick="TogglePeerAccessKey" />
+                    </div>
+                }
+                else if (peerSharingStatus?.HasAccessKey == true)
+                {
+                    <div class="callout warning">
+                        <strong>This older access key cannot be displayed.</strong>
+                        <p>Replace it once to store a reusable key. Existing machines using the old key will need the replacement.</p>
+                    </div>
+                }
+
+                <div class="local-ai-inline-actions">
+                    <UiCommandButton Label="@GetPeerKeyActionLabel()"
+                                     Glyph="UiIconGlyph.Key"
+                                     Disabled="@(!CanShareDefaultModel || isBusy)"
+                                     OnClick="EnableOrRotatePeerSharingAsync" />
+                    @if (peerSharingStatus?.Enabled == true)
+                    {
+                        <UiCommandButton Label="Disable sharing"
+                                         Glyph="UiIconGlyph.Stop"
+                                         Variant="UiButtonVariant.Ghost"
+                                         Disabled="@isBusy"
+                                         OnClick="DisablePeerSharingAsync" />
+                    }
+                </div>
+            </section>
+
+            <section class="surface-subcard local-ai-card">
+                <div class="table-header">
+                    <div>
+                        <p class="eyebrow">Models</p>
+                        <h2>Models on this server</h2>
+                        <p class="meta-text">Install the models you want and choose one default. LMS and connected clients always use that default.</p>
+                    </div>
+                    <div class="local-ai-model-header-actions">
+                        <UiPill Tone="@(workspace.Status.Runtime.IsApiReachable ? UiPillTone.Success : UiPillTone.Warning)">
+                            @(workspace.Status.Runtime.IsApiReachable ? "Engine ready" : "Engine unavailable")
+                        </UiPill>
+                        <UiPill Tone="UiPillTone.Neutral">
+                            @workspace.InstalledModels.Count installed · @FormatBytes(TotalInstalledModelBytes)
+                        </UiPill>
+                        <UiCommandButton Label="Check for new models"
+                                         Glyph="UiIconGlyph.Refresh"
+                                         Disabled="@isBusy"
+                                         OnClick="CheckForNewModelsAsync" />
+                    </div>
+                </div>
+
+                <div class="local-ai-acceleration-summary">
+                    <div>
+                        <span class="local-ai-summary-label">GPU use</span>
+                        <strong>Use a supported GPU when available</strong>
+                        <p class="meta-text">@GpuModeDetail</p>
+                    </div>
+                    <UiPill Tone="@GpuModeTone">@GpuModeLabel</UiPill>
+                </div>
+
+                <div class="local-ai-model-card-grid">
+                    @foreach (var model in ModelRows)
+                    {
+                        <article class="local-ai-model-panel @(model.IsDefault ? "is-default" : string.Empty)">
+                            <div class="local-ai-model-panel-main">
+                                <div class="local-ai-model-panel-heading">
+                                    <div>
+                                        <p class="eyebrow">@model.ModelId</p>
+                                        <h3>@model.DisplayName</h3>
+                                    </div>
+                                    <div class="local-ai-model-badges">
+                                    @if (model.IsDefault)
+                                    {
+                                        <UiPill Tone="UiPillTone.Success">Default</UiPill>
+                                    }
+                                    else if (model.IsInstalled)
+                                    {
+                                        <UiPill Tone="UiPillTone.Neutral">Installed</UiPill>
+                                    }
+                                    else
+                                    {
+                                        <UiPill Tone="UiPillTone.Warning">Not installed</UiPill>
+                                    }
+                                        <UiPill Tone="@GetModelAccelerationTone(model)">@GetModelAccelerationLabel(model)</UiPill>
+                                    </div>
+                                </div>
+                                <p class="local-ai-model-description">@model.Description</p>
+                                <div class="local-ai-model-facts">
+                                    @if (model.EstimatedRamBytes > 0)
+                                    {
+                                        <span><strong>@FormatBytes(model.EstimatedRamBytes)</strong> RAM</span>
+                                    }
+                                    @if (model.EstimatedVramBytes is > 0)
+                                    {
+                                        <span><strong>@FormatBytes(model.EstimatedVramBytes.Value)</strong> preferred VRAM</span>
+                                    }
+                                    @if (model.SizeBytes > 0)
+                                    {
+                                        <span><strong>@FormatBytes(model.SizeBytes)</strong> installed</span>
+                                    }
+                                </div>
+                                @if (installingModelId.Equals(model.ModelId, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    <div class="callout info" role="status" aria-live="polite">
+                                        <strong>@installProgressStep</strong>
+                                        <p>@installProgressDetail</p>
+                                    </div>
+                                }
+                            </div>
+                            <div class="local-ai-model-panel-actions">
+                                <UiCommandButton Label="Model details"
+                                                 Glyph="UiIconGlyph.Info"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 Disabled="@isBusy"
+                                                 OnClick="@(() => OpenModelDetails(model))" />
+                                @if (!model.IsInstalled)
+                                {
+                                    <UiCommandButton Label="@(installingModelId.Equals(model.ModelId, StringComparison.OrdinalIgnoreCase) ? "Installing..." : "Install")"
+                                                     Glyph="UiIconGlyph.Upload"
+                                                     Disabled="@isBusy"
+                                                     OnClick="@(() => InstallModelAsync(model.ModelId))" />
+                                }
+                                else if (!model.IsDefault)
+                                {
+                                    <UiCommandButton Label="Set as default"
+                                                     Glyph="UiIconGlyph.Save"
+                                                     Disabled="@isBusy"
+                                                     OnClick="@(() => SetDefaultModelAsync(model.ModelId))" />
+                                    <UiCommandButton Label="Remove"
+                                                     Glyph="UiIconGlyph.Delete"
+                                                     Variant="UiButtonVariant.Danger"
+                                                     Disabled="@isBusy"
+                                                     OnClick="@(() => OpenRemoveModelDialog(model))" />
+                                }
+                                else
+                                {
+                                    <UiCommandButton Label="Default"
+                                                     Glyph="UiIconGlyph.Save"
+                                                     Disabled="true" />
+                                }
+                            </div>
+                        </article>
+                    }
+                </div>
+            </section>
+
+        </div>
+    }
+</div>
+
+<UiModal IsOpen="@(detailModel is not null)"
+         Title="@(detailModel?.DisplayName ?? "Model details")"
+         Subtitle="@detailModel?.ModelId"
+         Class="local-ai-model-details-modal"
+         OnClose="CloseModelDetails">
+    <ChildContent>
+        @if (detailModel is not null)
+        {
+            <div class="local-ai-model-details">
+                <p class="local-ai-model-details-summary">@detailModel.Description</p>
+
+                <div class="local-ai-detail-grid">
+                    <div class="local-ai-detail-card">
+                        <span class="local-ai-summary-label">Status</span>
+                        <strong>@GetInstallStatus(detailModel)</strong>
+                        <span>@GetSuitabilityLabel(detailModel)</span>
+                    </div>
+                    <div class="local-ai-detail-card">
+                        <span class="local-ai-summary-label">Memory</span>
+                        <strong>@GetMemorySummary(detailModel)</strong>
+                        <span>@GetInstalledSizeSummary(detailModel)</span>
+                    </div>
+                    <div class="local-ai-detail-card">
+                        <span class="local-ai-summary-label">Acceleration</span>
+                        <strong>@GetModelAccelerationLabel(detailModel)</strong>
+                        <span>@GetModelAccelerationDetail(detailModel)</span>
+                    </div>
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(detailModel.SuitabilityWarning))
+                {
+                    <div class="callout warning">@detailModel.SuitabilityWarning</div>
+                }
+
+                <div class="local-ai-model-details-section">
+                    <h3>What it can do</h3>
+                    <div class="local-ai-capability-list">
+                        @foreach (var capability in GetCapabilityLabels(detailModel))
+                        {
+                            <span>@capability</span>
+                        }
+                    </div>
+                </div>
+
+                <div class="local-ai-model-details-section">
+                    <h3>GPU on this server</h3>
+                    <p>@GpuModeDetail</p>
+                    @if (workspace?.Status.Hardware.Gpus.Count > 0)
+                    {
+                        <div class="local-ai-gpu-detail-list">
+                            @foreach (var gpu in workspace.Status.Hardware.Gpus)
+                            {
+                                <div>
+                                    <strong>@gpu.Name</strong>
+                                    <span>@GetGpuDetail(gpu)</span>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Close"
+                         Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Ghost"
+                         OnClick="CloseModelDetails" />
+        @if (detailModel is { IsInstalled: false } modelToInstall)
+        {
+            <UiCommandButton Label="Install model"
+                             Glyph="UiIconGlyph.Upload"
+                             Disabled="@isBusy"
+                             OnClick="@(() => InstallFromDetailsAsync(modelToInstall.ModelId))" />
+        }
+        else if (detailModel is { IsInstalled: true, IsDefault: false } modelToSelect)
+        {
+            <UiCommandButton Label="Remove model"
+                             Glyph="UiIconGlyph.Delete"
+                             Variant="UiButtonVariant.Danger"
+                             Disabled="@isBusy"
+                             OnClick="@(() => OpenRemoveModelFromDetails(modelToSelect))" />
+            <UiCommandButton Label="Set as default"
+                             Glyph="UiIconGlyph.Save"
+                             Disabled="@isBusy"
+                             OnClick="@(() => SetDefaultFromDetailsAsync(modelToSelect.ModelId))" />
+        }
+    </Footer>
+</UiModal>
+
+<UiModal IsOpen="@showModelFinder"
+         Title="Check for new models"
+         Subtitle="Install any model from the Ollama library"
+         Class="local-ai-model-finder-modal"
+         OnClose="CloseModelFinderAsync">
+    <ChildContent>
+        <div class="local-ai-model-finder">
+            <p>
+                LMS refreshed this server and found <strong>@(workspace?.InstalledModels.Count ?? 0)</strong> installed models.
+                The model panels already show the built-in recommendations for this machine.
+            </p>
+            <div class="callout info">
+                Open the current Ollama library, copy a model name such as <code>gemma3:4b</code>, then install it here.
+                It will appear as another model panel when the download finishes.
+            </div>
+            <UiTextField @bind-Value="modelFinderId"
+                         Label="Ollama model name"
+                         Helper="Use the exact model name and size tag shown in the Ollama library."
+                         Placeholder="gemma3:4b"
+                         Disabled="@isBusy" />
+        </div>
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Close"
+                         Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Ghost"
+                         Disabled="@isBusy"
+                         OnClick="CloseModelFinderAsync" />
+        <UiCommandButton Label="Browse Ollama library"
+                         Glyph="UiIconGlyph.Connection"
+                         Variant="UiButtonVariant.Ghost"
+                         Href="https://ollama.com/search"
+                         Target="_blank"
+                         Rel="noopener noreferrer" />
+        <UiCommandButton Label="Install model"
+                         Glyph="UiIconGlyph.Upload"
+                         Disabled="@(isBusy || string.IsNullOrWhiteSpace(modelFinderId))"
+                         OnClick="InstallModelFromFinderAsync" />
+    </Footer>
+</UiModal>
+
+<UiModal IsOpen="@(modelPendingRemoval is not null)"
+         Title="Remove local model"
+         Subtitle="@modelPendingRemoval?.ModelId"
+         Class="local-ai-remove-model-modal"
+         OnClose="CloseRemoveModelDialogAsync">
+    <ChildContent>
+        @if (modelPendingRemoval is not null)
+        {
+            <div class="local-ai-remove-model-content">
+                <p>Remove <strong>@modelPendingRemoval.DisplayName</strong> from this server?</p>
+                <div class="local-ai-detail-card">
+                    <span class="local-ai-summary-label">Disk space to reclaim</span>
+                    <strong>@FormatBytes(modelPendingRemoval.SizeBytes)</strong>
+                    <span>The model can be downloaded again later.</span>
+                </div>
+                <div class="callout warning">
+                    This removes the model files from Ollama. It does not remove the Local AI engine or any other model.
+                </div>
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Cancel"
+                         Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Ghost"
+                         Disabled="@isBusy"
+                         OnClick="CloseRemoveModelDialogAsync" />
+        <UiCommandButton Label="Remove model"
+                         Glyph="UiIconGlyph.Delete"
+                         Variant="UiButtonVariant.Danger"
+                         Disabled="@isBusy"
+                         OnClick="ConfirmRemoveModelAsync" />
+    </Footer>
+</UiModal>
+
+@code {
+    [Parameter]
+    public bool Embedded { get; set; }
+
+    private LocalAiEngineWorkspaceViewModel? workspace;
+    private LocalAiPeerSharingStatus? peerSharingStatus;
+    private string statusMessage = string.Empty;
+    private string statusTone = "info";
+    private string installingModelId = string.Empty;
+    private string installProgressStep = string.Empty;
+    private string installProgressDetail = string.Empty;
+    private readonly List<LocalAiSetupProgressUpdate> setupProgressUpdates = [];
+    private ModelRow? detailModel;
+    private ModelRow? modelPendingRemoval;
+    private string modelFinderId = string.Empty;
+    private bool showModelFinder;
+    private bool showPeerAccessKey;
+    private bool isLoaded;
+    private bool isBusy;
+
+    private bool HasInstalledDefaultModel =>
+        workspace is not null &&
+        !string.IsNullOrWhiteSpace(workspace.Status.Settings.DefaultModelId) &&
+        workspace.InstalledModels.Any(model => model.ModelId.Equals(
+            workspace.Status.Settings.DefaultModelId,
+            StringComparison.OrdinalIgnoreCase));
+
+    private bool IsEngineReady =>
+        workspace?.Status.Runtime is { IsInstalled: true, IsServiceActive: true, IsApiReachable: true } &&
+        HasInstalledDefaultModel;
+
+    private bool CanShareDefaultModel => IsEngineReady;
+
+    private long TotalInstalledModelBytes => workspace?.InstalledModels.Sum(model => model.SizeBytes) ?? 0;
+
+    private string DefaultModelLabel => HasInstalledDefaultModel
+        ? workspace!.Status.Settings.DefaultModelId
+        : "No default selected";
+
+    private string EngineStatusTitle => workspace?.Status.Runtime switch
+    {
+        not { IsInstalled: true } => "Local AI needs installing",
+        not { IsServiceActive: true } => "Local AI is stopped",
+        not { IsApiReachable: true } => "Local AI is not responding",
+        _ when !HasInstalledDefaultModel => "Choose a default model",
+        _ => "Local AI is running"
+    };
+
+    private string EngineNextAction => workspace?.Status.Runtime.IsInstalled != true
+        ? "Choose a model below to install Local AI."
+        : workspace.Status.Runtime.IsApiReachable && !HasInstalledDefaultModel
+            ? "Choose or install a default model below."
+            : "Repair the engine before using or sharing it.";
+
+    private string EngineNextActionDetail => workspace?.Status.Runtime.IsInstalled != true
+        ? "The Install button handles the engine, starts it, downloads the model, tests it, and sets it as the default. Progress stays visible here."
+        : workspace.Status.Runtime.IsApiReachable && !HasInstalledDefaultModel
+            ? "Remote LMS machines always use the default model selected on this server."
+            : "LMS will start or restart Ollama, wait for its localhost API, and verify the default model.";
+
+    private string EngineActionLabel => workspace?.Status.Runtime.IsApiReachable == true && !HasInstalledDefaultModel
+        ? "Finish setup"
+        : "Repair and verify engine";
+
+    private string SharedAiServiceUrl
+    {
+        get
+        {
+            if (workspace is null ||
+                !Uri.TryCreate(workspace.Status.Runtime.ApiEndpoint, UriKind.Absolute, out var runtimeEndpoint))
+            {
+                return "Unavailable";
+            }
+
+            var navigationHost = new Uri(Navigation.Uri).Host;
+            var runtimeHost = runtimeEndpoint.IsLoopback || runtimeEndpoint.Host is "0.0.0.0" or "::"
+                ? navigationHost
+                : runtimeEndpoint.Host;
+            return new UriBuilder(runtimeEndpoint.Scheme, runtimeHost, runtimeEndpoint.Port)
+                .Uri
+                .GetLeftPart(UriPartial.Authority);
+        }
+    }
+
+    private IReadOnlyList<ModelRow> ModelRows
+    {
+        get
+        {
+            if (workspace is null)
+            {
+                return [];
+            }
+
+            var rows = workspace.RecommendedModels
+                .Select(definition =>
+                {
+                    var installed = workspace.InstalledModels.FirstOrDefault(model =>
+                        model.ModelId.Equals(definition.ModelId, StringComparison.OrdinalIgnoreCase));
+                    return new ModelRow(
+                        definition.ModelId,
+                        definition.DisplayName,
+                        definition.Description,
+                        installed is not null,
+                        IsDefault(definition.ModelId),
+                        installed?.SizeBytes ?? 0,
+                        definition.EstimatedRamBytes,
+                        definition.EstimatedVramBytes,
+                        definition.Suitability,
+                        definition.Capabilities,
+                        definition.SuitabilityWarning);
+                })
+                .ToList();
+
+            rows.AddRange(workspace.InstalledModels
+                .Where(installed => rows.All(row => !row.ModelId.Equals(installed.ModelId, StringComparison.OrdinalIgnoreCase)))
+                .Select(installed => new ModelRow(
+                    installed.ModelId,
+                    string.IsNullOrWhiteSpace(installed.DisplayName) ? installed.ModelId : installed.DisplayName,
+                    string.IsNullOrWhiteSpace(installed.Detail) ? "Installed local model." : installed.Detail,
+                    true,
+                    IsDefault(installed.ModelId),
+                    installed.SizeBytes,
+                    0,
+                    null,
+                    LocalAiModelSuitability.Supported,
+                    installed.Capabilities,
+                    string.Empty)));
+
+            return rows
+                .OrderByDescending(row => row.IsDefault)
+                .ThenByDescending(row => row.IsInstalled)
+                .ThenBy(row => row.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+    }
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task RefreshAsync()
+    {
+        setupProgressUpdates.Clear();
+        await LoadAsync();
+    }
+
+    private async Task CheckForNewModelsAsync()
+    {
+        await LoadAsync(clearStatus: false);
+        showModelFinder = true;
+        var availableCount = ModelRows.Count(model => !model.IsInstalled);
+        SetStatus(
+            $"Model list refreshed. {workspace?.InstalledModels.Count ?? 0} installed and {availableCount} built-in recommendations available to install.",
+            "success");
+    }
+
+    private Task CloseModelFinderAsync()
+    {
+        showModelFinder = false;
+        modelFinderId = string.Empty;
+        return Task.CompletedTask;
+    }
+
+    private async Task InstallModelFromFinderAsync()
+    {
+        var modelId = (modelFinderId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            return;
+        }
+
+        await CloseModelFinderAsync();
+        await InstallModelAsync(modelId);
+    }
+
+    private async Task LoadAsync(bool clearStatus = true)
+    {
+        isBusy = true;
+        try
+        {
+            workspace = await LocalAiService.GetWorkspaceAsync();
+            peerSharingStatus = await PeerSharing.GetStatusAsync();
+            if (clearStatus)
+            {
+                SetStatus(string.Empty);
+            }
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isLoaded = true;
+            isBusy = false;
+        }
+    }
+
+    private async Task InstallModelAsync(string modelId)
+    {
+        isBusy = true;
+        installingModelId = modelId;
+        setupProgressUpdates.Clear();
+        installProgressStep = $"Installing {modelId}";
+        installProgressDetail = "Preparing the model download...";
+        SetStatus($"Installing {modelId}. This can take several minutes for a large model.", "info");
+        await InvokeAsync(StateHasChanged);
+
+        var progress = new Progress<LocalAiSetupProgressUpdate>(update =>
+        {
+            installProgressStep = update.Step;
+            installProgressDetail = update.Detail;
+            RecordProgress(update);
+            SetStatus(update.Detail, update.State == LocalAiSetupProgressState.Failed ? "error" : "info");
+            _ = InvokeAsync(StateHasChanged);
+        });
+
+        try
+        {
+            LocalAiApplyResult result;
+            if (workspace?.Status.Runtime.IsApiReachable == true)
+            {
+                result = await LocalAiService.PullModelAsync(modelId, true, progress);
+                if (result.Succeeded && !HasInstalledDefaultModel)
+                {
+                    await LocalAiService.CreateOrUpdateLocalProviderAsync(modelId);
+                }
+            }
+            else
+            {
+                result = await LocalAiService.ApplySetupAsync(
+                    new LocalAiSetupEditor { SelectedModelId = modelId },
+                    true,
+                    progress);
+            }
+
+            SetStatus(result.Summary, result.Succeeded ? "success" : "error");
+            await LoadAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            installingModelId = string.Empty;
+            isBusy = false;
+        }
+    }
+
+    private async Task RepairEngineAsync()
+    {
+        var modelId = HasInstalledDefaultModel
+            ? workspace!.Status.Settings.DefaultModelId
+            : ModelRows.FirstOrDefault(model => model.IsInstalled)?.ModelId
+              ?? ModelRows.FirstOrDefault()?.ModelId
+              ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            SetStatus("Choose a model below to finish Local AI setup.", "warning");
+            return;
+        }
+
+        await InstallModelAsync(modelId);
+    }
+
+    private void RecordProgress(LocalAiSetupProgressUpdate update)
+    {
+        if (setupProgressUpdates.Count > 0 &&
+            setupProgressUpdates[^1].Step.Equals(update.Step, StringComparison.Ordinal) &&
+            setupProgressUpdates[^1].State == LocalAiSetupProgressState.Running &&
+            update.State == LocalAiSetupProgressState.Running)
+        {
+            setupProgressUpdates[^1] = update;
+            return;
+        }
+
+        setupProgressUpdates.Add(update);
+    }
+
+    private static string GetProgressClass(LocalAiSetupProgressState state) => state switch
+    {
+        LocalAiSetupProgressState.Completed => "is-complete",
+        LocalAiSetupProgressState.Failed => "is-failed",
+        _ => "is-running"
+    };
+
+    private static string GetProgressMark(LocalAiSetupProgressState state) => state switch
+    {
+        LocalAiSetupProgressState.Completed => "✓",
+        LocalAiSetupProgressState.Failed => "!",
+        _ => "•"
+    };
+
+    private async Task SetDefaultModelAsync(string modelId)
+    {
+        isBusy = true;
+        try
+        {
+            await LocalAiService.CreateOrUpdateLocalProviderAsync(modelId);
+            SetStatus($"{modelId} is now the server default. Connected clients will use it automatically.", "success");
+            await LoadAsync(clearStatus: false);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private void OpenModelDetails(ModelRow model) => detailModel = model;
+
+    private void CloseModelDetails() => detailModel = null;
+
+    private void OpenRemoveModelDialog(ModelRow model)
+    {
+        if (!model.IsInstalled || model.IsDefault)
+        {
+            return;
+        }
+
+        modelPendingRemoval = model;
+    }
+
+    private void OpenRemoveModelFromDetails(ModelRow model)
+    {
+        CloseModelDetails();
+        OpenRemoveModelDialog(model);
+    }
+
+    private Task CloseRemoveModelDialogAsync()
+    {
+        modelPendingRemoval = null;
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmRemoveModelAsync()
+    {
+        if (modelPendingRemoval is not { IsInstalled: true, IsDefault: false } model)
+        {
+            return;
+        }
+
+        isBusy = true;
+        try
+        {
+            var result = await LocalAiService.RemoveModelAsync(model.ModelId, true);
+            if (result.Succeeded)
+            {
+                modelPendingRemoval = null;
+                await LoadAsync(clearStatus: false);
+                SetStatus(
+                    $"{model.DisplayName} was removed. Reclaimed up to {FormatBytes(model.SizeBytes)}.",
+                    "success");
+            }
+            else
+            {
+                SetStatus($"{result.Summary} {result.Detail}", "error");
+            }
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task InstallFromDetailsAsync(string modelId)
+    {
+        CloseModelDetails();
+        await InstallModelAsync(modelId);
+    }
+
+    private async Task SetDefaultFromDetailsAsync(string modelId)
+    {
+        CloseModelDetails();
+        await SetDefaultModelAsync(modelId);
+    }
+
+    private async Task EnableOrRotatePeerSharingAsync()
+    {
+        isBusy = true;
+        try
+        {
+            var result = await PeerSharing.EnableWithNewKeyAsync();
+            peerSharingStatus = result.Status;
+            showPeerAccessKey = true;
+            SetStatus("Remote AI sharing is enabled. The access key is stored and can be shown here again.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task DisablePeerSharingAsync()
+    {
+        isBusy = true;
+        try
+        {
+            await PeerSharing.DisableAsync();
+            peerSharingStatus = await PeerSharing.GetStatusAsync();
+            showPeerAccessKey = false;
+            SetStatus("Remote AI sharing is disabled.", "success");
+        }
+        catch (Exception exception)
+        {
+            SetStatus(exception.Message, "error");
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private void TogglePeerAccessKey() => showPeerAccessKey = !showPeerAccessKey;
+
+    private string GetPeerKeyActionLabel() => peerSharingStatus switch
+    {
+        { HasAccessKey: true } => "Replace access key",
+        { Enabled: true } => "Generate access key",
+        _ => "Enable sharing and generate key"
+    };
+
+    private bool IsDefault(string modelId) =>
+        workspace is not null &&
+        modelId.Equals(workspace.Status.Settings.DefaultModelId, StringComparison.OrdinalIgnoreCase);
+
+    private UiPillTone GpuModeTone => workspace?.Status.Hardware.GpuAccelerationState switch
+    {
+        LocalAiGpuAccelerationState.Confirmed => UiPillTone.Success,
+        LocalAiGpuAccelerationState.Available => UiPillTone.Warning,
+        _ => UiPillTone.Neutral
+    };
+
+    private string GpuModeLabel => workspace?.Status.Hardware.GpuAccelerationState switch
+    {
+        LocalAiGpuAccelerationState.Confirmed => "GPU ready · automatic",
+        LocalAiGpuAccelerationState.Available => "GPU detected · check driver",
+        LocalAiGpuAccelerationState.NotDetected => "CPU mode",
+        _ => "Checking hardware"
+    };
+
+    private string GpuModeDetail => workspace?.Status.Hardware.GpuAccelerationState switch
+    {
+        LocalAiGpuAccelerationState.Confirmed =>
+            $"Automatic. Ollama will use {GetPrimaryGpuName()} when a model runs and will use system RAM if the model needs more memory.",
+        LocalAiGpuAccelerationState.Available =>
+            $"{GetPrimaryGpuName()} was found, but acceleration was not confirmed. Ollama will use it automatically if its driver is supported; otherwise it will use the CPU.",
+        LocalAiGpuAccelerationState.NotDetected =>
+            "No supported GPU was detected. Models will run on the CPU and use system RAM.",
+        _ => "LMS is checking this server for supported GPU acceleration."
+    };
+
+    private string GetPrimaryGpuName() =>
+        workspace?.Status.Hardware.Gpus.FirstOrDefault()?.Name ?? "the detected GPU";
+
+    private UiPillTone GetModelAccelerationTone(ModelRow model) =>
+        workspace?.Status.Hardware.GpuAccelerationState switch
+        {
+            LocalAiGpuAccelerationState.Confirmed when ModelFitsGpu(model) => UiPillTone.Success,
+            LocalAiGpuAccelerationState.Confirmed => UiPillTone.Warning,
+            LocalAiGpuAccelerationState.Available => UiPillTone.Warning,
+            _ => UiPillTone.Neutral
+        };
+
+    private string GetModelAccelerationLabel(ModelRow model) =>
+        workspace?.Status.Hardware.GpuAccelerationState switch
+        {
+            LocalAiGpuAccelerationState.Confirmed when ModelFitsGpu(model) => "Fits GPU",
+            LocalAiGpuAccelerationState.Confirmed => "GPU + RAM",
+            LocalAiGpuAccelerationState.Available => "GPU driver needed",
+            _ => "CPU"
+        };
+
+    private string GetModelAccelerationDetail(ModelRow model) =>
+        workspace?.Status.Hardware.GpuAccelerationState switch
+        {
+            LocalAiGpuAccelerationState.Confirmed when ModelFitsGpu(model) =>
+                $"GPU use is automatic. This model's preferred VRAM fits {GetPrimaryGpuName()}.",
+            LocalAiGpuAccelerationState.Confirmed =>
+                "GPU use is automatic, but the model may also use system RAM because its preferred VRAM exceeds the known GPU memory.",
+            LocalAiGpuAccelerationState.Available =>
+                "A GPU is present, but its acceleration driver was not confirmed. The engine will fall back to the CPU if it cannot use the GPU.",
+            _ => "This model will run on the CPU because no supported GPU was detected."
+        };
+
+    private bool ModelFitsGpu(ModelRow model)
+    {
+        if (model.EstimatedVramBytes is not > 0 || workspace is null)
+        {
+            return false;
+        }
+
+        return workspace.Status.Hardware.Gpus
+            .Where(gpu => gpu.IsCudaAvailable || gpu.IsRocmAvailable)
+            .Any(gpu => gpu.TotalVramBytes is not null && gpu.TotalVramBytes >= model.EstimatedVramBytes);
+    }
+
+    private static string GetInstallStatus(ModelRow model) => model.IsDefault
+        ? "Installed · server default"
+        : model.IsInstalled
+            ? "Installed"
+            : "Available to install";
+
+    private static string GetSuitabilityLabel(ModelRow model) => model.Suitability switch
+    {
+        LocalAiModelSuitability.Recommended => "A good fit for this server",
+        LocalAiModelSuitability.Supported => "Supported on this server",
+        LocalAiModelSuitability.Limited => "May be slow on this server",
+        LocalAiModelSuitability.NotRecommended => "This server is below the preferred hardware",
+        _ => "Hardware fit unavailable"
+    };
+
+    private static string GetMemorySummary(ModelRow model)
+    {
+        if (model.EstimatedRamBytes <= 0)
+        {
+            return "Requirements unavailable";
+        }
+
+        return model.EstimatedVramBytes is > 0
+            ? $"{FormatBytes(model.EstimatedRamBytes)} RAM · {FormatBytes(model.EstimatedVramBytes.Value)} VRAM"
+            : $"{FormatBytes(model.EstimatedRamBytes)} RAM";
+    }
+
+    private static string GetInstalledSizeSummary(ModelRow model) => model.SizeBytes > 0
+        ? $"Installed size: {FormatBytes(model.SizeBytes)}"
+        : "Download size is reported during installation";
+
+    private static IReadOnlyList<string> GetCapabilityLabels(ModelRow model)
+    {
+        var labels = new List<string>();
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.BasicChat, "Chat");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.CommandExplanation, "Command explanations");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.LogSummary, "Log summaries");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.FixPlanGeneration, "Fix planning");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.ToolCalling, "Tool calling");
+        AddCapability(labels, model.Capabilities, AiProviderCapabilityFlag.Streaming, "Streaming responses");
+        return labels.Count > 0 ? labels : ["Basic local chat"];
+    }
+
+    private static void AddCapability(
+        ICollection<string> labels,
+        AiProviderCapabilityFlag available,
+        AiProviderCapabilityFlag capability,
+        string label)
+    {
+        if (available.HasFlag(capability))
+        {
+            labels.Add(label);
+        }
+    }
+
+    private static string GetGpuDetail(LocalAiGpuAdapter gpu)
+    {
+        var memory = gpu.TotalVramBytes is > 0 ? FormatBytes(gpu.TotalVramBytes.Value) : "VRAM unknown";
+        var engine = gpu.IsCudaAvailable ? "CUDA ready" : gpu.IsRocmAvailable ? "ROCm ready" : "driver not confirmed";
+        return $"{memory} · {engine}";
+    }
+
+    private void SetStatus(string message, string tone = "info")
+    {
+        statusMessage = message;
+        statusTone = tone;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var value = (double)Math.Max(0, bytes);
+        var unitIndex = 0;
+        while (value >= 1024 && unitIndex < units.Length - 1)
+        {
+            value /= 1024;
+            unitIndex++;
+        }
+
+        return $"{value:0.#} {units[unitIndex]}";
+    }
+
+    private sealed record ModelRow(
+        string ModelId,
+        string DisplayName,
+        string Description,
+        bool IsInstalled,
+        bool IsDefault,
+        long SizeBytes,
+        long EstimatedRamBytes,
+        long? EstimatedVramBytes,
+        LocalAiModelSuitability Suitability,
+        AiProviderCapabilityFlag Capabilities,
+        string SuitabilityWarning);
+}

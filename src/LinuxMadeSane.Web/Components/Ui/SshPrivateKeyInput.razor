@@ -1,0 +1,73 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using Microsoft.AspNetCore.Components.Forms
+@using System.Text
+@using System.Text.RegularExpressions
+
+<div class="stack-tight">
+    <UiFileDropzone Label="Private key" PrimaryText="Drop your PEM / SSH private key here"
+                    SecondaryText="Or click to choose a file. PEM and OpenSSH keys from any provider."
+                    Helper="Use the private key downloaded when you created the server. Maximum 64 KB."
+                    MaxFileCount="int.MaxValue" ShowSelection="false" Disabled="@(Disabled || importing)"
+                    OnChange="ImportAsync" />
+    @if (!string.IsNullOrEmpty(status))
+    {
+        <p class="callout @tone" role="status">@status</p>
+    }
+    <details>
+        <summary>Paste a private key instead</summary>
+        <UiTextAreaField Label="Private key text" Value="@Value" ValueChanged="ValueChanged" ValueExpression="@(() => Value)" Rows="4"
+                         Disabled="@(Disabled || importing)" Helper="@Helper" />
+    </details>
+</div>
+
+@code {
+    [Parameter] public string Value { get; set; } = "";
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    [Parameter] public EventCallback<string> Imported { get; set; }
+    [Parameter] public EventCallback<bool> ImportingChanged { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public string? Helper { get; set; }
+    private const int MaxBytes = 64 * 1024;
+    private bool importing;
+    private string? status, importedValue;
+    private string tone = "info";
+
+    protected override void OnParametersSet()
+    {
+        if (importedValue is not null && Value != importedValue)
+        {
+            importedValue = null;
+            status = null;
+        }
+    }
+
+    private async Task ImportAsync(InputFileChangeEventArgs args)
+    {
+        if (Disabled || importing) return;
+        importing = true; tone = "info"; status = "Reading private key...";
+        await ImportingChanged.InvokeAsync(true);
+        // Render progress before streaming the file over the Blazor connection.
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            if (args.FileCount != 1) throw new InvalidOperationException("Choose one private key file at a time.");
+            var file = args.File;
+            if (file.Size is <= 0 or > MaxBytes) throw new InvalidOperationException("Choose a non-empty private key file smaller than 64 KB.");
+            await using var stream = file.OpenReadStream(MaxBytes);
+            using var reader = new StreamReader(stream, new UTF8Encoding(false, true), detectEncodingFromByteOrderMarks: true);
+            var text = (await reader.ReadToEndAsync()).Trim();
+            if (!Regex.IsMatch(text, @"\A-----BEGIN (?<kind>OPENSSH PRIVATE KEY|RSA PRIVATE KEY|EC PRIVATE KEY|DSA PRIVATE KEY|PRIVATE KEY|ENCRYPTED PRIVATE KEY)-----\r?\n[\s\S]+\r?\n-----END \k<kind>-----\z", RegexOptions.CultureInvariant)
+                || text.Contains('\0'))
+                throw new InvalidOperationException("This file is not a PEM or OpenSSH private key. Choose the private key, rather than a .pub file or certificate.");
+            await ValueChanged.InvokeAsync(text + "\n");
+            importedValue = text + "\n";
+            await Imported.InvokeAsync(file.Name);
+            status = $"Imported {file.Name}. Enter your server IP and username, add a passphrase if needed, then test credentials.";
+            tone = "success";
+        }
+        catch (InvalidOperationException ex) { status = ex.Message; tone = "error"; }
+        catch { status = "Unable to read this key file. Choose a PEM or OpenSSH private key smaller than 64 KB."; tone = "error"; }
+        finally { importing = false; await ImportingChanged.InvokeAsync(false); }
+    }
+}

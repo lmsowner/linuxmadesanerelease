@@ -1,0 +1,277 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@page "/InitialSetup"
+@page "/initial-setup"
+@page "/setup"
+@layout AuthLayout
+@using LinuxMadeSane.Application.Contracts.Security
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@inject ISecuritySettingsService SecuritySettingsService
+@inject NavigationManager Navigation
+@inject IHttpContextAccessor HttpContextAccessor
+@inject InitialSetupAccessService SetupAccess
+@using LinuxMadeSane.Core.Models
+
+<PageTitle>@(IsSetupRoute ? "Setup | Linux Made Sane" : "Initial Setup | Linux Made Sane")</PageTitle>
+
+<div class="initial-setup-shell">
+    <section class="initial-setup-showcase">
+        <img class="initial-setup-art" src="/images/lms-auth-panel.png" alt="Linux Made Sane secure access artwork" />
+    </section>
+
+    <section class="initial-setup-panel">
+        <div class="initial-setup-heading">
+            <p class="eyebrow">Linux Made Sane</p>
+            <h1>@(IsSetupRoute ? "Initial setup." : "First access.")</h1>
+            <p>Finish access setup before using LMS: verify your MFA, or explicitly switch off sign-in for your local network.</p>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(Error))
+        {
+            <p class="initial-setup-callout error">@Error</p>
+        }
+
+        @if (!isSetupAuthorized)
+        {
+            <div class="initial-setup-card">
+                <h2>Enter your Temporary Setup Code</h2>
+                <p>This one-time code is printed only after a fresh command-line installation. It expires when used or when its lifetime ends.</p>
+                <form method="post" action="/auth/setup/authorize" class="initial-setup-form">
+                    <label class="initial-setup-field">
+                        <span>Temporary Setup Code</span>
+                        <input name="temporarySetupCode"
+                               type="text"
+                               inputmode="text"
+                               autocomplete="one-time-code"
+                               placeholder="ABCD-1234"
+                               required />
+                    </label>
+                    <button class="initial-setup-primary" type="submit">Continue setup</button>
+                </form>
+                <p class="initial-setup-footnote">If the code has expired, run the installer again from the Linux command line to mint a new one.</p>
+            </div>
+        }
+        else if (setupState is null)
+        {
+            <p class="initial-setup-callout">Loading setup state...</p>
+        }
+        else
+        {
+            @if (currentNetwork is not null && !currentNetwork.IsAuthenticationEnabled)
+            {
+                <div class="initial-setup-card" role="status">
+                    <h2>Sign-in is switched off for @currentNetwork.Label.</h2>
+                    <p>Devices on <strong>@currentNetwork.AddressOrCidr</strong> can access LMS without signing in. This is a saved network setting, not temporary installer access.</p>
+                    <a class="initial-setup-primary" href="/">Open LMS</a>
+                    <p>You can set up MFA below and add a passkey afterwards to turn sign-in back on.</p>
+                </div>
+            }
+            else if (!setupState.IsComplete && currentNetwork is not null)
+            {
+                <div class="initial-setup-card">
+                    <h2>Prefer access without sign-in?</h2>
+                    <p>This switches off authentication for <strong>@currentNetwork.Label (@currentNetwork.AddressOrCidr)</strong>. Devices on this network will be able to access and administer LMS without MFA or a passkey. Other network rules stay unchanged.</p>
+                    <form method="post" action="/auth/setup/network-access">
+                        <AntiforgeryToken />
+                        <button class="initial-setup-secondary" type="submit">Switch off sign-in for this network</button>
+                    </form>
+                    <p>You can return to this setup page to set up MFA and a passkey later.</p>
+                </div>
+            }
+
+            @if (setupState.IsComplete)
+            {
+                <div class="initial-setup-card">
+                    <h2>Initial setup is complete.</h2>
+                    <p>Your LMS account is ready. Use MFA or your registered passkey to sign in.</p>
+                    <a class="initial-setup-secondary" href="/settings?tab=trusted-networks">Open interface security</a>
+                    <a class="initial-setup-primary" href="/login">Open login</a>
+                </div>
+            }
+            else if (setupState.AwaitingFirstLogin)
+            {
+                <div class="initial-setup-card">
+                    <h2>Complete your first login.</h2>
+                    <p>Your LMS account and MFA setup are ready. Sign in through the normal LMS login to confirm access. This setup page remains available until that login succeeds.</p>
+                    <a class="initial-setup-primary" href="/login">Open login</a>
+                </div>
+            }
+            else if (setupState.CanStart)
+            {
+                @if (setupState.HasInstallerIdentity)
+                {
+                    <div class="initial-setup-card">
+                        <h2>Installer identity detected.</h2>
+                        <p>LMS was installed by Linux user <strong>@setupState.InstallerLinuxUsername</strong>@FormatInstallerHome(setupState.InstallerHomeDirectory). This first LMS login will use that Linux identity by default.</p>
+                    </div>
+                }
+
+                <h2>Set up MFA</h2>
+                <p>Verify your authenticator code, then add a passkey if you want one.</p>
+                <form method="post" action="/auth/initial-setup/start" class="initial-setup-form">
+                    <AntiforgeryToken />
+                    <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+
+                    <label class="initial-setup-field">
+                        <span>Email</span>
+                        <input name="email" type="email" value="@Email" autocomplete="email" placeholder="you@example.com" required />
+                    </label>
+
+                    <label class="initial-setup-field">
+                        <span>Default Linux user</span>
+                        <input name="linuxUsername"
+                               type="text"
+                               value="@LinuxUsernameValue"
+                               autocomplete="username"
+                               placeholder="linuxuser"
+                               required />
+                    </label>
+
+                    <button class="initial-setup-primary" type="submit">Register LMS login</button>
+                    <p class="initial-setup-footnote">Use an email address you control. LMS links this login to the Linux user above for terminals, file access, MFA setup, passkeys, and recovery workflows.</p>
+                </form>
+            }
+            else if (setupState.CanVerify && provisioning is not null)
+            {
+                <div class="initial-setup-card">
+                    <div class="initial-setup-account">
+                        <div>
+                            <span>Account</span>
+                            <strong>@provisioning.Email</strong>
+                        </div>
+                        <div>
+                            <span>Linux user</span>
+                            <strong>@provisioning.LinuxUsername</strong>
+                        </div>
+                    </div>
+
+                    <div class="initial-setup-qr-row">
+                        <div class="initial-setup-qr-box">
+                            <UiQrCode Payload="@provisioning.OtpUri"
+                                      AriaLabel="Linux Made Sane MFA setup QR code" />
+                        </div>
+                        <div class="initial-setup-manual-key">
+                            <span>Manual key</span>
+                            <code>@provisioning.ManualEntryKey</code>
+                        </div>
+                    </div>
+
+                    <p>Confirming your code enables sign-in for the built-in network interfaces. You can add a passkey immediately afterwards.</p>
+                    <form method="post" action="/auth/initial-setup/verify" class="initial-setup-form compact">
+                    <AntiforgeryToken />
+                        <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+                        <input type="hidden" name="userId" value="@provisioning.UserId" />
+                        <input type="hidden" name="email" value="@provisioning.Email" />
+
+                        <label class="initial-setup-field">
+                            <span>MFA code</span>
+                            <input name="otpCode"
+                                   type="text"
+                                   inputmode="numeric"
+                                   autocomplete="one-time-code"
+                                   maxlength="6"
+                                   pattern="[0-9]{6}"
+                                   placeholder="123456"
+                                   required />
+                        </label>
+
+                        <button class="initial-setup-primary" type="submit">Confirm MFA and enable sign-in</button>
+                    </form>
+
+                    <form method="post" action="/auth/initial-setup/reset" class="initial-setup-reset-form">
+                    <AntiforgeryToken />
+                        <input type="hidden" name="returnUrl" value="@NormalizedReturnUrl" />
+                        <button class="initial-setup-secondary" type="submit">Rotate setup QR</button>
+                    </form>
+                </div>
+            }
+
+
+        }
+    </section>
+</div>
+
+@code {
+    [SupplyParameterFromQuery]
+    public string? ReturnUrl { get; set; }
+
+    [SupplyParameterFromQuery]
+    public string? Error { get; set; }
+
+    [SupplyParameterFromQuery]
+    public string? Email { get; set; }
+
+    [SupplyParameterFromQuery]
+    public string? LinuxUsername { get; set; }
+
+    private InitialSetupViewModel? setupState;
+    private SecurityUserProvisioningViewModel? provisioning;
+
+    private bool IsSetupRoute =>
+        new Uri(Navigation.Uri).AbsolutePath.Equals("/setup", StringComparison.OrdinalIgnoreCase);
+
+    private bool isSetupAuthorized;
+    private TrustedNetworkEntry? currentNetwork;
+
+    private string NormalizedReturnUrl => NormalizeReturnUrl(ReturnUrl);
+
+    private string LinuxUsernameValue =>
+        !string.IsNullOrWhiteSpace(LinuxUsername)
+            ? LinuxUsername.Trim()
+            : setupState?.SuggestedLinuxUsername ?? string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var context = HttpContextAccessor.HttpContext;
+        isSetupAuthorized = context is not null && await SetupAccess.CanConfigureAsync(context);
+        if (!isSetupAuthorized) return;
+        currentNetwork = await SetupAccess.GetCurrentLocalNetworkAsync(context!);
+
+        setupState = await SecuritySettingsService.GetInitialSetupAsync();
+        if (setupState.CanVerify)
+        {
+            provisioning = await SecuritySettingsService.GetInitialSetupProvisioningAsync(BuildLmsLoginUrl(setupState.PendingEmail));
+        }
+
+    }
+
+    private static string NormalizeReturnUrl(string? returnUrl)
+    {
+        if (string.IsNullOrWhiteSpace(returnUrl))
+        {
+            return "/";
+        }
+
+        var trimmed = returnUrl.Trim();
+        return trimmed.StartsWith("/", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("//", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("/\\", StringComparison.Ordinal) &&
+               !trimmed.StartsWith("/InitialSetup", StringComparison.OrdinalIgnoreCase) &&
+               !trimmed.StartsWith("/initial-setup", StringComparison.OrdinalIgnoreCase)
+            ? trimmed
+            : "/";
+    }
+
+    private static string FormatInstallerHome(string homeDirectory) =>
+        string.IsNullOrWhiteSpace(homeDirectory)
+            ? string.Empty
+            : $" ({homeDirectory})";
+
+    private string BuildLmsLoginUrl(string? email)
+    {
+        var loginUri = new Uri(new Uri(Navigation.BaseUri), "login");
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            return loginUri.ToString();
+        }
+
+        var builder = new UriBuilder(loginUri)
+        {
+            Query = $"email={Uri.EscapeDataString(email.Trim())}"
+        };
+        return builder.Uri.ToString();
+    }
+
+}
